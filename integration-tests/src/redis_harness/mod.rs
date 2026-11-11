@@ -72,7 +72,7 @@ impl RedisHarness {
                 .init_network()
                 .await
                 .context("failed to init docker network")?;
-            let container = crate::containers::Redis::run(&spawner).await;
+            let container = crate::containers::Redis::run_for_benchmark(&spawner).await;
             let url = container.internal_address.clone();
             (Some(container), url)
         };

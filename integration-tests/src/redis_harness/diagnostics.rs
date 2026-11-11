@@ -1,11 +1,14 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Context as _;
-use deadpool_redis::redis::{cmd, Script, Value};
+use deadpool_redis::redis::{cmd, Value};
 use deadpool_redis::{Config as RedisPoolConfig, Hook, Pool, Runtime as RedisRuntime, Status};
 use tokio::sync::Barrier;
+use tokio_util::task::AbortOnDropHandle;
+
+pub type SpikeHandle = AbortOnDropHandle<anyhow::Result<Vec<(Instant, Instant)>>>;
 
 /// Diagnostics and telemetry fetched directly from Redis.
 #[derive(Debug, Clone)]
@@ -306,63 +309,74 @@ impl RedisDiagnosticsClient {
         Ok(())
     }
 
-    /// Run intermittent blocking Lua scripts on the Redis instance until stopped or completed.
+    /// Verify DEBUG SLEEP is available before starting a blocking-spike workload.
+    pub async fn check_debug_sleep(&self) -> anyhow::Result<()> {
+        let mut conn = self
+            .pool
+            .get()
+            .await
+            .context("failed to get connection for DEBUG SLEEP preflight")?;
+        cmd("DEBUG")
+            .arg("SLEEP")
+            .arg("0")
+            .query_async::<()>(&mut conn)
+            .await
+            .context(
+                "DEBUG SLEEP is unavailable; enable DEBUG commands on the benchmark Redis server",
+            )
+    }
+
+    /// Inject bounded main-thread stalls and return their client-side time intervals.
     pub async fn run_intermittent_spike(
-        self,
+        pool: Pool,
         stop_flag: Arc<AtomicBool>,
         spike_ms: u64,
         num_spikes: usize,
-    ) {
-        let spike_script = Script::new(
-            r#"
-            local t0 = redis.call('time')
-            local limit_ms = tonumber(ARGV[1])
-            while true do
-                local t1 = redis.call('time')
-                local elapsed_ms = (tonumber(t1[1]) - tonumber(t0[1])) * 1000 + math.floor((tonumber(t1[2]) - tonumber(t0[2])) / 1000)
-                if elapsed_ms >= limit_ms then
-                    break
-                end
-            end
-            return 1
-        "#,
-        );
-
+    ) -> anyhow::Result<Vec<(Instant, Instant)>> {
+        // The control connection's timeout must exceed the requested stall.
+        let mut conn = tokio::time::timeout(Duration::from_secs(5), pool.get())
+            .await
+            .context("timed out connecting for blocking spikes")?
+            .context("failed to get connection for blocking spikes")?;
+        let seconds = format!("{}.{:03}", spike_ms / 1000, spike_ms % 1000);
+        let response_timeout =
+            Duration::from_millis(spike_ms).saturating_add(Duration::from_secs(5));
+        let mut intervals = Vec::new();
         tokio::time::sleep(Duration::from_millis(15)).await;
-
         for _ in 0..num_spikes {
             if stop_flag.load(Ordering::Relaxed) {
                 break;
             }
-            let Ok(mut conn) = self.pool.get().await.inspect_err(|e| {
-                tracing::warn!("Failed to get connection for blocking spike: {e:#}");
-            }) else {
-                tokio::time::sleep(Duration::from_millis(100)).await;
-                continue;
-            };
-
-            if let Err(e) = spike_script.arg(spike_ms).invoke_async::<i32>(&mut conn).await {
-                tracing::warn!(
-                    "Failed to execute intermittent blocking Lua spike on Redis: {e:#}"
-                );
-            }
+            let start = Instant::now();
+            tokio::time::timeout(response_timeout, async {
+                cmd("DEBUG")
+                    .arg("SLEEP")
+                    .arg(&seconds)
+                    .query_async::<()>(&mut conn)
+                    .await
+            })
+            .await
+            .context("timed out waiting for DEBUG SLEEP spike")?
+            .context("failed to execute DEBUG SLEEP spike")?;
+            intervals.push((start, Instant::now()));
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
+        Ok(intervals)
     }
 
-    /// Spawn a task that periodically executes a blocking Lua script on Redis.
     pub fn spawn_intermittent_spike(
-        &self,
+        redis_url: &str,
         stop_flag: Arc<AtomicBool>,
         spike_ms: u64,
         num_spikes: usize,
-    ) -> Option<tokio::task::JoinHandle<()>> {
+    ) -> anyhow::Result<Option<SpikeHandle>> {
         if spike_ms == 0 || num_spikes == 0 {
-            return None;
+            return Ok(None);
         }
-        Some(tokio::spawn(self.clone().run_intermittent_spike(
-            stop_flag, spike_ms, num_spikes,
-        )))
+        let pool = Self::build_pool(redis_url, Some(1), None)?;
+        Ok(Some(AbortOnDropHandle::new(tokio::spawn(
+            Self::run_intermittent_spike(pool, stop_flag, spike_ms, num_spikes),
+        ))))
     }
 }
 

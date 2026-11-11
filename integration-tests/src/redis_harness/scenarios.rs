@@ -20,6 +20,29 @@ fn summarize(name: &str, mut metric: MeasuredOp, wall: Duration) -> LatencySumma
     )
 }
 
+fn overlaps(
+    (start, end): (Instant, Instant),
+    (other_start, other_end): (Instant, Instant),
+) -> bool {
+    start < other_end && end > other_start
+}
+
+#[cfg(test)]
+mod tests {
+    use super::overlaps;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn spike_overlaps_even_when_it_ends_after_the_workload() {
+        let start = Instant::now();
+        let at = |ms| start + Duration::from_millis(ms);
+        assert!(overlaps((at(5), at(30)), (at(10), at(20))));
+        assert!(overlaps((at(15), at(30)), (at(10), at(20))));
+        assert!(!overlaps((at(20), at(30)), (at(10), at(20))));
+        assert!(!overlaps((at(0), at(10)), (at(10), at(20))));
+    }
+}
+
 async fn collect_task_results(
     tasks: impl IntoIterator<Item = tokio::task::JoinHandle<(Vec<Duration>, usize)>>,
 ) -> anyhow::Result<(Vec<Duration>, usize)> {
@@ -300,8 +323,6 @@ impl RedisHarness {
         blocking_spike_ms: u64,
         num_spikes: usize,
     ) -> anyhow::Result<Vec<LatencySummary>> {
-        self.reset_diagnostics().await?;
-
         if self.participants.is_empty() || tasks_per_participant == 0 || items_per_task == 0 {
             return Ok(vec![
                 LatencySummary::empty("saturated_insert_triple"),
@@ -309,6 +330,11 @@ impl RedisHarness {
                 LatencySummary::empty("saturated_take_triple"),
             ]);
         }
+
+        if blocking_spike_ms > 0 && num_spikes > 0 {
+            self.client.check_debug_sleep().await?;
+        }
+        self.reset_diagnostics().await?;
 
         let pool_status = self.participants[0].pool.status();
         println!(
@@ -319,109 +345,129 @@ impl RedisHarness {
         // 1. One-second stock-count polling across all participants
         let poller = self.spawn_background_polling(true);
 
-        // 2. Intermittent blocking spikes on Redis main thread (simulating large Lua scripts or BGSAVE stalls)
-        // Spans insert, peek, and take phases
+        // 2. Intermittent main-thread stalls, spanning insert, peek, and take.
         let spike_stop = Arc::new(AtomicBool::new(false));
-        let spike_handle =
-            self.client.spawn_intermittent_spike(spike_stop.clone(), blocking_spike_ms, num_spikes * 3);
+        let spike_count = num_spikes.checked_mul(3).context("spike count overflow")?;
+        let spike_handle = super::RedisDiagnosticsClient::spawn_intermittent_spike(
+            &self.redis_url,
+            spike_stop.clone(),
+            blocking_spike_ms,
+            spike_count,
+        )?;
+        let workload = async {
+            // 3. Phase A: High-concurrency inserts across participants under saturation
+            let total_items = self.participants.len() * tasks_per_participant * items_per_task;
+            let run_base_id = next_id_block(total_items as u64 + 10_000);
+            let insert_gate = StartingGate::new(self.participants.len() * tasks_per_participant);
+            let participant_list = self.participant_ids();
 
-        // 3. Phase A: High-concurrency inserts across participants under saturation
-        let total_items = self.participants.len() * tasks_per_participant * items_per_task;
-        let run_base_id = next_id_block(total_items as u64 + 10_000);
-        let insert_gate = StartingGate::new(
-            self.participants.len() * tasks_per_participant,
-        );
-        let participant_list = self.participant_ids();
+            let mut insert_tasks =
+                Vec::with_capacity(self.participants.len() * tasks_per_participant);
+            let mut task_id_ranges =
+                Vec::with_capacity(self.participants.len() * tasks_per_participant);
 
-        let mut insert_tasks = Vec::with_capacity(self.participants.len() * tasks_per_participant);
-        let mut task_id_ranges = Vec::with_capacity(self.participants.len() * tasks_per_participant);
-
-        for (p_idx, p) in self.participants.iter().enumerate() {
-            for t_idx in 0..tasks_per_participant {
-                let task_id = p_idx * tasks_per_participant + t_idx;
-                let base_id = run_base_id + (task_id as u64 * items_per_task as u64);
-                let ids: Vec<u64> = (base_id..base_id + items_per_task as u64).collect();
-                task_id_ranges.push((p.clone(), ids));
-                insert_tasks.push(tokio::spawn(p.clone().insert_measured(
-                    ArtifactKind::Triples,
-                    base_id,
-                    items_per_task,
-                    participant_list.clone(),
-                    insert_gate.barrier(),
-                )));
+            for (p_idx, p) in self.participants.iter().enumerate() {
+                for t_idx in 0..tasks_per_participant {
+                    let task_id = p_idx * tasks_per_participant + t_idx;
+                    let base_id = run_base_id + (task_id as u64 * items_per_task as u64);
+                    let ids: Vec<u64> = (base_id..base_id + items_per_task as u64).collect();
+                    task_id_ranges.push((p.clone(), ids));
+                    insert_tasks.push(tokio::spawn(p.clone().insert_measured(
+                        ArtifactKind::Triples,
+                        base_id,
+                        items_per_task,
+                        participant_list.clone(),
+                        insert_gate.barrier(),
+                    )));
+                }
             }
-        }
 
-        let insert_start = insert_gate.start().await;
-        let (mut all_insert_latencies, total_insert_failures) =
-            collect_task_results(insert_tasks).await?;
-        let insert_wall = insert_start.elapsed();
+            let insert_start = insert_gate.start().await;
+            let (mut all_insert_latencies, total_insert_failures) =
+                collect_task_results(insert_tasks).await?;
+            let insert_wall = insert_start.elapsed();
 
-        // 4. Phase B: Concurrent peek_mine on available stockpile under saturation and blocking stalls
-        let peek_gate = StartingGate::new(
-            self.participants.len() * tasks_per_participant,
-        );
-        let peek_items = items_per_task.min(25);
-        let mut peek_tasks = Vec::with_capacity(self.participants.len() * tasks_per_participant);
-        for p in &self.participants {
-            for _ in 0..tasks_per_participant {
-                peek_tasks.push(tokio::spawn(p.clone().peek_triples_measured(
-                    peek_gate.barrier(),
-                    peek_items,
-                )));
+            // 4. Phase B: Concurrent peek_mine on available stockpile under saturation and blocking stalls
+            let peek_gate = StartingGate::new(self.participants.len() * tasks_per_participant);
+            let peek_items = items_per_task.min(25);
+            let mut peek_tasks =
+                Vec::with_capacity(self.participants.len() * tasks_per_participant);
+            for p in &self.participants {
+                for _ in 0..tasks_per_participant {
+                    peek_tasks.push(tokio::spawn(
+                        p.clone()
+                            .peek_triples_measured(peek_gate.barrier(), peek_items),
+                    ));
+                }
             }
+
+            let peek_start = peek_gate.start().await;
+            let (mut all_peek_latencies, total_peek_indeterminate) =
+                collect_task_results(peek_tasks).await?;
+            let peek_wall = peek_start.elapsed();
+
+            // 5. Phase C: High-concurrency takes across participants under saturation
+            let take_gate = StartingGate::new(self.participants.len() * tasks_per_participant);
+            let mut take_tasks =
+                Vec::with_capacity(self.participants.len() * tasks_per_participant);
+            for (p, ids) in task_id_ranges {
+                take_tasks.push(tokio::spawn(
+                    p.take_triples(ids, take_gate.optional_barrier()),
+                ));
+            }
+
+            let take_start = take_gate.start().await;
+            let (mut all_take_latencies, total_take_indeterminate) =
+                collect_task_results(take_tasks).await?;
+            let take_wall = take_start.elapsed();
+            let workload_end = Instant::now();
+
+            let insert_summary = LatencySummary::calculate_with_failures(
+                "saturated_insert_triple",
+                &mut all_insert_latencies,
+                insert_wall,
+                total_insert_failures,
+            );
+            let peek_summary = LatencySummary::calculate_with_outcomes(
+                "saturated_peek_mine",
+                &mut all_peek_latencies,
+                peek_wall,
+                0,
+                total_peek_indeterminate,
+            );
+            let take_summary = LatencySummary::calculate_with_outcomes(
+                "saturated_take_triple",
+                &mut all_take_latencies,
+                take_wall,
+                0,
+                total_take_indeterminate,
+            );
+
+            Ok::<_, anyhow::Error>((
+                vec![insert_summary, peek_summary, take_summary],
+                insert_start,
+                workload_end,
+            ))
         }
+        .await;
 
-        let peek_start = peek_gate.start().await;
-        let (mut all_peek_latencies, total_peek_indeterminate) =
-            collect_task_results(peek_tasks).await?;
-        let peek_wall = peek_start.elapsed();
-
-        // 5. Phase C: High-concurrency takes across participants under saturation
-        let take_gate = StartingGate::new(
-            self.participants.len() * tasks_per_participant,
-        );
-        let mut take_tasks = Vec::with_capacity(self.participants.len() * tasks_per_participant);
-        for (p, ids) in task_id_ranges {
-            take_tasks.push(tokio::spawn(p.take_triples(
-                ids,
-                take_gate.optional_barrier(),
-            )));
-        }
-
-        let take_start = take_gate.start().await;
-        let (mut all_take_latencies, total_take_indeterminate) =
-            collect_task_results(take_tasks).await?;
-        let take_wall = take_start.elapsed();
-
+        spike_stop.store(true, Ordering::Relaxed);
         poller.stop().await;
-        if let Some(h) = spike_handle {
-            spike_stop.store(true, Ordering::Relaxed);
-            let _ = h.await;
+        let spikes = match spike_handle {
+            Some(handle) => Some(handle.await.context("blocking spike task failed")?),
+            None => None,
+        };
+        let (summaries, workload_start, workload_end) = workload?;
+        if let Some(spikes) = spikes {
+            let intervals = spikes?;
+            let overlapping = intervals
+                .iter()
+                .filter(|interval| overlaps(**interval, (workload_start, workload_end)))
+                .count();
+            anyhow::ensure!(overlapping > 0, "no DEBUG SLEEP spike overlapped the workload; increase the workload size or disable spikes with --spike-ms 0");
+            println!("   -> DEBUG SLEEP: {overlapping} spike(s) overlapped the workload ({} completed total)", intervals.len());
         }
-
-        let insert_summary = LatencySummary::calculate_with_failures(
-            "saturated_insert_triple",
-            &mut all_insert_latencies,
-            insert_wall,
-            total_insert_failures,
-        );
-        let peek_summary = LatencySummary::calculate_with_outcomes(
-            "saturated_peek_mine",
-            &mut all_peek_latencies,
-            peek_wall,
-            0,
-            total_peek_indeterminate,
-        );
-        let take_summary = LatencySummary::calculate_with_outcomes(
-            "saturated_take_triple",
-            &mut all_take_latencies,
-            take_wall,
-            0,
-            total_take_indeterminate,
-        );
-
-        Ok(vec![insert_summary, peek_summary, take_summary])
+        Ok(summaries)
     }
 
     /// SCENARIO 6: Mass Epoch Resharing `clear()` Storm.

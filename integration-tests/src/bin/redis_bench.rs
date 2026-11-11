@@ -156,9 +156,11 @@ async fn main() -> anyhow::Result<()> {
     );
     println!(
         "  Target Redis:           {}",
-        args.redis_url
-            .as_deref()
-            .unwrap_or("Ephemeral Docker Container (redis:7.4.2)")
+        if args.redis_url.is_some() {
+            "External Redis instance"
+        } else {
+            "Ephemeral Docker Container (redis:7.4.2)"
+        }
     );
     println!(
         "  Architecture:           Pure Redis container (Zero nodes / NEAR / chain processes)"
@@ -192,7 +194,7 @@ async fn main() -> anyhow::Result<()> {
     }
     let harness = RedisHarness::new(config).await?;
     let pool_status = harness.client.status();
-    println!("Connected to Redis at: {}", harness.redis_url);
+    println!("Connected to Redis");
     println!("Diagnostics pool ready: max_size={}", pool_status.max_size);
 
     #[derive(serde::Serialize)]

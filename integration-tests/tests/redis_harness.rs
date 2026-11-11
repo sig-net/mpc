@@ -1,5 +1,33 @@
+use integration_tests::redis_harness::RedisDiagnosticsClient;
 use integration_tests::redis_harness::{RedisHarness, RedisHarnessConfig};
-use std::time::Duration;
+use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+async fn wait_for_blocked_ping(
+    probe: &mut deadpool_redis::Connection,
+    on_block: impl FnOnce(),
+) -> anyhow::Result<Duration> {
+    tokio::time::timeout(Duration::from_secs(3), async {
+        let mut on_block = Some(on_block);
+        loop {
+            let start = Instant::now();
+            let cmd = deadpool_redis::redis::cmd("PING");
+            let ping = cmd.query_async::<()>(&mut *probe);
+            tokio::pin!(ping);
+            tokio::select! {
+                result = &mut ping => result?,
+                _ = tokio::time::sleep(Duration::from_millis(50)) => {
+                    on_block.take().unwrap()();
+                    ping.await?;
+                    return Ok::<_, anyhow::Error>(start.elapsed());
+                }
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await?
+}
 
 #[tokio::test]
 async fn mixed_pipeline_uses_independent_node_pools() -> anyhow::Result<()> {
@@ -48,5 +76,89 @@ async fn mixed_pipeline_uses_independent_node_pools() -> anyhow::Result<()> {
     assert_eq!(peek.latencies.len(), 0);
     assert_eq!(peek.indeterminate, 2);
     assert_eq!(commit.latencies.len(), 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn blocking_spike_delays_other_connections_for_requested_duration() -> anyhow::Result<()> {
+    let harness = RedisHarness::new(
+        RedisHarnessConfig::new(1)
+            .with_pool_size(Some(1))
+            .with_pool_timeout(Some(Duration::from_millis(50))),
+    )
+    .await?;
+    harness.client.check_debug_sleep().await?;
+
+    if let Some(redis) = &harness.redis {
+        let docker = bollard::Docker::connect_with_defaults()?;
+        let info = docker.inspect_container(redis.container.id(), None).await?;
+        let ports = info.network_settings.unwrap().ports.unwrap();
+        let bindings = ports.get("6379/tcp").unwrap().as_ref().unwrap();
+        assert!(!bindings.is_empty());
+        assert!(bindings
+            .iter()
+            .all(|binding| binding.host_ip.as_deref() == Some("127.0.0.1")));
+    }
+    let mut anonymous_url = url::Url::parse(&harness.redis_url)?;
+    anonymous_url.set_password(None).unwrap();
+    let anonymous_pool = RedisDiagnosticsClient::build_pool(anonymous_url.as_str(), Some(1), None)?;
+    let mut anonymous = anonymous_pool.get().await?;
+    assert!(deadpool_redis::redis::cmd("PING")
+        .query_async::<()>(&mut anonymous)
+        .await
+        .is_err());
+
+    // The probe and spike use distinct pools, so the delay is at Redis, not a pool wait.
+    let probe_pool = RedisDiagnosticsClient::build_pool(&harness.redis_url, Some(1), None)?;
+    let mut probe = probe_pool.get().await?;
+    let stop = Arc::new(AtomicBool::new(false));
+    let spike = RedisDiagnosticsClient::spawn_intermittent_spike(&harness.redis_url, stop, 250, 1)?
+        .expect("nonzero spike should start");
+    let probe_elapsed = wait_for_blocked_ping(&mut probe, || {}).await?;
+    let intervals = spike.await??;
+
+    assert_eq!(intervals.len(), 1);
+    let spike_elapsed = intervals[0].1.duration_since(intervals[0].0);
+    assert!(
+        spike_elapsed >= Duration::from_millis(250),
+        "{spike_elapsed:?}"
+    );
+    assert!(spike_elapsed < Duration::from_secs(3), "{spike_elapsed:?}");
+    assert!(
+        probe_elapsed >= Duration::from_millis(100),
+        "{probe_elapsed:?}"
+    );
+    assert!(probe_elapsed < Duration::from_secs(3), "{probe_elapsed:?}");
+    let slowlog = harness.client.fetch_slowlog(20).await?;
+    let spike_record = slowlog
+        .iter()
+        .find(|entry| entry.command.starts_with("DEBUG SLEEP 0.250"))
+        .expect("the injected spike should be recorded in Redis slowlog");
+    assert!(
+        spike_record.duration_us >= 240_000,
+        "{}",
+        spike_record.duration_us
+    );
+    assert!(
+        spike_record.duration_us < 3_000_000,
+        "{}",
+        spike_record.duration_us
+    );
+
+    harness.client.reset_slowlog().await?;
+    let stop = Arc::new(AtomicBool::new(false));
+    let spike =
+        RedisDiagnosticsClient::spawn_intermittent_spike(&harness.redis_url, stop, 250, 10)?
+            .expect("nonzero spike should start");
+    wait_for_blocked_ping(&mut probe, || drop(spike)).await?;
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    let slowlog = harness.client.fetch_slowlog(20).await?;
+    assert_eq!(
+        slowlog
+            .iter()
+            .filter(|e| e.command.starts_with("DEBUG SLEEP 0.250"))
+            .count(),
+        1
+    );
     Ok(())
 }
