@@ -84,12 +84,7 @@ pub enum Cli {
         #[arg(long, env("MPC_WEB_PORT"), default_value = "3000")]
         web_port: u16,
         /// The cipher secret key used to decrypt messages between nodes.
-        #[arg(
-            long,
-            env("MPC_CIPHER_SK"),
-            hide_env_values = true,
-            value_parser = parse_cipher_sk
-        )]
+        #[arg(long, env("MPC_CIPHER_SK"), hide_env_values = true)]
         cipher_sk: hpke::SecretKey,
         /// The secret key used to sign messages to be sent between nodes.
         #[arg(long, env("MPC_SIGN_SK"), hide_env_values = true)]
@@ -177,13 +172,6 @@ fn env_var_of(flag: &str) -> Option<String> {
             .is_some_and(|long| flag == format!("--{long}"))
     })?;
     Some(arg.get_env()?.to_string_lossy().into_owned())
-}
-
-/// The hex of an HPKE secret key. The reasons are fixed text: a parse error
-/// could quote the key.
-fn parse_cipher_sk(s: &str) -> Result<hpke::SecretKey, String> {
-    let bytes = hex::decode(s).map_err(|_| "not hex")?;
-    hpke::SecretKey::try_from_bytes(&bytes).map_err(|_| "not a cipher secret key".to_string())
 }
 
 /// `Url` alone accepts `node.example.org:8080`, reading the host as the scheme,
@@ -1062,19 +1050,6 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
-
-    /// The cipher key is checked by clap, so a bad one is a named argument
-    /// error and never reaches the node.
-    #[test]
-    fn the_cipher_key_is_parsed_at_the_cli() {
-        let (cipher_sk, _) = hpke::generate();
-        let parsed = parse_cipher_sk(&hex::encode(cipher_sk.to_bytes())).unwrap();
-        assert_eq!(parsed.to_bytes(), cipher_sk.to_bytes());
-
-        for malformed in ["", "not hex", "abcd"] {
-            assert!(parse_cipher_sk(malformed).is_err(), "{malformed:?}");
-        }
-    }
 
     /// No error echoes what the operator typed: every flag meets every way a
     /// secret can land in the input.
