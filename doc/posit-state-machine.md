@@ -342,7 +342,7 @@ because the round timeout ran out.
 - **Rounds are monotone per request**, including across a respawn
   (`carried_round`). Peers read a round reset as time travel; `set_round` is the
   only write path.
-- **At most one proposer per round**: exactly one node is elected. Election reads only `r`, membership, entropy and the request id — never
+- **At most one proposer per round**: exactly one node is elected. Election reads only `r`, membership, entropy and the request id, never
   the local active set. Filtering by local state is what caused the permanent
   divergence in #907.
 - **`ACCEPT` is sent at most once per round**, on the edge out of

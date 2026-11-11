@@ -16,11 +16,13 @@ async fn wait_out_round(state: &mut SignState, reason: &str) -> SignPhase {
 }
 
 impl OrganizingPhase {
-    /// Seeded by [`Self::election_seed`] so all nodes pick the same proposer.
-    ///
-    /// Both operands are reduced before adding: `round` comes from
-    /// `highest_seen_round`, which a peer sets, so it can be arbitrarily large.
-    fn proposer_per_round(round: usize, participants: &[Participant], seed: &[u8; 32]) -> Participant {
+    /// Seeded by [`Self::election_seed`] so all nodes agree. Both operands are reduced
+    /// before adding, since a peer sets `round` and it can be arbitrarily large.
+    fn proposer_per_round(
+        round: usize,
+        participants: &[Participant],
+        seed: &[u8; 32],
+    ) -> Participant {
         let n = participants.len();
         let index = (seed[0] as usize % n + round % n) % n;
         participants[index]
@@ -96,9 +98,8 @@ impl OrganizingPhase {
                 return state.reorganize("no active participants");
             };
 
-            // Elect from inputs every node shares (round, membership, entropy, request
-            // id), no local-only information: filtering by the local active set makes
-            // nodes elect different proposers and diverge permanently (#907).
+            // Only inputs every node shares (round, membership, entropy, request id):
+            // filtering by the local active set made nodes diverge permanently (#907).
             let proposer = Self::proposer_per_round(state.round(), &participants, &seed);
 
             let is_proposer = proposer == me;
@@ -275,7 +276,11 @@ mod tests {
                 OrganizingPhase::proposer_per_round(0, &participants, &seed)
             })
             .collect();
-        assert_eq!(first.len(), participants.len(), "first proposers: {first:?}");
+        assert_eq!(
+            first.len(),
+            participants.len(),
+            "first proposers: {first:?}"
+        );
     }
 
     /// From any starting round, with any `f < n` participants down, rotation must

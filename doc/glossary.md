@@ -286,9 +286,9 @@ the pair's id, not chosen (`hash_as_id`). Abbreviated P.
 ## Proposer
 
 The node that drives a [posit](#posit). For a signature it is elected per
-[round](#round) from the request's [entropy](#entropy) and the round number
-(`protocol/request/organize.rs`), so every node agrees on it without
-messaging; for a [triple pair](#triple-pair) or
+[round](#round) from the request's [entropy](#entropy), its request id and
+the round number (`protocol/request/organize.rs`), so every node agrees on it
+without messaging; for a [triple pair](#triple-pair) or
 [presignature](#presignature) it is the [owner](#owner). See
 [posit-state-machine.md §5](posit-state-machine.md#5-bumping-rounds).
 
