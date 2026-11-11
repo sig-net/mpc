@@ -148,15 +148,18 @@ impl<S> PositCounter<S> {
             .map(|(peer, _)| *peer)
     }
 
-    /// Record `from`'s vote. `None` when `from` is not a participant or the
-    /// action is not a vote; otherwise whether the vote was new.
+    /// Record `from`'s vote, where a REJECT overrides any ACCEPT. `None` when `from`
+    /// is not a participant or the action is not a vote; otherwise whether it counted.
     pub fn process_action(&mut self, from: Participant, action: &PositAction) -> Option<bool> {
         if !self.participants.contains(&from) {
             return None;
         }
         match action {
-            PositAction::Accept => Some(self.accepts.insert(from)),
+            PositAction::Accept => {
+                Some(!self.rejects.contains_key(&from) && self.accepts.insert(from))
+            }
             PositAction::RejectWithReason(reason) => {
+                self.accepts.remove(&from);
                 Some(self.rejects.insert(from, *reason).is_none())
             }
             _ => None,
@@ -614,6 +617,39 @@ mod tests {
             &PositAction::RejectWithReason(PositRejectReason::InvalidRequest),
         );
         assert!(matches!(action, PositInternalAction::Abort));
+    }
+
+    #[test]
+    fn test_posits_reject_overrides_accept() {
+        let threshold = 3;
+        let participants: Vec<_> = (0..4).map(Participant::from).collect();
+        let mut posits0 = Posits::<Id, ()>::new(Participant::from(0));
+        let saturated = PositAction::RejectWithReason(PositRejectReason::Saturated);
+
+        // Node 1 votes both ways (a late ACCEPT from an earlier attempt on the
+        // same id, then a REJECT); node 3 has not replied yet.
+        let id = 101;
+        posits0.propose(id, (), &participants);
+        posits0.act(id, Participant::from(1), threshold, &PositAction::Accept);
+        posits0.act(id, Participant::from(1), threshold, &saturated);
+        let action = posits0.act(id, Participant::from(2), threshold, &PositAction::Accept);
+        assert!(matches!(action, PositInternalAction::None));
+
+        let action = posits0.act(id, Participant::from(3), threshold, &PositAction::Accept);
+        let PositInternalAction::StartProtocol(mut started, _) = action else {
+            panic!("expected start once every participant replied, got {action:?}");
+        };
+        started.sort();
+        let expected: Vec<_> = [0, 2, 3].into_iter().map(Participant::from).collect();
+        assert_eq!(started, expected);
+
+        // An ACCEPT after the REJECT does not bring node 1 back.
+        let id = 202;
+        posits0.propose(id, (), &participants);
+        posits0.act(id, Participant::from(1), threshold, &saturated);
+        posits0.act(id, Participant::from(1), threshold, &PositAction::Accept);
+        let action = posits0.act(id, Participant::from(2), threshold, &PositAction::Accept);
+        assert!(matches!(action, PositInternalAction::None));
     }
 
     #[test]
