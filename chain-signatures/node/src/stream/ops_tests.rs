@@ -2808,3 +2808,35 @@ async fn final_response_settles_on_the_published_output() {
         );
     }
 }
+
+/// Catching up deletes the records of requests no longer in the backlog, such as one a rebase
+/// skipped the `Response` of, and keeps the others.
+#[tokio::test]
+async fn catching_up_deletes_records_without_an_entry() {
+    let chain = Chain::Solana;
+    let storage = CheckpointStorage::in_memory();
+    let backlog = Backlog::persisted(storage.clone());
+    let kept = mock_sign_request(SignId::new([1; 32]), chain);
+    backlog.insert(Arc::clone(&kept)).await;
+    let record = SignStatus::Sign(SignProgress::Publishing(
+        crate::backlog::mock::mock_publishing(),
+    ));
+    for id in [kept.id, SignId::new([2; 32])] {
+        storage.put_local(chain, id, &record).await.unwrap();
+    }
+    let (sign_tx, _sign_rx) = mpsc::channel(4);
+    let mut ctx = make_test_stream_context_with_generator_pk(backlog, sign_tx, false);
+
+    crate::stream::handle_chain_event(
+        mpc_primitives::ChainEvent::CatchupCompleted,
+        &mut ctx,
+        &NoopChainTelemetry,
+        test_root_pk(),
+        chain,
+    )
+    .await
+    .unwrap();
+
+    let records = storage.load_local(chain).await.unwrap();
+    assert_eq!(records, vec![(kept.id, record)]);
+}

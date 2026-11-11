@@ -25,8 +25,8 @@ pub fn start(ctx: &Context, node: &NodeEnvConfig) -> Vec<String> {
     args.flag("--web-port", node.web_port);
     args.flag("--my-address", node.address());
     args.chains(&node.cfg);
-    args.storage(&ctx.storage_options);
-    args.logs(&ctx.log_options);
+    args.storage(&ctx.storage_options, node.binary_path.is_none());
+    args.logs(&ctx.log_options, node.binary_path.is_none());
     args.0
 }
 
@@ -63,7 +63,7 @@ impl Args {
         );
         self.flag("--eth-execution-rpc-http-url", &eth.execution_rpc_http_url);
         self.flag("--eth-contract-address", eth.contract_address);
-        self.flag("--eth-network", &eth.network);
+        self.flag("--eth-network", eth.network);
     }
 
     fn sol(&mut self, sol: &SolConfig) {
@@ -127,9 +127,12 @@ impl Args {
         }
     }
 
-    fn storage(&mut self, storage: &storage::Options) {
+    fn storage(&mut self, storage: &storage::Options, is_current_node: bool) {
         if let Some(id) = &storage.gcp_project_id {
             self.flag("--gcp-project-id", id);
+        } else if !is_current_node {
+            // Older releases (e.g. 1.22.x) require --gcp-project-id on the CLI even when using local path storage.
+            self.flag("--gcp-project-id", "multichain-integration");
         }
         if let Some(id) = &storage.sk_share_secret_id {
             self.flag("--sk-share-secret-id", id);
@@ -140,9 +143,11 @@ impl Args {
         self.flag("--redis-url", &storage.redis_url);
     }
 
-    fn logs(&mut self, logs: &logs::Options) {
+    fn logs(&mut self, logs: &logs::Options, is_current_node: bool) {
         self.flag("--opentelemetry-level", logs.opentelemetry_level);
         self.flag("--otlp-endpoint", &logs.otlp_endpoint);
-        self.flag("--log-format", logs.log_format);
+        if is_current_node {
+            self.flag("--log-format", logs.log_format);
+        }
     }
 }

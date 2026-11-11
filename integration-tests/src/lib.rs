@@ -76,11 +76,7 @@ impl Default for NodeConfig {
         Self {
             nodes: 3,
             threshold: 2,
-            protocol: ProtocolConfig {
-                min_mine_triple_pairs: 16,
-                min_mine_presignatures: 16,
-                max_mine_generations: 2,
-            },
+            protocol: ProtocolConfig::new(16, 16, 2),
             eth: None,
             sol: None,
             hydration: None,
@@ -269,8 +265,7 @@ pub async fn setup(spawner: &mut ClusterSpawner) -> anyhow::Result<Context> {
             contract_address: contract_address_hex
                 .parse()
                 .context("invalid deployed contract address")?,
-            network: "anvil".to_string(),
-            optimistic_requests: true,
+            network: mpc_chain_ethereum::EthNetwork::Anvil,
             gas: Default::default(),
             indexer: Default::default(),
             publisher: Default::default(),

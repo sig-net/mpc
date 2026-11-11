@@ -619,8 +619,7 @@ fn log_startup(
         hydration_rpc_host = %chains.hydration.as_ref().map_or("None", |c| host_of(&c.rpc_ws_url)),
         hydration_signer_address = %hydration_signer_address.as_deref().unwrap_or("None"),
         canton_json_api_host = %chains.canton.as_ref().map_or("None", |c| host_of(&c.json_api_url)),
-        // Midnight still holds its node URL as a string.
-        midnight_node_host = %chains.midnight.as_ref().map_or("None".to_string(), |c| c.node_url.parse().map_or("invalid".to_string(), |url| host_of(&url).to_string())),
+        midnight_node_host = %chains.midnight.as_ref().map_or("None", |c| host_of(&c.node_url)),
         tron_host = %chains.tron.as_ref().map_or("None", |c| host_of(&c.endpoint)),
         "starting node",
     );
@@ -862,7 +861,7 @@ async fn spawn_indexers(
 
     // Every source chain's stream admits bidirectional requests targeting Ethereum.
     // Admission must match across nodes, so they all need the same Ethereum network.
-    let ethereum_chain_id = eth.as_ref().and_then(EthConfig::chain_id);
+    let ethereum_chain_id = eth.as_ref().map(EthConfig::chain_id);
     if ethereum_chain_id.is_none() {
         tracing::warn!(
             "ethereum not configured: Ethereum-targeted requests are admitted without the \
@@ -1250,12 +1249,12 @@ mod tests {
             canton: None,
             midnight: Some(MidnightConfig {
                 // Nothing listens on port 1, so the startup dial is refused.
-                node_url: "http://127.0.0.1:1".to_string(),
+                node_url: "http://127.0.0.1:1".parse().unwrap(),
                 central_address: mpc_chain_midnight::MidnightAddress::from_bytes([0xab; 32]),
                 responder_address: mpc_chain_midnight::MidnightAddress::from_bytes([0xcd; 32]),
                 publisher: mpc_chain_midnight::PublisherConfig {
                     funding_seed: "ab".repeat(32),
-                    indexer_ws_url: "ws://127.0.0.1:1/api/v3/graphql/ws".to_string(),
+                    indexer_ws_url: "ws://127.0.0.1:1/api/v3/graphql/ws".parse().unwrap(),
                     ..Default::default()
                 },
                 rpc: Default::default(),
