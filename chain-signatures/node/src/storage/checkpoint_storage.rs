@@ -665,7 +665,7 @@ type LocalRecords = HashMap<(SignId, Leg), SignStatus>;
 
 /// The byte after the request id in a record's field, so the values are part of the format.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-enum Leg {
+pub enum Leg {
     First = 0,
     Attestation = 1,
 }
