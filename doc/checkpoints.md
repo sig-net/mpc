@@ -42,7 +42,7 @@ Vocabulary, per node per source chain:
   The indexer reports heights in order, with all their events; a chain may skip heights where nothing happened, and the indexers of correct nodes report the same heights.
   Apart from the indexer, only a re-index (see Base) or a restart moves it, back or forward.
 
-* **Caught up**: the node has processed every block up to the finalised head its provider reported when the node started or last re-indexed.
+* **Caught up**: the node has processed every block up to the finalised head its provider reported when the node started or last re-indexed, and has not stopped indexing.
   Acting waits for it, so that a node behind the head does not spend presignatures, posit rounds and peer messages on requests the chain has already answered.
 
 * **Backlog**: one *entry* per request admitted and not *finished*, that is, not yet removed by a finalised source-chain event.
@@ -154,9 +154,10 @@ Described for one node, one source chain; `backlog` is the node's backlog.
   * The settled checkpoint is another one: the node stops indexing, fetches it from a peer, makes it the base, drops all of `pending` and re-indexes from it.
 * On a restart the node resumes from the newest checkpoint in `pending`, or the base if there is none, and votes again for every checkpoint in `pending`, since a vote in flight at the crash may have been lost.
 * A node is *at the cap* when `pending` holds `MAX_PENDING` checkpoints.
-  There it processes no block and waits for a settlement, caught up or not.
   This bounds how far the network signs from state nobody has agreed to.
-* It starts to act only while it is caught up and is not missing a settled checkpoint it has read (`want` below); a step it has already started or queued, such as a signing round, may finish or be aborted.
+  There it processes no block, so it is not caught up, and waits for a settlement; a signature it has started producing is still published.
+  When a settlement takes it below the cap, it restarts.
+* It starts to act only while it is caught up; a step it has already started or queued, such as a signing round, may finish or be aborted.
   This holds for everything acting covers, between blocks too.
 
 `persist` writes `base` and `pending` durably in one step and is retried until it succeeds.
@@ -249,12 +250,14 @@ If the node takes a stale head for the real head, it deletes the record of a req
 rebase(c):                                        // c settled, above base
   aligned = pending[c.height] has c's digest      // backlog descends from c
             and processed_height >= c.height
+  behind = pending is full                        // at the cap, blocks unread
   base = c
   if aligned: pending.drop_up_to(c.height)
   else: pending = {}
   persist
   want = none
   if not aligned: re_index()
+  else if behind: restart
 
 re_index():                                       // start over from base
   backlog, processed_height = base.backlog, base.height
@@ -341,7 +344,7 @@ Where no node can produce a checkpoint at all there is no recovery here (Section
 * Settlement stalls when fewer than t nodes reach a boundary and vote.
   At t = n - f one correct node down while the others create `MAX_PENDING` checkpoints above the base is enough.
   The nodes that are up run to the cap and wait for a settlement.
-* Signing stalls while more than n - t nodes are faulty or not acting: catching up, missing a settled checkpoint, or, for requests they have not admitted, at the cap.
+* Signing stalls while more than n - t nodes are faulty or not acting: catching up, at the cap, or missing a settled checkpoint.
 * A fetch slower than the time between two settlements never completes.
   Holders drop a checkpoint when they rebase onto the next one.
 * Nothing bounds the size of a checkpoint.
@@ -398,7 +401,7 @@ Each closes one of the limits above, at a price.
 
 ## 7. Implementation status
 
-The code, checked at `65b8d41b`, differs from the design as listed below, grouped by component.
+The code differs from the design as listed below, grouped by component.
 Each item says what the code does now and what the design asks for instead.
 
 Code under `chain-signatures/`: the contract in `contract/src/lib.rs`; the node in `node/src/`, mainly `backlog/checkpoints.rs`, `backlog/consensus.rs`, `storage/checkpoint_storage.rs`, `stream/supervisor.rs` and `stream/recovery.rs`.
@@ -436,7 +439,3 @@ The interval is `checkpoint_interval`, a per-chain constant with no per-node ove
    Now: while catching up, a node does not move its processed height, creates no checkpoints and casts no new votes.
    Once caught up, it creates one checkpoint at the height it reached, so the cap does not stop it while it catches up.
    Design: a node catching up indexes as usual and creates and votes for a checkpoint each time it passes a boundary, up to the cap; only acting waits until it is caught up.
-7. At the cap (§4).
-   Now: the indexer makes no progress at the cap, so the stall watchdog restarts it again and again, and each restart makes the node not caught up.
-   Until a settlement takes it below the cap, the node holds second-leg publishes and queues no second-leg sign requests.
-   Design: at the cap the node keeps its caught-up state and keeps acting on the requests it holds.

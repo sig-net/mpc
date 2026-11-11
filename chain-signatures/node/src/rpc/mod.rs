@@ -121,6 +121,8 @@ async fn publish_still_awaited(backlog: &Backlog, action: &PublishAction) -> any
     if awaited
         && request.request_kind() == RequestKind::RespondBidirectional
         && !backlog.is_caught_up(request.chain)
+        // At the cap only the blocks since the cap are missing, so a started second leg finishes.
+        && backlog.checkpoints().has_slot(request.chain)
     {
         return Err(SourceNotCaughtUp(request.chain).into());
     }
@@ -1344,6 +1346,24 @@ mod tests {
             .unwrap_err();
         assert!(behind.is::<SourceNotCaughtUp>());
         backlog.set_caught_up(tx.source_chain, true);
+        assert!(publish_still_awaited(&backlog, &second_leg).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn a_started_second_leg_publishes_at_the_cap() {
+        let backlog = Backlog::new();
+        let tx = mock_bidirectional_tx(SignId::new([5u8; 32]), Chain::Midnight);
+        let second_leg = publish_action_for(&mock_bidi_response(&tx));
+        backlog.insert_mock_final(&tx).await;
+        let interval = crate::backlog::checkpoint_interval(tx.source_chain).unwrap();
+        for i in 1..=crate::backlog::MAX_PENDING_CHECKPOINTS as u64 {
+            backlog
+                .set_processed_block(tx.source_chain, i * interval)
+                .await
+                .unwrap();
+        }
+        assert!(!backlog.checkpoints().has_slot(tx.source_chain));
+        assert!(!backlog.is_caught_up(tx.source_chain));
         assert!(publish_still_awaited(&backlog, &second_leg).await.unwrap());
     }
 

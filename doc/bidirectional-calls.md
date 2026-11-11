@@ -486,12 +486,12 @@ on Response { rid, att, sig } finalised on the source chain:
 
 A node is *caught up* on a source chain when it has processed it up to its
 finalised head. A node that is behind, after a restart for instance, does
-not sign, attest or publish while it runs the handlers above: its backlog
-still holds requests the chain has already answered, and it cannot tell
-which of the signatures and attestations it holds are already published.
-Once caught up, it acts on each entry only for what is missing: it does
-not sign an entry that has a published signature or one it holds, and does
-not attest an entry it holds an attestation for.
+not start to sign, attest or publish while it runs the handlers above: its
+backlog still holds requests the chain has already answered, and it cannot
+tell which of the signatures and attestations it holds are already
+published. Once caught up, it acts on each entry only for what is missing:
+it does not sign an entry that has a published signature or one it holds,
+and does not attest an entry it holds an attestation for.
 
 The MPC looks for a request's execution by transaction ID, under every
 signature it holds for the request, in any final block, so a node that
