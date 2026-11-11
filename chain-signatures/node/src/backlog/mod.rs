@@ -471,9 +471,7 @@ impl Backlog {
                 chain,
                 id: *sign_id,
             })?;
-        entry.status = SignStatus::Bidirectional(BidirectionalProgress::Parked(Arc::clone(
-            tx,
-        )));
+        entry.status = SignStatus::Bidirectional(BidirectionalProgress::Parked(Arc::clone(tx)));
         Ok(())
     }
 
