@@ -135,9 +135,9 @@ A short hash that stands for a larger structure. The docs use two:
 
 ## Entropy
 
-A value from the block that holds a [request](#request). The requester cannot
-know or influence it before that block is validated. Nodes read it from a final
-block, so every node derives the same delta (`SignArgs::entropy`,
+A value from the finalized block that holds a [request](#request). On Midnight,
+this is the containing block hash. The requester cannot know or influence it
+before that block is validated. Nodes read it from a final block, so every node derives the same delta (`SignArgs::entropy`,
 `chain-signatures/primitives/src/crypto.rs`). It also seeds the
 [proposer](#proposer) election. See
 [delta-derivation.md](delta-derivation.md).

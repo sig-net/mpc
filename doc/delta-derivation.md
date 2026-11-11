@@ -20,3 +20,4 @@ big_r' = big_r * delta,  k' = k / delta,  sigma' = (sigma + epsilon * k) / delta
 Operators choose which presignature they propose and so control `big_r`. That is acceptable: `delta` still depends on the request and on `entropy`, so choosing `big_r` gives no advantage toward forging. `entropy` is not there to counter presignature choice.
 
 Which block field satisfies requirement 1 depends on the chain and is decided per chain.
+On Midnight, `entropy` is the hash of the finalized block containing the request.

@@ -144,8 +144,19 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
         else {
             return Ok(Vec::new());
         };
-        // V1 carries the raw proof seed across the source boundary but has no verifier
-        // or persistence policy yet. A later verifier consumes this exact object.
+        // The block hash is the chain-chosen entropy for every request in this
+        // finalized block. Check the source's proof seed is for the block indexed.
+        anyhow::ensure!(
+            proof_seed.reported_block_number == block.number
+                && hex::encode(proof_seed.reported_block_hash)
+                    == block.hash.trim_start_matches("0x").to_ascii_lowercase(),
+            "midnight proof seed does not match indexed block {} ({})",
+            block.number,
+            block.hash
+        );
+        let block_entropy = proof_seed.reported_block_hash;
+        // This path only needs the block hash; release the remaining raw proof
+        // material before per-entry reads await on chain state.
         drop(proof_seed);
         let mut events = Vec::new();
         let mut indexed_ts = None;
@@ -208,6 +219,7 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
                                     caller,
                                     &block.hash,
                                     block.number,
+                                    block_entropy,
                                     maybe_rolled_back.then_some(block.parent_hash.as_str()),
                                     indexed_ts,
                                 )
@@ -334,6 +346,7 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
         caller: Option<[u8; 32]>,
         at_hash: &str,
         height: u64,
+        block_entropy: [u8; 32],
         rolled_back_parent: Option<&str>,
         indexed_ts: u64,
     ) -> anyhow::Result<Option<IndexedSignRequest>> {
@@ -519,6 +532,7 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
             &record,
             &unpacked.caller_address,
             rid,
+            block_entropy,
             indexed_ts,
             self.root_pk,
         ) {
@@ -813,10 +827,12 @@ mod tests {
     }
 
     fn proof_seed(height: u64) -> BlockProofSeed {
+        let mut reported_block_hash = [0; 32];
+        reported_block_hash[24..].copy_from_slice(&height.to_be_bytes());
         BlockProofSeed {
             reported_genesis_hash: [0x11; 32],
             reported_block_number: height,
-            reported_block_hash: [height as u8; 32],
+            reported_block_hash,
             singleton_address: SINGLETON,
             responder_address: RESPONDER,
             scale_header: vec![0x21, height as u8],
@@ -1629,6 +1645,7 @@ mod tests {
                 call.caller,
                 CAPTURE_BLOCK_HASH,
                 CAPTURE_HEIGHT,
+                [0x55; 32],
                 None,
                 0,
             )
@@ -1690,6 +1707,7 @@ mod tests {
                 call.caller,
                 CAPTURE_BLOCK_HASH,
                 CAPTURE_HEIGHT,
+                [0x55; 32],
                 None,
                 0,
             )
