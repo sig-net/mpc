@@ -541,6 +541,7 @@ async fn test_clear_clears_pending_reservations() -> anyhow::Result<()> {
 
 #[test(tokio::test)]
 async fn test_local_records_persist() -> anyhow::Result<()> {
+    use mpc_node::backlog::mock::mock_publishing;
     use mpc_node::sign_bidirectional::{BidirectionalProgress, SignProgress, SignStatus};
 
     let spawner = ClusterSpawner::default()
@@ -550,21 +551,26 @@ async fn test_local_records_persist() -> anyhow::Result<()> {
     let redis_container = containers::Redis::run(&spawner).await;
     let account_id = "party0.near".parse()?;
     let storage = CheckpointStorage::Redis(redis_container.pool(), account_id);
-    let entry = dummy_backlog_entry(1, Chain::Solana);
-    let (id, status) = (entry.sign_id(), entry.status);
+    let id = dummy_backlog_entry(1, Chain::Solana).sign_id();
+    let sign_id = dummy_backlog_entry(3, Chain::Solana).sign_id();
+    let publishing = || SignProgress::Publishing(mock_publishing());
+    let status = SignStatus::Bidirectional(BidirectionalProgress::Initial(publishing()));
     let attestation = SignStatus::Bidirectional(BidirectionalProgress::Final {
         respond_request: dummy_indexed_sign_request(2, Chain::Solana),
-        progress: SignProgress::Generating,
+        progress: publishing(),
     });
+    let sign = SignStatus::Sign(publishing());
 
     storage.put_local(Chain::Solana, id, &status).await?;
     storage.put_local(Chain::Solana, id, &attestation).await?;
+    storage.put_local(Chain::Solana, sign_id, &sign).await?;
     let records = storage.load_local(Chain::Solana).await?;
-    assert_eq!(records.len(), 2);
+    assert_eq!(records.len(), 3);
     assert!(records.contains(&(id, status)) && records.contains(&(id, attestation)));
+    assert!(records.contains(&(sign_id, sign)));
     assert!(storage.load_local(Chain::Canton).await?.is_empty());
 
-    storage.remove_local(Chain::Solana, &[id]).await?;
+    storage.remove_local(Chain::Solana, &[id, sign_id]).await?;
     assert!(storage.load_local(Chain::Solana).await?.is_empty());
     Ok(())
 }
