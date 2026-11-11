@@ -5,7 +5,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use rand::Rng;
 
-use super::classify::is_provider_throttled;
+use super::classify::{is_provider_throttled, RpcFailure};
 
 const RATE_LIMIT_BASE_COOLDOWN: Duration = Duration::from_secs(1);
 const RATE_LIMIT_MAX_COOLDOWN: Duration = Duration::from_secs(60);
@@ -63,10 +63,15 @@ impl SharedBackoff {
             .penalty_level
             .fetch_min(MAX_PENALTY_LEVEL, Ordering::Relaxed);
         let cooldown = self.cooldown_for_level(level);
+        self.extend_to(cooldown);
+        cooldown
+    }
+
+    /// Extends the window to cover `cooldown` from now, never shortening it.
+    fn extend_to(&self, cooldown: Duration) {
         self.inner
             .limited_until_ms
             .fetch_max(now_ms() + cooldown.as_millis() as u64, Ordering::Relaxed);
-        cooldown
     }
 
     /// Resets the penalty level once the cooldown window has fully elapsed
@@ -78,10 +83,24 @@ impl SharedBackoff {
     }
 
     /// Extends the cooldown if `err` looks like provider throttling (429/402).
-    /// Returns the applied cooldown, or `None` when the error is not a
-    /// throttle
+    /// An advertised pause (`Retry-After` on the carrier) replaces the
+    /// ladder's guess, clamped by policy. Returns the applied cooldown, or
+    /// `None` when the error is not a throttle
     pub fn engage_if_throttled(&self, err: &anyhow::Error) -> Option<Duration> {
-        is_provider_throttled(err).then(|| self.extend_cooldown())
+        if !is_provider_throttled(err) {
+            return None;
+        }
+        let cooldown = self.extend_cooldown();
+        let advertised = err
+            .chain()
+            .find_map(|c| c.downcast_ref::<RpcFailure>())
+            .and_then(RpcFailure::retry_after)
+            .map(|ra| ra.min(self.inner.max_cooldown));
+        if let Some(pause) = advertised {
+            self.extend_to(pause);
+            return Some(pause.max(cooldown));
+        }
+        Some(cooldown)
     }
 
     /// Sleeps until the global cooldown window has elapsed, plus random jitter
@@ -239,5 +258,31 @@ mod tests {
         let t = std::time::Instant::now();
         sb.wait().await;
         assert!(t.elapsed() >= Duration::from_millis(80));
+    }
+
+    #[test]
+    fn advertised_retry_after_replaces_the_ladders_guess() {
+        let gate =
+            SharedBackoff::with_cooldowns(Duration::from_millis(100), Duration::from_secs(60));
+        let err = anyhow::Error::new(
+            RpcFailure::read_status(http::StatusCode::TOO_MANY_REQUESTS, "429".to_owned())
+                .with_retry_after(Duration::from_secs(30)),
+        );
+        let applied = gate.engage_if_throttled(&err).unwrap();
+        assert!(applied >= Duration::from_secs(29));
+        assert!(gate.remaining() >= Duration::from_secs(29));
+    }
+
+    #[test]
+    fn advertised_retry_after_is_clamped_by_policy() {
+        let gate =
+            SharedBackoff::with_cooldowns(Duration::from_millis(300), Duration::from_millis(600));
+        let err = anyhow::Error::new(
+            RpcFailure::read_status(http::StatusCode::TOO_MANY_REQUESTS, "429".to_owned())
+                .with_retry_after(Duration::from_secs(30)),
+        );
+        let applied = gate.engage_if_throttled(&err).unwrap();
+        assert_eq!(applied, Duration::from_millis(600));
+        assert!(gate.remaining() <= Duration::from_millis(600));
     }
 }

@@ -91,7 +91,29 @@ fn read_carrier(e: &reqwest::Error) -> RpcFailure {
 /// The batch fetch bypasses the solana client, so its errors arrive bare.
 // TODO: transitional boundary helper — disappears with Phase 4's typed verdict enums.
 fn classify_batch(e: reqwest::Error) -> anyhow::Error {
-    anyhow::Error::new(read_carrier(&e))
+    classify_batch_with(e, None)
+}
+
+/// `classify_batch`, carrying a `Retry-After` pause read off the response
+/// before `error_for_status()` discards it.
+fn classify_batch_with(e: reqwest::Error, retry_after: Option<Duration>) -> anyhow::Error {
+    let carrier = match retry_after {
+        Some(ra) => read_carrier(&e).with_retry_after(ra),
+        None => read_carrier(&e),
+    };
+    anyhow::Error::new(carrier)
+}
+
+/// `Retry-After` seconds on a 429; the HTTP-date form reads as absent.
+fn retry_after_secs(resp: &reqwest::Response) -> Option<Duration> {
+    if resp.status() != reqwest::StatusCode::TOO_MANY_REQUESTS {
+        return None;
+    }
+    resp.headers()
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.parse::<u64>().ok())
+        .map(Duration::from_secs)
 }
 
 /// JSON-RPC body error to carrier: skipped slots are terminal with their
@@ -256,8 +278,11 @@ impl SolanaClient {
             .json(&request)
             .send()
             .await
-            .and_then(|resp| resp.error_for_status())
             .map_err(classify_batch)?;
+        let retry_after = retry_after_secs(&resp);
+        let resp = resp
+            .error_for_status()
+            .map_err(|e| classify_batch_with(e, retry_after))?;
         let resp = resp
             .json::<JsonRpcResponse<T>>()
             .await
@@ -366,9 +391,11 @@ impl SolanaClient {
                     .json(&requests)
                     .send()
                     .await
-                    .and_then(|resp| resp.error_for_status())
                     .map_err(classify_batch)?;
+                let retry_after = retry_after_secs(&resp);
                 let responses = resp
+                    .error_for_status()
+                    .map_err(|e| classify_batch_with(e, retry_after))?
                     .json::<Vec<JsonRpcResponse<UiConfirmedBlock>>>()
                     .await
                     .map_err(classify_batch)?;
@@ -1481,6 +1508,32 @@ mod tests {
         assert!(is_retryable(&err), "{err:#}");
         assert!(!is_provider_throttled(&err), "{err:#}");
         mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn retry_after_advertised_pauses_are_honored() {
+        // the gate waits the advertised pause instead of the ladder rung
+        let mut server = mockito::Server::new_async().await;
+        let throttled = server
+            .mock("POST", "/")
+            .with_status(429)
+            .with_header("Retry-After", "1")
+            .expect(3) // 1 attempt + 2 retries
+            .create_async()
+            .await;
+
+        let gate =
+            SharedBackoff::with_cooldowns(Duration::from_millis(100), Duration::from_secs(60));
+        let client = test_client_with_gate(&server.url(), gate.clone());
+        let err = client.get_slot_finalized().await.unwrap_err();
+        assert!(is_retryable(&err), "{err:#}");
+        // the ladder rung alone would leave ~100ms; the advertised 1s wins
+        assert!(
+            gate.remaining() >= Duration::from_millis(800),
+            "remaining: {:?}",
+            gate.remaining()
+        );
+        throttled.assert_async().await;
     }
 
     #[tokio::test]
