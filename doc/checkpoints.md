@@ -240,6 +240,7 @@ What the node already produced is in its node-local records, so it repeats nothi
 [bidirectional-calls.md](bidirectional-calls.md) (Section 4.3, the `Response` handler) deletes a node-local record when the node processes the `Response` for its request.
 A node that rebases forward skips those Responses, so a caught-up node also deletes the records of requests that are not in its backlog.
 A node that is behind does not, since it may hold a record for a request above its processed height.
+A node applies its records only on catching up after a restart or a rebase, so a late delete is harmless.
 The code deletes a record when its request leaves the backlog, and on catching up deletes the records of requests that are not in it.
 If the node takes a stale head for the real head, it deletes the record of a request it has not reached yet, and later signs or sends for that request a second time, which [bidirectional-calls.md](bidirectional-calls.md) makes harmless (C3a, replay protection).
 
@@ -418,7 +419,7 @@ The interval is `checkpoint_interval`, a per-chain constant with no per-node ove
 
 3. Entries (§1 Backlog, which [bidirectional-calls.md](bidirectional-calls.md) also needs).
    Now: an entry is the request and its status, the node's progress and the phases read from either chain, and the whole entry goes into the checkpoint.
-   A node tries to store its signatures and attestations in `local` before publishing them.
+   A node tries to store its signatures and attestations in `local` before publishing them, and applies them on catching up after a restart or a rebase.
    There is no `signatures` list.
    Design: an entry holds the rid, the request, the contract and `signatures`, and the node's own progress is node-local in `local`, outside checkpoints.
 4. Digest (§2).

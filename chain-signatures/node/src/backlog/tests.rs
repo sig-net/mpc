@@ -1528,3 +1528,140 @@ async fn a_signature_that_cannot_be_stored_is_still_published() {
     assert!(result.is_ok());
     assert_eq!(backlog.publishable_requests(Chain::Solana).await.len(), 1);
 }
+/// An attestation stored after the checkpoint outranks the watch the checkpoint holds.
+#[tokio::test]
+async fn a_stored_attestation_is_published_after_a_restart() {
+    let storage = CheckpointStorage::in_memory();
+    let tx = mock_tx(42);
+    let chain = Chain::Ethereum; // `single_entry_checkpoint`'s
+    let executing = mock_execution_entry(&tx, chain, pending_execution_status(&tx));
+    let checkpoint = single_entry_checkpoint(executing.clone());
+    storage.persist(&checkpoint).await.unwrap();
+    let record = SignStatus::Bidirectional(BidirectionalProgress::Final {
+        respond_request: mock_bidi_response(&tx),
+        progress: SignProgress::Publishing(mock_publishing()),
+    });
+    storage
+        .put_local(chain, executing.sign_id(), &record)
+        .await
+        .unwrap();
+
+    let records = storage.load_local(chain).await.unwrap();
+    let restarted = Backlog::persisted(storage);
+    restarted.recover_local(chain).await.unwrap();
+    restarted.claim_local(chain, records).await;
+
+    assert_eq!(restarted.publishable_requests(chain).await.len(), 1);
+    assert!(restarted.requeueable_requests(chain).await.is_empty());
+}
+
+/// A first leg's record stays once its entry moves on, and must not take the entry back.
+#[tokio::test]
+async fn a_first_leg_record_does_not_undo_later_progress() {
+    let tx = mock_tx(42);
+    let mut executing = mock_execution_entry(&tx, Chain::Solana, pending_execution_status(&tx));
+    let status = executing.status.clone();
+    let publish = SignProgress::Publishing(mock_publishing());
+
+    executing.apply_record(SignStatus::Bidirectional(BidirectionalProgress::Initial(
+        publish,
+    )));
+    assert_eq!(executing.status, status);
+}
+
+/// A rebase rebuilds progress from the source chain alone, so it depends on the record.
+#[tokio::test]
+async fn a_rebased_node_publishes_what_it_stored() {
+    let storage = CheckpointStorage::in_memory();
+    let backlog = Backlog::persisted(storage.clone());
+    let request = mock_bidi_request(SignId::new([1; 32]), Chain::Solana);
+    let (pk, output) = mock_signature_output(&request.args);
+    let peer = Backlog::new();
+    peer.insert_bidirectional(Arc::clone(&request)).await;
+    let consensus = peer.checkpoint(Chain::Solana).await.unwrap();
+    backlog
+        .insert_bidirectional(Arc::clone(&request))
+        .await
+        .advance(pk, &output, mock_participants(), true)
+        .await
+        .unwrap();
+
+    backlog.regress(&consensus).await.unwrap();
+    let records = storage.load_local(Chain::Solana).await.unwrap();
+    backlog.claim_local(Chain::Solana, records).await;
+
+    assert_eq!(backlog.publishable_requests(Chain::Solana).await.len(), 1);
+    assert!(backlog.requeueable_requests(Chain::Solana).await.is_empty());
+}
+
+/// With both legs stored, the attestation is claimed whichever record comes first.
+#[tokio::test]
+async fn both_records_claim_the_attestation_in_any_order() {
+    for attestation_first in [false, true] {
+        let backlog = Backlog::new();
+        let tx = mock_tx(42);
+        let chain = tx.source_chain;
+        let request = mock_bidi_request(tx.sign_id(), chain);
+        backlog.insert_bidirectional(Arc::clone(&request)).await;
+        let publishing = SignProgress::Publishing(crate::backlog::mock::mock_publishing());
+        let first_leg =
+            SignStatus::Bidirectional(BidirectionalProgress::Initial(publishing.clone()));
+        let attestation = SignStatus::Bidirectional(BidirectionalProgress::Final {
+            respond_request: mock_bidi_response(&tx),
+            progress: publishing,
+        });
+        let mut records = vec![(request.id, first_leg), (request.id, attestation.clone())];
+        if attestation_first {
+            records.reverse();
+        }
+
+        backlog.claim_local(chain, records).await;
+
+        let entry = backlog.get(chain, &request.id).await.unwrap();
+        assert_eq!(entry.status(), &attestation);
+    }
+}
+
+/// Each stored record against each entry status: the record applies only where marked.
+#[test]
+fn a_record_applies_only_to_an_entry_behind_it() {
+    use BidirectionalProgress::{Executing, Final, Initial, Parked};
+    let tx = mock_tx(42);
+    let execution = Arc::new(tx.clone());
+    let record = || SignProgress::Publishing(mock_publishing());
+    let held = || SignProgress::Publishing(mock_publishing_with_proposer(false));
+    let gen = || SignProgress::Generating;
+    let fin = |progress| Final {
+        respond_request: mock_bidi_response(&tx),
+        progress,
+    };
+    let statuses = [
+        SignStatus::Sign(gen()),
+        SignStatus::Sign(held()),
+        SignStatus::Bidirectional(Initial(gen())),
+        SignStatus::Bidirectional(Initial(held())),
+        SignStatus::Bidirectional(Executing(Arc::clone(&execution))),
+        SignStatus::Bidirectional(fin(gen())),
+        SignStatus::Bidirectional(fin(held())),
+        SignStatus::Bidirectional(Parked(execution)),
+    ];
+    let records = [
+        (SignStatus::Sign(record()), [1, 0, 0, 0, 0, 0, 0, 0]),
+        (
+            SignStatus::Bidirectional(Initial(record())),
+            [0, 0, 1, 0, 0, 0, 0, 0],
+        ),
+        (
+            SignStatus::Bidirectional(fin(record())),
+            [0, 0, 1, 1, 1, 1, 0, 0],
+        ),
+    ];
+    for (record, applies) in records {
+        for (status, applies) in statuses.iter().zip(applies) {
+            let mut entry = mock_execution_entry(&tx, Chain::Solana, status.clone());
+            entry.apply_record(record.clone());
+            let expected = if applies == 1 { &record } else { status };
+            assert_eq!(&entry.status, expected, "{record:?} on {status:?}");
+        }
+    }
+}

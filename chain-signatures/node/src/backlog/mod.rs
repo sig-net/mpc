@@ -578,6 +578,16 @@ impl Backlog {
         self.recover_local(chain).await
     }
 
+    /// Give each entry its stored records, once replay has rebuilt the backlog.
+    pub(crate) async fn claim_local(&self, chain: Chain, records: Vec<(SignId, SignStatus)>) {
+        let mut pending = self.pending(&chain).write().await;
+        for (id, record) in records {
+            if let Some(entry) = pending.requests.get_mut(&id) {
+                entry.apply_record(record);
+            }
+        }
+    }
+
     /// Recovers local backlog state from the latest durable checkpoint if one exists.
     pub async fn recover_local(&self, chain: Chain) -> Result<Option<Checkpoint>, CheckpointError> {
         let Some(checkpoint) = self.checkpoints.latest(chain).await? else {
@@ -739,6 +749,25 @@ impl BacklogEntry {
 
     pub fn with_status(request: Arc<IndexedSignRequest>, status: SignStatus) -> Self {
         Self { request, status }
+    }
+
+    /// Take a stored status unless the entry has moved past it. A record is written only on
+    /// publishing, so a first leg's stays behind once the request executes.
+    fn apply_record(&mut self, record: SignStatus) {
+        use BidirectionalProgress::{Executing, Final, Initial};
+        use SignStatus::{Bidirectional, Sign};
+        let applies = match (&record, &self.status) {
+            (Sign(_), Sign(progress))
+            | (Bidirectional(Initial(_)), Bidirectional(Initial(progress)))
+            | (Bidirectional(Final { .. }), Bidirectional(Final { progress, .. })) => {
+                progress.is_generating()
+            }
+            (Bidirectional(Final { .. }), Bidirectional(Initial(_) | Executing(_))) => true,
+            _ => false,
+        };
+        if applies {
+            self.status = record;
+        }
     }
 
     pub fn sign_id(&self) -> SignId {
