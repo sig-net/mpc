@@ -1460,4 +1460,55 @@ mod tests {
         assert!(!is_provider_throttled(&err), "{err:#}");
         mock.assert_async().await;
     }
+
+    #[tokio::test]
+    async fn undecodable_read_bodies_stay_retryable() {
+        // 200 with HTML: statusless decode failure on the single-read path
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "text/html")
+            .with_body("<html>502 Bad Gateway</html>")
+            .expect(3) // 1 attempt + 2 retries
+            .create_async()
+            .await;
+
+        let client = test_client(&server.url());
+        let err = client.get_slot_finalized().await.unwrap_err();
+        assert!(is_retryable(&err), "{err:#}");
+        assert!(!is_provider_throttled(&err), "{err:#}");
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn both_field_read_envelopes_classify_by_their_error() {
+        // error wins over a paired result, like the batch envelope — the
+        // block must not be delivered
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                json!({
+                    "jsonrpc": "2.0", "id": 0,
+                    "result": make_block_response(0, 1234)["result"],
+                    "error": {
+                        "code": JSON_RPC_SERVER_ERROR_SLOT_SKIPPED,
+                        "message": "Slot was skipped"
+                    }
+                })
+                .to_string(),
+            )
+            .expect(1)
+            .create_async()
+            .await;
+
+        let client = test_client(&server.url());
+        let err = client.get_block(1234).await.unwrap_err();
+        assert!(!is_retryable(&err), "{err:#}");
+        assert_eq!(skipped_code(&err), Some(JSON_RPC_SERVER_ERROR_SLOT_SKIPPED));
+        mock.assert_async().await;
+    }
 }
