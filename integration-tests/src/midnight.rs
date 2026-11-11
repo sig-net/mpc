@@ -23,12 +23,19 @@ use tokio::sync::Mutex;
 use crate::cluster::spawner::ClusterSpawner;
 use crate::containers::{start_container_with_network_retry, Container};
 
-const NODE_IMAGE: (&str, &str) = ("midnightntwrk/midnight-node", "2.0.0-rc.4");
-const INDEXER_IMAGE: (&str, &str) = (
-    "midnightntwrk/indexer-standalone",
-    "4.4.0-pre-alpha.16-l91r3-n2r3-bridge-and-events-epics-contract-zswap-16c656df",
-);
-const PROOF_IMAGE: (&str, &str) = ("midnightntwrk/proof-server", "9.0.0-rc.5_experimental");
+const NODE_IMAGE: (&str, &str) = ("midnightntwrk/midnight-node", "2.1.101");
+const INDEXER_IMAGE: (&str, &str) = ("midnightntwrk/indexer-standalone", "4.4.101");
+const PROOF_IMAGE: (&str, &str) = ("midnightntwrk/proof-server", "9.0.1");
+
+/// Set to a deployed network's node RPC URL to run the cases there instead of on a local node
+/// and indexer; the other `MPC_MIDNIGHT_E2E_*` variables then become required.
+const DEPLOYED_NODE_URL_ENV: &str = "MPC_MIDNIGHT_E2E_NODE_URL";
+const DEPLOYED_INDEXER_URL_ENV: &str = "MPC_MIDNIGHT_E2E_INDEXER_URL";
+const DEPLOYED_INDEXER_WS_URL_ENV: &str = "MPC_MIDNIGHT_E2E_INDEXER_WS_URL";
+const DEPLOYED_DEPLOYER_SEED_ENV: &str = "MPC_MIDNIGHT_E2E_DEPLOYER_SEED";
+const DEPLOYED_INVOKER_SEED_ENV: &str = "MPC_MIDNIGHT_E2E_INVOKER_SEED";
+/// Comma-separated, one per MPC node.
+const DEPLOYED_PUBLISHER_SEEDS_ENV: &str = "MPC_MIDNIGHT_E2E_PUBLISHER_SEEDS";
 
 const NODE_PORT: u16 = 9944;
 const INDEXER_PORT: u16 = 8088;
@@ -45,18 +52,64 @@ struct MidnightEndpoints {
 }
 
 struct MidnightStack {
-    _node: Container,
-    _indexer: Container,
+    /// The local node and indexer; none on a deployed network.
+    _chain: Option<(Container, Container)>,
     _proof_server: Container,
     endpoints: MidnightEndpoints,
     network_id: String,
+    /// The role wallets on a deployed network; locally the driver funds its own.
+    role_seeds: Option<RoleSeeds>,
     artifact_dir: PathBuf,
+}
+
+/// A deployed network the cases run against in place of a local node and indexer.
+struct DeployedNetwork {
+    node_http_url: String,
+    indexer_url: String,
+    indexer_ws_url: String,
+    role_seeds: RoleSeeds,
+}
+
+/// Role wallets that already hold NIGHT registered for DUST: NIGHT sent just before a run
+/// has not generated enough DUST to pay for it.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RoleSeeds {
+    deployer: String,
+    invoker: String,
+    publishers: Vec<String>,
+}
+
+impl DeployedNetwork {
+    fn from_env() -> anyhow::Result<Option<Self>> {
+        let Ok(node_http_url) = std::env::var(DEPLOYED_NODE_URL_ENV) else {
+            return Ok(None);
+        };
+        let required = |name: &str| {
+            std::env::var(name)
+                .with_context(|| format!("{name} is required with {DEPLOYED_NODE_URL_ENV}"))
+        };
+        Ok(Some(Self {
+            node_http_url,
+            indexer_url: required(DEPLOYED_INDEXER_URL_ENV)?,
+            indexer_ws_url: required(DEPLOYED_INDEXER_WS_URL_ENV)?,
+            role_seeds: RoleSeeds {
+                deployer: required(DEPLOYED_DEPLOYER_SEED_ENV)?,
+                invoker: required(DEPLOYED_INVOKER_SEED_ENV)?,
+                publishers: required(DEPLOYED_PUBLISHER_SEEDS_ENV)?
+                    .split(',')
+                    .map(|seed| seed.trim().to_owned())
+                    .collect(),
+            },
+        }))
+    }
 }
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct BootstrapResult {
     central_address: String,
+    responder_address: String,
     caller_address: String,
     /// One funding seed per MPC node, each wallet funded and generating DUST.
     publisher_seeds: Vec<String>,
@@ -220,6 +273,7 @@ impl MidnightContext {
                 "config": DriverConfig::new(&stack),
                 "artifactDir": stack.artifact_dir,
                 "publishers": spawner.cfg.nodes,
+                "roleSeeds": stack.role_seeds,
             }))
             .await
             .context("bootstrapping fresh Midnight wallets and contracts")?;
@@ -253,18 +307,19 @@ impl MidnightContext {
             }))
             .await
             .context("initialising the Midnight caller with the MPC response key")?;
-        let publisher_entrypoint = publisher_package_dir()?.join("dist/main.js");
+        let contract_artifacts =
+            devtools_package_dir()?.join("node_modules/@sig-net/midnight-responder/dist/managed");
         anyhow::ensure!(
-            publisher_entrypoint.is_file(),
-            "Midnight publisher entry point {} is missing; run npm run build in {}",
-            publisher_entrypoint.display(),
-            publisher_package_dir()?.display()
+            contract_artifacts.join("keys/respond.prover").is_file(),
+            "Midnight responder artifacts {} are missing; run npm ci in {}",
+            contract_artifacts.display(),
+            devtools_package_dir()?.display()
         );
         let config = responder_config(
             &stack.endpoints,
             &bootstrap,
-            node_executable()?,
-            publisher_entrypoint,
+            contract_artifacts,
+            zk_params_dir()?,
             Some(OutputStorageConfig {
                 bucket: output_storage.bucket.clone(),
                 prefix: format!("integration-tests/{}", uuid::Uuid::new_v4()),
@@ -550,24 +605,22 @@ impl<'a> DriverConfig<'a> {
 fn responder_config(
     endpoints: &MidnightEndpoints,
     bootstrap: &BootstrapResult,
-    node_executable: String,
-    publisher_entrypoint: PathBuf,
+    contract_artifacts_dir: PathBuf,
+    zk_params_dir: PathBuf,
     output_storage: Option<OutputStorageConfig>,
 ) -> anyhow::Result<MidnightConfig> {
     Ok(MidnightConfig {
         node_url: endpoints.node_http_url.clone(),
         central_address: MidnightAddress::from_hex(&bootstrap.central_address)
             .context("decoding Midnight central address")?,
+        responder_address: MidnightAddress::from_hex(&bootstrap.responder_address)
+            .context("decoding Midnight responder address")?,
         publisher: PublisherConfig {
             output_storage,
-            intent_gen_command: vec![
-                node_executable,
-                publisher_entrypoint.to_string_lossy().into_owned(),
-            ],
             funding_seed: bootstrap.publisher_seeds[0].clone(),
-            proof_server_url: endpoints.proof_server_url.clone(),
-            indexer_url: endpoints.indexer_url.clone(),
             indexer_ws_url: endpoints.indexer_ws_url.clone(),
+            contract_artifacts_dir,
+            zk_params_dir,
             ..Default::default()
         },
         rpc: Default::default(),
@@ -575,23 +628,17 @@ fn responder_config(
     })
 }
 
-fn node_executable() -> anyhow::Result<String> {
-    let output = std::process::Command::new("node")
-        .args(["--print", "process.execPath"])
-        .output()
-        .context("resolving the Node executable for the Midnight publisher")?;
-    anyhow::ensure!(
-        output.status.success(),
-        "resolving the Node executable failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let path = String::from_utf8(output.stdout).context("Node's executable path is not UTF-8")?;
-    let path = path.trim();
-    anyhow::ensure!(
-        Path::new(path).is_absolute(),
-        "Node returned a non-absolute executable path: {path}"
-    );
-    Ok(path.to_string())
+/// The ledger's own parameter cache, so runs share what earlier ones fetched; looked
+/// up as `MidnightDataProvider::new` does.
+fn zk_params_dir() -> anyhow::Result<PathBuf> {
+    if let Some(dir) = std::env::var_os("MIDNIGHT_PP") {
+        return Ok(PathBuf::from(dir));
+    }
+    if let Some(cache) = std::env::var_os("XDG_CACHE_HOME") {
+        return Ok(PathBuf::from(cache).join("midnight/zk-params"));
+    }
+    let home = std::env::var_os("HOME").context("HOME is unset, so there is no zk-params cache")?;
+    Ok(PathBuf::from(home).join(".cache/midnight/zk-params"))
 }
 
 struct MidnightDriver {
@@ -602,7 +649,7 @@ struct MidnightDriver {
 
 impl MidnightDriver {
     async fn spawn(artifact_dir: &Path) -> anyhow::Result<Self> {
-        let package_dir = publisher_package_dir()?;
+        let package_dir = devtools_package_dir()?;
         let executable = package_dir.join("node_modules/.bin/tsx");
         let source = package_dir.join("devtools/real-stack/driver.ts");
         anyhow::ensure!(
@@ -665,11 +712,11 @@ impl MidnightDriver {
     }
 }
 
-fn publisher_package_dir() -> anyhow::Result<PathBuf> {
+fn devtools_package_dir() -> anyhow::Result<PathBuf> {
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
     manifest
         .parent()
-        .map(|root| root.join("chain-signatures/midnight-publisher-ts"))
+        .map(|root| root.join("chain-signatures/midnight-devtools"))
         .context("integration-tests manifest has no repository parent")
 }
 
@@ -683,6 +730,77 @@ impl MidnightStack {
             )
         })?;
 
+        let (chain, node_http_url, indexer_url, indexer_ws_url, network_id, role_seeds) =
+            match DeployedNetwork::from_env()? {
+                Some(network) => {
+                    let network_id = wait_for_node(&network.node_http_url).await?;
+                    tracing::info!(%network_id, "running the Midnight cases on a deployed network");
+                    (
+                        None,
+                        network.node_http_url,
+                        network.indexer_url,
+                        network.indexer_ws_url,
+                        network_id,
+                        Some(network.role_seeds),
+                    )
+                }
+                None => {
+                    let (chain, node_http_url, indexer_host_port, network_id) =
+                        Self::start_local_chain(spawner, &artifact_dir).await?;
+                    (
+                        Some(chain),
+                        node_http_url,
+                        format!("http://127.0.0.1:{indexer_host_port}/api/v3/graphql"),
+                        format!("ws://127.0.0.1:{indexer_host_port}/api/v3/graphql/ws"),
+                        network_id,
+                        None,
+                    )
+                }
+            };
+
+        let proof_log = log_consumer(&artifact_dir.join("proof-server.log"));
+        let proof_server = start_container_with_network_retry(
+            || {
+                GenericImage::new(PROOF_IMAGE.0, PROOF_IMAGE.1)
+                    .with_exposed_port(PROOF_PORT.tcp())
+                    .with_wait_for(WaitFor::Nothing)
+                    .with_network(&spawner.network)
+                    .with_log_consumer(proof_log.clone())
+            },
+            &spawner.network,
+        )
+        .await
+        .context("starting Midnight proof-server container")?;
+        let proof_host_port = proof_server
+            .get_host_port_ipv4(PROOF_PORT)
+            .await
+            .context("resolving Midnight proof-server host port")?;
+
+        let endpoints = MidnightEndpoints {
+            node_http_url,
+            indexer_url,
+            indexer_ws_url,
+            proof_server_url: format!("http://127.0.0.1:{proof_host_port}"),
+        };
+        wait_for_indexer(&endpoints.indexer_url).await?;
+        wait_for_http("proof server", &endpoints.proof_server_url).await?;
+
+        Ok(Self {
+            _chain: chain,
+            _proof_server: proof_server,
+            endpoints,
+            network_id,
+            role_seeds,
+            artifact_dir,
+        })
+    }
+
+    /// Starts a local dev node and an indexer following it, returning them with the node's
+    /// HTTP URL, the indexer's host port and the node's network id.
+    async fn start_local_chain(
+        spawner: &ClusterSpawner,
+        artifact_dir: &Path,
+    ) -> anyhow::Result<((Container, Container), String, u16, String)> {
         let node_log = log_consumer(&artifact_dir.join("node.log"));
         let node = start_container_with_network_retry(
             || {
@@ -743,41 +861,12 @@ impl MidnightStack {
             .await
             .context("resolving Midnight indexer host port")?;
 
-        let proof_log = log_consumer(&artifact_dir.join("proof-server.log"));
-        let proof_server = start_container_with_network_retry(
-            || {
-                GenericImage::new(PROOF_IMAGE.0, PROOF_IMAGE.1)
-                    .with_exposed_port(PROOF_PORT.tcp())
-                    .with_wait_for(WaitFor::Nothing)
-                    .with_network(&spawner.network)
-                    .with_log_consumer(proof_log.clone())
-            },
-            &spawner.network,
-        )
-        .await
-        .context("starting Midnight proof-server container")?;
-        let proof_host_port = proof_server
-            .get_host_port_ipv4(PROOF_PORT)
-            .await
-            .context("resolving Midnight proof-server host port")?;
-
-        let endpoints = MidnightEndpoints {
+        Ok((
+            (node, indexer),
             node_http_url,
-            indexer_url: format!("http://127.0.0.1:{indexer_host_port}/api/v3/graphql"),
-            indexer_ws_url: format!("ws://127.0.0.1:{indexer_host_port}/api/v3/graphql/ws"),
-            proof_server_url: format!("http://127.0.0.1:{proof_host_port}"),
-        };
-        wait_for_indexer(&endpoints.indexer_url).await?;
-        wait_for_http("proof server", &endpoints.proof_server_url).await?;
-
-        Ok(Self {
-            _node: node,
-            _indexer: indexer,
-            _proof_server: proof_server,
-            endpoints,
+            indexer_host_port,
             network_id,
-            artifact_dir,
-        })
+        ))
     }
 }
 

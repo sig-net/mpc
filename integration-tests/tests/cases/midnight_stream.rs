@@ -356,8 +356,8 @@ async fn midnight_to_ethereum_to_midnight_consumes_caller_response() -> anyhow::
         cases.iter().rev().skip(1).all(|case| !case.cache_outage),
         "only the last output case may take the output cache down"
     );
-    // Every case is filed before any is awaited, so the MPC signs earlier cases while later
-    // ones are still being filed.
+    // Every case is filed before any is awaited, so the MPC signs and attests earlier cases
+    // while later ones are still being filed.
     let mut filings = Vec::new();
     for (nonce, case) in cases.iter().enumerate() {
         tracing::info!(case = case.name, nonce, "checking Midnight API conformance");
