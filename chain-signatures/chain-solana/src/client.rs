@@ -122,6 +122,23 @@ fn classify_batch(e: reqwest::Error) -> anyhow::Error {
     anyhow::Error::new(read_carrier(&e))
 }
 
+/// JSON-RPC body error to carrier: skipped slots are terminal with their
+/// code, everything else retryable (another LB backend may serve it).
+fn classify_body_error(error: serde_json::Value) -> anyhow::Error {
+    let code = error.get("code").and_then(serde_json::Value::as_i64);
+    let message = error
+        .get("message")
+        .and_then(|m| m.as_str())
+        .map(str::to_owned)
+        .unwrap_or_else(|| error.to_string());
+    match code {
+        Some(code) if slot_skipped(code) => {
+            anyhow::Error::new(RpcFailure::terminal_code(code, message))
+        }
+        _ => anyhow::Error::new(RpcFailure::retryable(message)),
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum SolanaCatchupBlock {
     Block(UiConfirmedBlock),
@@ -244,6 +261,46 @@ impl SolanaClient {
             rewards: Some(false),
             commitment: Some(CommitmentConfig::finalized()),
             max_supported_transaction_version: Some(1),
+        }
+    }
+
+    /// Single JSON-RPC call over raw reqwest, like `fetch_blocks`: HTTP
+    /// statuses and body error codes arrive typed. The vendored client
+    /// hides 429s behind its internal retry loop, which only ever surfaces
+    /// a timeout.
+    #[allow(dead_code)] // wired onto the read call sites in i4-b
+    async fn rpc_call<T: serde::de::DeserializeOwned>(
+        &self,
+        method: &'static str,
+        params: serde_json::Value,
+    ) -> anyhow::Result<T> {
+        let request = JsonRpcRequest {
+            jsonrpc: "2.0",
+            id: 0,
+            method,
+            params,
+        };
+        let resp = self
+            .http_client
+            .post(self.rpc_http_url.clone())
+            .json(&request)
+            .send()
+            .await
+            .and_then(|resp| resp.error_for_status())
+            .map_err(classify_batch)?;
+        let resp = resp
+            .json::<JsonRpcResponse<T>>()
+            .await
+            .map_err(classify_batch)?;
+        match (resp.result, resp.error) {
+            // error wins over a paired result, like the batch envelope
+            (_, Some(error)) => Err(classify_body_error(error)),
+            (Some(result), None) => Ok(result),
+            // null result: retryable, matching the vendored client's
+            // decode failure
+            (None, None) => Err(anyhow::Error::new(RpcFailure::retryable(format!(
+                "{method} returned no result"
+            )))),
         }
     }
 
@@ -554,6 +611,7 @@ mod tests {
         utils::retry::{is_provider_throttled, is_retryable},
         NoopPublisherTelemetry,
     };
+    use solana_client::rpc_config::RpcSignaturesForAddressConfig;
     use solana_client::rpc_custom_error::{
         JSON_RPC_SERVER_ERROR_BLOCK_CLEANED_UP, JSON_RPC_SERVER_ERROR_BLOCK_NOT_AVAILABLE,
         JSON_RPC_SERVER_ERROR_BLOCK_STATUS_NOT_AVAILABLE_YET,
@@ -1298,5 +1356,265 @@ mod tests {
         let err = classify_batch(reqwest_err);
         assert!(is_retryable(&err));
         assert!(!is_provider_throttled(&err));
+    }
+
+    #[tokio::test]
+    async fn rpc_call_pins_the_getslot_wire_shape() {
+        // the exact request the vendored client sends (solana-rpc-client
+        // 3.1.14, rpc_client.rs:1848): getSlot [commitment]
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/")
+            .match_body(mockito::Matcher::Json(json!({
+                "jsonrpc": "2.0", "id": 0, "method": "getSlot",
+                "params": [{ "commitment": "finalized" }]
+            })))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"jsonrpc":"2.0","id":0,"result":42}"#)
+            .expect(1)
+            .create_async()
+            .await;
+
+        let client = test_client(&server.url());
+        let slot = client
+            .rpc_call::<u64>("getSlot", json!([CommitmentConfig::finalized()]))
+            .await
+            .unwrap();
+        assert_eq!(slot, 42);
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn rpc_call_pins_the_getblock_wire_shape() {
+        // getBlock [slot, config] (rpc_client.rs:2457); same config as
+        // the batch path sends
+        const HEIGHT: u64 = 1234;
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/")
+            .match_body(mockito::Matcher::Json(json!({
+                "jsonrpc": "2.0", "id": 0, "method": "getBlock",
+                "params": [
+                    HEIGHT,
+                    {
+                        "encoding": "jsonParsed",
+                        "transactionDetails": "full",
+                        "rewards": false,
+                        "commitment": "finalized",
+                        "maxSupportedTransactionVersion": 1
+                    }
+                ]
+            })))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                json!({"jsonrpc": "2.0", "id": 0, "result": make_block_response(0, HEIGHT)["result"]})
+                    .to_string(),
+            )
+            .expect(1)
+            .create_async()
+            .await;
+
+        let client = test_client(&server.url());
+        let block = client
+            .rpc_call::<UiConfirmedBlock>(
+                "getBlock",
+                json!([
+                    HEIGHT,
+                    serde_json::to_value(SolanaClient::block_fetch_config()).unwrap()
+                ]),
+            )
+            .await
+            .unwrap();
+        assert_eq!(block.block_height, Some(HEIGHT));
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn rpc_call_pins_the_signatures_wire_shape() {
+        // getSignaturesForAddress [address, config] (rpc_client.rs:2786);
+        // the config serializes its None fields as null
+        let mut server = mockito::Server::new_async().await;
+        let address = Pubkey::new_unique();
+        let before = Signature::new_unique().to_string();
+        let mock = server
+            .mock("POST", "/")
+            .match_body(mockito::Matcher::Json(json!({
+                "jsonrpc": "2.0", "id": 0, "method": "getSignaturesForAddress",
+                "params": [
+                    address.to_string(),
+                    {
+                        "before": before,
+                        "until": null,
+                        "limit": CATCHUP_PAGE_SIZE,
+                        "commitment": "finalized",
+                        "minContextSlot": null
+                    }
+                ]
+            })))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                json!({
+                    "jsonrpc": "2.0", "id": 0,
+                    "result": [{ "signature": "sig1", "slot": 42, "err": null, "memo": null, "blockTime": null, "confirmationStatus": "confirmed" }]
+                })
+                .to_string(),
+            )
+            .expect(1)
+            .create_async()
+            .await;
+
+        let client = test_client(&server.url());
+        let config = RpcSignaturesForAddressConfig {
+            before: Some(before),
+            until: None,
+            limit: Some(CATCHUP_PAGE_SIZE),
+            commitment: Some(CommitmentConfig::finalized()),
+            min_context_slot: None,
+        };
+        let sigs = client
+            .rpc_call::<Vec<RpcConfirmedTransactionStatusWithSignature>>(
+                "getSignaturesForAddress",
+                json!([address.to_string(), serde_json::to_value(config).unwrap()]),
+            )
+            .await
+            .unwrap();
+        assert_eq!(sigs.len(), 1);
+        assert_eq!(sigs[0].slot, 42);
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn rpc_call_classifies_body_errors_by_code() {
+        // same verdicts as classify_read: skipped codes terminal,
+        // node-local absence retryable
+        for (code, message, retryable, carried) in [
+            (
+                JSON_RPC_SERVER_ERROR_SLOT_SKIPPED,
+                "Slot was skipped",
+                false,
+                Some(JSON_RPC_SERVER_ERROR_SLOT_SKIPPED),
+            ),
+            (
+                JSON_RPC_SERVER_ERROR_BLOCK_NOT_AVAILABLE,
+                "Block not available for slot 1234",
+                true,
+                None,
+            ),
+        ] {
+            let mut server = mockito::Server::new_async().await;
+            let mock = server
+                .mock("POST", "/")
+                .with_status(200)
+                .with_header("content-type", "application/json")
+                .with_body(
+                    json!({"jsonrpc": "2.0", "id": 0, "error": {"code": code, "message": message}})
+                        .to_string(),
+                )
+                .expect(1)
+                .create_async()
+                .await;
+
+            let client = test_client(&server.url());
+            let err = client
+                .rpc_call::<UiConfirmedBlock>(
+                    "getBlock",
+                    json!([
+                        1234,
+                        serde_json::to_value(SolanaClient::block_fetch_config()).unwrap()
+                    ]),
+                )
+                .await
+                .unwrap_err();
+            assert_eq!(is_retryable(&err), retryable, "code {code}: {err:#}");
+            assert_eq!(skipped_code(&err), carried, "code {code}: {err:#}");
+            mock.assert_async().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn rpc_call_null_results_classify_retryable() {
+        // providers send null for absent blocks; the vendored client
+        // treats it as a retryable decode failure
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"jsonrpc":"2.0","id":0,"result":null}"#)
+            .expect(1)
+            .create_async()
+            .await;
+
+        let client = test_client(&server.url());
+        let err = client
+            .rpc_call::<UiConfirmedBlock>("getBlock", json!([1234]))
+            .await
+            .unwrap_err();
+        assert!(is_retryable(&err), "{err:#}");
+        assert!(!is_provider_throttled(&err), "{err:#}");
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn rpc_call_statuses_arrive_typed() {
+        // a 429 arrives typed here, so the gate can engage (the vendored
+        // sender would surface it as a timeout); classic client errors
+        // stay terminal
+        let mut server = mockito::Server::new_async().await;
+        let throttled = server
+            .mock("POST", "/")
+            .with_status(429)
+            .expect(1)
+            .create_async()
+            .await;
+        let client = test_client(&server.url());
+        let err = client
+            .rpc_call::<u64>("getSlot", json!([]))
+            .await
+            .unwrap_err();
+        assert!(is_retryable(&err), "{err:#}");
+        assert!(is_provider_throttled(&err), "{err:#}");
+        throttled.assert_async().await;
+
+        let mut server = mockito::Server::new_async().await;
+        let not_found = server
+            .mock("POST", "/")
+            .with_status(404)
+            .expect(1)
+            .create_async()
+            .await;
+        let client = test_client(&server.url());
+        let err = client
+            .rpc_call::<u64>("getSlot", json!([]))
+            .await
+            .unwrap_err();
+        assert!(!is_retryable(&err), "{err:#}");
+        not_found.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn rpc_call_undecodable_bodies_stay_retryable() {
+        // 200 with HTML: statusless decode failure, same as the batch
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "text/html")
+            .with_body("<html>502 Bad Gateway</html>")
+            .expect(1)
+            .create_async()
+            .await;
+
+        let client = test_client(&server.url());
+        let err = client
+            .rpc_call::<u64>("getSlot", json!([]))
+            .await
+            .unwrap_err();
+        assert!(is_retryable(&err), "{err:#}");
+        assert!(!is_provider_throttled(&err), "{err:#}");
+        mock.assert_async().await;
     }
 }
