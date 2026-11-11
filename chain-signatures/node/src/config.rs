@@ -68,18 +68,6 @@ impl std::fmt::Debug for NetworkConfig {
     }
 }
 
-impl Default for NetworkConfig {
-    fn default() -> Self {
-        Self {
-            sign_sk: near_crypto::SecretKey::from_seed(
-                near_crypto::KeyType::ED25519,
-                "test-entropy",
-            ),
-            cipher_sk: hpke::SecretKey::from_bytes(&[0; 32]),
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::Config;

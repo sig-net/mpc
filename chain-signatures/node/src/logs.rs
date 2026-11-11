@@ -45,16 +45,6 @@ pub struct Options {
     pub log_format: LogFormat,
 }
 
-impl Default for Options {
-    fn default() -> Self {
-        Self {
-            opentelemetry_level: OpenTelemetryLevel::default(),
-            otlp_endpoint: "http://localhost:4318".parse().expect("a valid literal"),
-            log_format: LogFormat::Plain,
-        }
-    }
-}
-
 /// Deployment a node belongs to; labels logs and telemetry.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, clap::ValueEnum)]
 pub enum Env {

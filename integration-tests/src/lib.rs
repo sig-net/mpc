@@ -21,6 +21,7 @@ use self::local::NodeEnvConfig;
 use alloy::primitives::{Address, U256};
 use anyhow::Context as _;
 use cait_sith::protocol::Participant;
+use clap::Parser as _;
 use cluster::spawner::ClusterSpawner;
 use mpc_chain_canton::CantonConfig;
 use mpc_chain_ethereum::utils::test::deploy_chain_signatures;
@@ -286,7 +287,7 @@ pub async fn setup(spawner: &mut ClusterSpawner) -> anyhow::Result<Context> {
         redis_url: redis.internal_address.clone(),
     };
 
-    let log_options = logs::Options::default();
+    let log_options = logs::Options::parse_from(["test"]);
 
     // If using pregenerated keys, inject them into storage before nodes start
     if spawner.pregenerated_keys.is_enabled() {
