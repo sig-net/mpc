@@ -18,6 +18,7 @@ pub enum BenchScenario {
     SyncPrune,
     ClientKill,
     DeepStockpile,
+    PresignatureStockpile,
     ReservationChurn,
     ConflictedTake,
     LargeBatchPrune,
@@ -75,6 +76,14 @@ struct Args {
     /// Number of seeks per worker in Scenario 10 Deep Stockpile Seek (default: 50)
     #[arg(long, default_value_t = 50)]
     deep_seeks: usize,
+
+    /// Number of owned presignatures for the sign-path stockpile scenario.
+    #[arg(long, default_value_t = 4_100)]
+    presignature_stockpile: usize,
+
+    /// Number of signing proposer attempts per worker for the presignature scenario.
+    #[arg(long, default_value_t = 50)]
+    presignature_seeks: usize,
 
     /// External Redis URL. Requires --allow-external-redis; the benchmark can flush data, kill clients, and change configuration.
     #[arg(long, requires = "allow_external_redis")]
@@ -360,6 +369,16 @@ async fn main() -> anyhow::Result<()> {
             );
             let results = harness
                 .bench_deep_stockpile_seek(stockpile, num_seekers, exclusions, seeks)
+                .await?;
+            harness.report_results(&results).await?;
+            record(results);
+        }
+
+        if should_run(BenchScenario::PresignatureStockpile) {
+            let seekers = args.participants.clamp(1, 4);
+            println!("\n>>> Running presignature stockpile seek ({} items, {seekers} signers)", args.presignature_stockpile);
+            let results = harness
+                .bench_presignature_stockpile(args.presignature_stockpile, seekers, args.presignature_seeks)
                 .await?;
             harness.report_results(&results).await?;
             record(results);

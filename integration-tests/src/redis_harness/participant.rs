@@ -527,6 +527,23 @@ impl SimulatedParticipant {
         metrics
     }
 
+    /// Measure the signing proposer's presignature peek and commit operations.
+    pub async fn seek_presignatures(self, barrier: Arc<Barrier>, count: usize) -> [MeasuredOp; 2] {
+        barrier.wait().await;
+        let mut metrics: [MeasuredOp; 2] = Default::default();
+        for _ in 0..count {
+            let start = Instant::now();
+            let reservation = self.presignatures.peek_mine(&[]).await;
+            metrics[0].record_optional(start, reservation.is_some());
+            let Some(reservation) = reservation else {
+                continue;
+            };
+            let start = Instant::now();
+            metrics[1].record_optional(start, reservation.commit().await.is_some());
+        }
+        metrics
+    }
+
     /// Concurrently simulate proposer deliberation with partial timeout / reject drops.
     pub async fn run_proposer_churn(
         self,

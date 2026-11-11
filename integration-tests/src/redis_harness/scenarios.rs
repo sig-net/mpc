@@ -1245,6 +1245,52 @@ impl RedisHarness {
         ])
     }
 
+    /// Measure signing proposer operations against a large owned presignature stockpile.
+    pub async fn bench_presignature_stockpile(
+        &self,
+        stockpile_size: usize,
+        num_seekers: usize,
+        seeks_per_worker: usize,
+    ) -> anyhow::Result<Vec<LatencySummary>> {
+        self.reset_diagnostics().await?;
+        if self.participants.is_empty()
+            || stockpile_size == 0
+            || num_seekers == 0
+            || seeks_per_worker == 0
+        {
+            return Ok(vec![
+                LatencySummary::empty("presig_stockpile_peek"),
+                LatencySummary::empty("presig_stockpile_commit"),
+            ]);
+        }
+        let base_id = next_id_block(stockpile_size as u64 + 10_000);
+        self.populate(ArtifactKind::Presignatures, 0, base_id, stockpile_size)
+            .await?;
+        let p = &self.participants[0];
+        let gate = StartingGate::new(num_seekers);
+        let tasks: Vec<_> = (0..num_seekers)
+            .map(|_| {
+                tokio::spawn(
+                    p.clone()
+                        .seek_presignatures(gate.barrier(), seeks_per_worker),
+                )
+            })
+            .collect();
+        let start = gate.start().await;
+        let mut metrics: [MeasuredOp; 2] = Default::default();
+        for task in tasks {
+            for (total, result) in metrics.iter_mut().zip(task.await?) {
+                total.merge(result);
+            }
+        }
+        let wall = start.elapsed();
+        let [peek, commit] = metrics;
+        Ok(vec![
+            summarize("presig_stockpile_peek", peek, wall),
+            summarize("presig_stockpile_commit", commit, wall),
+        ])
+    }
+
     /// SCENARIO 11: Proposer Churn & Aborted Reservation Storm.
     /// Simulates deliberation timeouts and reject reorgs seen in production logs:
     /// proposers peek presignatures, hold them for simulated deliberation, and a portion

@@ -64,6 +64,11 @@ async fn mixed_pipeline_uses_independent_node_pools() -> anyhow::Result<()> {
         assert_eq!(result.indeterminate, 0, "{}", result.op_name);
     }
 
+    let results = harness.bench_presignature_stockpile(16, 2, 3).await?;
+    assert_eq!(results[0].count + results[0].indeterminate, 6);
+    assert!(results[1].count > 0);
+    assert_eq!(results[1].failures, 0);
+
     // All five items are excluded by the proposer scenario: empty peeks are
     // indeterminate, not successful latency samples or known Redis errors.
     let results = harness.bench_proposer_race(0, 5, 1, 3).await?;
