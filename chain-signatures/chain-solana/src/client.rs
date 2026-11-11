@@ -969,6 +969,7 @@ mod tests {
         let sig_a = Signature::new_unique().to_string();
         let sig_b = Signature::new_unique().to_string();
         let sig_c = Signature::new_unique().to_string();
+        let program_id = Pubkey::new_unique();
 
         // Page 1: slots 200, 150 — both in range [100, 200]
         let page1 =
@@ -987,6 +988,15 @@ mod tests {
 
         let _mock2 = server
             .mock("POST", "/")
+            // page 2 carries page 1's last signature as the cursor — the
+            // Some arm of the config conversion
+            .match_body(mockito::Matcher::Json(json!({
+                "jsonrpc": "2.0", "id": 0, "method": "getSignaturesForAddress",
+                "params": [program_id.to_string(), {
+                    "before": sig_b, "until": null, "limit": CATCHUP_PAGE_SIZE,
+                    "commitment": "finalized", "minContextSlot": null
+                }]
+            })))
             .with_status(200)
             .with_header("content-type", "application/json")
             .with_body(page2)
@@ -994,7 +1004,13 @@ mod tests {
             .create_async()
             .await;
 
-        let client = test_client(&server.url());
+        let client = SolanaClient::for_indexer(
+            server.url().parse().unwrap(),
+            program_id,
+            Arc::new(NoopPublisherTelemetry),
+            SharedBackoff::new(),
+        )
+        .with_fast_retry();
         let sigs = client.fetch_signatures(100, 200).await.unwrap();
 
         assert_eq!(sigs.len(), 2);
