@@ -130,27 +130,6 @@ struct Args {
     large_batch_size: Option<usize>,
 }
 
-#[cfg(test)]
-mod tests {
-    use super::Args;
-    use clap::Parser;
-
-    #[test]
-    fn external_redis_requires_explicit_opt_in() {
-        assert!(
-            Args::try_parse_from(["redis-bench", "--redis-url", "redis://127.0.0.1/"]).is_err()
-        );
-        assert!(Args::try_parse_from([
-            "redis-bench",
-            "--redis-url",
-            "redis://127.0.0.1/",
-            "--allow-external-redis",
-        ])
-        .is_ok());
-        assert!(Args::try_parse_from(["redis-bench"]).is_ok());
-    }
-}
-
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     integration_tests::utils::init_tracing_log();
@@ -528,4 +507,25 @@ async fn main() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Args;
+    use clap::Parser;
+
+    #[test]
+    fn external_redis_requires_explicit_opt_in() {
+        assert!(
+            Args::try_parse_from(["redis-bench", "--redis-url", "redis://127.0.0.1/"]).is_err()
+        );
+        assert!(Args::try_parse_from([
+            "redis-bench",
+            "--redis-url",
+            "redis://127.0.0.1/",
+            "--allow-external-redis",
+        ])
+        .is_ok());
+        assert!(Args::try_parse_from(["redis-bench"]).is_ok());
+    }
 }

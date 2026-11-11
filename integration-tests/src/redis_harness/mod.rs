@@ -34,23 +34,6 @@ pub struct RedisHarness {
     pub config: RedisHarnessConfig,
 }
 
-#[cfg(test)]
-mod tests {
-    use super::{RedisHarness, RedisHarnessConfig};
-
-    #[tokio::test]
-    async fn external_redis_is_rejected_before_connecting_without_opt_in() {
-        let config = RedisHarnessConfig::default().with_redis_url("not a valid Redis URL");
-        let error = match RedisHarness::new(config).await {
-            Ok(_) => panic!("external Redis should require explicit opt-in"),
-            Err(error) => error,
-        };
-        assert!(error
-            .to_string()
-            .contains("external Redis requires explicit opt-in"));
-    }
-}
-
 impl RedisHarness {
     /// Initialize the Redis benchmark harness from a `RedisHarnessConfig`.
     ///
@@ -234,5 +217,22 @@ impl RedisHarness {
             .collect();
 
         BackgroundPollerGuard { stop_flag, handles }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{RedisHarness, RedisHarnessConfig};
+
+    #[tokio::test]
+    async fn external_redis_is_rejected_before_connecting_without_opt_in() {
+        let config = RedisHarnessConfig::default().with_redis_url("not a valid Redis URL");
+        let error = match RedisHarness::new(config).await {
+            Ok(_) => panic!("external Redis should require explicit opt-in"),
+            Err(error) => error,
+        };
+        assert!(error
+            .to_string()
+            .contains("external Redis requires explicit opt-in"));
     }
 }

@@ -32,22 +32,6 @@ fn overlaps(
     start < other_end && end > other_start
 }
 
-#[cfg(test)]
-mod tests {
-    use super::overlaps;
-    use std::time::{Duration, Instant};
-
-    #[test]
-    fn spike_overlaps_even_when_it_ends_after_the_workload() {
-        let start = Instant::now();
-        let at = |ms| start + Duration::from_millis(ms);
-        assert!(overlaps((at(5), at(30)), (at(10), at(20))));
-        assert!(overlaps((at(15), at(30)), (at(10), at(20))));
-        assert!(!overlaps((at(20), at(30)), (at(10), at(20))));
-        assert!(!overlaps((at(0), at(10)), (at(10), at(20))));
-    }
-}
-
 async fn collect_task_results(
     tasks: impl IntoIterator<Item = tokio::task::JoinHandle<(Vec<Duration>, usize)>>,
 ) -> anyhow::Result<(Vec<Duration>, usize)> {
@@ -1668,5 +1652,21 @@ impl RedisHarness {
         );
 
         Ok(vec![s1, s2, s3])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::overlaps;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn spike_overlaps_even_when_it_ends_after_the_workload() {
+        let start = Instant::now();
+        let at = |ms| start + Duration::from_millis(ms);
+        assert!(overlaps((at(5), at(30)), (at(10), at(20))));
+        assert!(overlaps((at(15), at(30)), (at(10), at(20))));
+        assert!(!overlaps((at(20), at(30)), (at(10), at(20))));
+        assert!(!overlaps((at(0), at(10)), (at(10), at(20))));
     }
 }
