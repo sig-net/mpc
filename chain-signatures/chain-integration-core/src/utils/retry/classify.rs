@@ -32,8 +32,10 @@ pub fn http_status_read_retryable(status: StatusCode) -> bool {
 }
 
 /// Typed RPC failure chain for classifying errors in the retry logic.
-// TODO: once every chain client attaches typed failures, the string-matching
-// fallbacks in `is_retryable`/`is_provider_throttled` get deleted.
+// TODO: two-step transition — the string fallbacks in `is_retryable`/
+// `is_provider_throttled` go once every chain attaches typed failures; the
+// carrier and chain-side classify helpers go once retry/publish boundaries
+// return typed verdict enums (variant matching, not chain walks).
 #[derive(Debug, Clone, thiserror::Error)]
 #[error("{message}")]
 pub struct RpcFailure {
@@ -41,24 +43,36 @@ pub struct RpcFailure {
     message: String,
     /// HTTP status code associated with the failure, if any.
     status: Option<StatusCode>,
+    /// JSON-RPC error code identifying the failure, if any.
+    code: Option<i64>,
     /// Whether this failure is considered terminal.
     terminal: bool,
 }
 
 impl RpcFailure {
-    /// Constructs a new `RpcFailure` with the given HTTP status and message.
-    /// The verdict is derived from the status via [`http_status_retryable`].
-    pub fn with_status(status: StatusCode, message: String) -> Self {
+    /// Send-path verdict for a status, per [`http_status_retryable`].
+    pub fn send_status(status: StatusCode, message: String) -> Self {
         Self::with_verdict(status, !http_status_retryable(status), message)
     }
 
-    /// Constructs a new `RpcFailure` with an explicit verdict, for cases where
-    /// a chain error code overrules the status (e.g. a concurrent-submission
-    /// 409 that is worth retrying). Throttle detection still reads the status.
-    pub fn with_verdict(status: StatusCode, terminal: bool, message: String) -> Self {
+    /// Read-path verdict for a status, per [`http_status_read_retryable`].
+    pub fn read_status(status: StatusCode, message: String) -> Self {
+        Self::with_verdict(status, !http_status_read_retryable(status), message)
+    }
+
+    /// Retryable verdict that keeps the status — throttle detection still
+    /// reads it — for a chain error code overruling the envelope (a
+    /// concurrent-submission 409, a mempool rejection riding a 4xx).
+    pub fn retryable_with_status(status: StatusCode, message: String) -> Self {
+        Self::with_verdict(status, false, message)
+    }
+
+    /// Constructs an `RpcFailure` with the given status, terminal flag, and message.
+    fn with_verdict(status: StatusCode, terminal: bool, message: String) -> Self {
         Self {
             message,
             status: Some(status),
+            code: None,
             terminal,
         }
     }
@@ -68,6 +82,17 @@ impl RpcFailure {
         Self {
             message,
             status: None,
+            code: None,
+            terminal: true,
+        }
+    }
+
+    /// Terminal failure carrying its JSON-RPC error code for consumers that act on it.
+    pub fn terminal_code(code: i64, message: String) -> Self {
+        Self {
+            message,
+            status: None,
+            code: Some(code),
             terminal: true,
         }
     }
@@ -77,6 +102,7 @@ impl RpcFailure {
         Self {
             message,
             status: None,
+            code: None,
             terminal: false,
         }
     }
@@ -85,6 +111,12 @@ impl RpcFailure {
     pub fn status(&self) -> Option<StatusCode> {
         self.status
     }
+
+    /// Returns the JSON-RPC error code associated with this failure, if any.
+    pub fn code(&self) -> Option<i64> {
+        self.code
+    }
+
     /// Returns true if this failure is considered terminal.
     pub fn is_terminal(&self) -> bool {
         self.terminal
@@ -93,16 +125,19 @@ impl RpcFailure {
     /// Carrier reproducing `e`'s classification — verdict carrier or first
     /// typed status — with the full chain render as its message, so fan-out
     /// copies keep outer contexts. `None` when `e` has no typed signal.
+    /// The bare-status fallback is send-partitioned; read-side fan-outs
+    /// rebuild with `read_status`.
     pub fn from_chain(e: &anyhow::Error) -> Option<Self> {
         let (failure, status) = typed_signals(e);
         if let Some(failure) = failure {
             return Some(Self {
                 message: format!("{e:#}"),
                 status: failure.status,
+                code: failure.code,
                 terminal: failure.terminal,
             });
         }
-        status.map(|status| Self::with_status(status, format!("{e:#}")))
+        status.map(|status| Self::send_status(status, format!("{e:#}")))
     }
 }
 
@@ -129,6 +164,16 @@ fn cause_status(cause: &(dyn std::error::Error + 'static)) -> Option<StatusCode>
     if let Some(http) = cause.downcast_ref::<alloy::transports::HttpError>() {
         return StatusCode::from_u16(http.status).ok();
     }
+    // `status()` is Some only for error_for_status() products (reqwest 0.12.28
+    // error.rs:174). Only bare reqwest causes reach this: solana's
+    // `Box<ErrorKind>` nesting hides the inner error from the walk, so its
+    // publisher carries the status explicitly.
+    if let Some(status) = cause
+        .downcast_ref::<reqwest::Error>()
+        .and_then(|e| e.status())
+    {
+        return Some(status);
+    }
     let err = cause.downcast_ref::<AlloyTransportError>()?;
     let AlloyRpcError::Transport(TransportErrorKind::HttpError(http)) = err else {
         return None;
@@ -138,7 +183,7 @@ fn cause_status(cause: &(dyn std::error::Error + 'static)) -> Option<StatusCode>
 
 /// Returns true if the error looks like the provider throttling us: HTTP 429
 /// (rate limited) or 402 (payment required, e.g. exhausted credits).
-pub(super) fn is_provider_throttled(e: &anyhow::Error) -> bool {
+pub fn is_provider_throttled(e: &anyhow::Error) -> bool {
     let (failure, status) = typed_signals(e);
     // Typed status is authoritative over body text (if present).
     if let Some(status) = status {
@@ -302,9 +347,46 @@ mod tests {
     }
 
     #[test]
+    fn read_status_derives_the_verdict_from_the_read_partition() {
+        let status = |n: u16| StatusCode::from_u16(n).unwrap();
+        let throttled: anyhow::Error =
+            RpcFailure::read_status(status(429), "rate limited".into()).into();
+        assert!(is_retryable(&throttled));
+        assert!(is_provider_throttled(&throttled));
+        // 402 keeps both load-bearing: read-retryable, yet the carried
+        // status still engages the credit-refill gate
+        let payment: anyhow::Error =
+            RpcFailure::read_status(status(402), "payment required".into()).into();
+        assert!(is_retryable(&payment));
+        assert!(is_provider_throttled(&payment));
+        // 409 is send-terminal but read-retryable
+        let conflict: anyhow::Error =
+            RpcFailure::read_status(status(409), "conflict".into()).into();
+        assert!(is_retryable(&conflict));
+        assert!(!is_provider_throttled(&conflict));
+        let not_found: anyhow::Error =
+            RpcFailure::read_status(status(404), "not found".into()).into();
+        assert!(!is_retryable(&not_found));
+    }
+
+    #[test]
+    fn terminal_code_carries_the_code_through_contexts() {
+        let err = anyhow::Error::new(RpcFailure::terminal_code(-32007, "Slot was skipped".into()))
+            .context("get_block");
+        assert!(!is_retryable(&err));
+        let code = err
+            .chain()
+            .find_map(|c| c.downcast_ref::<RpcFailure>())
+            .and_then(|f| f.code());
+        assert_eq!(code, Some(-32007));
+        // from_chain rebuilds preserve the code for fan-outs
+        assert_eq!(RpcFailure::from_chain(&err).unwrap().code(), Some(-32007));
+    }
+
+    #[test]
     fn rpc_failure_verdict_is_authoritative_over_message_text() {
-        // with_status derives the verdict from the status, not the message
-        let throttled: anyhow::Error = RpcFailure::with_status(
+        // send_status derives the verdict from the status, not the message
+        let throttled: anyhow::Error = RpcFailure::send_status(
             StatusCode::TOO_MANY_REQUESTS,
             "nothing suspicious in this text".into(),
         )
@@ -313,7 +395,7 @@ mod tests {
         assert!(is_provider_throttled(&throttled));
 
         // 409 is terminal by status, even though the body text mentions 429
-        let terminal: anyhow::Error = RpcFailure::with_status(
+        let terminal: anyhow::Error = RpcFailure::send_status(
             StatusCode::CONFLICT,
             "conflict; body says 429 retry now".into(),
         )
@@ -340,7 +422,7 @@ mod tests {
     #[test]
     fn rpc_failure_under_context_still_classifies() {
         // context wrappers must not hide the typed carrier
-        let err = anyhow::Error::new(RpcFailure::with_status(
+        let err = anyhow::Error::new(RpcFailure::send_status(
             StatusCode::TOO_MANY_REQUESTS,
             "rate limited".into(),
         ))
@@ -423,5 +505,57 @@ mod tests {
         assert!(!is_retryable(&wrapped(409)));
         assert!(is_retryable(&wrapped(429)));
         assert!(is_provider_throttled(&wrapped(429)));
+    }
+
+    #[tokio::test]
+    async fn reqwest_status_errors_classify_by_status() {
+        // real transport round trip: only error_for_status() errors carry a status
+        let mut server = mockito::Server::new_async().await;
+        let client = reqwest::Client::new();
+
+        let throttled = server
+            .mock("GET", "/")
+            .with_status(429)
+            .create_async()
+            .await;
+        let err = anyhow::Error::new(
+            client
+                .get(server.url())
+                .send()
+                .await
+                .unwrap()
+                .error_for_status()
+                .unwrap_err(),
+        )
+        .context("getSlot");
+        assert!(is_retryable(&err));
+        assert!(is_provider_throttled(&err));
+        throttled.assert();
+
+        let conflict = server
+            .mock("GET", "/")
+            .with_status(409)
+            .create_async()
+            .await;
+        let err = anyhow::Error::new(
+            client
+                .get(server.url())
+                .send()
+                .await
+                .unwrap()
+                .error_for_status()
+                .unwrap_err(),
+        )
+        .context("getSlot");
+        assert!(!is_retryable(&err));
+        conflict.assert();
+
+        // no status seen (connection refused): no typed signal, no gate
+        let err = anyhow::Error::new(client.get("http://127.0.0.1:1").send().await.unwrap_err());
+        assert!(err
+            .downcast_ref::<reqwest::Error>()
+            .and_then(|e| e.status())
+            .is_none());
+        assert!(!is_provider_throttled(&err));
     }
 }

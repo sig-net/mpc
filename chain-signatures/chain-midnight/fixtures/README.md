@@ -39,10 +39,19 @@ All three events have native call index 1, fallible phase, emission index 0, and
 
 `fallible-block-432-metadata.scale` and `fallible-block-432-events.scale` are the captured node's raw `state_getMetadata` and `System.Events` storage bytes for block 432. They allow the reader tests to decode the actual `TxApplied` association at extrinsic 4. Tests that substitute `TxPartialSuccess` or change the status event's transaction hash use synthetic status records; they do not demonstrate node acceptance of those combinations.
 
-The `Noop(0)` regression test appends a no-op to the captured singleton's fallible transcript and updates the synthetic `TxApplied` hash. It verifies that execution within the original gas limit produces the same events and effects, and that the contract proof's public inputs remain unchanged.
+The `Noop(0)` regression test appends a no-op to the captured singleton's fallible transcript and updates the synthetic `TxApplied` hash. It verifies that execution produces the same events and effects, and that the contract proof's public inputs remain unchanged. It runs the VM without the declared gas bound: ledger 9.1.0.1 prices the captured writes below the transcript's declared deletions and refuses `noop 0` as not normalized, so a node no longer accepts either transcript.
 
 The checkpoint regression test inserts `Ckpt` markers before, between and after the captured event instructions, then updates the synthetic `TxApplied` hash. It verifies that the reader recovers the same event and call location. It does not assert that the modified program preserves proof inputs or satisfies the original gas limit.
 
 Both tests exercise the production reader with modified copies of the captured transaction. They do not reseal the intent, pay changed fees or establish node acceptance. The checked-in capture files remain unchanged.
 
 To recapture, run the real vault integration suite, record the node block hash, block body, metadata and `System.Events` at the selected hash, decode `Midnight.send_mn_transaction` using that metadata, and save the argument bytes without reserialization. Confirm the node event status, ledger transaction hash, singleton address, native call ordinal, physical segment and payload against the same capture. These files contain neither GRANDPA finality proofs nor storage read proofs.
+
+## Publisher fixtures
+
+`initial-responder-state.mn` is the responder's synthesized initial state, never a chain capture: the empty ledger plus the two verifier keys of the `@sig-net/midnight-responder` package `midnight-devtools` installs, written by its `npm run gen:initial-state`. The native publisher's build tests read it as the deployed contract.
+
+`dust-events-undeployed.json` is every `dustLedgerEvents` item (`id`, `maxId`, `raw`) a local `undeployed` stack served at finalized block `0x03684af0efbb73e8cd0f6f108f037165cacb380c2022d862cf798581d1ea488e`, on `midnightntwrk/midnight-node:2.0.0-rc.4` and `midnightntwrk/indexer-standalone:4.4.0-pre-alpha.16-l91r3-n2r3-bridge-and-events-epics-contract-zswap-16c656df`. The stack's genesis wallet funded and registered the wallet of seed `04` × 32, which then paid three respond fees. The funding wallet's tests replay it.
+
+`dust-events-preview-ledger-8.json` is the first two `dustLedgerEvents` items (`id`, `maxId`, `raw`) the Midnight Preview indexer serves, ids 1 and 30. Ledger 8, which Preview ran before ledger 9, wrote them, with the header `midnight:event[v9]:` at protocol version 1000000; Preview's first ledger-9 event, `midnight:event[v14]:` at protocol version 2001100, has id 2876. The funding wallet's tests use them as events its replay passes over.
+

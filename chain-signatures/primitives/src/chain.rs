@@ -12,13 +12,16 @@ pub enum SerDeserFormat {
 /// these are operational knobs of this node implementation, not part of the
 /// public interface.
 pub trait ChainConfig {
+    /// Blocks between checkpoints, or `None` for chains without one. Every
+    /// node of a network must use the same value: nodes vote on the digest at
+    /// each boundary, and a node on its own cadence would vote at boundaries
+    /// nobody else has.
     fn checkpoint_interval(&self) -> Option<u64>;
-    fn checkpoint_env_vars() -> Vec<(&'static str, &'static str)>;
     /// `ChainEvent::Block` silence budget before the supervisor restarts
-    /// the indexer. Env-overridable for indexed chains.
+    /// the indexer.
     fn stall_timeout_secs(&self) -> u64;
     /// Budget for the chain-local feed detector (Canton: WS silence;
-    /// Solana: frozen anchor). Env-overridable
+    /// Solana: frozen anchor).
     fn feed_stall_timeout_secs(&self) -> u64;
     fn expected_finality_time_secs(&self) -> u64;
     /// From publishing a response until it is final on chain.
@@ -27,34 +30,21 @@ pub trait ChainConfig {
     fn respond_serialization_format(&self) -> SerDeserFormat;
     /// Whether bidirectional requests can target this chain.
     fn supports_bidirectional_signing(&self) -> bool;
+    /// Whether this source's respond encoding can carry `Unviable`
+    /// attestations; the rest refund via `Failed`.
+    fn encodes_unviable(&self) -> bool;
 }
 
 impl ChainConfig for Chain {
     fn checkpoint_interval(&self) -> Option<u64> {
-        let (key, default) = match self {
-            Chain::NEAR | Chain::Bitcoin | Chain::Tron => return None,
-            Chain::Ethereum => ("CHECKPOINT_INTERVAL_ETHEREUM", 20),
-            Chain::Solana => ("CHECKPOINT_INTERVAL_SOLANA", 1200),
-            Chain::Hydration => ("CHECKPOINT_INTERVAL_HYDRATION", 240),
-            Chain::Canton => ("CHECKPOINT_INTERVAL_CANTON", 50),
-            Chain::Midnight => ("CHECKPOINT_INTERVAL_MIDNIGHT", 120),
-        };
-
-        let interval = std::env::var(key)
-            .map(|param| param.parse::<u64>().unwrap_or(default))
-            .unwrap_or(default);
-
-        Some(interval)
-    }
-
-    fn checkpoint_env_vars() -> Vec<(&'static str, &'static str)> {
-        vec![
-            ("CHECKPOINT_INTERVAL_ETHEREUM", "2"),
-            ("CHECKPOINT_INTERVAL_SOLANA", "5"),
-            ("CHECKPOINT_INTERVAL_HYDRATION", "5"),
-            ("CHECKPOINT_INTERVAL_CANTON", "5"),
-            ("CHECKPOINT_INTERVAL_MIDNIGHT", "5"),
-        ]
+        match self {
+            Chain::NEAR | Chain::Bitcoin | Chain::Tron => None,
+            Chain::Ethereum => Some(20),
+            Chain::Solana => Some(1200),
+            Chain::Hydration => Some(240),
+            Chain::Canton => Some(50),
+            Chain::Midnight => Some(120),
+        }
     }
 
     fn stall_timeout_secs(&self) -> u64 {
@@ -67,34 +57,18 @@ impl ChainConfig for Chain {
             .expected_finality_time_secs()
             .saturating_add(BUFFER_SECS)
             .max(FLOOR_SECS);
-        let (key, default) = match self {
+        match self {
             // ~20 missed blocks at ~6s cadence; headroom for slow catchup
             // blocks (large contract-state reads).
-            Chain::Midnight => ("STALL_TIMEOUT_MIDNIGHT", 120),
+            Chain::Midnight => 120,
             // ~10x the 12s finality cadence.
-            Chain::Hydration => ("STALL_TIMEOUT_HYDRATION", 120),
-            Chain::Canton => ("STALL_TIMEOUT_CANTON", derived),
-            Chain::Ethereum => ("STALL_TIMEOUT_ETHEREUM", derived),
-            Chain::Solana => ("STALL_TIMEOUT_SOLANA", derived),
-            Chain::NEAR | Chain::Bitcoin | Chain::Tron => return derived,
-        };
-
-        std::env::var(key)
-            .map(|param| param.parse::<u64>().unwrap_or(default))
-            .unwrap_or(default)
+            Chain::Hydration => 120,
+            _ => derived,
+        }
     }
 
     fn feed_stall_timeout_secs(&self) -> u64 {
-        const DEFAULT_SECS: u64 = 60;
-        let (key, default) = match self {
-            Chain::Canton => ("FEED_STALL_TIMEOUT_CANTON", DEFAULT_SECS),
-            Chain::Solana => ("FEED_STALL_TIMEOUT_SOLANA", DEFAULT_SECS),
-            _ => return DEFAULT_SECS,
-        };
-
-        std::env::var(key)
-            .map(|param| param.parse::<u64>().unwrap_or(default))
-            .unwrap_or(default)
+        60
     }
 
     fn expected_finality_time_secs(&self) -> u64 {
@@ -141,6 +115,21 @@ impl ChainConfig for Chain {
     fn supports_bidirectional_signing(&self) -> bool {
         matches!(self, Chain::Ethereum | Chain::Tron)
     }
+
+    /// Whether this source's respond encoding can carry `Unviable`
+    /// attestations; the rest refund via `Failed`.
+    fn encodes_unviable(&self) -> bool {
+        match self {
+            Chain::Midnight => true,
+            Chain::NEAR
+            | Chain::Ethereum
+            | Chain::Solana
+            | Chain::Bitcoin
+            | Chain::Hydration
+            | Chain::Canton
+            | Chain::Tron => false,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -164,5 +153,18 @@ mod tests {
     fn feed_stall_timeouts_pin_the_fast_signal_budgets() {
         assert_eq!(Chain::Canton.feed_stall_timeout_secs(), 60);
         assert_eq!(Chain::Solana.feed_stall_timeout_secs(), 60);
+    }
+
+    /// Pins the production cadence: every node of a network votes on it.
+    #[test]
+    fn checkpoint_intervals_pin_the_production_cadence() {
+        assert_eq!(Chain::Ethereum.checkpoint_interval(), Some(20));
+        assert_eq!(Chain::Solana.checkpoint_interval(), Some(1200));
+        assert_eq!(Chain::Hydration.checkpoint_interval(), Some(240));
+        assert_eq!(Chain::Canton.checkpoint_interval(), Some(50));
+        assert_eq!(Chain::Midnight.checkpoint_interval(), Some(120));
+        assert_eq!(Chain::NEAR.checkpoint_interval(), None);
+        assert_eq!(Chain::Bitcoin.checkpoint_interval(), None);
+        assert_eq!(Chain::Tron.checkpoint_interval(), None);
     }
 }

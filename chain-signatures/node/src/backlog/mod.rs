@@ -17,8 +17,7 @@ pub use checkpoints::{Checkpoint, CheckpointError, Checkpoints};
 use enum_map::EnumMap;
 use mpc_chain_integration_core::StateManager;
 use mpc_primitives::{
-    BidirectionalTx, BidirectionalTxId, Chain, ChainConfig as _, IndexedSignRequest, SignId,
-    SignKind,
+    BidirectionalTx, BidirectionalTxId, Chain, IndexedSignRequest, SignId, SignKind,
 };
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -94,6 +93,18 @@ impl PendingRequests {
             .collect()
     }
 
+    fn executing_targeting(&self, target: Chain) -> Vec<(SignId, Arc<BidirectionalTx>)> {
+        self.requests
+            .values()
+            .filter_map(|entry| {
+                entry
+                    .execution_tx()
+                    .filter(|tx| tx.target_chain == target)
+                    .map(|tx| (entry.sign_id(), Arc::clone(tx)))
+            })
+            .collect()
+    }
+
     /// Get the processed block height for this chain
     fn processed_block_height(&self) -> Option<u64> {
         self.processed_block_height
@@ -123,12 +134,27 @@ struct ExecutionWatchers {
 }
 
 impl ExecutionWatchers {
+    // TODO(non-lossy watch map): store a Vec<ExecutionWatch> per flat
+    // id instead of one, so duplicate ids keep their own watches. This
+    // removes the workarounds: the tron scan's flat-id grouping and
+    // inclusion veto, the identity check in `remove_owned`, and
+    // displaced entries losing their wait measurement.
     fn insert(&mut self, watch: ExecutionWatch) -> Option<ExecutionWatch> {
         self.watchers.insert(watch.tx.id, watch)
     }
 
-    fn remove(&mut self, tx_id: &BidirectionalTxId) -> Option<ExecutionWatch> {
-        self.watchers.remove(tx_id)
+    /// Removes the watch only if it belongs to `(source_chain, sign_id)`;
+    /// a foreign watch under the same flat id survives.
+    fn remove_owned(
+        &mut self,
+        tx_id: &BidirectionalTxId,
+        source_chain: Chain,
+        sign_id: &SignId,
+    ) -> Option<ExecutionWatch> {
+        let own = self.watchers.get(tx_id).is_some_and(|watch| {
+            watch.tx.source_chain == source_chain && watch.tx.sign_id() == *sign_id
+        });
+        own.then(|| self.watchers.remove(tx_id)).flatten()
     }
 
     fn all(&self) -> HashMap<BidirectionalTxId, (SignId, Arc<BidirectionalTx>)> {
@@ -158,6 +184,26 @@ pub struct Backlog {
 impl Default for Backlog {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Blocks between checkpoints: the chain's production cadence, or in test
+/// builds the mock one so checkpoint tests finish in seconds.
+pub fn checkpoint_interval(chain: Chain) -> Option<u64> {
+    #[cfg(feature = "test-feature")]
+    return mock_checkpoint_interval(chain);
+    #[cfg(not(feature = "test-feature"))]
+    mpc_primitives::ChainConfig::checkpoint_interval(&chain)
+}
+
+/// Short cadence for test networks. Mirrors `ChainConfig::checkpoint_interval`
+/// in which chains have one.
+#[cfg(any(test, feature = "test-feature"))]
+fn mock_checkpoint_interval(chain: Chain) -> Option<u64> {
+    match chain {
+        Chain::NEAR | Chain::Bitcoin | Chain::Tron => None,
+        Chain::Ethereum => Some(2),
+        Chain::Solana | Chain::Hydration | Chain::Canton | Chain::Midnight => Some(5),
     }
 }
 
@@ -337,13 +383,26 @@ impl Backlog {
         publishable
     }
 
-    /// Returns all backlog entries currently in destination-chain execution for a specific chain.
+    /// Entries in destination-chain execution on `chain`, the chain that
+    /// owns them.
     pub async fn pending_executions(
         &self,
         chain: Chain,
     ) -> Vec<SignEntry<Bidirectional<Executing>>> {
         let pending = self.pending(&chain).read().await;
         pending.pending_executions(chain, self)
+    }
+
+    /// `Executing` entries targeting `target`, from every owning chain.
+    async fn pending_executions_targeting(
+        &self,
+        target: Chain,
+    ) -> Vec<(SignId, Arc<BidirectionalTx>)> {
+        let mut targeting = Vec::new();
+        for pending in self.requests.values() {
+            targeting.extend(pending.read().await.executing_targeting(target));
+        }
+        targeting
     }
 
     /// Returns the number of pending requests for a specific chain
@@ -360,16 +419,19 @@ impl Backlog {
         watchers.insert(entry.execution_watch());
     }
 
-    /// Stop watching for execution of a bidirectional transaction on the destination chain
-    /// and retrieve the executing backlog entry from its source chain.
+    /// Stop watching an execution and retrieve its backlog entry, by
+    /// flat id and the entry's own source and sign id; a foreign watch
+    /// under the same flat id stays for its own confirmation.
     pub async fn unwatch_execution(
         &self,
         chain: Chain,
         tx_id: &BidirectionalTxId,
+        source_chain: Chain,
+        sign_id: &SignId,
     ) -> Option<SignEntry<Bidirectional<Executing>>> {
         let watch = {
             let mut watchers = self.watchers(&chain).write().await;
-            watchers.remove(tx_id)?
+            watchers.remove_owned(tx_id, source_chain, sign_id)?
         };
 
         // Restore the observation time absent from backlog status.
@@ -378,10 +440,29 @@ impl Backlog {
             .map(|entry| entry.with_respond_observed_at(watch.respond_observed_at))
     }
 
+    /// The executing entry a confirmation attests: by the entry's own
+    /// watch, or by source and sign id from the backlog.
+    pub async fn executing_entry_for(
+        &self,
+        target_chain: Chain,
+        tx_id: &BidirectionalTxId,
+        source_chain: Chain,
+        sign_id: &SignId,
+    ) -> Option<SignEntry<Bidirectional<Executing>>> {
+        if let Some(entry) = self
+            .unwatch_execution(target_chain, tx_id, source_chain, sign_id)
+            .await
+        {
+            return Some(entry);
+        }
+        self.get_by::<Bidirectional<Executing>>(source_chain, sign_id)
+            .await
+    }
+
     /// Set the processed block height for a specific chain.
     /// Returns Some(Checkpoint) if a checkpoint should be created and submitted at this block height.
     pub async fn set_processed_block(&self, chain: Chain, height: u64) -> Option<Checkpoint> {
-        let interval = chain.checkpoint_interval()?;
+        let interval = checkpoint_interval(chain)?;
         self.set_processed_block_interval(chain, height, interval)
             .await
     }
@@ -577,6 +658,19 @@ impl StateManager for Backlog {
         chain: Chain,
     ) -> HashMap<BidirectionalTxId, (SignId, Arc<BidirectionalTx>)> {
         self.watchers(&chain).read().await.all()
+    }
+
+    async fn get_pending_executions(&self, chain: Chain) -> Vec<(SignId, Arc<BidirectionalTx>)> {
+        self.pending_executions_targeting(chain).await
+    }
+
+    async fn watch_execution(&self, chain: Chain, tx: Arc<BidirectionalTx>) {
+        let mut watchers = self.watchers(&chain).write().await;
+        let observed = watchers
+            .watchers
+            .get(&tx.id)
+            .and_then(|watch| watch.respond_observed_at);
+        watchers.insert(ExecutionWatch::new(tx, observed));
     }
 }
 

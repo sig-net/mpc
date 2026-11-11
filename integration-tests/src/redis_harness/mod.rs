@@ -19,7 +19,7 @@ use diagnostics::print_summary_header;
 pub use config::RedisHarnessConfig;
 pub use diagnostics::{LatencySummary, MemorySnapshot, RedisDiagnosticsClient, SlowlogRecord};
 pub use gate::StartingGate;
-pub use participant::{BackgroundPollerGuard, SimulatedParticipant, ArtifactKind};
+pub use participant::{ArtifactKind, BackgroundPollerGuard, SimulatedParticipant};
 
 /// Standalone Redis benchmark harness.
 ///
@@ -73,7 +73,7 @@ impl RedisHarness {
                 .await
                 .context("failed to init docker network")?;
             let container = crate::containers::Redis::run_for_benchmark(&spawner).await;
-            let url = container.internal_address.clone();
+            let url = container.internal_address.to_string();
             (Some(container), url)
         };
 
@@ -95,11 +95,7 @@ impl RedisHarness {
                 config.max_pool_size,
                 config.pool_timeout,
             )?;
-            participants.push(SimulatedParticipant::new(
-                &pool,
-                &account_id,
-                participant,
-            ));
+            participants.push(SimulatedParticipant::new(&pool, &account_id, participant));
         }
 
         Ok(Self {
@@ -209,7 +205,8 @@ impl RedisHarness {
         base_id: u64,
         count: usize,
     ) -> anyhow::Result<Vec<Vec<u64>>> {
-        self.populate_all(ArtifactKind::Triples, base_id, count).await
+        self.populate_all(ArtifactKind::Triples, base_id, count)
+            .await
     }
 
     /// Convenience alias to populate presignatures on all participants concurrently.
@@ -218,7 +215,8 @@ impl RedisHarness {
         base_id: u64,
         count: usize,
     ) -> anyhow::Result<Vec<Vec<u64>>> {
-        self.populate_all(ArtifactKind::Presignatures, base_id, count).await
+        self.populate_all(ArtifactKind::Presignatures, base_id, count)
+            .await
     }
 
     /// Spawn one-second background stockpile polling loops across all participants.

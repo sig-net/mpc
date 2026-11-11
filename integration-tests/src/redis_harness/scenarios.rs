@@ -10,7 +10,9 @@ use mpc_primitives::{Chain, SignId};
 
 use super::diagnostics::LatencySummary;
 use super::gate::StartingGate;
-use super::participant::{next_id_block, ArtifactKind, ChurnState, MeasuredOp};
+use super::participant::{
+    next_id_block, ArtifactKind, ChurnState, MeasuredOp, SimulatedParticipant,
+};
 use super::RedisHarness;
 
 fn summarize(name: &str, mut metric: MeasuredOp, wall: Duration) -> LatencySummary {
@@ -673,10 +675,7 @@ impl RedisHarness {
             let (
                 (round_triple_lats, round_triple_fails, round_triple_wall),
                 (round_presig_lats, round_presig_fails, round_presig_wall),
-            ) = tokio::try_join!(
-                collect_clear(triple_tasks),
-                collect_clear(presig_tasks),
-            )?;
+            ) = tokio::try_join!(collect_clear(triple_tasks), collect_clear(presig_tasks),)?;
 
             all_triple_latencies.extend(round_triple_lats);
             all_presig_latencies.extend(round_presig_lats);
@@ -1082,7 +1081,9 @@ impl RedisHarness {
         );
 
         // 1. Killer task that severs all client connections using client helper
-        let killer_task = self.client.spawn_client_killer(gate.barrier(), kill_delay_ms);
+        let killer_task = self
+            .client
+            .spawn_client_killer(gate.barrier(), kill_delay_ms);
 
         // 2. Active participant tasks (Phase A: mid-insert CLIENT KILL)
         let worker_tasks: Vec<_> = self
@@ -1126,7 +1127,9 @@ impl RedisHarness {
         // 3. Phase B: Mid-take CLIENT KILL shock (killing connections mid-take)
         let num_take_workers = all_success_ids.len();
         let take_gate = StartingGate::new(num_take_workers + 1);
-        let take_killer_task = self.client.spawn_client_killer(take_gate.barrier(), kill_delay_ms);
+        let take_killer_task = self
+            .client
+            .spawn_client_killer(take_gate.barrier(), kill_delay_ms);
 
         let mut kill_take_tasks = Vec::with_capacity(num_take_workers);
         let mut post_take_batches = Vec::with_capacity(num_take_workers);
@@ -1135,10 +1138,10 @@ impl RedisHarness {
             let p = self.participants[node_idx].clone();
             let mid = ids.len() / 2;
             let (first_half, second_half) = ids.split_at(mid);
-            kill_take_tasks.push(tokio::spawn(p.clone().take_triples(
-                first_half.to_vec(),
-                take_gate.optional_barrier(),
-            )));
+            kill_take_tasks.push(tokio::spawn(
+                p.clone()
+                    .take_triples(first_half.to_vec(), take_gate.optional_barrier()),
+            ));
             post_take_batches.push((p, second_half.to_vec()));
         }
 
@@ -1400,9 +1403,8 @@ impl RedisHarness {
             .map(|contender_idx| {
                 // Independent handles intentionally force a synthetic same-key take race.
                 let contender = Participant::from(contender_idx as u32);
-                let mut p_contender = owner.clone_isolated(&owner.pool);
-                p_contender.participant = contender;
-                p_contender.triples.set_me(contender);
+                let p_contender =
+                    SimulatedParticipant::new(&owner.pool, &owner.account_id, contender);
                 let ids = target_ids.clone();
                 tokio::spawn(p_contender.race_take_conflicted(
                     gate.barrier(),
@@ -1477,10 +1479,7 @@ impl RedisHarness {
 
                 // Phase 1: Large ARGV sync (passing all >4,096 IDs in ARGV; 0 outdated)
                 let t_argv_start = Instant::now();
-                let argv_res = p
-                    .triples
-                    .remove_outdated(p.participant, &all_ids)
-                    .await;
+                let argv_res = p.triples.remove_outdated(p.participant, &all_ids).await;
                 let argv_lat = t_argv_start.elapsed();
                 total_argv_wall += argv_lat;
 
@@ -1671,4 +1670,3 @@ impl RedisHarness {
         Ok(vec![s1, s2, s3])
     }
 }
-

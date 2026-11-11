@@ -1,5 +1,7 @@
 # Bidirectional calls: entities, API, properties
 
+*Status: partly implemented (Section 8).*
+
 ## TL;DR
 
 A contract on the source chain asks for a transaction to be signed and
@@ -7,7 +9,8 @@ executed on a target chain, and is told the outcome at most once. The
 response is final when it comes: the transaction executed, it reverted, or
 it can never execute. Until then nothing arrives. A transaction that never
 executes is answered only when another request's transaction takes its
-place; otherwise it is never answered. The rest of the document is what the
+place or its validity window closes; otherwise it is never answered. The
+rest of the document is what the
 MPC, the signet contract and the library have to do for that to hold.
 
 Organization:
@@ -19,6 +22,7 @@ Organization:
 * Section 5 argues that Section 4 delivers Section 3.
 * Section 6 collects notes: limits of the design and what is still open.
 * Section 7 gives the canonical structures on the wire.
+* Section 8 says which of it is implemented.
 
 ## 1. Entities and happy path
 
@@ -116,8 +120,8 @@ Happy path:
   chain's own numbering (a slot on Solana),
   of the final block that holds the transaction the outcome describes:
   req.tx for Executed and Failed, the transaction that used up its replay
-  protection for Unviable, or for an expired req.tx the first final block
-  past its expiry.
+  protection for Unviable, or for an expired req.tx the first final
+  block at or past the expiry.
 * *Response*: an attestation delivered to the contract that made rid's
   request.
 
@@ -218,7 +222,8 @@ G1 to G3 are safety, G4 and G5 are liveness. G2 and G4 together give
   replay protection as req.tx on the same target chain, the same account
   and nonce on EVM for instance, is included after req was made, and that
   request is answered Executed or Failed; or (b) req.tx has an expiry, no
-  block up to the first final target block past it includes req.tx, and
+  block up to the first final target block at or past it includes
+  req.tx, and
   that block became final after req was made. Then a response to req
   saying Unviable is eventually accepted, unless the response handler
   fails.
@@ -252,7 +257,8 @@ before the contract upgraded to this library.
   never execute. So the same bytes, however often they are signed, execute
   at most once, and a different transaction using the same nonce blocks
   ours for good. A Solana transaction with a recent blockhash has no such
-  protection; see Section 6. Tron rejects a transaction whose ID is already
+  protection; see Section 6. Solana is not a target today, it appears as a
+  design case in this doc. Tron rejects a transaction whose ID is already
   on chain, and accepts one only while its `expiration` is ahead of the head
   block and its reference block is on the chain. UTXO target chains are out
   of scope: their replay protection is a set of outputs, and M4 would need
@@ -368,6 +374,9 @@ call. It emits three events:
   directly, which is how a response is delivered where the signet contract
   cannot call it, and again after a failed handler.
 
+On Midnight, a second contract, the signet responder, emits `Signature` and
+`Response`; see [midnight-publisher.md](midnight-publisher.md).
+
 ### 4.3 MPC network
 
 Written as if the network were one process; the real one is a threshold
@@ -420,6 +429,11 @@ processable(req): bool
       time and at most target's cap past it (Tron: `expiration`, 24 h)
     req.schema is well formed: it is empty, or it parses and names only
       types the MPC can decode from target and encode for the source chain
+    on Midnight, the caller contract's state at the request's block, which
+      holds the request, is at most `MAX_CALLER_STATE_BYTES` once
+      hex-decoded, and so is its state at the parent block when the
+      notification comes from a partially successful transaction
+      (Section 6)
 
 on Signature { rid, signature } finalised on the source chain:
     e = backlog[rid] if rid in backlog
@@ -444,9 +458,9 @@ on target chain block at height h finalised on chain target:
             else:
                 local[rid].outcome = Parked, log why        // M3
         else if txid ignores the signature on target
-          and block h is past e.req.tx's expiry:            // M6
-            h_exp = lowest final height past e.req.tx's expiry
-            attest(rid, (h_exp, Unviable, empty))
+          and h is the first block at or past e.req.tx's expiry
+          and no block up to h includes e.req.tx:   // M6
+            attest(rid, (h, Unviable, empty))
 
 attest(rid, att):
     e = backlog[rid]
@@ -535,7 +549,8 @@ Properties:
   in the hash, and describes only target chain state final at that height.
 * M6 The MPC attests Unviable for an expired request only where the
   transaction ID does not depend on the signature, and only if no block
-  up to the first final block past the expiry includes req.tx. It
+  up to the first final block at or past the expiry includes req.tx.
+  It
   attests at that block's height.
 
 ## 5. Why the guarantees hold (sketch)
@@ -545,17 +560,17 @@ properties of the network make that legitimate. None is specific to this
 design. The network is n nodes, at most f < n/3 of them faulty, the rest
 correct, with a signing threshold t, f+1 <= t <= n - f.
 
-* Threshold (Section 2 of protocol-properties.md). Fewer than t nodes cannot
+* Threshold (system-model.md). Fewer than t nodes cannot
   produce a signature or an attestation, correct nodes alone can, and
   correct nodes eventually produce and publish what a request in their
   backlog needs.
 * Agreement. Correct nodes hold the same backlog at a source height, so
   they admit the same requests and hold the same published signatures for
   them, and they compute the same attestation for a rid, as a function of
-  final target chain state and the request's schema only. This needs a
-  node to start processing a source chain at or before the oldest
-  outstanding request, or from a backlog the correct nodes agreed on at
-  its start height; otherwise it never admits the older requests.
+  final target chain state and the request's schema only.
+  This needs a node to start processing a source chain at or before the
+  oldest outstanding request, or from a backlog the correct nodes agreed
+  on at its start height; otherwise it never admits the older requests.
 * Distinct keys (account-derivation.md). The derivation path contains the
   source chain's id and the requesting contract, so different (source
   chain, contract, key parameters) derive different keys, where the key
@@ -659,14 +674,26 @@ a path from B48 through A15; the first at A12 has none.
   the response (C3).
 
   G5 (b): every correct node sees, without a signature (M6), that no
-  block up to the first one past the expiry includes req.tx, and attests
-  Unviable at that block's height, so they agree. That block became
-  final after req was made, so the library accepts the response (C3).
+  block up to the first one at or past the expiry includes req.tx,
+  and
+  attests Unviable at that block's height — the same one on every
+  node, so they sign the same message. The height is at or past the
+  expiry,
+  a block final after req was made, so the library accepts the
+  response (C3).
   The premise needs the chains' clocks roughly in step: admission only
   places the expiry after the source block's time.
 
 ## 6. Notes
 
+* The Midnight caller state limit. A node reads the caller state, the
+  requesting contract's ledger state, to find the request. `processable`
+  bounds its decoded size by `MAX_CALLER_STATE_BYTES`, so admission does
+  not follow each node's RPC response cap. A read the RPC node refuses for
+  size is a drop only if the refusing cap fits every state within the
+  limit; a smaller cap is that node's misconfiguration and holds the block.
+  The limit binds admission only; the publisher's read of the signet
+  responder is exempt.
 * Solana with a recent blockhash has no replay protection in the sense of
   Section 3.3. It can be made to work if the MPC remembers completed rids
   for as long as a differently signed copy could still execute, about a
@@ -1081,3 +1108,24 @@ Whichever route supplies the bytes, they remain untrusted until the
 application contract's library recomputes the attestation digest and
 verifies the signature against the attestation key (Section 4.1). Incorrect
 or forged bytes fail verification.
+
+## 8. Implementation status
+
+Target chains are Ethereum and Tron (`Chain::supports_bidirectional_signing`).
+Source chains are Midnight, Solana, Hydration and Canton.
+
+Checked against `develop` at `1d823c4e`. Still to change:
+
+* Unviable from another request's response.
+* Finding nonce siblings, and executions under every published signature.
+* Refusing non-canonical request fields, and the reserved paths on every
+  source.
+* One key per key version, before a second version.
+* Catch-up for Hydration.
+* Hydration and Canton: source block time, so §4.3's expiry bound
+  anchors for them too.
+* Tron: Unviable at expiry for packable spans past the 24 h walk cap
+  (the admission bound anchors at the source block, which sits after
+  the TaPoS reference — such windows are admitted but never verdicted);
+  output schemas.
+* Solana, Hydration and Canton: structures of Section 7, and Unviable.

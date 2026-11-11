@@ -231,13 +231,12 @@ async fn main() -> anyhow::Result<()> {
 
     for iteration in 1..=args.repeats {
         if args.repeats > 1 {
+            println!("\n=========================================================================");
             println!(
-                "\n========================================================================="
+                "               BENCHMARK ITERATION {iteration}/{}",
+                args.repeats
             );
-            println!("               BENCHMARK ITERATION {iteration}/{}", args.repeats);
-            println!(
-                "=========================================================================\n"
-            );
+            println!("=========================================================================\n");
         }
 
         let mut record = |results: Vec<LatencySummary>| {
@@ -260,7 +259,9 @@ async fn main() -> anyhow::Result<()> {
         }
 
         if should_run(BenchScenario::Polling) {
-            println!("\n>>> Running Scenario 2: Stockpile One-Second Polling Contention Comparison");
+            println!(
+                "\n>>> Running Scenario 2: Stockpile One-Second Polling Contention Comparison"
+            );
             let results = harness.bench_polling_contention(args.items / 2).await?;
             println!("\n  Comparison (Without vs. With One-Second Polling Contention):");
             harness.report_results(&results).await?;
@@ -268,7 +269,10 @@ async fn main() -> anyhow::Result<()> {
         }
 
         if should_run(BenchScenario::Checkpoint) {
-            println!("\n>>> Running checkpoint contention with {} pending requests per node", args.checkpoint_requests);
+            println!(
+                "\n>>> Running checkpoint contention with {} pending requests per node",
+                args.checkpoint_requests
+            );
             let results = harness
                 .bench_checkpoint_contention(args.checkpoint_requests, args.items)
                 .await?;
@@ -356,7 +360,9 @@ async fn main() -> anyhow::Result<()> {
 
         if should_run(BenchScenario::ClientKill) {
             let items = args.items.max(100);
-            println!("\n>>> Running Scenario 9: Connection Drop & Reconnection Shock (`CLIENT KILL`)");
+            println!(
+                "\n>>> Running Scenario 9: Connection Drop & Reconnection Shock (`CLIENT KILL`)"
+            );
             let results = harness.bench_client_kill(items, 30).await?;
             harness.report_results(&results).await?;
             record(results);
@@ -384,9 +390,16 @@ async fn main() -> anyhow::Result<()> {
 
         if should_run(BenchScenario::PresignatureStockpile) {
             let seekers = args.participants.clamp(1, 4);
-            println!("\n>>> Running presignature stockpile seek ({} items, {seekers} signers)", args.presignature_stockpile);
+            println!(
+                "\n>>> Running presignature stockpile seek ({} items, {seekers} signers)",
+                args.presignature_stockpile
+            );
             let results = harness
-                .bench_presignature_stockpile(args.presignature_stockpile, seekers, args.presignature_seeks)
+                .bench_presignature_stockpile(
+                    args.presignature_stockpile,
+                    seekers,
+                    args.presignature_seeks,
+                )
                 .await?;
             harness.report_results(&results).await?;
             record(results);

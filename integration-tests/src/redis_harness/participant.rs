@@ -82,10 +82,8 @@ pub struct SimulatedParticipant {
 impl SimulatedParticipant {
     /// Create a new participant with independent in-memory storage handles.
     pub fn new(pool: &Pool, account_id: &AccountId, participant: Participant) -> Self {
-        let triples = TriplePair::storage(pool, account_id);
-        triples.set_me(participant);
-        let presignatures = Presignature::storage(pool, account_id);
-        presignatures.set_me(participant);
+        let triples = TriplePair::ready_storage(pool, account_id, participant);
+        let presignatures = Presignature::ready_storage(pool, account_id, participant);
         Self {
             participant,
             account_id: account_id.clone(),
@@ -93,11 +91,6 @@ impl SimulatedParticipant {
             triples,
             presignatures,
         }
-    }
-
-    /// Create an independent handle for synthetic same-key conflict tests.
-    pub fn clone_isolated(&self, pool: &Pool) -> Self {
-        Self::new(pool, &self.account_id, self.participant)
     }
 
     async fn populate_chunk(
