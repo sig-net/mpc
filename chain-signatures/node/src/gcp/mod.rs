@@ -2,11 +2,14 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine as _;
 use google_cloud_auth::credentials::AccessTokenCredentials;
 use serde::{Deserialize, Serialize};
+use std::time::Duration;
 
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
     #[error("GCP auth error: {0}")]
     Auth(#[from] google_cloud_auth::errors::CredentialsError),
+    #[error("GCP access token not issued within {REQUEST_TIMEOUT:?}")]
+    TokenTimeout,
     #[error("GCP API error ({status}): {message}")]
     Api {
         status: reqwest::StatusCode,
@@ -22,6 +25,9 @@ pub enum Error {
 
 const SECRET_MANAGER_ENDPOINT: &str = "https://secretmanager.googleapis.com";
 const CLOUD_PLATFORM_SCOPE: &str = "https://www.googleapis.com/auth/cloud-platform";
+/// The access token fetch and the Secret Manager call each fail after this
+/// instead of hanging.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Deserialize)]
 struct AccessSecretVersionResponse {
@@ -57,7 +63,10 @@ impl SecretManagerService {
         let credentials = google_cloud_auth::credentials::Builder::default()
             .with_scopes([CLOUD_PLATFORM_SCOPE])
             .build_access_token_credentials()?;
-        let http = reqwest::Client::builder().https_only(true).build()?;
+        let http = reqwest::Client::builder()
+            .https_only(true)
+            .timeout(REQUEST_TIMEOUT)
+            .build()?;
         Ok(Self {
             http,
             credentials,
@@ -116,7 +125,9 @@ impl SecretManagerService {
         url: &str,
         body: Option<Vec<u8>>,
     ) -> Result<reqwest::Response, Error> {
-        let token = self.credentials.access_token().await?;
+        let token = tokio::time::timeout(REQUEST_TIMEOUT, self.credentials.access_token())
+            .await
+            .map_err(|_| Error::TokenTimeout)??;
         let mut request = self.http.request(method, url).bearer_auth(token.token);
         if let Some(body) = body {
             request = request.header(reqwest::header::CONTENT_TYPE, "application/json");

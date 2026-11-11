@@ -124,16 +124,16 @@ pub(crate) async fn handle_chain_event<T: ChainTelemetry>(
             let kind = request.request_kind();
 
             // Record the request's indexed timestamp if it's a new request
-            let is_new = process_sign_request(request, ctx, root_pk)
+            let is_new = process_sign_request(request, ctx, root_pk, block_timestamp)
                 .await
                 .context("failed to process sign request")?;
 
             if is_new {
                 if let Some(ts) = block_timestamp {
-                    // Ethereum (~15 min finality) reports the block timestamp.
+                    // Ethereum, Solana, and Midnight report block timestamps;
+                    // Canton and Hydration do not yet.
                     telemetry.request_indexed_at(ts, kind);
                 } else {
-                    // Faster chains (Solana, Canton, Hydration) report no timestamp.
                     telemetry.request_indexed(kind);
                 }
             }

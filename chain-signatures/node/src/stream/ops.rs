@@ -14,8 +14,8 @@ use crate::respond_bidirectional::{
     published_midnight_signing_args, published_output_payload, published_output_signing_args,
 };
 use crate::sign_bidirectional::{
-    owned_by_requester, transaction_chain_id, BidirectionalProgress, BidirectionalTxId,
-    SignBidirectionalEventExt, SignStatus,
+    destination_expiry, owned_by_requester, transaction_chain_id, BidirectionalProgress,
+    BidirectionalTxId, ExpiryWindow, SignBidirectionalEventExt, SignStatus,
 };
 use crate::stream::StreamContext;
 use crate::types::SignCommand;
@@ -48,6 +48,7 @@ pub(crate) async fn process_sign_request(
     sign_request: Arc<IndexedSignRequest>,
     ctx: &StreamContext,
     root_pk: mpc_primitives::PublicKey,
+    block_timestamp: Option<u64>,
 ) -> anyhow::Result<bool> {
     match &sign_request.kind {
         SignKind::RespondBidirectional(_) => anyhow::bail!("Unexpected sign request kind"),
@@ -78,6 +79,12 @@ pub(crate) async fn process_sign_request(
                 anyhow::bail!(
                     "rejecting bidirectional sign request {:?}: \
                      owner_address is not the request's derived key",
+                    sign_request.id
+                );
+            }
+            if let Err(err) = expiry_bound(event, block_timestamp) {
+                anyhow::bail!(
+                    "rejecting bidirectional sign request {:?}: {err:#}",
                     sign_request.id
                 );
             }
@@ -118,6 +125,51 @@ fn network_mismatch(
     }
     let actual = transaction_chain_id(&event.serialized_transaction);
     (actual != Some(expected)).then_some((actual, expected))
+}
+
+/// §4.3's bound: the target's validity window must be open at the source
+/// block and close within the target's cap of it (seconds in, milliseconds
+/// out). `None` skips, logging the enforcement gap.
+fn expiry_bound(
+    event: &SignBidirectionalEvent,
+    block_timestamp: Option<u64>,
+) -> anyhow::Result<()> {
+    // `validate` owns rejecting unknown targets; no expiry, no bound.
+    let Some(ExpiryWindow {
+        expiration_ms,
+        cap_ms,
+    }) = event
+        .target_chain()
+        .ok()
+        .map(|target| destination_expiry(target, &event.serialized_transaction))
+        .transpose()?
+        .flatten()
+    else {
+        return Ok(());
+    };
+    let source_ms = match block_timestamp {
+        Some(seconds) => seconds.saturating_mul(1000),
+        None => {
+            tracing::warn!(
+                source = ?event.chain,
+                target = %event.caip2_id,
+                "no source block time: expiry bound skipped"
+            );
+            return Ok(());
+        }
+    };
+    if expiration_ms <= source_ms {
+        anyhow::bail!(
+            "validity window closed at the source block: \
+             expiration {expiration_ms} ms, source block {source_ms} ms"
+        );
+    }
+    if expiration_ms > source_ms + cap_ms {
+        anyhow::bail!(
+            "expiration {expiration_ms} ms exceeds the cap over source block {source_ms} ms"
+        );
+    }
+    Ok(())
 }
 
 /// A flat destination id names one transaction per set of raw bytes: a second
