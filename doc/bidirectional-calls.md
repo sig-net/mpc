@@ -1080,14 +1080,25 @@ The output itself travels off chain. Clients are responsible for recovering
 it from the target chain so they can deliver the exact serialised
 output the MPC attested to the application contract. Each target chain
 integration must document how the MPC obtains the output so clients can
-follow the same procedure.
+follow the same procedure. The recovery method is chain-specific.
 
-The recovery method is chain-specific. For example, on EVM chains the MPC
-reads a mined call's return data with the `debug_traceTransaction` RPC method,
-using `callTracer`'s top call frame. A client retrieves that data, decodes it
-with the request's `outputDeserializationSchema` and re-serialises it in
-the source chain's encoding, which that schema determines, reproducing
-the MPC's conversions.
+###### EVM
+
+The MPC reads a mined call's return data with the `debug_traceTransaction`
+RPC method, using `callTracer`'s top call frame. A client retrieves that
+data, decodes it with the request's `outputDeserializationSchema` and
+re-serialises it in the source chain's encoding, which that schema
+determines, reproducing the MPC's conversions.
+
+###### Tron
+
+The MPC reads the executed transaction's receipt with
+`/walletsolidity/gettransactioninfobyid`. The receipt's `contractResult` field carries the top call's return
+data (the same bytes `callTracer`'s top frame yields on EVM). A client
+retrieves the receipt, decodes that data with the request's
+`outputDeserializationSchema` and re-serialises it in the source chain's
+encoding, reproducing the MPC's conversions. Events are not read: a
+contract that reports a result only through an event has no output, same as on EVM.
 
 As a convenience, MPC nodes may serve the serialised output they attest in
 a public cache. This helps dApp developers who lack access to a node that
