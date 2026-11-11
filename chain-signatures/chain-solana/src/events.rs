@@ -153,12 +153,6 @@ impl SolanaSignEvent {
             }
         }
     }
-
-    fn build_sign_request(self, tx_sig: &[u8]) -> Option<IndexedSignRequest> {
-        let mut entropy = [0u8; 32];
-        entropy.copy_from_slice(&tx_sig[..32]);
-        self.generate_sign_request(entropy)
-    }
 }
 
 /// Split an Anchor `emit_cpi!` event instruction payload into its 8-byte event
@@ -248,6 +242,7 @@ pub async fn emit_events(
     events_tx: &mpsc::Sender<ChainEvent>,
     program_id: &str,
     block_time: Option<u64>,
+    entropy: [u8; 32],
     tx: &EncodedTransactionWithStatusMeta,
 ) -> anyhow::Result<()> {
     let events = parse_cpi_events(tx, program_id);
@@ -258,7 +253,7 @@ pub async fn emit_events(
     for event in events {
         let event = match event {
             CpiEvent::Sign(ev) => {
-                let Some(request) = ev.build_sign_request(signature.as_ref()) else {
+                let Some(request) = ev.generate_sign_request(entropy) else {
                     continue;
                 };
                 let bidirectional = matches!(request.kind, SignKind::SignBidirectional(_));

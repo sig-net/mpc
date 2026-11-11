@@ -135,12 +135,15 @@ A short hash that stands for a larger structure. The docs use two:
 
 ## Entropy
 
-A value from the block that holds a [request](#request). The requester cannot
-know or influence it before that block is validated. Nodes read it from a final
-block, so every node derives the same delta (`SignArgs::entropy`,
+A chain-provided value from the block that holds a [request](#request). Under
+the chain's threat model, the requester cannot freely choose or reliably
+predict it before publication. It is public afterward, and its resistance to
+producer influence depends on the chain. Nodes read it from a final block, so
+every node derives the same delta (`SignArgs::entropy`,
 `chain-signatures/primitives/src/crypto.rs`). It also seeds the
 [proposer](#proposer) election. See
-[delta-derivation.md](delta-derivation.md).
+[delta-derivation.md](delta-derivation.md) for chain-specific sources and
+caveats.
 
 ## Epoch
 
