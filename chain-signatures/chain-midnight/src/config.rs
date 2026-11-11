@@ -40,15 +40,11 @@ pub struct IndexerConfig {
     pub poll_interval: Duration,
 }
 
-impl IndexerConfig {
-    /// One Midnight block time; polling faster mostly rereads an unchanged head.
-    pub const DEFAULT_POLL_INTERVAL_MS: u64 = 6_000;
-}
-
 impl Default for IndexerConfig {
     fn default() -> Self {
         Self {
-            poll_interval: Duration::from_millis(Self::DEFAULT_POLL_INTERVAL_MS),
+            // One Midnight block time; polling faster mostly rereads an unchanged head.
+            poll_interval: Duration::from_secs(6),
         }
     }
 }

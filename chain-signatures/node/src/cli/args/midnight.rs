@@ -1,6 +1,4 @@
-use mpc_chain_midnight::{
-    IndexerConfig, MidnightAddress, MidnightConfig, OutputStorageConfig, PublisherConfig,
-};
+use mpc_chain_midnight::{MidnightAddress, MidnightConfig, OutputStorageConfig, PublisherConfig};
 use secrecy::{ExposeSecret as _, SecretString};
 use std::time::Duration;
 use url::Url;
@@ -59,14 +57,6 @@ pub struct MidnightArgs {
         requires = "midnight_node_url"
     )]
     pub midnight_indexer_ws_url: Option<Url>,
-    /// Delay between finalized-head polls, in milliseconds.
-    #[arg(
-        long,
-        env("MPC_MIDNIGHT_POLL_INTERVAL_MS"),
-        default_value_t = IndexerConfig::DEFAULT_POLL_INTERVAL_MS,
-        requires = "midnight_node_url"
-    )]
-    pub midnight_poll_interval_ms: u64,
     /// Optional GCS output cache. Initialization retries in the background; upload failures warn
     /// and do not prevent the on-chain response.
     #[arg(
@@ -159,9 +149,7 @@ impl MidnightArgs {
             responder_address,
             publisher,
             rpc: Default::default(),
-            indexer: IndexerConfig {
-                poll_interval: Duration::from_millis(self.midnight_poll_interval_ms),
-            },
+            indexer: Default::default(),
         };
         config.validate()?;
         Ok(Some(config))
@@ -172,6 +160,7 @@ impl MidnightArgs {
 mod tests {
     use super::*;
     use clap::Parser as _;
+    use mpc_chain_midnight::IndexerConfig;
 
     /// The command line for [`configured`].
     fn configured_argv() -> Vec<String> {
@@ -187,8 +176,6 @@ mod tests {
             &"0f".repeat(32),
             "--midnight-indexer-ws-url",
             "ws://127.0.0.1:8088/api/v3/graphql/ws",
-            "--midnight-poll-interval-ms",
-            "4700",
             "--midnight-output-storage-bucket",
             "midnight-results",
             "--midnight-output-storage-prefix",
@@ -223,9 +210,7 @@ mod tests {
                 ..Default::default()
             },
             rpc: Default::default(),
-            indexer: IndexerConfig {
-                poll_interval: Duration::from_millis(4700),
-            },
+            indexer: Default::default(),
         }
     }
 
@@ -253,8 +238,9 @@ mod tests {
 
         let config = configured_args().into_config().unwrap();
         assert_eq!(config, Some(configured()));
-        // Submission tuning has no CLI flags.
+        // Indexer and submission tuning have no CLI flags.
         let config = config.unwrap();
+        assert_eq!(config.indexer, IndexerConfig::default());
         assert_eq!(
             config.publisher.submit_timeout,
             PublisherConfig::default().submit_timeout
@@ -336,7 +322,6 @@ mod tests {
             ("--midnight-responder-address", responder_address.as_str()),
             ("--midnight-funding-seed", "1"),
             ("--midnight-indexer-ws-url", "ws://127.0.0.1:1"),
-            ("--midnight-poll-interval-ms", "1"),
             ("--midnight-output-storage-bucket", "1"),
             ("--midnight-output-storage-prefix", "1"),
             ("--midnight-output-storage-timeout-secs", "1"),
@@ -389,23 +374,6 @@ mod tests {
             .expect("Midnight remains enabled");
         assert_eq!(config.node_url, configured().node_url);
         assert!(config.publisher.output_storage.is_none());
-    }
-
-    #[test]
-    fn poll_interval_defaults_to_one_block_time() {
-        crate::cli::tests::assert_midnight_env_unset();
-        let mut argv = configured_argv();
-        let index = argv
-            .iter()
-            .position(|arg| arg == "--midnight-poll-interval-ms")
-            .unwrap();
-        argv.drain(index..=index + 1);
-        let config = MidnightArgs::try_parse_from(argv)
-            .unwrap()
-            .into_config()
-            .unwrap()
-            .expect("Midnight enabled");
-        assert_eq!(config.indexer.poll_interval, Duration::from_secs(6));
     }
 
     #[test]
