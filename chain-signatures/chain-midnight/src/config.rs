@@ -43,7 +43,6 @@ pub struct IndexerConfig {
 impl Default for IndexerConfig {
     fn default() -> Self {
         Self {
-            // One Midnight block time; polling faster mostly rereads an unchanged head.
             poll_interval: Duration::from_secs(6),
         }
     }
