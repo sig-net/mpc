@@ -2,16 +2,18 @@ use cait_sith::protocol::Participant;
 use integration_tests::cluster::spawner::ClusterSpawner;
 use integration_tests::containers;
 use mpc_crypto::PublicKey;
+use mpc_node::backlog::Checkpoint;
 use mpc_node::protocol::presignature::PresignatureSpawner;
 use mpc_node::protocol::triple::TripleSpawner;
 use mpc_node::protocol::MessageChannel;
+use mpc_node::storage::checkpoint_storage::CheckpointStorage;
 use mpc_node::types::SecretKeyShare;
 use test_log::test;
 
 use super::helpers::{
     dummy_backlog_entry, dummy_indexed_sign_request, dummy_pair, dummy_presignature,
 };
-use mpc_primitives::SignId;
+use mpc_primitives::{Chain, SignId};
 
 #[test(tokio::test)]
 async fn test_triple_persistence() -> anyhow::Result<()> {
@@ -325,9 +327,6 @@ async fn test_presignature_persistence() -> anyhow::Result<()> {
 
 #[test(tokio::test)]
 async fn test_checkpoint_persistence() -> anyhow::Result<()> {
-    use mpc_node::backlog::Checkpoint;
-    use mpc_node::storage::checkpoint_storage::CheckpointStorage;
-    use mpc_primitives::Chain;
     use near_account_id::AccountId;
 
     let spawner = ClusterSpawner::default()
@@ -389,9 +388,6 @@ async fn test_checkpoint_persistence() -> anyhow::Result<()> {
 #[test(tokio::test)]
 async fn test_pending_checkpoint_persistence() -> anyhow::Result<()> {
     use deadpool_redis::redis;
-    use mpc_node::backlog::Checkpoint;
-    use mpc_node::storage::checkpoint_storage::CheckpointStorage;
-    use mpc_primitives::Chain;
 
     let spawner = ClusterSpawner::default()
         .network("test-pending-checkpoint-persistence")
@@ -546,8 +542,6 @@ async fn test_clear_clears_pending_reservations() -> anyhow::Result<()> {
 #[test(tokio::test)]
 async fn test_local_records_persist() -> anyhow::Result<()> {
     use mpc_node::sign_bidirectional::{BidirectionalProgress, SignProgress, SignStatus};
-    use mpc_node::storage::checkpoint_storage::CheckpointStorage;
-    use mpc_primitives::Chain;
 
     let spawner = ClusterSpawner::default()
         .network("test-local-records")
