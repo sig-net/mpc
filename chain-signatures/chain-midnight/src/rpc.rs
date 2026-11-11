@@ -349,7 +349,7 @@ fn parse_block_hash(at_block_hash_0x: &str) -> anyhow::Result<H256> {
 }
 
 fn connect_http(config: &MidnightConfig) -> anyhow::Result<RpcClient> {
-    connect_http_endpoint(&config.node_url, &config.rpc)
+    connect_http_endpoint(config.node_url.as_str(), &config.rpc)
 }
 
 fn connect_http_endpoint(node_url: &str, config: &RpcConfig) -> anyhow::Result<RpcClient> {
@@ -2114,7 +2114,9 @@ mod tests {
     #[ignore = "capture tool: MIDNIGHT_NODE_URL, MIDNIGHT_CAPTURE_BLOCK, MIDNIGHT_CAPTURE_SINGLETON, MIDNIGHT_CAPTURE_OUT_DIR"]
     async fn capture_block_fixtures() {
         let node_url = std::env::var("MIDNIGHT_NODE_URL")
-            .expect("MIDNIGHT_NODE_URL must name the capture node HTTP endpoint");
+            .expect("MIDNIGHT_NODE_URL must name the capture node HTTP endpoint")
+            .parse()
+            .expect("MIDNIGHT_NODE_URL must be a URL");
         let height = std::env::var("MIDNIGHT_CAPTURE_BLOCK")
             .expect("MIDNIGHT_CAPTURE_BLOCK must name one capture height")
             .parse::<u64>()
@@ -2236,7 +2238,7 @@ mod tests {
 
     fn http_config(address: SocketAddr) -> crate::config::MidnightConfig {
         crate::config::MidnightConfig {
-            node_url: format!("http://{address}"),
+            node_url: format!("http://{address}").parse().unwrap(),
             central_address: crate::config::MidnightAddress::from_bytes([0xab; 32]),
             responder_address: crate::config::MidnightAddress::from_bytes([0xcd; 32]),
             publisher: Default::default(),
@@ -2573,8 +2575,12 @@ mod tests {
         // a definitive oversized state and not retried.
         let capped_config = http_config(address);
         let capped_rpc = RpcClient::new(
-            HttpRpcClient::with_response_cap(&capped_config.node_url, &capped_config.rpc, 128)
-                .expect("build capped transport"),
+            HttpRpcClient::with_response_cap(
+                capped_config.node_url.as_str(),
+                &capped_config.rpc,
+                128,
+            )
+            .expect("build capped transport"),
         );
         let reads = Reads::new(capped_rpc, READ_TIMEOUT, attempts(2));
         let capped_error = reads
@@ -2730,7 +2736,7 @@ mod tests {
 
         let config = http_config(address);
         let rpc = RpcClient::new(
-            HttpRpcClient::with_response_cap(&config.node_url, &config.rpc, 128)
+            HttpRpcClient::with_response_cap(config.node_url.as_str(), &config.rpc, 128)
                 .expect("build capped transport"),
         );
         let reads = Reads::new(rpc, READ_TIMEOUT, attempts(2));
@@ -2828,7 +2834,7 @@ mod tests {
             std::future::pending::<()>().await;
         });
         let mut config = crate::config::MidnightConfig {
-            node_url: format!("http://{address}"),
+            node_url: format!("http://{address}").parse().unwrap(),
             central_address: crate::config::MidnightAddress::from_bytes([0xab; 32]),
             responder_address: crate::config::MidnightAddress::from_bytes([0xcd; 32]),
             publisher: Default::default(),

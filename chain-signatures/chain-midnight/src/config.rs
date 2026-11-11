@@ -1,6 +1,5 @@
 //! Midnight node configuration.
 
-use anyhow::Context as _;
 use mpc_chain_integration_core::utils::retry::RetryConfig;
 use std::fmt;
 use std::path::PathBuf;
@@ -97,7 +96,7 @@ pub struct PublisherConfig {
     pub funding_seed: String,
     /// The indexer's GraphQL subscription URL: spendable DUST derives only from the
     /// ledger events it serves.
-    pub indexer_ws_url: String,
+    pub indexer_ws_url: Url,
     /// The responder's packaged proving artifacts, `@sig-net/midnight-responder`'s
     /// `dist/managed`: `keys/<circuit>.{prover,verifier}` and `zkir/<circuit>.bzkir`.
     pub contract_artifacts_dir: PathBuf,
@@ -115,7 +114,8 @@ impl Default for PublisherConfig {
         Self {
             output_storage: None,
             funding_seed: String::new(),
-            indexer_ws_url: String::new(),
+            // Replaced by every real config; the empty funding seed fails validation.
+            indexer_ws_url: Url::parse("ws://placeholder.invalid").expect("a valid literal"),
             // Where the node image installs them.
             contract_artifacts_dir: PathBuf::from("/usr/local/share/midnight/signet-responder"),
             zk_params_dir: PathBuf::from("/usr/local/share/midnight/zk-params"),
@@ -170,7 +170,7 @@ impl MidnightAddress {
 /// Midnight chain integration configuration.
 #[derive(Clone, Debug, PartialEq)]
 pub struct MidnightConfig {
-    pub node_url: String,
+    pub node_url: Url,
     /// Address of the central singleton contract, where clients notify their requests.
     pub central_address: MidnightAddress,
     /// Address of the signet responder contract, where responses are posted and read.
@@ -182,11 +182,7 @@ pub struct MidnightConfig {
 
 impl MidnightConfig {
     pub fn validate(&self) -> anyhow::Result<()> {
-        anyhow::ensure!(
-            self.node_url.starts_with("http://") || self.node_url.starts_with("https://"),
-            "midnight config: node_url must use a lowercase http or https scheme"
-        );
-        validate_url("node_url", &self.node_url, &["http", "https"])?;
+        validate_scheme("node_url", &self.node_url, &["http", "https"])?;
         anyhow::ensure!(
             self.responder_address != self.central_address,
             "midnight config: responder_address must differ from central_address"
@@ -226,7 +222,7 @@ impl PublisherConfig {
             !self.submit_timeout.is_zero(),
             "midnight config: publisher.submit_timeout must be greater than zero"
         );
-        validate_url(
+        validate_scheme(
             "publisher.indexer_ws_url",
             &self.indexer_ws_url,
             &["ws", "wss"],
@@ -252,14 +248,12 @@ pub(crate) fn validate_publisher_network_id(value: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn validate_url(field: &str, value: &str, schemes: &[&str]) -> anyhow::Result<()> {
-    let parsed = Url::parse(value)
-        .with_context(|| format!("midnight config: {field} must be an absolute URL"))?;
+fn validate_scheme(field: &str, url: &Url, schemes: &[&str]) -> anyhow::Result<()> {
     anyhow::ensure!(
-        schemes.contains(&parsed.scheme()),
+        schemes.contains(&url.scheme()),
         "midnight config: {field} must use one of {}, got {}",
         schemes.join(", "),
-        parsed.scheme()
+        url.scheme()
     );
     Ok(())
 }
@@ -305,12 +299,12 @@ mod tests {
 
     fn valid_config() -> MidnightConfig {
         MidnightConfig {
-            node_url: "http://127.0.0.1:9944".to_string(),
+            node_url: "http://127.0.0.1:9944".parse().unwrap(),
             central_address: MidnightAddress::from_bytes([0xab; 32]),
             responder_address: MidnightAddress::from_bytes([0xcd; 32]),
             publisher: PublisherConfig {
                 funding_seed: "0f".repeat(32),
-                indexer_ws_url: "ws://127.0.0.1:8088/api/v3/graphql/ws".to_string(),
+                indexer_ws_url: "ws://127.0.0.1:8088/api/v3/graphql/ws".parse().unwrap(),
                 ..Default::default()
             },
             rpc: Default::default(),
@@ -468,11 +462,6 @@ mod tests {
 
     #[test]
     fn validate_names_offending_field() {
-        let mut uppercase_url = valid_config();
-        uppercase_url.node_url = "HTTP://127.0.0.1:9944".to_string();
-        let err = uppercase_url.validate().unwrap_err().to_string();
-        assert!(err.contains("lowercase"), "unexpected error: {err}");
-
         let mut zero_poll = valid_config();
         zero_poll.indexer.poll_interval = Duration::ZERO;
         let err = zero_poll.validate().unwrap_err().to_string();
@@ -480,16 +469,19 @@ mod tests {
 
         for (field, apply) in [
             (
-                "funding_seed",
+                "node_url",
                 (|config: &mut MidnightConfig| {
-                    config.publisher.funding_seed = "not hex".to_string();
+                    config.node_url = "ws://127.0.0.1:9944".parse().unwrap();
                 }) as fn(&mut MidnightConfig),
             ),
+            ("funding_seed", |config: &mut MidnightConfig| {
+                config.publisher.funding_seed = "not hex".to_string();
+            }),
             ("submit_timeout", |config: &mut MidnightConfig| {
                 config.publisher.submit_timeout = Duration::ZERO;
             }),
             ("indexer_ws_url", |config: &mut MidnightConfig| {
-                config.publisher.indexer_ws_url = "http://127.0.0.1:8088".to_string();
+                config.publisher.indexer_ws_url = "http://127.0.0.1:8088".parse().unwrap();
             }),
             ("responder_address", |config: &mut MidnightConfig| {
                 config.responder_address = config.central_address;
