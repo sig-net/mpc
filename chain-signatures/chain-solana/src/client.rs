@@ -126,9 +126,11 @@ struct JsonRpcRequest {
 }
 
 /// Represents a JSON-RPC response, which can either be a successful result or an error.
+/// `id: Option` — the spec permits `null`, and a decode failure must not
+/// swallow the error side's verdict.
 #[derive(Deserialize)]
 struct JsonRpcResponse<T> {
-    id: usize,
+    id: Option<usize>,
     result: Option<T>,
     error: Option<serde_json::Value>,
 }
@@ -379,13 +381,13 @@ impl SolanaClient {
                                 .get("code")
                                 .and_then(serde_json::Value::as_i64)
                                 .is_some_and(slot_skipped);
-                            let slot = slots.get(resp.id).copied();
+                            let slot = resp.id.and_then(|id| slots.get(id)).copied();
                             if !skipped {
                                 tracing::warn!(?error, ?slot, "JSON-RPC batch response error");
                             }
                         }
                         (Some(block), None) => {
-                            if let Some(slot) = slots.get(resp.id).copied() {
+                            if let Some(slot) = resp.id.and_then(|id| slots.get(id)).copied() {
                                 results.insert(slot, block);
                             }
                         }
@@ -1206,6 +1208,36 @@ mod tests {
             assert_eq!(carried, Some(code));
             mock.assert_async().await;
         }
+    }
+
+    #[tokio::test]
+    async fn null_id_error_envelopes_keep_their_verdict() {
+        // JSON-RPC 2.0 permits id: null on error responses; the decode
+        // must not swallow the terminal code into a retryable
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                json!({
+                    "jsonrpc": "2.0", "id": null,
+                    "error": {
+                        "code": JSON_RPC_SERVER_ERROR_SLOT_SKIPPED,
+                        "message": "Slot was skipped"
+                    }
+                })
+                .to_string(),
+            )
+            .expect(1)
+            .create_async()
+            .await;
+
+        let client = test_client(&server.url());
+        let err = client.get_block(1234).await.unwrap_err();
+        assert!(!is_retryable(&err), "{err:#}");
+        assert_eq!(skipped_code(&err), Some(JSON_RPC_SERVER_ERROR_SLOT_SKIPPED));
+        mock.assert_async().await;
     }
 
     #[tokio::test]
