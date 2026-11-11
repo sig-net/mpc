@@ -24,6 +24,7 @@ use url::Url;
 
 #[derive(Debug, Clone, clap::Parser)]
 pub struct Options {
+    /// Level of the logs and traces exported over OTLP. `off` exports nothing.
     #[arg(
         long,
         env("MPC_OPENTELEMETRY_LEVEL"),
@@ -32,6 +33,7 @@ pub struct Options {
     )]
     pub opentelemetry_level: OpenTelemetryLevel,
 
+    /// OTLP collector endpoint. Used only when `--opentelemetry-level` is not `off`.
     #[arg(
         long,
         env("MPC_OTLP_ENDPOINT"),
