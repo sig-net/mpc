@@ -27,5 +27,8 @@ Hotfix for A.B.C on `testnet|mainnet`.
 - [ ] Cherry-picked with `-x`
 - [ ] Patch version bumped on this branch only; `develop` untouched
 - [ ] The `regression` issue this closes, if any, is linked
+- The soak on `testnet` (tick one):
+  - [ ] restarts, because the node binary or the contract changed
+  - [ ] continues, because only CI, tests, tooling or docs changed
 
 <!-- After merging: tag and publish the release, then hotfix the other branch if it has the bug, see doc/releasing.md. -->

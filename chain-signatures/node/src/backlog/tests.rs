@@ -10,6 +10,7 @@ use crate::backlog::mock::{
     pending_execution_status, single_entry_checkpoint, BacklogTestExt,
 };
 use crate::sign_bidirectional::{BidirectionalProgress, SignProgress, SignStatus};
+use crate::storage::checkpoint_storage::CheckpointStorage;
 use mpc_chain_integration_core::StateManager;
 use mpc_primitives::{BidirectionalTx, Chain, ExecutionOutcome, SignId, SignKind};
 use std::sync::Arc;
@@ -1435,4 +1436,95 @@ fn mock_cadence_covers_the_same_chains_as_production() {
             "{chain:?}"
         );
     }
+}
+
+/// A request that leaves the backlog loses its record.
+#[tokio::test]
+async fn a_removed_request_loses_its_record() {
+    let storage = CheckpointStorage::in_memory();
+    let backlog = Backlog::persisted(storage.clone());
+    let request = mock_sign_request(SignId::new([1; 32]), Chain::Solana);
+    let (pk, output) = mock_signature_output(&request.args);
+    let (entry, _) = backlog.insert(Arc::clone(&request)).await;
+    entry
+        .advance(pk, &output, mock_participants(), true)
+        .await
+        .unwrap();
+    assert_eq!(storage.load_local(Chain::Solana).await.unwrap().len(), 1);
+
+    backlog.remove(Chain::Solana, &request.id).await;
+
+    let deleted = async {
+        while !storage.load_local(Chain::Solana).await.unwrap().is_empty() {
+            tokio::task::yield_now().await;
+        }
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(5), deleted)
+        .await
+        .expect("the record is deleted");
+}
+
+/// A first-leg signature stored after the attestation does not replace it.
+#[tokio::test]
+async fn the_legs_of_a_request_have_separate_records() {
+    let storage = CheckpointStorage::in_memory();
+    let backlog = Backlog::persisted(storage.clone());
+    let tx = mock_tx(42);
+    let chain = tx.source_chain;
+    let first_leg = mock_bidi_request(tx.sign_id(), chain);
+    let entry: crate::backlog::SignEntry<Generating> = backlog
+        .insert_bidirectional(Arc::clone(&first_leg))
+        .await
+        .into();
+    let attestation = SignStatus::Bidirectional(BidirectionalProgress::Final {
+        respond_request: mock_bidi_response(&tx),
+        progress: SignProgress::Publishing(crate::backlog::mock::mock_publishing()),
+    });
+    storage
+        .put_local(chain, first_leg.id, &attestation)
+        .await
+        .unwrap();
+
+    let (pk, output) = mock_signature_output(&first_leg.args);
+    entry
+        .advance(pk, &output, mock_participants(), true)
+        .await
+        .unwrap();
+
+    let records = storage.load_local(chain).await.unwrap();
+    assert_eq!(records.len(), 2);
+    assert!(records.contains(&(first_leg.id, attestation)));
+}
+
+/// A round that finishes after its request left the backlog leaves no record.
+#[tokio::test]
+async fn a_round_after_removal_leaves_no_record() {
+    let storage = CheckpointStorage::in_memory();
+    let backlog = Backlog::persisted(storage.clone());
+    let request = mock_sign_request(SignId::new([1; 32]), Chain::Solana);
+    let (pk, output) = mock_signature_output(&request.args);
+    let (entry, _) = backlog.insert(Arc::clone(&request)).await;
+    backlog.remove(Chain::Solana, &request.id).await;
+    for _ in 0..10 {
+        tokio::task::yield_now().await;
+    }
+
+    let result = entry.advance(pk, &output, mock_participants(), true).await;
+
+    assert_matches!(result, Err(BacklogError::NotFound { .. }));
+    assert!(storage.load_local(Chain::Solana).await.unwrap().is_empty());
+}
+
+/// A signature that cannot be stored is published anyway, as before there were records.
+#[tokio::test]
+async fn a_signature_that_cannot_be_stored_is_still_published() {
+    let backlog = Backlog::persisted(CheckpointStorage::failing());
+    let request = mock_sign_request(SignId::new([1; 32]), Chain::Solana);
+    let (pk, output) = mock_signature_output(&request.args);
+    let (entry, _) = backlog.insert(request).await;
+
+    let result = entry.advance(pk, &output, mock_participants(), true).await;
+
+    assert!(result.is_ok());
+    assert_eq!(backlog.publishable_requests(Chain::Solana).await.len(), 1);
 }
