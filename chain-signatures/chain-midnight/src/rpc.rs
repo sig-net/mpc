@@ -438,40 +438,38 @@ impl MidnightRpc {
         responder: &[u8; 32],
     ) -> anyhow::Result<Option<BlockEmissions>> {
         let hash = parse_block_hash(&block_ref.hash)?;
+        // `chain_getBlock` carries the header, so one call reads the whole block.
         let block = retry_read(
             self.reads.request_timeout,
             self.reads.retry,
             "midnight_block",
             || async {
-                self.client
-                    .blocks()
-                    .at(hash)
+                self.reads
+                    .legacy
+                    .chain_get_block(Some(hash))
                     .await
                     .map_err(anyhow::Error::new)
                     .context("failed to fetch a midnight block")
             },
         )
-        .await?;
-        let extrinsics = retry_read(
-            self.reads.request_timeout,
-            self.reads.retry,
-            "midnight_block_body",
-            || async {
-                block
-                    .extrinsics()
-                    .await
-                    .map_err(anyhow::Error::new)
-                    .context("failed to fetch a midnight block body")
-            },
+        .await?
+        .with_context(|| format!("midnight node has no block {}", block_ref.hash))?
+        .block;
+        let header = block.header;
+        let extrinsics = subxt::ext::subxt_core::blocks::decode_from::<SubstrateConfig>(
+            block.extrinsics.into_iter().map(|bytes| bytes.0).collect(),
+            self.client.metadata(),
         )
-        .await?;
+        .map_err(anyhow::Error::new)
+        .context("failed to decode a midnight block body")?;
+        let height = u64::from(header.number);
 
         let mut candidates = Vec::new();
         for found in extrinsics.find::<SendMnTransaction>() {
             let found = found.map_err(|err| {
                 BlockHold::new(
                     "emission-schema-hold",
-                    u64::from(block.number()),
+                    height,
                     anyhow::Error::new(err).context("send_mn_transaction did not match metadata"),
                 )
             })?;
@@ -486,11 +484,10 @@ impl MidnightRpc {
             return Ok(None);
         }
 
-        let height = u64::from(block.number());
         // One timestamp inherent per block by substrate protocol; §4.3's
         // admission bound anchors on it, so a traffic block without a
         // decodable one holds instead of emitting without a time.
-        // Arg corruption fails `extrinsics()` first (subxt eagerly decodes
+        // Arg corruption fails `decode_from` first (subxt eagerly decodes
         // call data); the decode arm is metadata drift — the payload decodes
         // per the node's metadata but not as `TimestampSet`.
         let block_time_ms = extrinsics
@@ -504,26 +501,27 @@ impl MidnightRpc {
             .map_err(|cause| BlockHold::new("block-time-hold", height, cause))?
             .value
             .now;
+        let block_events = retry_read(
+            self.reads.request_timeout,
+            self.reads.retry,
+            "midnight_block_events",
+            || async {
+                self.client
+                    .events()
+                    .at(hash)
+                    .await
+                    .map_err(anyhow::Error::new)
+                    .context("failed to fetch midnight block events")
+            },
+        )
+        .await?;
         let mut decoded_candidates = Vec::with_capacity(candidates.len());
-        let mut scale_system_events = None;
         for found in candidates {
-            let events = retry_read(
-                self.reads.request_timeout,
-                self.reads.retry,
-                "midnight_block_events",
-                || async {
-                    found
-                        .details
-                        .events()
-                        .await
-                        .map_err(anyhow::Error::new)
-                        .context("failed to fetch midnight block events")
-                },
-            )
-            .await?;
-            scale_system_events
-                .get_or_insert_with(|| events.all_events_in_block().bytes().to_vec());
-
+            let events = subxt::blocks::ExtrinsicEvents::new(
+                found.details.hash(),
+                found.details.index(),
+                block_events.clone(),
+            );
             let applied = applied_status(&events)
                 .map_err(|err| BlockHold::new("emission-schema-hold", height, err))?;
             let Some((ledger_tx_hash, status)) = applied else {
@@ -600,16 +598,15 @@ impl MidnightRpc {
             proof_seed: BlockProofSeed {
                 reported_genesis_hash: *self.client.genesis_hash().as_fixed_bytes(),
                 reported_block_number: height,
-                reported_block_hash: *block.hash().as_fixed_bytes(),
+                reported_block_hash: *hash.as_fixed_bytes(),
                 singleton_address: *singleton,
                 responder_address: *responder,
-                scale_header: block.header().encode(),
+                scale_header: header.encode(),
                 scale_body: extrinsics
                     .iter()
                     .map(|extrinsic| extrinsic.bytes().to_vec())
                     .collect(),
-                scale_system_events: scale_system_events
-                    .expect("a prefiltered candidate always fetched block events"),
+                scale_system_events: block_events.bytes().to_vec(),
             },
             candidates: decoded_candidates,
         }))
@@ -1564,12 +1561,8 @@ mod tests {
             "extrinsicsRoot": hash_of_byte(0x45),
             "digest": { "logs": [] }
         });
+        // No chain_getHeader: the block read takes the header from chain_getBlock.
         let mut module = RpcModule::new(());
-        let response_header = header.clone();
-        module.register_method("chain_getHeader", move |params, _, _| {
-            assert_eq!(params.parse::<Vec<String>>().unwrap(), [hash_of_byte(0x43)]);
-            response_header.clone()
-        })?;
         module.register_method("chain_getBlock", move |params, _, _| {
             assert_eq!(params.parse::<Vec<String>>().unwrap(), [hash_of_byte(0x43)]);
             json!({ "block": { "header": header, "extrinsics": body }, "justifications": null })
@@ -1711,7 +1704,7 @@ mod tests {
             err.downcast_ref::<BlockHold>().is_none(),
             "arg corruption is a fetch failure, not a hold: {err:#}"
         );
-        assert!(format!("{err:#}").contains("failed to fetch a midnight block body"));
+        assert!(format!("{err:#}").contains("failed to decode a midnight block body"));
         assert!(format!("{err:#}").contains("bytes were left"));
     }
 

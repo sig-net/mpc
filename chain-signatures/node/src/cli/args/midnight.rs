@@ -1,4 +1,6 @@
-use mpc_chain_midnight::{MidnightAddress, MidnightConfig, OutputStorageConfig, PublisherConfig};
+use mpc_chain_midnight::{
+    IndexerConfig, MidnightAddress, MidnightConfig, OutputStorageConfig, PublisherConfig,
+};
 use secrecy::{ExposeSecret as _, SecretString};
 use std::time::Duration;
 use url::Url;
@@ -57,6 +59,14 @@ pub struct MidnightArgs {
         requires = "midnight_node_url"
     )]
     pub midnight_indexer_ws_url: Option<Url>,
+    /// Delay between finalized-head polls, in milliseconds.
+    #[arg(
+        long,
+        env("MPC_MIDNIGHT_POLL_INTERVAL_MS"),
+        default_value_t = IndexerConfig::DEFAULT_POLL_INTERVAL_MS,
+        requires = "midnight_node_url"
+    )]
+    pub midnight_poll_interval_ms: u64,
     /// Optional GCS output cache. Initialization retries in the background; upload failures warn
     /// and do not prevent the on-chain response.
     #[arg(
@@ -149,7 +159,9 @@ impl MidnightArgs {
             responder_address,
             publisher,
             rpc: Default::default(),
-            indexer: Default::default(),
+            indexer: IndexerConfig {
+                poll_interval: Duration::from_millis(self.midnight_poll_interval_ms),
+            },
         };
         config.validate()?;
         Ok(Some(config))
@@ -160,7 +172,6 @@ impl MidnightArgs {
 mod tests {
     use super::*;
     use clap::Parser as _;
-    use mpc_chain_midnight::IndexerConfig;
 
     /// The command line for [`configured`].
     fn configured_argv() -> Vec<String> {
@@ -182,6 +193,8 @@ mod tests {
             "staging/testnet",
             "--midnight-output-storage-timeout-secs",
             "47",
+            "--midnight-poll-interval-ms",
+            "4700",
         ]
         .into_iter()
         .map(String::from)
@@ -210,7 +223,9 @@ mod tests {
                 ..Default::default()
             },
             rpc: Default::default(),
-            indexer: Default::default(),
+            indexer: IndexerConfig {
+                poll_interval: Duration::from_millis(4700),
+            },
         }
     }
 
@@ -238,9 +253,8 @@ mod tests {
 
         let config = configured_args().into_config().unwrap();
         assert_eq!(config, Some(configured()));
-        // Indexer and submission tuning have no CLI flags.
+        // Submission tuning has no CLI flags.
         let config = config.unwrap();
-        assert_eq!(config.indexer, IndexerConfig::default());
         assert_eq!(
             config.publisher.submit_timeout,
             PublisherConfig::default().submit_timeout

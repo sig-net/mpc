@@ -1139,6 +1139,7 @@ mod tests {
             "MPC_MIDNIGHT_OUTPUT_STORAGE_BUCKET",
             "MPC_MIDNIGHT_OUTPUT_STORAGE_PREFIX",
             "MPC_MIDNIGHT_OUTPUT_STORAGE_TIMEOUT_SECS",
+            "MPC_MIDNIGHT_POLL_INTERVAL_MS",
         ] {
             assert!(
                 std::env::var_os(var).is_none(),
