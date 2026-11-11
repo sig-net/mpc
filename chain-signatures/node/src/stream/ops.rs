@@ -616,9 +616,6 @@ pub async fn process_execution_confirmed(
     // Captured before `advance` consumes the entry: the wait ends here, and the
     // outcome is what distinguishes a healthy round trip from a reverted one.
     let awaiting_execution = entry.awaiting_execution();
-    // Re-watched if the transition below fails: the map is the watcher's
-    // only resolution path.
-    let watch = entry.execution_watch();
     if matches!(result, ExecutionOutcome::ExtractionFailed) {
         tracing::error!(
             ?sign_id,
@@ -632,10 +629,7 @@ pub async fn process_execution_confirmed(
              without a response, even though the destination transaction executed."
         );
         // Removing it here, on a target-chain event, would split source checkpoints (#1363).
-        if let Err(err) = entry.park().await {
-            ctx.backlog.rewatch_execution(target_chain, watch).await;
-            return Err(err.into());
-        }
+        entry.park().await?;
         // Sent even during catchup: nothing requeues a parked request.
         ctx.sign_tx
             .send(SignCommand::Completion(sign_id))
@@ -648,13 +642,37 @@ pub async fn process_execution_confirmed(
         ExecutionOutcome::Failed | ExecutionOutcome::Unviable
     );
 
+    let execution_tx = Arc::clone(entry.execution_tx());
     let entry = match entry.advance(result, block_height).await {
         Ok(entry) => entry,
         Err(err) => {
-            ctx.backlog.rewatch_execution(target_chain, watch).await;
+            // Every failure here is deterministic, so a retry would
+            // re-emit the same failing confirmation forever: park
+            // terminally, like the extraction failure above.
+            tracing::error!(
+                ?sign_id,
+                ?tx_id,
+                ?source_chain,
+                "terminal advance failure; parking without a response: {err:#}"
+            );
+            if let Err(park_err) = ctx
+                .backlog
+                .park_execution(source_chain, &sign_id, &execution_tx)
+                .await
+            {
+                tracing::warn!(?sign_id, "parking failed too: {park_err:#}");
+            }
+            if ctx
+                .sign_tx
+                .send(SignCommand::Completion(sign_id))
+                .await
+                .is_err()
+            {
+                tracing::warn!(?sign_id, "sign command channel closed while parking");
+            }
             return Err(err).with_context(|| {
                 format!(
-                    "failed to transition pending tx to final response for sign id {sign_id:?}, tx_id {tx_id:?}, source_chain {source_chain}; re-watched"
+                    "failed to transition pending tx to final response for sign id {sign_id:?}, tx_id {tx_id:?}, source_chain {source_chain}; parked"
                 )
             });
         }

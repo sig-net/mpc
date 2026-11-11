@@ -455,10 +455,26 @@ impl Backlog {
             .map(|entry| entry.with_respond_observed_at(watch.respond_observed_at))
     }
 
-    /// Re-registers a watch — the confirmation error path, restoring
-    /// what [`Backlog::executing_entry_for`] consumed.
-    pub async fn rewatch_execution(&self, chain: Chain, watch: ExecutionWatch) {
-        self.watchers(&chain).write().await.insert(watch);
+    /// Parks the entry by key — the confirmation error path, whose
+    /// `advance` consumed the handle.
+    pub async fn park_execution(
+        &self,
+        chain: Chain,
+        sign_id: &SignId,
+        tx: &Arc<BidirectionalTx>,
+    ) -> Result<(), BacklogError> {
+        let mut pending = self.pending(&chain).write().await;
+        let entry = pending
+            .requests
+            .get_mut(sign_id)
+            .ok_or(BacklogError::NotFound {
+                chain,
+                id: *sign_id,
+            })?;
+        entry.status = SignStatus::Bidirectional(BidirectionalProgress::Parked(Arc::clone(
+            tx,
+        )));
+        Ok(())
     }
 
     /// The executing entry a confirmation attests: by the entry's own

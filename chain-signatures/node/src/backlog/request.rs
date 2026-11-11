@@ -556,18 +556,9 @@ impl SignEntry<Bidirectional<Executing>> {
 
     /// Retain a terminal extraction failure without retrying target-chain execution.
     pub async fn park(self) -> Result<(), BacklogError> {
-        let mut pending = self.backlog.pending(&self.chain).write().await;
-        let entry = pending
-            .requests
-            .get_mut(&self.request.id)
-            .ok_or(BacklogError::NotFound {
-                chain: self.chain,
-                id: self.request.id,
-            })?;
-        entry.status = SignStatus::Bidirectional(BidirectionalProgress::Parked(Arc::clone(
-            self.execution_tx(),
-        )));
-        Ok(())
+        self.backlog
+            .park_execution(self.chain, &self.request.id, self.execution_tx())
+            .await
     }
 
     /// Advance destination-chain `Executing` into Phase 2 response signing based on
