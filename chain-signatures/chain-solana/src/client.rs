@@ -78,28 +78,24 @@ pub(crate) fn skipped_code(err: &anyhow::Error) -> Option<i64> {
         .filter(|&code| slot_skipped(code))
 }
 
-/// Read carrier for a bare reqwest error.
-fn read_carrier(e: &reqwest::Error) -> RpcFailure {
-    match e.status() {
+/// A bare reqwest transport error (send, status, or decode) to carrier.
+// TODO: transitional boundary helper — disappears with typed verdict enums.
+fn classify_transport(e: reqwest::Error) -> anyhow::Error {
+    classify_transport_with(e, None)
+}
+
+/// `classify_transport`, carrying a `Retry-After` pause read off the
+/// response before `error_for_status()` discards it.
+fn classify_transport_with(e: reqwest::Error, retry_after: Option<Duration>) -> anyhow::Error {
+    let carrier = match e.status() {
         Some(status) => RpcFailure::read_status(status, format!("{e:#}")),
         // statusless (connection): explicit retryable so the fallback
         // can't misread a ":429" port
         None => RpcFailure::retryable(format!("{e:#}")),
-    }
-}
-
-/// The batch fetch bypasses the solana client, so its errors arrive bare.
-// TODO: transitional boundary helper — disappears with Phase 4's typed verdict enums.
-fn classify_batch(e: reqwest::Error) -> anyhow::Error {
-    classify_batch_with(e, None)
-}
-
-/// `classify_batch`, carrying a `Retry-After` pause read off the response
-/// before `error_for_status()` discards it.
-fn classify_batch_with(e: reqwest::Error, retry_after: Option<Duration>) -> anyhow::Error {
+    };
     let carrier = match retry_after {
-        Some(ra) => read_carrier(&e).with_retry_after(ra),
-        None => read_carrier(&e),
+        Some(ra) => carrier.with_retry_after(ra),
+        None => carrier,
     };
     anyhow::Error::new(carrier)
 }
@@ -278,15 +274,15 @@ impl SolanaClient {
             .json(&request)
             .send()
             .await
-            .map_err(classify_batch)?;
+            .map_err(classify_transport)?;
         let retry_after = retry_after_secs(&resp);
         let resp = resp
             .error_for_status()
-            .map_err(|e| classify_batch_with(e, retry_after))?;
+            .map_err(|e| classify_transport_with(e, retry_after))?;
         let resp = resp
             .json::<JsonRpcResponse<T>>()
             .await
-            .map_err(classify_batch)?;
+            .map_err(classify_transport)?;
         match (resp.result, resp.error) {
             // error wins over a paired result, like the batch envelope
             (_, Some(error)) => Err(classify_body_error(error)),
@@ -391,14 +387,14 @@ impl SolanaClient {
                     .json(&requests)
                     .send()
                     .await
-                    .map_err(classify_batch)?;
+                    .map_err(classify_transport)?;
                 let retry_after = retry_after_secs(&resp);
                 let responses = resp
                     .error_for_status()
-                    .map_err(|e| classify_batch_with(e, retry_after))?
+                    .map_err(|e| classify_transport_with(e, retry_after))?
                     .json::<Vec<JsonRpcResponse<UiConfirmedBlock>>>()
                     .await
-                    .map_err(classify_batch)?;
+                    .map_err(classify_transport)?;
 
                 let mut results = HashMap::new();
                 for resp in responses {
@@ -1464,7 +1460,7 @@ mod tests {
             .send()
             .await
             .unwrap_err();
-        let err = classify_batch(reqwest_err);
+        let err = classify_transport(reqwest_err);
         assert!(is_retryable(&err));
         assert!(!is_provider_throttled(&err));
     }
