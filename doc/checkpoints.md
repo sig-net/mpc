@@ -321,7 +321,7 @@ They are not lost to the network where another correct node was in the round, wh
 Correct nodes agree (S1), so what is left is how many are up:
 
 * t votes out of the n - f correct nodes leaves n - f - t of them free to be down, none at t = n - f.
-* Votes persist until the height settles, so nodes need not be up together.
+* Votes persist until the height settles or their node leaves the committee, so nodes need not be up together.
 * A node catching up votes at every boundary it passes rather than waiting for the head.
 * A vote is retried until the contract has it, and after a restart the node casts its votes for `pending` again.
 
