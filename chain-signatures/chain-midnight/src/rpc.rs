@@ -11,7 +11,7 @@ use jsonrpsee::types::error::{INVALID_PARAMS_CODE, OVERSIZED_RESPONSE_CODE};
 use mpc_chain_integration_core::utils::retry::{
     exhausted, http_status_read_retryable, is_retryable, RetryConfig,
 };
-use subxt::backend::legacy::rpc_methods::NumberOrHex;
+use subxt::backend::legacy::rpc_methods::{BlockDetails, NumberOrHex};
 use subxt::backend::legacy::LegacyRpcMethods;
 use subxt::backend::rpc::{RawRpcFuture, RawRpcSubscription, RawValue, RpcClient, RpcClientT};
 use subxt::client::OnlineClient;
@@ -438,23 +438,12 @@ impl MidnightRpc {
         responder: &[u8; 32],
     ) -> anyhow::Result<Option<BlockEmissions>> {
         let hash = parse_block_hash(&block_ref.hash)?;
-        // `chain_getBlock` carries the header, so one call reads the whole block.
-        let block = retry_read(
-            self.reads.request_timeout,
-            self.reads.retry,
-            "midnight_block",
-            || async {
-                self.reads
-                    .legacy
-                    .chain_get_block(Some(hash))
-                    .await
-                    .map_err(anyhow::Error::new)
-                    .context("failed to fetch a midnight block")
-            },
-        )
-        .await?
-        .with_context(|| format!("midnight node has no block {}", block_ref.hash))?
-        .block;
+        let block = self
+            .reads
+            .block(hash)
+            .await?
+            .with_context(|| format!("midnight node has no block {}", block_ref.hash))?
+            .block;
         let header = block.header;
         let extrinsics = subxt::ext::subxt_core::blocks::decode_from::<SubstrateConfig>(
             block.extrinsics.into_iter().map(|bytes| bytes.0).collect(),
@@ -1253,6 +1242,23 @@ impl Reads {
                     .await
                     .map_err(anyhow::Error::new)
                     .context("failed to fetch a block header")
+            },
+        )
+        .await
+    }
+
+    /// Header and body in one call: `chain_getBlock` carries the header.
+    async fn block(&self, hash: H256) -> anyhow::Result<Option<BlockDetails<SubstrateConfig>>> {
+        retry_read(
+            self.request_timeout,
+            self.retry,
+            "midnight_block",
+            || async {
+                self.legacy
+                    .chain_get_block(Some(hash))
+                    .await
+                    .map_err(anyhow::Error::new)
+                    .context("failed to fetch a midnight block")
             },
         )
         .await

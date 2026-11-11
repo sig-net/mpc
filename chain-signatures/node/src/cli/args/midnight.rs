@@ -187,14 +187,14 @@ mod tests {
             &"0f".repeat(32),
             "--midnight-indexer-ws-url",
             "ws://127.0.0.1:8088/api/v3/graphql/ws",
+            "--midnight-poll-interval-ms",
+            "4700",
             "--midnight-output-storage-bucket",
             "midnight-results",
             "--midnight-output-storage-prefix",
             "staging/testnet",
             "--midnight-output-storage-timeout-secs",
             "47",
-            "--midnight-poll-interval-ms",
-            "4700",
         ]
         .into_iter()
         .map(String::from)
@@ -336,6 +336,7 @@ mod tests {
             ("--midnight-responder-address", responder_address.as_str()),
             ("--midnight-funding-seed", "1"),
             ("--midnight-indexer-ws-url", "ws://127.0.0.1:1"),
+            ("--midnight-poll-interval-ms", "1"),
             ("--midnight-output-storage-bucket", "1"),
             ("--midnight-output-storage-prefix", "1"),
             ("--midnight-output-storage-timeout-secs", "1"),
@@ -388,6 +389,23 @@ mod tests {
             .expect("Midnight remains enabled");
         assert_eq!(config.node_url, configured().node_url);
         assert!(config.publisher.output_storage.is_none());
+    }
+
+    #[test]
+    fn poll_interval_defaults_to_one_block_time() {
+        crate::cli::tests::assert_midnight_env_unset();
+        let mut argv = configured_argv();
+        let index = argv
+            .iter()
+            .position(|arg| arg == "--midnight-poll-interval-ms")
+            .unwrap();
+        argv.drain(index..=index + 1);
+        let config = MidnightArgs::try_parse_from(argv)
+            .unwrap()
+            .into_config()
+            .unwrap()
+            .expect("Midnight enabled");
+        assert_eq!(config.indexer.poll_interval, Duration::from_secs(6));
     }
 
     #[test]
