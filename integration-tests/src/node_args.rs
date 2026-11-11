@@ -23,9 +23,10 @@ pub fn start(ctx: &Context, node: &NodeEnvConfig) -> Vec<String> {
     args.flag("--cipher-sk", hex::encode(node.cipher_sk.to_bytes()));
     args.flag("--sign-sk", &node.sign_sk);
     args.flag("--web-port", node.web_port);
+    args.flag("--my-address", node.address());
     args.chains(&node.cfg);
-    args.storage(&ctx.storage_options);
-    args.logs(&ctx.log_options);
+    args.storage(&ctx.storage_options, node.binary_path.is_none());
+    args.logs(&ctx.log_options, node.binary_path.is_none());
     args.0
 }
 
@@ -68,7 +69,7 @@ impl Args {
     fn sol(&mut self, sol: &SolConfig) {
         self.flag("--sol-account-sk", &sol.account_sk);
         self.flag("--sol-rpc-http-url", &sol.rpc_http_url);
-        self.flag("--sol-program-address", &sol.program_address);
+        self.flag("--sol-program-address", sol.program_address);
     }
 
     fn hydration(&mut self, hydration: &HydrationConfig) {
@@ -99,15 +100,20 @@ impl Args {
             "--midnight-central-address",
             midnight.central_address.to_hex(),
         );
-        self.flag("--midnight-funding-seed", &publisher.funding_seed);
         self.flag(
-            "--midnight-intent-gen-command",
-            serde_json::to_string(&publisher.intent_gen_command)
-                .expect("a Vec<String> always serializes"),
+            "--midnight-responder-address",
+            midnight.responder_address.to_hex(),
         );
-        self.flag("--midnight-proof-server-url", &publisher.proof_server_url);
-        self.flag("--midnight-indexer-url", &publisher.indexer_url);
+        self.flag("--midnight-funding-seed", &publisher.funding_seed);
         self.flag("--midnight-indexer-ws-url", &publisher.indexer_ws_url);
+        self.flag(
+            "--midnight-contract-artifacts-dir",
+            publisher.contract_artifacts_dir.display(),
+        );
+        self.flag(
+            "--midnight-zk-params-dir",
+            publisher.zk_params_dir.display(),
+        );
         if let Some(storage) = &publisher.output_storage {
             self.flag("--midnight-output-storage-bucket", &storage.bucket);
             self.flag("--midnight-output-storage-prefix", &storage.prefix);
@@ -121,22 +127,27 @@ impl Args {
         }
     }
 
-    fn storage(&mut self, storage: &storage::Options) {
+    fn storage(&mut self, storage: &storage::Options, is_current_node: bool) {
         if let Some(id) = &storage.gcp_project_id {
             self.flag("--gcp-project-id", id);
+        } else if !is_current_node {
+            // Older releases (e.g. 1.22.x) require --gcp-project-id on the CLI even when using local path storage.
+            self.flag("--gcp-project-id", "multichain-integration");
         }
         if let Some(id) = &storage.sk_share_secret_id {
             self.flag("--sk-share-secret-id", id);
         }
         if let Some(path) = &storage.sk_share_local_path {
-            self.flag("--sk-share-local-path", path);
+            self.flag("--sk-share-local-path", path.display());
         }
         self.flag("--redis-url", &storage.redis_url);
     }
 
-    fn logs(&mut self, logs: &logs::Options) {
+    fn logs(&mut self, logs: &logs::Options, is_current_node: bool) {
         self.flag("--opentelemetry-level", logs.opentelemetry_level);
         self.flag("--otlp-endpoint", &logs.otlp_endpoint);
-        self.flag("--log-format", logs.log_format);
+        if is_current_node {
+            self.flag("--log-format", logs.log_format);
+        }
     }
 }
