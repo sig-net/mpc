@@ -728,7 +728,9 @@ mod tests {
             .await;
 
         let client = test_client(&server.url());
-        assert!(client.get_slot_finalized().await.is_err());
+        let err = client.get_slot_finalized().await.unwrap_err();
+        assert!(is_retryable(&err), "{err:#}");
+        assert!(!is_provider_throttled(&err), "{err:#}");
     }
 
     #[tokio::test]
