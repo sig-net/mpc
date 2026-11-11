@@ -37,6 +37,8 @@ const MAX_CHUNK_SIZE: usize = 50;
 
 const SOL_RPC_TIMEOUT: Duration = Duration::from_secs(2);
 const SOL_BATCH_TIMEOUT: Duration = Duration::from_secs(30);
+/// HTTP-level timeout for requests (Vendored client default)
+const SOL_HTTP_TIMEOUT: Duration = Duration::from_secs(30);
 const SOL_RPC_MIN_DELAY: Duration = Duration::from_millis(500);
 const SOL_RPC_MAX_DELAY: Duration = Duration::from_secs(10);
 const SOL_RPC_MAX_RETRIES: usize = 5;
@@ -172,6 +174,13 @@ pub struct SolanaClient {
     pub telemetry: Arc<dyn PublisherTelemetry>,
 }
 
+fn http_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .timeout(SOL_HTTP_TIMEOUT)
+        .build()
+        .expect("reqwest client builder cannot fail for a timeout-only config")
+}
+
 impl SolanaClient {
     // TODO: reduce duplication between from_config and for_indexer
     pub fn from_config(sol: &SolConfig, telemetry: Arc<dyn PublisherTelemetry>) -> Self {
@@ -192,7 +201,7 @@ impl SolanaClient {
             // moves inside the client
             shared_backoff: SharedBackoff::new(),
             rpc_http_url: sol.rpc_http_url.clone(),
-            http_client: reqwest::Client::new(),
+            http_client: http_client(),
             program_id: sol.program_address,
             payer,
             telemetry,
@@ -222,7 +231,7 @@ impl SolanaClient {
             // publishes (and vice versa)
             shared_backoff,
             rpc_http_url,
-            http_client: reqwest::Client::new(),
+            http_client: http_client(),
             program_id: program_address,
             payer,
             telemetry,
