@@ -18,10 +18,11 @@ pub use mpc_primitives::{
 pub use eth_tx::{derive_user_address, public_key_to_address};
 pub use progress::{BidirectionalProgress, SignProgress, SignStatus};
 pub use signing::sign_and_hash_transaction;
-use signing::validate_unsigned_transaction;
 pub(crate) use signing::{
-    owned_by_requester, pending_destination_id, transaction_chain_id, transaction_nonce,
+    destination_expiry, owned_by_requester, pending_destination_id, transaction_chain_id,
+    transaction_nonce, ExpiryWindow,
 };
+use signing::validate_unsigned_transaction;
 
 /// The requester's chain-local identity string: Midnight and Canton senders
 /// are 32-byte addresses whose canonical form is the lowercase hex of those
@@ -186,12 +187,8 @@ impl SignBidirectionalEventExt for SignBidirectionalEvent {
             );
         }
         self.epsilon().context("cannot derive epsilon")?;
-        // TODO(tron): enforce §4.3's bound t_src < expiration ≤ t_src +
-        // 24 h. The raw bytes carry `expiration`; the missing pipe is the
-        // source time (event has none, Midnight reports block_timestamp:
-        // None) — thread indexed_ts into validate or expose block time.
-        // The expiry→Unviable scan must cover backlog entries, not just
-        // watchers.
+        // §4.3's expiry bound lives at ingestion (`expiry_bound` in stream
+        // ops): wall-clock anchors would split verdicts, block time does not.
         let calldata = validate_unsigned_transaction(target, &self.serialized_transaction)
             .context("undecodable serialized_transaction")?;
         match calldata {

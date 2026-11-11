@@ -26,11 +26,14 @@ use crate::protocol::consensus::ConsensusProtocol;
 use crate::protocol::cryptography::CryptographicProtocol;
 use crate::protocol::message::{GeneratingMessage, ReadyMessage, ResharingMessage};
 use crate::protocol::request::SignatureSpawnerTask;
+use crate::protocol::state::StartedState;
 use crate::rpc::ContractStateWatcher;
 use crate::storage::keystore::Keystore;
 use crate::storage::presignature_storage::PresignatureStorage;
 use crate::storage::triple_storage::TripleStorage;
+use crate::storage::Initializing;
 
+use anyhow::Context as _;
 use near_account_id::AccountId;
 use semver::Version;
 use std::path::Path;
@@ -76,8 +79,8 @@ impl AcceptLimits {
 pub struct MpcSignProtocol {
     pub(crate) my_account_id: AccountId,
     pub(crate) keystore: Keystore,
-    pub(crate) triple_storage: TripleStorage,
-    pub(crate) presignature_storage: PresignatureStorage,
+    pub(crate) triple_storage: TripleStorage<Initializing>,
+    pub(crate) presignature_storage: PresignatureStorage<Initializing>,
     pub(crate) sign_task: SignatureSpawnerTask,
     pub(crate) generating: mpsc::Receiver<GeneratingMessage>,
     pub(crate) resharing: mpsc::Receiver<ResharingMessage>,
@@ -141,34 +144,38 @@ impl MpcSignProtocol {
                 .as_secs() as i64,
         );
 
+        let key_share = self
+            .keystore
+            .load()
+            .await
+            .context("failed to read the key share store")?;
+        let mut state = NodeState::Started(StartedState { key_share });
         loop {
             let protocol_time = Instant::now();
             crate::metrics::protocols::PROTOCOL_ITER_CNT.inc();
 
             let mesh_state = mesh_state.borrow().clone();
             let crypto_time = Instant::now();
-            node.state = node.state.progress(&mut self, mesh_state).await;
-            node.update_watchers().await;
+            state = state.progress(&mut self, mesh_state).await;
+            node.update_watchers(&state).await;
             crate::metrics::protocols::PROTOCOL_LATENCY_ITER_CRYPTO
                 .observe(crypto_time.elapsed().as_secs_f64());
 
             if let Some(contract_state) = contract_state.state() {
                 let consensus_time = Instant::now();
-                node.state = node
-                    .state
+                state = state
                     .advance(&mut self, &mut gov_client, contract_state)
                     .await;
                 crate::metrics::protocols::PROTOCOL_LATENCY_ITER_CONSENSUS
                     .observe(consensus_time.elapsed().as_secs_f64());
-                node.update_watchers().await;
+                node.update_watchers(&state).await;
             }
 
-            let sleep_ms = match node.state {
+            let sleep_ms = match state {
                 NodeState::Generating(_) => 500,
                 NodeState::Resharing(_) => 500,
                 NodeState::Running(_) => 100,
 
-                NodeState::Starting => 1000,
                 NodeState::Started(_) => 1000,
                 NodeState::WaitingForConsensus(_) => 1000,
                 NodeState::Joining(_) => 1000,

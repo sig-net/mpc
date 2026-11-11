@@ -120,13 +120,26 @@ async fn assert_migration(
     Ok(())
 }
 
+// Each test migrates a live contract's state. Ignored: CI runs them per target branch.
+// Locally: `cargo test -p mpc-contract --test network_migration -- --ignored`.
+
 #[tokio::test]
-async fn test_migrate_deployed_network_states() -> anyhow::Result<()> {
+#[ignore = "run conditionally by CI, see test-unit.yml"]
+async fn test_migrate_dev_state() -> anyhow::Result<()> {
     let wasm = std::fs::read(contract_file_path())?;
+    assert_migration(TESTNET_RPC_URL, "dev.sig-net.testnet".parse()?, &wasm).await
+}
 
-    assert_migration(TESTNET_RPC_URL, "dev.sig-net.testnet".parse()?, &wasm).await?;
-    assert_migration(TESTNET_RPC_URL, "v1.sig-net.testnet".parse()?, &wasm).await?;
-    assert_migration(MAINNET_RPC_URL, "v1.sig-net.near".parse()?, &wasm).await?;
+#[tokio::test]
+#[ignore = "run conditionally by CI, see test-unit.yml"]
+async fn test_migrate_testnet_state() -> anyhow::Result<()> {
+    let wasm = std::fs::read(contract_file_path())?;
+    assert_migration(TESTNET_RPC_URL, "v1.sig-net.testnet".parse()?, &wasm).await
+}
 
-    Ok(())
+#[tokio::test]
+#[ignore = "run conditionally by CI, see test-unit.yml"]
+async fn test_migrate_mainnet_state() -> anyhow::Result<()> {
+    let wasm = std::fs::read(contract_file_path())?;
+    assert_migration(MAINNET_RPC_URL, "v1.sig-net.near".parse()?, &wasm).await
 }

@@ -12,10 +12,15 @@ pub trait ChainTelemetry: Send + Sync + Clone + 'static {
     /// Records that a checkpoint was created
     fn checkpoint_created(&self, block_number: u64);
 
-    /// Report that a request was indexed at the given block timestamp (currently used for Ethereum due to ~15 min finality delay)
+    /// Report that a request was indexed at the given block timestamp
+    /// (unix seconds) — Ethereum, Solana, and Midnight. The latency
+    /// population mixes Ethereum's ~15 min finality with indexing lag
+    /// elsewhere: a distribution shift from when it was Ethereum-only.
     fn request_indexed_at(&self, block_timestamp: u64, kind: RequestKind);
 
-    /// Report that a request was indexed without a block timestamp (faster chains, e.g. for Solana, Canton, or Hydration)
+    /// Report that a request was indexed without a block timestamp —
+    /// Canton and Hydration report no chain time, as does a Solana block
+    /// whose `blockTime` estimate is absent.
     fn request_indexed(&self, kind: RequestKind);
 
     /// Records a failed attempt to extract the output of a bidirectional
