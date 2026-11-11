@@ -29,7 +29,12 @@ pub fn env_u64(name: &str, default: Option<u64>) -> anyhow::Result<u64> {
 /// `MPC_ETH_NETWORK`). Like the node, the bench waits for finality unless
 /// the network is `anvil`.
 pub fn make_config() -> anyhow::Result<EthConfig> {
-    let network = std::env::var("MPC_ETH_NETWORK").unwrap_or_else(|_| "sepolia".to_string());
+    let network = match std::env::var("MPC_ETH_NETWORK") {
+        Ok(network) => network
+            .parse()
+            .map_err(|e| anyhow!("invalid MPC_ETH_NETWORK: {e}"))?,
+        Err(_) => mpc_chain_ethereum::EthNetwork::Sepolia,
+    };
     Ok(EthConfig {
         // The bench only indexes; the signer is never used.
         account_sk: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
@@ -41,7 +46,6 @@ pub fn make_config() -> anyhow::Result<EthConfig> {
         contract_address: opt_env("MPC_ETH_CONTRACT_ADDRESS")?
             .parse()
             .map_err(|e| anyhow!("invalid MPC_ETH_CONTRACT_ADDRESS: {e}"))?,
-        optimistic_requests: EthConfig::is_optimistic_network(&network),
         network,
         rpc: Default::default(),
         gas: Default::default(),
