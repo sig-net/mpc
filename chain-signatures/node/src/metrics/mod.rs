@@ -3,6 +3,7 @@ use std::{
     time::{Instant, SystemTime},
 };
 
+use crate::build;
 use near_account_id::AccountId;
 use prometheus::{HistogramOpts, HistogramVec, Opts, Result};
 
@@ -17,39 +18,12 @@ pub mod storage;
 pub mod telemetry;
 
 static NODE_ACCOUNT_ID: OnceLock<String> = OnceLock::new();
-static VERSION: OnceLock<String> = OnceLock::new();
-static GIT_COMMIT_HASH: OnceLock<String> = OnceLock::new();
-static BUILD_TIMESTAMP: OnceLock<String> = OnceLock::new();
 
-pub fn init_metrics(
-    account_id: &AccountId,
-    version: &str,
-    git_commit_hash: Option<&str>,
-    build_timestamp: Option<&str>,
-) {
+pub fn init_metrics(account_id: &AccountId) {
     if let Err(existing) = NODE_ACCOUNT_ID.set(account_id.to_string()) {
         // If set twice with a different value it is a programmer error; keep simple and panic.
         if existing.as_str() != account_id.as_str() {
             panic!("node account id already set to a different value");
-        }
-    }
-    if let Err(existing) = VERSION.set(version.to_string()) {
-        if existing.as_str() != version {
-            panic!("version already set to a different value");
-        }
-    }
-    if let Some(git_commit_hash) = git_commit_hash {
-        if let Err(existing) = GIT_COMMIT_HASH.set(git_commit_hash.to_string()) {
-            if existing.as_str() != git_commit_hash {
-                panic!("git commit hash already set to a different value");
-            }
-        }
-    }
-    if let Some(build_timestamp) = build_timestamp {
-        if let Err(existing) = BUILD_TIMESTAMP.set(build_timestamp.to_string()) {
-            if existing.as_str() != build_timestamp {
-                panic!("build timestamp already set to a different value");
-            }
         }
     }
 }
@@ -61,27 +35,6 @@ pub fn node_account_id() -> &'static str {
     #[cfg(any(test, feature = "test-feature"))]
     let account_id = account_id.or(Some("test-account.near"));
     account_id.expect("init_metrics runs before any metric is registered")
-}
-
-pub fn version() -> &'static str {
-    VERSION
-        .get()
-        .map(String::as_str)
-        .unwrap_or(env!("CARGO_PKG_VERSION"))
-}
-
-pub fn git_commit_hash() -> &'static str {
-    GIT_COMMIT_HASH
-        .get()
-        .map(String::as_str)
-        .unwrap_or("unknown")
-}
-
-pub fn build_timestamp() -> &'static str {
-    BUILD_TIMESTAMP
-        .get()
-        .map(String::as_str)
-        .unwrap_or("unknown")
 }
 
 pub fn try_create_int_gauge_vec_with_node_account_id(
@@ -156,9 +109,15 @@ fn node_opts(name: &str, help: &str) -> Result<Opts> {
 /// [`node_opts`] plus the node's build as const labels.
 fn node_build_opts(name: &str, help: &str) -> Result<Opts> {
     Ok(node_opts(name, help)?
-        .const_label("version".to_string(), version().to_string())
-        .const_label("git_commit_hash".to_string(), git_commit_hash().to_string())
-        .const_label("build_timestamp".to_string(), build_timestamp().to_string()))
+        .const_label("version".to_string(), build::VERSION.to_string())
+        .const_label(
+            "git_commit_hash".to_string(),
+            build::GIT_COMMIT_HASH.to_string(),
+        )
+        .const_label(
+            "build_timestamp".to_string(),
+            build::BUILD_TIMESTAMP.to_string(),
+        ))
 }
 
 fn histogram_opts(opts: Opts, buckets: Option<Vec<f64>>) -> HistogramOpts {
