@@ -96,13 +96,9 @@ fn classify_batch(e: reqwest::Error) -> anyhow::Error {
 
 /// JSON-RPC body error to carrier: skipped slots are terminal with their
 /// code, everything else retryable (another LB backend may serve it).
-fn classify_body_error(error: serde_json::Value) -> anyhow::Error {
-    let code = error.get("code").and_then(serde_json::Value::as_i64);
-    let message = error
-        .get("message")
-        .and_then(|m| m.as_str())
-        .map(str::to_owned)
-        .unwrap_or_else(|| error.to_string());
+fn classify_body_error(error: JsonRpcError) -> anyhow::Error {
+    let JsonRpcError { code, message } = error;
+    let message = message.unwrap_or_else(|| format!("code {code:?}"));
     match code {
         Some(code) if slot_skipped(code) => {
             anyhow::Error::new(RpcFailure::terminal_code(code, message))
@@ -125,6 +121,13 @@ struct JsonRpcRequest {
     params: serde_json::Value,
 }
 
+/// A JSON-RPC error object.
+#[derive(Debug, Deserialize)]
+struct JsonRpcError {
+    code: Option<i64>,
+    message: Option<String>,
+}
+
 /// Represents a JSON-RPC response, which can either be a successful result or an error.
 /// `id: Option` — the spec permits `null`, and a decode failure must not
 /// swallow the error side's verdict.
@@ -132,7 +135,7 @@ struct JsonRpcRequest {
 struct JsonRpcResponse<T> {
     id: Option<usize>,
     result: Option<T>,
-    error: Option<serde_json::Value>,
+    error: Option<JsonRpcError>,
 }
 
 #[derive(Clone)]
@@ -378,10 +381,7 @@ impl SolanaClient {
                         // silent — node-local absence warns because
                         // `process_catchup_item` refetch-retries it
                         (_, Some(error)) => {
-                            let skipped = error
-                                .get("code")
-                                .and_then(serde_json::Value::as_i64)
-                                .is_some_and(slot_skipped);
+                            let skipped = error.code.is_some_and(slot_skipped);
                             let slot = resp.id.and_then(|id| slots.get(id)).copied();
                             if !skipped {
                                 tracing::warn!(?error, ?slot, "JSON-RPC batch response error");
