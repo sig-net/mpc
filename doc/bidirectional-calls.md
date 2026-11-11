@@ -401,7 +401,7 @@ on SignRequest { contract, rid, req } finalised on the source chain:
         drop
     if rid in backlog or not processable(req):            // M2
         drop
-    backlog[rid] = { req, contract, tx_ids: {} }
+    backlog[rid] = { req, contract, tx_ids: {}, unviable_at: none }
     signature = threshold_sign(req.tx, derived_key(contract, req.key))   // M1
     local[rid].issued.add(signature)       // stored before publishing
     publish_signature(rid, signature)
