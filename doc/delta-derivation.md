@@ -20,9 +20,10 @@ big_r' = big_r * delta,  k' = k / delta,  sigma' = (sigma + epsilon * k) / delta
 Operators choose which presignature they propose and so control `big_r`. That is acceptable: `delta` still depends on the request and on `entropy`, so choosing `big_r` gives no advantage toward forging. `entropy` is not there to counter presignature choice.
 
 Which block field satisfies requirement 1 depends on the chain and is decided per chain.
-Midnight and Ethereum both derive `entropy = Keccak256(block_hash || request_id)`;
-the block hash supplies unpredictability, and including the request ID gives
-requests in the same block distinct proposer-election seeds.
+Midnight, Ethereum and Solana all derive
+`entropy = Keccak256(block_hash || request_id)`; the block hash supplies
+unpredictability, and including the request ID gives requests in the same block
+distinct proposer-election seeds.
 
 - **Midnight:** `block_hash` is the hash of the finalized block containing the
   request; both inputs are 32 bytes.
@@ -36,6 +37,12 @@ requests in the same block distinct proposer-election seeds.
   contents, or censor a request into a later block; these producer-level powers
   are outside the threat model. Requester-proposer collusion is not covered.
   Production nodes derive entropy only from finalized blocks.
+- **Solana:** `block_hash` is the hash of the containing finalized block from
+  the `getBlock` response. It is a leader-produced block identifier, not a
+  randomness beacon, so this source is not bias-resistant against a malicious
+  or colluding leader; requester-leader collusion is out of scope. Historical
+  values exposed through `recentBlockhash` or `SlotHashes` are not a stronger
+  source of fresh entropy.
 
 ## Upgrade safety
 
@@ -44,8 +51,9 @@ request ID, so nodes on different rules derive different values for the same
 request. Since [#1595](https://github.com/sig-net/mpc/pull/1595) the checkpoint
 digest covers `request.args` (entropy included), such a split shows up as
 diverging digests: it heals by rebase while one rule still has `t` nodes, and
-otherwise Ethereum checkpoints stall.
+otherwise the affected chain's checkpoints stall.
 
 ## Entropy of a response
 
 For a response to a bidirectional request ([bidirectional-calls.md](bidirectional-calls.md), Section 4.3) its `entropy` is `H(first_leg_entropy || payload || epsilon)`, the hash of the first leg's `entropy`, the message being signed and its key's tweak, so `delta` moves with the first leg's `entropy` and binds the other two. Every node signing that message under that key derives the same `entropy`, whichever way it learned the outcome.
+
