@@ -9,6 +9,7 @@ pub enum BenchScenario {
     All,
     Baseline,
     Polling,
+    Checkpoint,
     Storm,
     Proposer,
     Saturation,
@@ -35,7 +36,7 @@ impl std::fmt::Display for BenchScenario {
     about = "Redis Latency & Stress Benchmark Harness (Pure Redis Container - No MPC Nodes, NEAR, or Blockchains)"
 )]
 struct Args {
-    /// Benchmark scenario to run: 'all', 'baseline', 'polling', 'storm', 'proposer', 'saturation', 'clear', 'mixed', 'sync_prune', 'client_kill', 'deep_stockpile', 'reservation_churn', 'conflicted_take', 'large_batch_prune', 'disk_stall'
+    /// Benchmark scenario to run.
     #[arg(short, long, value_enum, default_value_t = BenchScenario::All)]
     scenario: BenchScenario,
 
@@ -46,6 +47,10 @@ struct Args {
     /// Number of items (triples/presignatures) per participant
     #[arg(short, long, default_value_t = 300)]
     items: usize,
+
+    /// Pending requests per checkpoint in the checkpoint contention scenario.
+    #[arg(long, default_value_t = 25_000)]
+    checkpoint_requests: usize,
 
     /// Per-node connection pool max size (0 uses the deadpool default).
     #[arg(long, default_value_t = 0)]
@@ -241,6 +246,15 @@ async fn main() -> anyhow::Result<()> {
             println!("\n>>> Running Scenario 2: Stockpile One-Second Polling Contention Comparison");
             let results = harness.bench_polling_contention(args.items / 2).await?;
             println!("\n  Comparison (Without vs. With One-Second Polling Contention):");
+            harness.report_results(&results).await?;
+            record(results);
+        }
+
+        if should_run(BenchScenario::Checkpoint) {
+            println!("\n>>> Running checkpoint contention with {} pending requests per node", args.checkpoint_requests);
+            let results = harness
+                .bench_checkpoint_contention(args.checkpoint_requests, args.items)
+                .await?;
             harness.report_results(&results).await?;
             record(results);
         }

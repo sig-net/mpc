@@ -4,6 +4,9 @@ use std::time::{Duration, Instant};
 
 use anyhow::Context as _;
 use cait_sith::protocol::Participant;
+use mpc_node::backlog::{mock::mock_sign_request, BacklogEntry, Checkpoint};
+use mpc_node::storage::CheckpointStorage;
+use mpc_primitives::{Chain, SignId};
 
 use super::diagnostics::LatencySummary;
 use super::gate::StartingGate;
@@ -174,6 +177,134 @@ impl RedisHarness {
         }));
 
         Ok(combined)
+    }
+
+    /// Compare artifact traffic with and without concurrent checkpoint writes and reads.
+    pub async fn bench_checkpoint_contention(
+        &self,
+        requests_per_checkpoint: usize,
+        workload_items: usize,
+    ) -> anyhow::Result<Vec<LatencySummary>> {
+        self.reset_diagnostics().await?;
+        let baseline = self.run_concurrent_insert_and_take(workload_items).await?;
+        self.reset_diagnostics().await?;
+
+        if self.participants.is_empty() || workload_items == 0 {
+            return Ok(vec![
+                LatencySummary::empty("concurrent_insert_triple_no_checkpoint"),
+                LatencySummary::empty("concurrent_take_triple_no_checkpoint"),
+                LatencySummary::empty("concurrent_insert_triple_with_checkpoint"),
+                LatencySummary::empty("concurrent_take_triple_with_checkpoint"),
+                LatencySummary::empty("checkpoint_write"),
+                LatencySummary::empty("checkpoint_read"),
+            ]);
+        }
+
+        let mut checkpoint = Checkpoint::empty(Chain::Solana);
+        checkpoint.pending_requests = (0..requests_per_checkpoint)
+            .map(|i| {
+                let mut id = [0; 32];
+                id[..8].copy_from_slice(&(i as u64).to_le_bytes());
+                let mut request = mock_sign_request(SignId::new(id), Chain::Solana);
+                // Approximate the observed ~1.2 kB/request checkpoint payload.
+                Arc::get_mut(&mut request).unwrap().args.path = "x".repeat(900);
+                BacklogEntry::new(request)
+            })
+            .collect();
+        let mut encoded = Vec::new();
+        ciborium::into_writer(&checkpoint, &mut encoded)?;
+        println!("   -> Checkpoint payload: {} bytes per node", encoded.len());
+        drop(encoded);
+        let checkpoint = Arc::new(checkpoint);
+        let storages: Vec<_> = self
+            .participants
+            .iter()
+            .map(|p| CheckpointStorage::Redis(p.pool.clone(), p.account_id.clone()))
+            .collect();
+        futures::future::try_join_all(storages.iter().map(|s| s.persist(&checkpoint))).await?;
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let gate = StartingGate::new(self.participants.len() * 2);
+        let mut tasks = Vec::new();
+        for storage in storages {
+            for is_write in [true, false] {
+                let storage = storage.clone();
+                let checkpoint = checkpoint.clone();
+                let stop = stop.clone();
+                let barrier = gate.barrier();
+                tasks.push(tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
+                    barrier.wait().await;
+                    let mut latencies = Vec::new();
+                    let mut failures = 0;
+                    let mut intervals = Vec::new();
+                    while !stop.load(Ordering::Relaxed) {
+                        let start = Instant::now();
+                        let success = if is_write {
+                            storage.persist(&checkpoint).await.is_ok()
+                        } else {
+                            matches!(storage.load_latest(Chain::Solana).await,
+                                Ok(Some(value)) if value.pending_requests.len() == checkpoint.pending_requests.len())
+                        };
+                        let end = Instant::now();
+                        intervals.push((start, end));
+                        if success { latencies.push(end - start); } else { failures += 1; }
+                    }
+                    (is_write, latencies, failures, intervals)
+                })));
+            }
+        }
+
+        let start = gate.start().await;
+        let workload_start = Instant::now();
+        let workload = self.run_concurrent_insert_and_take(workload_items).await;
+        let workload_end = Instant::now();
+        stop.store(true, Ordering::Relaxed);
+        let mut writes = Vec::new();
+        let mut reads = Vec::new();
+        let mut write_failures = 0;
+        let mut read_failures = 0;
+        let mut write_overlap = false;
+        let mut read_overlap = false;
+        for task in tasks {
+            let (is_write, latencies, failures, intervals) = task.await?;
+            let overlapped = intervals
+                .into_iter()
+                .any(|interval| overlaps(interval, (workload_start, workload_end)));
+            if is_write {
+                writes.extend(latencies);
+                write_failures += failures;
+                write_overlap |= overlapped;
+            } else {
+                reads.extend(latencies);
+                read_failures += failures;
+                read_overlap |= overlapped;
+            }
+        }
+        let wall = start.elapsed();
+        let workload = workload?;
+        anyhow::ensure!(write_overlap && read_overlap, "checkpoint reads and writes did not both overlap the artifact workload; increase --items");
+        let mut results = Vec::new();
+        results.extend(baseline.into_iter().map(|mut result| {
+            result.op_name.push_str("_no_checkpoint");
+            result
+        }));
+        results.extend(workload.into_iter().map(|mut result| {
+            result.op_name.push_str("_with_checkpoint");
+            result
+        }));
+        results.push(LatencySummary::calculate_with_failures(
+            "checkpoint_write",
+            &mut writes,
+            wall,
+            write_failures,
+        ));
+        results.push(LatencySummary::calculate_with_failures(
+            "checkpoint_read",
+            &mut reads,
+            wall,
+            read_failures,
+        ));
+        Ok(results)
     }
 
     /// SCENARIO 3: `remove_outdated` Pruning Storm.
