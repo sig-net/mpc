@@ -9,8 +9,6 @@
 
 use crate::client::EthereumClient;
 use crate::config::IndexerConfig;
-use crate::event_parsing::is_contract_call;
-use crate::respond_bidirectional::{build_serialized_output, TraceOutput};
 use alloy::consensus::Transaction;
 use alloy::eips::BlockNumberOrTag;
 use alloy::network::TransactionResponse;
@@ -20,6 +18,7 @@ use futures_util::{stream, StreamExt};
 use mpc_chain_integration_core::{
     unexecutable_outcome, ChainTelemetry, ExtractionFailureKind, StateManager, WatchedExecution,
 };
+use mpc_evm_common::{build_serialized_output, is_contract_call, TraceOutput};
 use mpc_primitives::{
     BidirectionalTx, BidirectionalTxId, Chain, ChainConfig as _, ChainEvent, ExecutionOutcome,
     SignId,

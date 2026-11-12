@@ -7,10 +7,14 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::io::Write;
 
-use crate::event_parsing::is_contract_call;
-
 // Use Abi as this is what we are using for ethereum
 const OUTPUT_DESERIALIZATION_FORMAT: SerDeserFormat = SerDeserFormat::Abi;
+
+/// Whether a transaction's calldata represents a contract call: the
+/// same predicate on every EVM-family target.
+pub fn is_contract_call(input: &Bytes) -> bool {
+    !input.is_empty()
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 struct AbiField {
@@ -437,6 +441,15 @@ mod tests {
     use super::*;
 
     const UINT256_SCHEMA: &[u8] = br#"[{"name":"amount","type":"uint256"}]"#;
+
+    #[test]
+    fn is_contract_call_detects_calldata() {
+        assert!(!is_contract_call(&Bytes::new()));
+        assert!(is_contract_call(&Bytes::from(vec![0u8; 2])));
+        assert!(is_contract_call(&Bytes::from(vec![
+            0xa9, 0x05, 0x9c, 0xbb, 0x00
+        ])));
+    }
 
     /// ABI-encoded `uint256` (32-byte big-endian).
     fn abi_uint256(value: u64) -> Bytes {

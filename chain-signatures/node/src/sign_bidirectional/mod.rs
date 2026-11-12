@@ -184,7 +184,7 @@ impl SignBidirectionalEventExt for SignBidirectionalEvent {
         let calldata = validate_unsigned_transaction(target, &self.serialized_transaction)
             .context("undecodable serialized_transaction")?;
         match calldata {
-            Some(calldata) => mpc_chain_ethereum::validate_schemas(
+            Some(calldata) => mpc_evm_common::validate_schemas(
                 calldata,
                 &self.output_deserialization_schema,
                 self.chain.respond_serialization_format(),

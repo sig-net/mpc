@@ -16,11 +16,6 @@ use mpc_primitives::{
 use mpc_utils::time::current_unix_timestamp;
 use tokio::sync::mpsc;
 
-/// Whether a transaction's calldata represents a contract call.
-pub fn is_contract_call(input: &Bytes) -> bool {
-    !input.is_empty()
-}
-
 pub fn parse_filtered_logs(logs: Vec<Log>) -> Vec<IndexedSignRequest> {
     let mut indexed_requests = Vec::new();
     for log in logs {
@@ -259,15 +254,6 @@ mod tests {
             ),
             ..Default::default()
         }
-    }
-
-    #[test]
-    fn is_contract_call_detects_calldata() {
-        assert!(!is_contract_call(&Bytes::new()));
-        assert!(is_contract_call(&Bytes::from(vec![0u8; 2])));
-        assert!(is_contract_call(&Bytes::from(vec![
-            0xa9, 0x05, 0x9c, 0xbb, 0x00
-        ])));
     }
 
     #[test]

@@ -7595,7 +7595,6 @@ dependencies = [
  "alloy",
  "anyhow",
  "async-trait",
- "borsh",
  "futures-util",
  "hex",
  "http 1.5.0",
@@ -7603,7 +7602,7 @@ dependencies = [
  "mockito",
  "mpc-chain-integration-core",
  "mpc-crypto",
- "mpc-midnight-respond-codec",
+ "mpc-evm-common",
  "mpc-primitives",
  "mpc-utils",
  "serde",
@@ -7852,6 +7851,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "mpc-evm-common"
+version = "1.22.0"
+dependencies = [
+ "alloy",
+ "anyhow",
+ "borsh",
+ "mpc-midnight-respond-codec",
+ "mpc-primitives",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "mpc-keys"
 version = "1.22.0"
 dependencies = [
@@ -7912,6 +7924,7 @@ dependencies = [
  "mpc-compact-hashing",
  "mpc-contract",
  "mpc-crypto",
+ "mpc-evm-common",
  "mpc-keys",
  "mpc-primitives",
  "mpc-tron-wire",

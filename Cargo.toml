@@ -20,6 +20,7 @@ members = [
     "chain-signatures/tron-wire",
     "chain-signatures/compact-hashing",
     "chain-signatures/midnight-respond-codec",
+    "chain-signatures/evm-common",
     "chain-signatures/utils",
 ]
 resolver = "2"
@@ -115,6 +116,7 @@ mpc-chain-tron = { path = "./chain-signatures/chain-tron" }
 mpc-tron-wire = { path = "./chain-signatures/tron-wire" }
 mpc-compact-hashing = { path = "./chain-signatures/compact-hashing" }
 mpc-midnight-respond-codec = { path = "./chain-signatures/midnight-respond-codec" }
+mpc-evm-common = { path = "./chain-signatures/evm-common" }
 mpc-keys = { path = "./chain-signatures/keys" }
 mpc-utils = { path = "./chain-signatures/utils" }
 mpc-node = { path = "./chain-signatures/node" }
