@@ -21,7 +21,8 @@ pub struct StockCounts {
     pub generated: usize,
 }
 
-// Redis connection backoff configuration
+// Backoff for taking a Redis connection from the pool: up to 3 retries, 100ms
+// to 2s apart. A single attempt failed too often on a stale connection.
 const REDIS_CONNECT_MIN_DELAY_MS: u64 = 100;
 const REDIS_CONNECT_MAX_DELAY_SECS: u64 = 2;
 const REDIS_CONNECT_MAX_TIMES: usize = 3;
