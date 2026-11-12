@@ -7784,6 +7784,7 @@ dependencies = [
  "k256 0.13.4",
  "mockito",
  "mpc-chain-integration-core",
+ "mpc-evm-common",
  "mpc-primitives",
  "mpc-tron-wire",
  "prost-types",

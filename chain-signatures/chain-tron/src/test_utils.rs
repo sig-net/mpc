@@ -34,6 +34,47 @@ pub(crate) fn test_config(endpoint: Url) -> TronConfig {
     }
 }
 
+/// A parseable raw, absent calldata unless given
+fn fixture_raw(calldata: Option<([u8; 4], Vec<[u8; 32]>)>) -> Vec<u8> {
+    let calldata = match calldata {
+        Some((selector, words)) => CompactMaybe {
+            is_some: true,
+            value: Calldata {
+                selector,
+                no_words: words.len() as u16,
+                words,
+            },
+        },
+        None => CompactMaybe {
+            is_some: false,
+            value: Calldata {
+                selector: [0; 4],
+                no_words: 0,
+                words: Vec::new(),
+            },
+        },
+    };
+    let params = TronTxParams {
+        ref_block_bytes: [0x00, 0x03],
+        ref_block_hash: [0x03; 8],
+        timestamp: ASSEMBLED_AT,
+        expiration: ASSEMBLED_AT + 60_000,
+        contract_address: {
+            let mut address = [0xcd; 21];
+            address[0] = 0x41;
+            address
+        },
+        fee_limit: 0,
+        call_value: 0,
+        calldata,
+    };
+    to_unsigned_tron_tx(&params, owner_addr()).unwrap()
+}
+
+fn owner_addr() -> TronAddress {
+    TronAddress::from_evm(alloy::primitives::Address::from_slice(&[0xab; 20]))
+}
+
 /// Watcher entry keyed by the seed (txID's first byte); the request id
 /// mirrors it, as `to_bidirectional_tx` builds it.
 pub(crate) fn watcher_tx(seed: u8) -> (BidirectionalTxId, SignId, Arc<BidirectionalTx>) {
@@ -42,7 +83,7 @@ pub(crate) fn watcher_tx(seed: u8) -> (BidirectionalTxId, SignId, Arc<Bidirectio
     let tx = Arc::new(BidirectionalTx {
         id: BidirectionalTxId(id),
         sender: [0u8; 32],
-        serialized_transaction: vec![],
+        serialized_transaction: fixture_raw(None),
         source_chain: mpc_primitives::Chain::Midnight,
         target_chain: mpc_primitives::Chain::Tron,
         caip2_id: "tron:mainnet".to_string(),
@@ -61,13 +102,23 @@ pub(crate) fn watcher_tx(seed: u8) -> (BidirectionalTxId, SignId, Arc<Bidirectio
     (BidirectionalTxId(id), SignId::new(id), tx)
 }
 
-/// The same entry carrying a non-empty output schema — admission
-/// refuses these today; the watcher must still handle it.
+/// The same entry with calldata in its raw and a non-empty output schema.
 pub(crate) fn schema_carrying_tx(seed: u8) -> (BidirectionalTxId, SignId, Arc<BidirectionalTx>) {
     let (tx_id, sign_id, tx) = watcher_tx(seed);
     let mut with_schema = (*tx).clone();
+    with_schema.serialized_transaction =
+        fixture_raw(Some(([0xa9, 0x05, 0x9c, 0xbb], vec![[0u8; 32]])));
     with_schema.output_deserialization_schema = br#"[{"name":"output","type":"bool"}]"#.to_vec();
     (tx_id, sign_id, with_schema.into())
+}
+
+/// The same entry with calldata in its raw and empty schemas.
+pub(crate) fn calling_tx(seed: u8) -> (BidirectionalTxId, SignId, Arc<BidirectionalTx>) {
+    let (tx_id, sign_id, tx) = watcher_tx(seed);
+    let mut with_calldata = (*tx).clone();
+    with_calldata.serialized_transaction =
+        fixture_raw(Some(([0xa9, 0x05, 0x9c, 0xbb], vec![[0u8; 32]])));
+    (tx_id, sign_id, with_calldata.into())
 }
 
 /// The expiry tests' shared fixture: a server answering both heads
@@ -121,6 +172,19 @@ fn receipt_mock(
 pub(crate) fn success_body(seed: u8) -> String {
     receipt_body(seed, "", "SUCCESS")
 }
+
+/// Success whose top call returned `ret` (hex) in `contractResult`.
+pub(crate) fn success_body_with_return(seed: u8, ret: &str) -> String {
+    let tx_id = watcher_tx(seed).0;
+    format!(
+        r#"{{ "id": "{}", "blockNumber": 71896097, "fee": 472800, "contractResult": ["{ret}"], "receipt": {{ "result": "SUCCESS" }} }}"#,
+        hex::encode(tx_id.0)
+    )
+}
+
+/// The ABI `false` word — the recorded USDT transfer's return value.
+pub(crate) const ABI_FALSE_WORD: &str =
+    "0000000000000000000000000000000000000000000000000000000000000000";
 
 /// Failure prints `FAILED` above the specific member.
 pub(crate) fn failure_body(seed: u8, member: &str) -> String {

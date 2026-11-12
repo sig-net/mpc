@@ -3,10 +3,12 @@
 //! Receipt fields mirror java-tron's `TransactionInfo`/`ResourceReceipt`
 //! JSON (protocol/core/Tron.proto@4e8389f).
 
-use alloy::primitives::{Log, LogData, B256};
+use alloy::primitives::{Bytes, Log, LogData, B256};
 
 use anyhow::{bail, Context};
-use mpc_primitives::ExecutionOutcome;
+use mpc_evm_common::{build_serialized_output, is_contract_call, TraceOutput};
+use mpc_primitives::{BidirectionalTx, ChainConfig as _, ExecutionOutcome};
+use mpc_tron_wire::pb::RawTransaction;
 
 pub use mpc_tron_wire::NowBlock;
 
@@ -86,18 +88,39 @@ impl TronReceipt {
         }
     }
 
-    /// The attested outcome for a request carrying `output_schema` — the
-    /// one policy site; watcher and live gate read it and cannot drift.
-    pub fn execution_outcome(&self, output_schema: &[u8]) -> anyhow::Result<ExecutionOutcome> {
+    /// The attested outcome from the request's own schemas:
+    /// `contractResult[0]` is the top call's return data — the bytes
+    /// EVM's `callTracer` top frame yields (§7.5.2.2). A refusal is
+    /// deterministic (receipt and entry immutable), so it parks as
+    /// [`ExecutionOutcome::ExtractionFailed`]; an unclassifiable
+    /// verdict errs, to keep polling.
+    pub fn execution_outcome(&self, tx: &BidirectionalTx) -> anyhow::Result<ExecutionOutcome> {
         match self.execution_result()? {
             TronExecutionResult::Failed => Ok(ExecutionOutcome::Failed),
-            // Schema-less: empty output until log extraction is defined.
-            TronExecutionResult::Succeeded if output_schema.is_empty() => {
-                Ok(ExecutionOutcome::Success { output: Vec::new() })
+            TronExecutionResult::Succeeded => {
+                let built = RawTransaction::parse(&tx.serialized_transaction)
+                    .and_then(|raw| raw.calldata())
+                    .and_then(|calldata| {
+                        let trace = match self.contract_result.first() {
+                            Some(data) => TraceOutput::Output(Bytes::from(data.clone())),
+                            None => TraceOutput::NoReturnData,
+                        };
+                        build_serialized_output(
+                            is_contract_call(&Bytes::from(calldata)),
+                            &tx.output_deserialization_schema,
+                            trace,
+                            tx.source_chain.respond_serialization_format(),
+                            &tx.respond_serialization_schema,
+                        )
+                    });
+                match built {
+                    Ok(output) => Ok(ExecutionOutcome::Success { output }),
+                    Err(err) => {
+                        tracing::warn!(?tx.id, "output extraction failed terminally: {err:#}");
+                        Ok(ExecutionOutcome::ExtractionFailed)
+                    }
+                }
             }
-            // No extractable output: park rather than attest an empty one.
-            // TODO(tron): log-based output extraction.
-            TronExecutionResult::Succeeded => Ok(ExecutionOutcome::ExtractionFailed),
         }
     }
 }
@@ -118,6 +141,7 @@ pub struct SolidifiedBlock {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_utils::{schema_carrying_tx, watcher_tx};
 
     fn receipt(result: Option<&str>, receipt_result: Option<&str>) -> TronReceipt {
         TronReceipt {
@@ -131,6 +155,12 @@ mod tests {
             res_message: None,
             logs: vec![],
         }
+    }
+
+    fn receipt_returning(data: Vec<Vec<u8>>) -> TronReceipt {
+        let mut r = receipt(Some("SUCCESS"), None);
+        r.contract_result = data;
+        r
     }
 
     /// Every member of both vendor enums (Tron.proto@4e8389f), in both
@@ -188,20 +218,34 @@ mod tests {
     fn execution_outcome_maps_schema_policy() {
         let failed = receipt(Some("REVERT"), None);
         assert!(matches!(
-            failed.execution_outcome(&[]).unwrap(),
+            failed.execution_outcome(&watcher_tx(1).2).unwrap(),
             ExecutionOutcome::Failed
         ));
         let succeeded = receipt(Some("SUCCESS"), None);
         assert!(matches!(
-            succeeded.execution_outcome(&[]).unwrap(),
+            succeeded.execution_outcome(&watcher_tx(1).2).unwrap(),
             ExecutionOutcome::Success { output } if output.is_empty()
         ));
-        let schema = br#"[{"name":"output","type":"bool"}]"#;
+        assert!(receipt(None, None)
+            .execution_outcome(&watcher_tx(1).2)
+            .is_err());
+
+        // contractResult[0] decoded and re-serialized: Fab `false`.
+        let returning = receipt_returning(vec![vec![0u8; 32]]);
         assert!(matches!(
-            succeeded.execution_outcome(schema).unwrap(),
+            returning
+                .execution_outcome(&schema_carrying_tx(1).2)
+                .unwrap(),
+            ExecutionOutcome::Success { output } if output == vec![0]
+        ));
+        // A table refusal is deterministic: park, don't err.
+        let undecodable = receipt_returning(vec![vec![0u8; 2]]);
+        assert!(matches!(
+            undecodable
+                .execution_outcome(&schema_carrying_tx(1).2)
+                .unwrap(),
             ExecutionOutcome::ExtractionFailed
         ));
-        assert!(receipt(None, None).execution_outcome(&[]).is_err());
     }
 
     /// Only failure prints both (top-level FAILED, nested member) — never

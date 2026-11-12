@@ -112,7 +112,7 @@ impl<S: StateManager, T: ChainTelemetry> TronWatcher<S, T> {
         let WatchedExecution { sign_id, tx } = member;
         let tx_id = tx.id;
         let result = receipt
-            .execution_outcome(&tx.output_deserialization_schema)
+            .execution_outcome(&tx)
             .inspect_err(|err| {
                 tracing::warn!(?tx_id, ?sign_id, "{err:#}");
                 self.telemetry
@@ -120,15 +120,12 @@ impl<S: StateManager, T: ChainTelemetry> TronWatcher<S, T> {
             })
             .ok()?;
 
-        // The park arm reports terminal telemetry.
+        // Terminal telemetry; the cause is logged at the policy site
+        // (`execution_outcome`).
         if matches!(result, ExecutionOutcome::ExtractionFailed) {
             self.telemetry
                 .bidirectional_extraction_failed(ExtractionFailureKind::Terminal);
-            tracing::error!(
-                ?tx_id,
-                ?sign_id,
-                "schema-carrying request, but Tron output extraction is undefined; parking"
-            );
+            tracing::error!(?tx_id, ?sign_id, "output extraction failed; parking");
         }
 
         Some(ChainEvent::ExecutionConfirmed {
@@ -504,10 +501,68 @@ mod tests {
         run.stop().await;
     }
 
-    /// A successful receipt can't yield a schema-carrying request's
-    /// output: park rather than attest an empty one.
+    /// A successful receipt yields the request's output:
+    /// `contractResult[0]` decoded and re-serialized (Fab `bool` →
+    /// one byte).
     #[tokio::test]
-    async fn schema_carrying_success_parks() {
+    async fn schema_carrying_success_extracts() {
+        let server = mockito::Server::new_async().await;
+        let config = test_config(server.url().parse().unwrap());
+        let mut server = server;
+        nowblock_mock(&mut server);
+        receipt_stub(&mut server, 1, success_body_with_return(1, ABI_FALSE_WORD))
+            .expect(1)
+            .create();
+
+        let state = MockStateManager::new();
+        state
+            .watch_execution(Chain::Tron, schema_carrying_tx(1).2)
+            .await;
+
+        let telemetry = CountingTelemetry::default();
+        let mut run = spawn_watcher(config, state, telemetry.clone());
+        first_is_catchup_completed(&mut run).await;
+        let (_, result) = until_confirmed(&mut run, 1).await;
+        assert!(matches!(&result,
+            ExecutionOutcome::Success { output } if *output == vec![0]));
+        assert_eq!(telemetry.terminal_failures(), 0);
+        assert_eq!(telemetry.retryable_failures(), 0);
+
+        run.stop().await;
+    }
+
+    /// Receipt and entry are immutable, so a table refusal is
+    /// deterministic — park with terminal telemetry, never retry.
+    #[tokio::test]
+    async fn undecodable_return_data_parks() {
+        let server = mockito::Server::new_async().await;
+        let config = test_config(server.url().parse().unwrap());
+        let mut server = server;
+        nowblock_mock(&mut server);
+        receipt_stub(&mut server, 1, success_body_with_return(1, "00"))
+            .expect(1)
+            .create();
+
+        let state = MockStateManager::new();
+        state
+            .watch_execution(Chain::Tron, schema_carrying_tx(1).2)
+            .await;
+
+        let telemetry = CountingTelemetry::default();
+        let mut run = spawn_watcher(config, state, telemetry.clone());
+        first_is_catchup_completed(&mut run).await;
+        let (_, result) = until_confirmed(&mut run, 1).await;
+        assert!(matches!(result, ExecutionOutcome::ExtractionFailed));
+        assert!(telemetry.terminal_failures() >= 1);
+        assert_eq!(telemetry.retryable_failures(), 0);
+
+        run.stop().await;
+    }
+
+    /// A schema-carrying call whose receipt carries no return data
+    /// parks — same arm, different table row.
+    #[tokio::test]
+    async fn schema_without_return_data_parks() {
         let server = mockito::Server::new_async().await;
         let config = test_config(server.url().parse().unwrap());
         let mut server = server;
@@ -527,7 +582,31 @@ mod tests {
         let (_, result) = until_confirmed(&mut run, 1).await;
         assert!(matches!(result, ExecutionOutcome::ExtractionFailed));
         assert!(telemetry.terminal_failures() >= 1);
-        assert_eq!(telemetry.retryable_failures(), 0);
+
+        run.stop().await;
+    }
+
+    /// Return data with an empty output schema parks under EVM parity
+    /// — the recorded USDT shape the placeholder used to attest empty.
+    #[tokio::test]
+    async fn return_data_with_empty_schema_parks() {
+        let server = mockito::Server::new_async().await;
+        let config = test_config(server.url().parse().unwrap());
+        let mut server = server;
+        nowblock_mock(&mut server);
+        receipt_stub(&mut server, 1, success_body_with_return(1, ABI_FALSE_WORD))
+            .expect(1)
+            .create();
+
+        let state = MockStateManager::new();
+        state.watch_execution(Chain::Tron, calling_tx(1).2).await;
+
+        let telemetry = CountingTelemetry::default();
+        let mut run = spawn_watcher(config, state, telemetry.clone());
+        first_is_catchup_completed(&mut run).await;
+        let (_, result) = until_confirmed(&mut run, 1).await;
+        assert!(matches!(result, ExecutionOutcome::ExtractionFailed));
+        assert!(telemetry.terminal_failures() >= 1);
 
         run.stop().await;
     }

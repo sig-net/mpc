@@ -88,8 +88,8 @@ fn bidirectional_tx(
         algo: "secp256k1".to_string(),
         dest: "tron:nile".to_string(),
         params: String::new(),
-        output_deserialization_schema: vec![],
-        respond_serialization_schema: vec![],
+        output_deserialization_schema: br#"[{"name":"ok","type":"bool"}]"#.to_vec(),
+        respond_serialization_schema: br#"[{"name":"ok","type":"bool"}]"#.to_vec(),
         request_id: id,
         from_address: [0u8; 20],
         nonce: 0,
@@ -202,6 +202,7 @@ struct Gate {
 /// What the later probes reuse from the acceptance broadcast.
 struct Broadcast {
     signed: Vec<u8>,
+    raw: Vec<u8>,
     reference: NowBlock,
     txid: [u8; 32],
     receipt: TronReceipt,
@@ -392,10 +393,8 @@ impl Gate {
     /// Watcher leg: run [`TronWatcher`] on the settled tx; the event
     /// must match the receipt's own classification.
     async fn watcher(&self, accepted: &Broadcast) -> anyhow::Result<()> {
-        let tx = bidirectional_tx(accepted.txid, vec![], Chain::Ethereum);
-        let expected = accepted
-            .receipt
-            .execution_outcome(&tx.output_deserialization_schema)?;
+        let tx = bidirectional_tx(accepted.txid, accepted.raw.clone(), Chain::Ethereum);
+        let expected = accepted.receipt.execution_outcome(&tx)?;
 
         let state = MockStateManager::new();
         state.watch_execution(Chain::Tron, tx).await;
@@ -442,6 +441,10 @@ impl Gate {
             agrees,
             "watcher classified {result:?}, receipt says {expected:?}"
         );
+        // The source stand-in responds in Borsh: `bool` is one byte.
+        if let ExecutionOutcome::Success { output } = &result {
+            anyhow::ensure!(output.len() == 1, "borsh bool is one byte: {output:?}");
+        }
         println!("[watcher] confirmed at block {block_height} as {result:?}");
         Ok(())
     }
@@ -502,6 +505,7 @@ impl Gate {
         }
         Ok(Broadcast {
             signed,
+            raw: raw_bytes,
             reference,
             txid,
             receipt,
