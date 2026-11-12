@@ -310,7 +310,7 @@ The two round-surviving variables, in detail:
 Both the proposer and the round length follow from `r` alone, with no messaging,
 which is why agreeing on `r` is all the nodes need:
 
-- proposer of the round: `participants[(entropy[0] + r) % n]` (`organize.rs`)
+- proposer of the round: `participants[(seed[0] + r) % n]` with `seed = keccak(entropy ‖ request_id)`, so requests that share entropy still start at different proposers (`organize.rs`)
 - round length: `round_timeout(r)` (§6)
 
 ## 6. The round timeout
@@ -345,7 +345,7 @@ because the round timeout ran out.
 - **Rounds are monotone per request**, including across a respawn
   (`carried_round`). Peers read a round reset as time travel; `set_round` is the
   only write path.
-- **At most one proposer per round**: exactly one node is elected. Election reads only `r`, membership and entropy — never
+- **At most one proposer per round**: exactly one node is elected. Election reads only `r`, membership, entropy and the request id, never
   the local active set. Filtering by local state is what caused the permanent
   divergence in #907.
 - **`ACCEPT` is sent at most once per round**, on the edge out of
