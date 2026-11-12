@@ -1,6 +1,8 @@
 //! Chain-dispatched validation and signing of unsigned transactions:
 //! admission and respond processing share one path per target chain.
 
+use std::borrow::Cow;
+
 use crate::protocol::Chain;
 use k256::elliptic_curve::point::AffineCoordinates as _;
 use k256::elliptic_curve::scalar::IsHigh as _;
@@ -22,10 +24,12 @@ use super::SignBidirectionalEventExt as _;
 pub(crate) fn validate_unsigned_transaction(
     target: Chain,
     unsigned: &[u8],
-) -> anyhow::Result<Vec<u8>> {
+) -> anyhow::Result<std::borrow::Cow<'_, [u8]>> {
     match target {
-        Chain::Ethereum => validate_unsigned_ethereum(unsigned).map(ToOwned::to_owned),
-        Chain::Tron => RawTransaction::parse(unsigned).and_then(|raw| raw.calldata()),
+        Chain::Ethereum => validate_unsigned_ethereum(unsigned).map(Cow::Borrowed),
+        Chain::Tron => RawTransaction::parse(unsigned)
+            .and_then(|raw| raw.calldata())
+            .map(Cow::Owned),
         _ => anyhow::bail!("unsupported target chain {target}"),
     }
 }
