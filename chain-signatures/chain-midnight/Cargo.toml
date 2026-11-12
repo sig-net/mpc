@@ -10,18 +10,18 @@ alloy.workspace = true
 # TODO: replace with thiserror
 anyhow.workspace = true
 async-trait.workspace = true
-bip32 = { version = "0.5.3", default-features = false, features = ["alloc", "secp256k1"] }
+bip32 = { workspace = true, features = ["alloc", "secp256k1"] }
 bytes = "1"
 futures-util.workspace = true
 google-cloud-storage = "=1.17.0"
-google-cloud-auth = { version = "1.15", default-features = false, optional = true }
+google-cloud-auth = { workspace = true, optional = true }
 hex.workspace = true
 # The BIP-32 master key over any 16 to 64 byte seed, as bip32 hashes it.
 hmac = "0.12.1"
 http.workspace = true
 # The same crate jsonrpsee's client limits bodies with, to recognise its error.
 http-body-util = "0.1"
-jsonrpsee = { version = "0.24.10", features = ["http-client"] }
+jsonrpsee = { workspace = true, features = ["http-client"] }
 k256.workspace = true
 memchr.workspace = true
 midnight-base-crypto.workspace = true
@@ -49,12 +49,13 @@ rand.workspace = true
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 serde.workspace = true
 serde_json.workspace = true
+# hmac 0.12 takes a digest 0.10 hash, so this stays on sha2 0.10, not the workspace's 0.11.
 sha2 = "0.10.9"
 subxt = { workspace = true, features = ["native"] }
 thiserror.workspace = true
 tokio.workspace = true
 # The indexer's GraphQL subscription is the only source of the DUST ledger events.
-tokio-tungstenite = { version = "0.29", features = ["rustls-tls-webpki-roots"] }
+tokio-tungstenite.workspace = true
 tokio-util.workspace = true
 webpki-roots = "0.26"
 tracing.workspace = true
@@ -65,9 +66,9 @@ url.workspace = true
 sandbox = ["dep:google-cloud-auth"]
 
 [dev-dependencies]
-google-cloud-auth = { version = "1.15", default-features = false }
+google-cloud-auth.workspace = true
 mockito.workspace = true
-jsonrpsee = { version = "0.24.10", features = ["server"] }
-tempfile = "3.27.0"
+jsonrpsee = { workspace = true, features = ["server"] }
+tempfile.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 tracing-subscriber.workspace = true
