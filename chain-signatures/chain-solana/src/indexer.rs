@@ -2322,24 +2322,23 @@ mod tests {
         .expect("process_catchup_retrying should stop promptly on cancel");
     }
 
-    // Very expensive test in terms of RPC usage.
+    // Very expensive test in terms of RPC usage. Reads the node's own
+    // variables, like the bench example.
     #[tokio::test]
     #[ignore]
     async fn test_solana_pipeline_devnet() {
         let _ = tracing_subscriber::fmt::try_init();
 
-        let api_key = match std::env::var("MPC_TEST_API_KEY") {
-            Ok(key) if !key.is_empty() => key,
+        let http_url = match std::env::var("MPC_SOL_RPC_HTTP_URL") {
+            Ok(url) if !url.is_empty() => url,
             _ => {
-                tracing::debug!("Skipping devnet test: MPC_TEST_API_KEY not set");
+                tracing::debug!("Skipping devnet test: MPC_SOL_RPC_HTTP_URL not set");
                 return;
             }
         };
 
-        let sol_addr = std::env::var("MPC_TEST_SOL_ADDR")
+        let sol_addr = std::env::var("MPC_SOL_PROGRAM_ADDRESS")
             .unwrap_or_else(|_| "SigDHT99hPznk4d9SAxWLoBnKWT8jcob5pV8X7ti8SM".to_string());
-
-        let http_url = format!("https://solana-devnet.g.alchemy.com/v2/{api_key}");
 
         let state_manager = MockStateManager::new();
         let (events_tx, mut events_rx) = mpsc::channel(1_000_000);
