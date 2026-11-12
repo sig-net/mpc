@@ -17,7 +17,9 @@ use alloy::network::TransactionResponse;
 use alloy::primitives::{Address, B256};
 use alloy::rpc::types::{Block, BlockId, BlockTransactions, TransactionReceipt};
 use futures_util::{stream, StreamExt};
-use mpc_chain_integration_core::{ChainTelemetry, ExtractionFailureKind, StateManager};
+use mpc_chain_integration_core::{
+    ChainTelemetry, ExtractionFailureKind, StateManager, WatchedExecution,
+};
 use mpc_primitives::{
     BidirectionalTx, BidirectionalTxId, Chain, ChainConfig as _, ChainEvent, ExecutionOutcome,
     SignId,
@@ -37,7 +39,7 @@ pub(crate) struct WatcherGateState {
 }
 
 /// A pending execution watcher entry from the state manager.
-type WatcherEntry = (BidirectionalTxId, (SignId, Arc<BidirectionalTx>));
+type WatcherEntry = (BidirectionalTxId, WatchedExecution);
 
 /// Per-watcher receipt resolution result.
 type WatcherReceipt = (
@@ -137,12 +139,18 @@ impl<'a, S: StateManager, T: ChainTelemetry> ExecutionWatcher<'a, S, T> {
 
         let block_number = block.header.number;
         tracing::info!(
-            watchers_count = watchers.len(),
+            flat_ids = watchers.len(),
             block_number,
             "collect_execution_confirmations checking watchers"
         );
 
         let (new_watchers, retry) = self.schedule_watcher_gates(&watchers);
+
+        // Ethereum ids hash the signed tx: one member per flat id.
+        let watchers: Vec<WatcherEntry> = watchers
+            .into_iter()
+            .flat_map(|(tx_id, members)| members.into_iter().map(move |member| (tx_id, member)))
+            .collect();
 
         // Extract hashes from the block
         let block_tx_hashes: HashSet<_> = match &block.transactions {
@@ -202,7 +210,7 @@ impl<'a, S: StateManager, T: ChainTelemetry> ExecutionWatcher<'a, S, T> {
     /// (retried every block).
     fn schedule_watcher_gates(
         &self,
-        watchers: &HashMap<BidirectionalTxId, (SignId, Arc<BidirectionalTx>)>,
+        watchers: &HashMap<BidirectionalTxId, Vec<WatchedExecution>>,
     ) -> (HashSet<BidirectionalTxId>, HashSet<BidirectionalTxId>) {
         let mut gate = self.lock_watcher_gate();
         gate.retry.retain(|id| watchers.contains_key(id));
@@ -435,16 +443,12 @@ impl<'a, S: StateManager, T: ChainTelemetry> ExecutionWatcher<'a, S, T> {
         watchers: Vec<WatcherEntry>,
         block_number: u64,
     ) -> Vec<WatcherReceipt> {
-        stream::iter(
-            watchers
-                .into_iter()
-                .map(|(tx_id, (sign_id, pending_tx))| async move {
-                    let result = self
-                        .backfill_execution_confirmation(tx_id, sign_id, &pending_tx, block_number)
-                        .await;
-                    (tx_id, sign_id, pending_tx, result)
-                }),
-        )
+        stream::iter(watchers.into_iter().map(|(tx_id, member)| async move {
+            let result = self
+                .backfill_execution_confirmation(tx_id, member.sign_id, &member.tx, block_number)
+                .await;
+            (tx_id, member.sign_id, member.tx, result)
+        }))
         .buffer_unordered(self.config.max_concurrent_watcher_rpcs)
         .collect()
         .await
@@ -487,7 +491,12 @@ impl<'a, S: StateManager, T: ChainTelemetry> ExecutionWatcher<'a, S, T> {
         // A watched hash in this final block proves its nonce is taken, receipt or not.
         let consumed_slots: HashMap<_, _> = mined
             .iter()
-            .map(|(_, (_, tx))| ((Address::from(tx.from_address), tx.nonce), Arc::clone(tx)))
+            .map(|(_, member)| {
+                (
+                    (Address::from(member.tx.from_address), member.tx.nonce),
+                    Arc::clone(&member.tx),
+                )
+            })
             .collect();
         let mut failed = HashSet::new();
 
@@ -547,7 +556,7 @@ impl<'a, S: StateManager, T: ChainTelemetry> ExecutionWatcher<'a, S, T> {
     ) {
         let unique_senders: HashSet<_> = gated
             .iter()
-            .map(|(_, (_, tx))| Address::from(tx.from_address))
+            .map(|(_, member)| Address::from(member.tx.from_address))
             .collect();
 
         // Failed senders are skipped: their watchers stay pending and are
@@ -564,7 +573,7 @@ impl<'a, S: StateManager, T: ChainTelemetry> ExecutionWatcher<'a, S, T> {
                     failed.extend(
                         gated
                             .iter()
-                            .filter(|(_, (_, tx))| Address::from(tx.from_address) == sender)
+                            .filter(|(_, member)| Address::from(member.tx.from_address) == sender)
                             .map(|(tx_id, _)| *tx_id),
                     );
                 }
@@ -574,10 +583,10 @@ impl<'a, S: StateManager, T: ChainTelemetry> ExecutionWatcher<'a, S, T> {
         // Keep ONLY watchers whose nonces were consumed
         let consumed_txs: Vec<_> = gated
             .into_iter()
-            .filter(|(_, (_, tx))| {
+            .filter(|(_, member)| {
                 nonces
-                    .get(&Address::from(tx.from_address))
-                    .is_some_and(|&current_nonce| tx.nonce < current_nonce)
+                    .get(&Address::from(member.tx.from_address))
+                    .is_some_and(|&current_nonce| member.tx.nonce < current_nonce)
             })
             .collect();
 

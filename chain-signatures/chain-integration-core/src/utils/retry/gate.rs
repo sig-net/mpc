@@ -5,12 +5,14 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use rand::Rng;
 
-use super::classify::is_provider_throttled;
+use super::classify::{is_provider_throttled, RpcFailure};
 
 const RATE_LIMIT_BASE_COOLDOWN: Duration = Duration::from_secs(1);
 const RATE_LIMIT_MAX_COOLDOWN: Duration = Duration::from_secs(60);
 const RATE_LIMIT_MAX_JITTER: Duration = Duration::from_millis(500);
 const MAX_PENALTY_LEVEL: u32 = 10;
+/// Duration after which a warning is logged if the caller is still waiting.
+const GATE_WAIT_WARN_AFTER: Duration = Duration::from_secs(5);
 
 /// Shared cooldown gate: callers wait out a window that failures extend.
 #[derive(Clone)]
@@ -22,6 +24,8 @@ pub struct SharedBackoff {
 struct SharedBackoffInner {
     /// Epoch millis until which all requests should wait.
     limited_until_ms: AtomicU64,
+    /// Window endpoint already park-warned.
+    warned_until_ms: AtomicU64,
     /// Exponential penalty level, used to compute the cooldown duration.
     penalty_level: AtomicU32,
     /// Base cooldown duration for the first penalty level.
@@ -45,6 +49,7 @@ impl SharedBackoff {
         Self {
             inner: Arc::new(SharedBackoffInner {
                 limited_until_ms: AtomicU64::new(0),
+                warned_until_ms: AtomicU64::new(0),
                 penalty_level: AtomicU32::new(0),
                 base_cooldown,
                 max_cooldown,
@@ -61,10 +66,15 @@ impl SharedBackoff {
             .penalty_level
             .fetch_min(MAX_PENALTY_LEVEL, Ordering::Relaxed);
         let cooldown = self.cooldown_for_level(level);
+        self.extend_to(cooldown);
+        cooldown
+    }
+
+    /// Extends the window to cover `cooldown` from now, never shortening it.
+    fn extend_to(&self, cooldown: Duration) {
         self.inner
             .limited_until_ms
             .fetch_max(now_ms() + cooldown.as_millis() as u64, Ordering::Relaxed);
-        cooldown
     }
 
     /// Resets the penalty level once the cooldown window has fully elapsed
@@ -76,10 +86,25 @@ impl SharedBackoff {
     }
 
     /// Extends the cooldown if `err` looks like provider throttling (429/402).
+    /// An advertised pause (`Retry-After`) extends the window to at least
+    /// it, clamped by policy — the ladder rung still applies underneath.
     /// Returns the applied cooldown, or `None` when the error is not a
     /// throttle
     pub fn engage_if_throttled(&self, err: &anyhow::Error) -> Option<Duration> {
-        is_provider_throttled(err).then(|| self.extend_cooldown())
+        if !is_provider_throttled(err) {
+            return None;
+        }
+        let cooldown = self.extend_cooldown();
+        let advertised = err
+            .chain()
+            .find_map(|c| c.downcast_ref::<RpcFailure>())
+            .and_then(RpcFailure::retry_after)
+            .map(|ra| ra.min(self.inner.max_cooldown));
+        if let Some(pause) = advertised {
+            self.extend_to(pause);
+            return Some(pause.max(cooldown));
+        }
+        Some(cooldown)
     }
 
     /// Sleeps until the global cooldown window has elapsed, plus random jitter
@@ -104,6 +129,12 @@ impl SharedBackoff {
         Duration::from_millis(ms)
     }
 
+    /// True once per window; an extended window is claimable again.
+    fn claim_park_warn(&self) -> bool {
+        let until = self.inner.limited_until_ms.load(Ordering::Relaxed);
+        self.inner.warned_until_ms.swap(until, Ordering::Relaxed) != until
+    }
+
     fn cooldown_for_level(&self, level: u32) -> Duration {
         let millis = (self.inner.base_cooldown.as_millis() as u64)
             .saturating_mul(1u64 << level.min(MAX_PENALTY_LEVEL));
@@ -122,6 +153,14 @@ pub async fn run_gated<T, F>(
 where
     F: Future<Output = anyhow::Result<T>>,
 {
+    let remaining = gate.remaining();
+    if remaining > GATE_WAIT_WARN_AFTER && gate.claim_park_warn() {
+        tracing::warn!(
+            operation,
+            ?remaining,
+            "waiting out the shared throttle window"
+        );
+    }
     gate.wait().await;
     match call.await {
         Ok(value) => {
@@ -229,5 +268,43 @@ mod tests {
         let t = std::time::Instant::now();
         sb.wait().await;
         assert!(t.elapsed() >= Duration::from_millis(80));
+    }
+
+    #[test]
+    fn advertised_retry_after_extends_the_window() {
+        let gate =
+            SharedBackoff::with_cooldowns(Duration::from_millis(100), Duration::from_secs(60));
+        let err = anyhow::Error::new(
+            RpcFailure::read_status(http::StatusCode::TOO_MANY_REQUESTS, "429".to_owned())
+                .with_retry_after(Duration::from_secs(30)),
+        );
+        let applied = gate.engage_if_throttled(&err).unwrap();
+        assert!(applied >= Duration::from_secs(29));
+        assert!(gate.remaining() >= Duration::from_secs(29));
+    }
+
+    #[test]
+    fn advertised_retry_after_is_clamped_by_policy() {
+        let gate =
+            SharedBackoff::with_cooldowns(Duration::from_millis(300), Duration::from_millis(600));
+        let err = anyhow::Error::new(
+            RpcFailure::read_status(http::StatusCode::TOO_MANY_REQUESTS, "429".to_owned())
+                .with_retry_after(Duration::from_secs(30)),
+        );
+        let applied = gate.engage_if_throttled(&err).unwrap();
+        assert_eq!(applied, Duration::from_millis(600));
+        assert!(gate.remaining() <= Duration::from_millis(600));
+    }
+
+    #[test]
+    fn park_warn_is_claimed_once_per_window() {
+        let gate =
+            SharedBackoff::with_cooldowns(Duration::from_millis(100), Duration::from_secs(60));
+        gate.extend_cooldown();
+        assert!(gate.claim_park_warn());
+        assert!(!gate.claim_park_warn());
+        // a new endpoint re-arms the claim
+        gate.extend_cooldown();
+        assert!(gate.claim_park_warn());
     }
 }

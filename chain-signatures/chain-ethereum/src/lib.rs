@@ -17,7 +17,7 @@ mod test_utils;
 pub mod utils;
 
 pub use client::{CatchupItem, MaybeBlock};
-pub use config::{EthConfig, GasConfig, IndexerConfig, PublisherConfig, RpcConfig};
+pub use config::{EthConfig, EthNetwork, GasConfig, IndexerConfig, PublisherConfig, RpcConfig};
 pub use event_parsing::generate_request_id;
 pub use indexer::EthereumIndexer;
 pub use respond_bidirectional::validate_schemas;

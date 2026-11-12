@@ -224,6 +224,13 @@ async fn run_supervised_with_watchdog<I: ChainIndexer, T: ChainTelemetry>(
             )
             .await?;
             load_local = false;
+            // Failing here retries: without its records the node would sign again.
+            ctx.local_records = ctx
+                .backlog
+                .checkpoints()
+                .storage()
+                .load_local(chain)
+                .await?;
 
             if resubmit_votes {
                 resubmit_pending_checkpoint_votes(chain, &ctx).await?;
@@ -235,7 +242,7 @@ async fn run_supervised_with_watchdog<I: ChainIndexer, T: ChainTelemetry>(
         if let Err(err) = recovered {
             tracing::error!(
                 %chain,
-                %err,
+                error = %format_args!("{err:#}"),
                 ?recovery_retry_delay,
                 "failed to recover backlog; retrying"
             );
