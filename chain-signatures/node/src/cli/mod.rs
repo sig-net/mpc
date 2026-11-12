@@ -85,7 +85,7 @@ pub enum Cli {
         web_port: u16,
         /// The cipher secret key used to decrypt messages between nodes.
         #[arg(long, env("MPC_CIPHER_SK"), hide_env_values = true)]
-        cipher_sk: String,
+        cipher_sk: hpke::SecretKey,
         /// The secret key used to sign messages to be sent between nodes.
         #[arg(long, env("MPC_SIGN_SK"), hide_env_values = true)]
         sign_sk: SecretKey,
@@ -213,8 +213,6 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             // is an orderly exit rather than the OS default.
             let shutdown = shutdown_signal();
             crate::metrics::init_metrics(&account_id);
-
-            let cipher_sk = hpke::SecretKey::try_from_bytes(&hex::decode(cipher_sk)?)?;
 
             let cipher_pk_hex = hex::encode(cipher_sk.public_key().to_bytes());
 
