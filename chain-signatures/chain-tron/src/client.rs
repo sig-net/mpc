@@ -220,7 +220,7 @@ fn decode_hex_ascii(s: &str) -> String {
 #[derive(Debug, thiserror::Error)]
 pub enum ReceiptError {
     #[error(transparent)]
-    Transport(#[from] anyhow::Error),
+    Transport(anyhow::Error),
     #[error("malformed receipt body: {0:#}")]
     Malformed(#[source] anyhow::Error),
 }
