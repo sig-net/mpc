@@ -3,6 +3,7 @@ use crate::mesh::MeshState;
 use crate::node_client::NodeClient;
 use crate::protocol::contract::primitives::ParticipantInfo;
 use crate::types::CheckpointWatcher;
+use mpc_chain_integration_core::StateManager;
 
 use crate::backlog::Checkpoint;
 use cait_sith::protocol::Participant;
@@ -44,11 +45,25 @@ pub async fn align_backlog_with_consensus(
         }
     }
 
-    tracing::warn!(
-        ?chain,
-        ?checkpoint_digest.digest,
-        "Consensus checkpoint mismatch/divergence detected: triggering regression"
-    );
+    // Below the consensus height the node cannot hold that checkpoint yet.
+    let processed = backlog.get_processed_block(chain).await;
+    let behind = processed.is_none_or(|height| height < checkpoint_digest.height);
+    if behind {
+        tracing::info!(
+            ?chain,
+            consensus_height = checkpoint_digest.height,
+            ?processed,
+            "behind the consensus checkpoint: catching up"
+        );
+    } else {
+        tracing::warn!(
+            ?chain,
+            ?checkpoint_digest.digest,
+            consensus_height = checkpoint_digest.height,
+            ?processed,
+            "Consensus checkpoint mismatch/divergence detected: triggering regression"
+        );
+    }
     // A reset settles this digest for a state no node has produced, so
     // `find_consensus_checkpoint` would poll peers forever. Rebuild it instead
     // and fall through to the ordinary regression path, which is what makes a
@@ -77,6 +92,11 @@ pub async fn align_backlog_with_consensus(
     if let Err(err) = backlog.regress(&fetched_checkpoint).await {
         tracing::error!(error = %format_args!("{err:#}"), %chain, "failed to regress backlog to checkpoint");
         return None;
+    }
+    if behind {
+        tracing::info!(%chain, "backlog rebased onto the consensus checkpoint");
+    } else {
+        tracing::warn!(%chain, "backlog regressed via consensus checkpoint");
     }
 
     Some(fetched_checkpoint.block_height)
