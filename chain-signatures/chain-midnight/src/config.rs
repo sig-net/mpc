@@ -1,6 +1,7 @@
 //! Midnight node configuration.
 
 use mpc_chain_integration_core::utils::retry::RetryConfig;
+use secrecy::{ExposeSecret as _, SecretString};
 use std::fmt;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -87,13 +88,17 @@ impl OutputStorageConfig {
 }
 
 /// Builds, proves, pays for and posts respond transactions in process.
-#[derive(Clone, PartialEq)]
+#[derive(Clone)]
 pub struct PublisherConfig {
     /// Optional output cache. Runtime storage failures warn and do not prevent on-chain responses.
     /// Initialization retries in the background with backoff until the cache is available.
     pub output_storage: Option<OutputStorageConfig>,
     /// Funds respond transactions.
-    pub funding_seed: String,
+    ///
+    /// Carried as a [`SecretString`]: the seed is only exposed when it is
+    /// validated or parsed into a signing key, so deriving `Debug` cannot
+    /// leak it.
+    pub funding_seed: SecretString,
     /// The indexer's GraphQL subscription URL: spendable DUST derives only from the
     /// ledger events it serves.
     pub indexer_ws_url: Url,
@@ -113,7 +118,7 @@ impl Default for PublisherConfig {
     fn default() -> Self {
         Self {
             output_storage: None,
-            funding_seed: String::new(),
+            funding_seed: String::new().into(),
             // Replaced by every real config; the empty funding seed fails validation.
             indexer_ws_url: Url::parse("ws://placeholder.invalid").expect("a valid literal"),
             // Where the node image installs them.
@@ -125,13 +130,27 @@ impl Default for PublisherConfig {
     }
 }
 
+/// `SecretString` does not implement `PartialEq`, so the seed is compared through
+/// `expose_secret` and the remaining fields field by field.
+impl PartialEq for PublisherConfig {
+    fn eq(&self, other: &Self) -> bool {
+        self.output_storage == other.output_storage
+            && self.funding_seed.expose_secret() == other.funding_seed.expose_secret()
+            && self.indexer_ws_url == other.indexer_ws_url
+            && self.contract_artifacts_dir == other.contract_artifacts_dir
+            && self.zk_params_dir == other.zk_params_dir
+            && self.build_budget == other.build_budget
+            && self.submit_timeout == other.submit_timeout
+    }
+}
+
 /// Hand-written so `funding_seed` cannot reach the log via `Debug`. Redacted rather
 /// than skipped, so a later `derive(Debug)` cannot silently restore the leak.
 impl fmt::Debug for PublisherConfig {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("PublisherConfig")
             .field("output_storage", &self.output_storage)
-            .field("funding_seed", &"<redacted>")
+            .field("funding_seed", &self.funding_seed)
             .field("indexer_ws_url", &self.indexer_ws_url)
             .field("contract_artifacts_dir", &self.contract_artifacts_dir)
             .field("zk_params_dir", &self.zk_params_dir)
@@ -205,7 +224,7 @@ impl PublisherConfig {
 
     fn validate(&self) -> anyhow::Result<()> {
         self.validate_output_storage()?;
-        validate_funding_seed(&self.funding_seed)?;
+        validate_funding_seed(self.funding_seed.expose_secret())?;
         for (field, dir) in [
             (
                 "publisher.contract_artifacts_dir",
@@ -303,7 +322,7 @@ mod tests {
             central_address: MidnightAddress::from_bytes([0xab; 32]),
             responder_address: MidnightAddress::from_bytes([0xcd; 32]),
             publisher: PublisherConfig {
-                funding_seed: "0f".repeat(32),
+                funding_seed: "0f".repeat(32).into(),
                 indexer_ws_url: "ws://127.0.0.1:8088/api/v3/graphql/ws".parse().unwrap(),
                 ..Default::default()
             },
@@ -341,7 +360,7 @@ mod tests {
     fn debug_redacts_the_funding_seed() {
         let seed = "0123456789abcdef0123456789abcdef";
         let mut config = valid_config();
-        config.publisher.funding_seed = seed.to_string();
+        config.publisher.funding_seed = seed.into();
 
         let rendered = format!("{config:?}");
         assert!(
@@ -349,7 +368,7 @@ mod tests {
             "the funding seed reached Debug: {rendered}"
         );
         assert!(
-            rendered.contains("<redacted>"),
+            rendered.contains("[REDACTED]"),
             "the field must render redacted rather than vanish, or a later \
              derive(Debug) reinstates the leak unnoticed: {rendered}"
         );
@@ -361,7 +380,7 @@ mod tests {
         let seed = "0123456789abcdef0123456789abcdef";
         let endpoint = "http://127.0.0.1:4443";
         let mut config = valid_config();
-        config.publisher.funding_seed = seed.to_string();
+        config.publisher.funding_seed = seed.into();
         config.publisher.output_storage = Some(OutputStorageConfig {
             emulator_endpoint: Some(endpoint.to_string()),
             ..OutputStorageConfig::new("outputs".into(), "v1".into(), Duration::from_secs(30))
@@ -381,7 +400,7 @@ mod tests {
             "the funding seed reached Debug: {rendered}"
         );
         assert!(
-            rendered.contains("<redacted>"),
+            rendered.contains("[REDACTED]"),
             "the funding seed must remain visibly redacted: {rendered}"
         );
     }
@@ -475,7 +494,7 @@ mod tests {
                 }) as fn(&mut MidnightConfig),
             ),
             ("funding_seed", |config: &mut MidnightConfig| {
-                config.publisher.funding_seed = "not hex".to_string();
+                config.publisher.funding_seed = "not hex".into();
             }),
             ("submit_timeout", |config: &mut MidnightConfig| {
                 config.publisher.submit_timeout = Duration::ZERO;
@@ -502,7 +521,7 @@ mod tests {
             format!("0X{}", "AB".repeat(32)),
         ] {
             let mut config = valid_config();
-            config.publisher.funding_seed = valid;
+            config.publisher.funding_seed = valid.into();
             config.validate().expect("the SDK accepts this hex seed");
         }
 
@@ -515,7 +534,7 @@ mod tests {
                 .to_string(),
         ] {
             let mut config = valid_config();
-            config.publisher.funding_seed = invalid.clone();
+            config.publisher.funding_seed = invalid.clone().into();
             let error = config.validate().unwrap_err().to_string();
             assert!(error.contains("funding_seed"), "unexpected error: {error}");
             assert!(

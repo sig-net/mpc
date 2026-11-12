@@ -1,4 +1,5 @@
 use mpc_chain_canton::{CantonAuthConfig, CantonConfig};
+use secrecy::SecretString;
 use url::Url;
 
 /// CLI arguments for the Canton indexer.
@@ -54,7 +55,7 @@ pub struct CantonArgs {
         hide_env_values = true,
         requires = "canton_json_api_url"
     )]
-    pub canton_oidc_client_secret: Option<String>,
+    pub canton_oidc_client_secret: Option<SecretString>,
     #[arg(
         long,
         env("MPC_CANTON_OIDC_AUDIENCE"),

@@ -17,6 +17,7 @@ mpc-crypto.workspace = true
 mpc-primitives.workspace = true
 mpc-utils.workspace = true
 parity-scale-codec = { version = "3", features = ["derive"] }
+secrecy = "0.10.3"
 serde.workspace = true
 sp-core = { version = "38.1", default-features = false, features = ["std"] }
 sp-runtime = { version = "44.0.0", default-features = false, features = ["std"] }

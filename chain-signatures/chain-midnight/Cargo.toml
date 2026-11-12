@@ -47,6 +47,7 @@ rand.workspace = true
 # The indexer subscription's TLS, with its crypto provider named: the graph enables
 # two, so rustls has no process default to fall back on.
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+secrecy = "0.10.3"
 serde.workspace = true
 serde_json.workspace = true
 sha2 = "0.10.9"

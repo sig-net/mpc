@@ -309,8 +309,8 @@ impl ClusterSpawner {
         // Enable Solana by setting a placeholder if not already configured
         if self.cfg.sol.is_none() {
             self.cfg.sol = Some(SolConfig {
-                account_sk: String::new(),                      // Will be filled in later
-                rpc_http_url: placeholder_url(),                // Will be filled in later
+                account_sk: String::new().into(), // Will be filled in later
+                rpc_http_url: placeholder_url(),  // Will be filled in later
                 program_address: placeholder_program_address(), // Will be filled in later
                 indexer: Default::default(),
             });
@@ -357,7 +357,7 @@ impl ClusterSpawner {
                 auth: CantonAuthConfig {
                     token_url: placeholder_url(),
                     client_id: String::new(),
-                    client_secret: String::new(),
+                    client_secret: String::new().into(),
                     audience: String::new(),
                     scope: None,
                 },
@@ -544,7 +544,8 @@ fn node_config(
                     midnight_funding_seeds.len()
                 )
             })?
-            .clone();
+            .clone()
+            .into();
     }
     Ok(cfg)
 }
@@ -578,6 +579,7 @@ mod tests {
 
     use super::node_config;
     use crate::NodeConfig;
+    use secrecy::ExposeSecret as _;
 
     fn midnight_cfg() -> NodeConfig {
         NodeConfig {
@@ -586,7 +588,7 @@ mod tests {
                 central_address: MidnightAddress::from_bytes([0; 32]),
                 responder_address: MidnightAddress::from_bytes([1; 32]),
                 publisher: PublisherConfig {
-                    funding_seed: "04".repeat(32),
+                    funding_seed: "04".repeat(32).into(),
                     ..Default::default()
                 },
                 rpc: Default::default(),
@@ -601,7 +603,10 @@ mod tests {
         let seeds = ["04", "05", "06"].map(|byte| byte.repeat(32));
         for (index, seed) in seeds.iter().enumerate() {
             let cfg = node_config(&midnight_cfg(), &seeds, index).unwrap();
-            assert_eq!(&cfg.midnight.unwrap().publisher.funding_seed, seed);
+            assert_eq!(
+                cfg.midnight.unwrap().publisher.funding_seed.expose_secret(),
+                seed.as_str()
+            );
         }
     }
 

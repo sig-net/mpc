@@ -457,7 +457,7 @@ mod tests {
             auth: CantonAuthConfig {
                 token_url: format!("{url}/token").parse().unwrap(),
                 client_id: "test-client".to_string(),
-                client_secret: "test-secret".to_string(),
+                client_secret: "test-secret".into(),
                 audience: "test-audience".to_string(),
                 scope: None,
             },

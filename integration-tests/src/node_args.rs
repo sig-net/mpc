@@ -11,6 +11,7 @@ use mpc_chain_hydration::HydrationConfig;
 use mpc_chain_midnight::MidnightConfig;
 use mpc_chain_solana::SolConfig;
 use mpc_node::{logs, storage};
+use secrecy::ExposeSecret as _;
 
 /// The `start` command line for one node.
 pub fn start(ctx: &Context, node: &NodeEnvConfig) -> Vec<String> {
@@ -67,14 +68,17 @@ impl Args {
     }
 
     fn sol(&mut self, sol: &SolConfig) {
-        self.flag("--sol-account-sk", &sol.account_sk);
+        self.flag("--sol-account-sk", sol.account_sk.expose_secret());
         self.flag("--sol-rpc-http-url", &sol.rpc_http_url);
         self.flag("--sol-program-address", sol.program_address);
     }
 
     fn hydration(&mut self, hydration: &HydrationConfig) {
         self.flag("--hydration-rpc-ws-url", &hydration.rpc_ws_url);
-        self.flag("--hydration-signer-uri", &hydration.signer_uri);
+        self.flag(
+            "--hydration-signer-uri",
+            hydration.signer_uri.expose_secret(),
+        );
     }
 
     fn canton(&mut self, canton: &CantonConfig) {
@@ -83,7 +87,10 @@ impl Args {
         self.flag("--canton-ledger-api-user", &canton.ledger_api_user);
         self.flag("--canton-oidc-token-url", &canton.auth.token_url);
         self.flag("--canton-oidc-client-id", &canton.auth.client_id);
-        self.flag("--canton-oidc-client-secret", &canton.auth.client_secret);
+        self.flag(
+            "--canton-oidc-client-secret",
+            canton.auth.client_secret.expose_secret(),
+        );
         self.flag("--canton-oidc-audience", &canton.auth.audience);
         if let Some(scope) = &canton.auth.scope {
             self.flag("--canton-oidc-scope", scope);
@@ -104,7 +111,10 @@ impl Args {
             "--midnight-responder-address",
             midnight.responder_address.to_hex(),
         );
-        self.flag("--midnight-funding-seed", &publisher.funding_seed);
+        self.flag(
+            "--midnight-funding-seed",
+            publisher.funding_seed.expose_secret(),
+        );
         self.flag("--midnight-indexer-ws-url", &publisher.indexer_ws_url);
         self.flag(
             "--midnight-contract-artifacts-dir",
@@ -140,7 +150,7 @@ impl Args {
         if let Some(path) = &storage.sk_share_local_path {
             self.flag("--sk-share-local-path", path.display());
         }
-        self.flag("--redis-url", &storage.redis_url);
+        self.flag("--redis-url", storage.redis_url.expose_secret());
     }
 
     fn logs(&mut self, logs: &logs::Options, is_current_node: bool) {

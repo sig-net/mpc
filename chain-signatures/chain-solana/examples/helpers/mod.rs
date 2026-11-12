@@ -27,7 +27,7 @@ pub fn env_u64(name: &str, default: Option<u64>) -> anyhow::Result<u64> {
 pub fn make_config() -> anyhow::Result<SolConfig> {
     Ok(SolConfig {
         // The bench only indexes; the signer is never used.
-        account_sk: String::new(),
+        account_sk: String::new().into(),
         rpc_http_url: opt_env("MPC_SOL_RPC_HTTP_URL")?
             .parse()
             .map_err(|e| anyhow!("invalid MPC_SOL_RPC_HTTP_URL: {e}"))?,

@@ -13,6 +13,7 @@ use mpc_chain_integration_core::{ChainPublisher, PublishAction, PublisherTelemet
 use mpc_primitives::{Chain, SignKind, Signature};
 use mpc_utils::task::AbortOnDrop;
 use mpc_utils::time::current_unix_timestamp;
+use secrecy::ExposeSecret as _;
 
 use crate::attestation::validate_attestation_response;
 use crate::config::{
@@ -101,7 +102,7 @@ impl MidnightPublisher {
             &config.publisher.contract_artifacts_dir,
             &config.publisher.zk_params_dir,
         )?);
-        let key = dust_secret_key(&parse_seed(&config.publisher.funding_seed)?)?;
+        let key = dust_secret_key(&parse_seed(config.publisher.funding_seed.expose_secret())?)?;
         let wallet = FundingWallet::start(
             key,
             Arc::new(IndexerDustEvents::new(
@@ -1767,7 +1768,7 @@ mod tests {
             responder_address: MidnightAddress::from_hex(RESPONDER)
                 .expect("RESPONDER is a 32-byte hex address"),
             publisher: PublisherConfig {
-                funding_seed: "ab".repeat(32),
+                funding_seed: "ab".repeat(32).into(),
                 indexer_ws_url: "ws://127.0.0.1:1/api/v3/graphql/ws".parse().unwrap(),
                 ..Default::default()
             },

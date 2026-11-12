@@ -50,6 +50,7 @@ use mpc_keys::hpke;
 use mpc_primitives::{Chain, CheckpointDigest};
 use near_account_id::AccountId;
 use near_crypto::{InMemorySigner, SecretKey};
+use secrecy::{ExposeSecret as _, SecretString};
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
@@ -63,9 +64,15 @@ const MAX_SIGN_COMMANDS: usize = 16384;
 #[command(version = build::version_with_commit())]
 pub enum Cli {
     Start {
-        /// NEAR RPC address
-        #[arg(long, env("MPC_NEAR_RPC"), hide_env_values = true)]
-        near_rpc: Url,
+        /// NEAR RPC address. May carry a provider API key, so it is carried as
+        /// a `SecretString` and only exposed where the RPC client is built.
+        #[arg(
+            long,
+            env("MPC_NEAR_RPC"),
+            hide_env_values = true,
+            value_parser = parse_rpc_url
+        )]
+        near_rpc: SecretString,
         /// MPC contract id
         #[arg(long, env("MPC_CONTRACT_ID"))]
         mpc_contract_id: AccountId,
@@ -77,7 +84,7 @@ pub enum Cli {
         env: logs::Env,
         /// This node's account ed25519 secret key
         #[arg(long, env("MPC_ACCOUNT_SK"), hide_env_values = true)]
-        account_sk: SecretKey,
+        account_sk: SecretString,
         /// The web port for this server
         /// this is default to 3000 for all nodes now.
         /// Partners can choose to change the port, but then they also need to make sure they change their load balancer config to match this
@@ -85,10 +92,10 @@ pub enum Cli {
         web_port: u16,
         /// The cipher secret key used to decrypt messages between nodes.
         #[arg(long, env("MPC_CIPHER_SK"), hide_env_values = true)]
-        cipher_sk: String,
+        cipher_sk: SecretString,
         /// The secret key used to sign messages to be sent between nodes.
         #[arg(long, env("MPC_SIGN_SK"), hide_env_values = true)]
-        sign_sk: SecretKey,
+        sign_sk: SecretString,
         /// Ethereum Indexer options
         #[command(flatten)]
         eth: EthArgs,
@@ -174,6 +181,14 @@ fn env_var_of(flag: &str) -> Option<String> {
     Some(arg.get_env()?.to_string_lossy().into_owned())
 }
 
+/// A NEAR RPC endpoint may carry a provider API key, so clap hands it on as a
+/// `SecretString`; validating it here still fails a malformed endpoint at
+/// startup rather than at the first call.
+fn parse_rpc_url(s: &str) -> Result<SecretString, String> {
+    Url::parse(s).map_err(|e| format!("not a valid URL: {e}"))?;
+    Ok(s.into())
+}
+
 /// `Url` alone accepts `node.example.org:8080`, reading the host as the scheme,
 /// and the contract cannot change a participant's URL once it has joined.
 fn parse_peer_address(s: &str) -> Result<Url, String> {
@@ -214,7 +229,17 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             let shutdown = shutdown_signal();
             crate::metrics::init_metrics(&account_id);
 
-            let cipher_sk = hpke::SecretKey::try_from_bytes(&hex::decode(cipher_sk)?)?;
+            // Exposed here, once, where the runtime takes ownership of the
+            // keys; everything up to this point moved only redacted values.
+            let near_rpc =
+                Url::parse(near_rpc.expose_secret()).context("`--near-rpc` is not a valid URL")?;
+            let cipher_sk =
+                hpke::SecretKey::try_from_bytes(&hex::decode(cipher_sk.expose_secret())?)?;
+            let account_sk: SecretKey = account_sk
+                .expose_secret()
+                .parse()
+                .context("invalid account sk")?;
+            let sign_sk: SecretKey = sign_sk.expose_secret().parse().context("invalid sign sk")?;
 
             let cipher_pk_hex = hex::encode(cipher_sk.public_key().to_bytes());
 
@@ -736,7 +761,7 @@ impl StorageHandles {
         storage_options: &storage::Options,
     ) -> anyhow::Result<Self> {
         let keystore = Keystore::init(storage_options, account_id).await?;
-        let redis_pool = redis_pool(storage_options.redis_url.clone())?;
+        let redis_pool = redis_pool(Url::parse(storage_options.redis_url.expose_secret())?)?;
         let triple_storage = TriplePair::storage(&redis_pool, account_id);
         let presignature_storage = Presignature::storage(&redis_pool, account_id);
         let backlog = Backlog::persisted(CheckpointStorage::Redis(
@@ -1219,7 +1244,7 @@ mod tests {
             hydration: Some(HydrationConfig {
                 // Nothing listens on port 1.
                 rpc_ws_url: "ws://127.0.0.1:1".parse().unwrap(),
-                signer_uri: signer_uri.to_string(),
+                signer_uri: signer_uri.into(),
             }),
             canton: None,
             midnight: None,
@@ -1253,7 +1278,7 @@ mod tests {
                 central_address: mpc_chain_midnight::MidnightAddress::from_bytes([0xab; 32]),
                 responder_address: mpc_chain_midnight::MidnightAddress::from_bytes([0xcd; 32]),
                 publisher: mpc_chain_midnight::PublisherConfig {
-                    funding_seed: "ab".repeat(32),
+                    funding_seed: "ab".repeat(32).into(),
                     indexer_ws_url: "ws://127.0.0.1:1/api/v3/graphql/ws".parse().unwrap(),
                     ..Default::default()
                 },
@@ -1293,7 +1318,7 @@ mod tests {
 
     fn sol_config_with_bogus_rpc() -> SolConfig {
         SolConfig {
-            account_sk: mpc_chain_solana::Keypair::new().to_base58_string(),
+            account_sk: mpc_chain_solana::Keypair::new().to_base58_string().into(),
             rpc_http_url: "http://127.0.0.1:1".parse().unwrap(),
             program_address: mpc_chain_solana::Pubkey::new_unique(),
             indexer: Default::default(),
@@ -1386,5 +1411,89 @@ mod tests {
                 "arg {arg_id} must have hide_env_values set"
             );
         }
+    }
+
+    /// The CLI boundary is not enough: the chain configs live for the node's
+    /// lifetime, so they must hold secrets in `SecretString` rather than a plain
+    /// `String` whose redaction depends on a hand-written `Debug`. Returning
+    /// one field to `String` fails to compile the type assertions below.
+    #[test]
+    fn chain_configs_carry_secrets_as_secret_strings() {
+        let sol_sk = "dummy_solana_payer_secret";
+        let sol = SolConfig {
+            account_sk: sol_sk.into(),
+            rpc_http_url: "http://127.0.0.1:8899".parse().unwrap(),
+            program_address: "11111111111111111111111111111111".parse().unwrap(),
+            indexer: Default::default(),
+        };
+        let _: &SecretString = &sol.account_sk;
+        assert!(!format!("{sol:?}").contains(sol_sk));
+
+        let hydration_uri = "//Alice/dummy/hydration/uri";
+        let hydration = HydrationConfig {
+            rpc_ws_url: "ws://127.0.0.1:8000".parse().unwrap(),
+            signer_uri: hydration_uri.into(),
+        };
+        let _: &SecretString = &hydration.signer_uri;
+        assert!(!format!("{hydration:?}").contains(hydration_uri));
+
+        let canton_secret = "dummy_canton_oidc_client_secret";
+        let canton = CantonConfig {
+            json_api_url: "http://127.0.0.1:7575".parse().unwrap(),
+            json_api_ws_url: "ws://127.0.0.1:7575".parse().unwrap(),
+            auth: mpc_chain_canton::CantonAuthConfig {
+                token_url: "http://127.0.0.1:7575/token".parse().unwrap(),
+                client_id: "client-id".to_string(),
+                client_secret: canton_secret.into(),
+                audience: "audience".to_string(),
+                scope: None,
+            },
+            ledger_api_user: "ledger-user".to_string(),
+            party_id: "party".to_string(),
+            signer_contract_id: "contract".to_string(),
+            signer_template_id: "template".to_string(),
+        };
+        let _: &SecretString = &canton.auth.client_secret;
+        assert!(!format!("{canton:?}").contains(canton_secret));
+
+        let midnight_seed = "000102030405060708090a0b0c0d0e0f000102030405060708090a0b0c0d0e0f";
+        let midnight = MidnightConfig {
+            node_url: "http://127.0.0.1:9944".parse().unwrap(),
+            central_address: mpc_chain_midnight::MidnightAddress::from_bytes([0xab; 32]),
+            responder_address: mpc_chain_midnight::MidnightAddress::from_bytes([0xcd; 32]),
+            publisher: mpc_chain_midnight::PublisherConfig {
+                funding_seed: midnight_seed.into(),
+                ..Default::default()
+            },
+            rpc: Default::default(),
+            indexer: Default::default(),
+        };
+        let _: &SecretString = &midnight.publisher.funding_seed;
+        assert!(!format!("{midnight:?}").contains(midnight_seed));
+
+        let tron_key = "dummy_tron_api_key";
+        let tron = TronConfig {
+            api_key: Some(tron_key.into()),
+            ..Default::default()
+        };
+        let _: &Option<SecretString> = &tron.api_key;
+        assert!(!format!("{tron:?}").contains(tron_key));
+    }
+
+    #[test]
+    fn storage_options_redact_the_redis_url() {
+        let options = <storage::Options as Parser>::try_parse_from([
+            "test",
+            "--redis-url",
+            "redis://:redis-password@127.0.0.1:6379",
+            "--sk-share-secret-id",
+            "s",
+            "--gcp-project-id",
+            "p",
+        ])
+        .expect("the redis url and one key-share store are a valid set");
+
+        let _: &SecretString = &options.redis_url;
+        assert!(!format!("{options:?}").contains("redis-password"));
     }
 }

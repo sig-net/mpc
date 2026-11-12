@@ -620,7 +620,7 @@ fn responder_config(
             .context("decoding Midnight responder address")?,
         publisher: PublisherConfig {
             output_storage,
-            funding_seed: bootstrap.publisher_seeds[0].clone(),
+            funding_seed: bootstrap.publisher_seeds[0].clone().into(),
             indexer_ws_url: endpoints
                 .indexer_ws_url
                 .parse()

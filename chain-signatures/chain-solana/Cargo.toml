@@ -22,6 +22,7 @@ mpc-crypto.workspace = true
 mpc-primitives.workspace = true
 mpc-utils.workspace = true
 reqwest.workspace = true
+secrecy = "0.10.3"
 serde.workspace = true
 serde_json.workspace = true
 signet-program.workspace = true

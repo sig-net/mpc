@@ -1,5 +1,5 @@
 use mpc_chain_midnight::{MidnightAddress, MidnightConfig, OutputStorageConfig, PublisherConfig};
-use secrecy::{ExposeSecret as _, SecretString};
+use secrecy::SecretString;
 use std::time::Duration;
 use url::Url;
 
@@ -120,7 +120,7 @@ impl MidnightArgs {
         // Only test builds override the image's artifact directories.
         #[cfg_attr(not(feature = "test-feature"), allow(unused_mut))]
         let mut publisher = PublisherConfig {
-            funding_seed: funding_seed.expose_secret().to_string(),
+            funding_seed,
             indexer_ws_url,
             output_storage: self.midnight_output_storage_bucket.map(|bucket| {
                 OutputStorageConfig::new(
@@ -161,6 +161,7 @@ mod tests {
     use super::*;
     use clap::Parser as _;
     use mpc_chain_midnight::IndexerConfig;
+    use secrecy::ExposeSecret as _;
 
     /// The command line for [`configured`].
     fn configured_argv() -> Vec<String> {
@@ -200,7 +201,7 @@ mod tests {
             central_address: MidnightAddress::from_bytes([0xab; 32]),
             responder_address: MidnightAddress::from_bytes([0xcd; 32]),
             publisher: PublisherConfig {
-                funding_seed: "0f".repeat(32),
+                funding_seed: "0f".repeat(32).into(),
                 indexer_ws_url: "ws://127.0.0.1:8088/api/v3/graphql/ws".parse().unwrap(),
                 output_storage: Some(OutputStorageConfig::new(
                     "midnight-results".into(),
@@ -217,7 +218,7 @@ mod tests {
     #[test]
     fn debug_redacts_the_funding_seed() {
         let config = configured();
-        let funding_seed = config.publisher.funding_seed.clone();
+        let funding_seed = config.publisher.funding_seed.expose_secret().to_string();
         let rendered = format!("{:?}", configured_args());
 
         assert!(

@@ -1,4 +1,5 @@
 use mpc_chain_solana::{Pubkey, SolConfig, SolIndexerConfig};
+use secrecy::SecretString;
 use url::Url;
 
 /// Configures Solana indexer.
@@ -12,7 +13,7 @@ pub struct SolArgs {
         hide_env_values = true,
         requires_all = ["sol_rpc_http_url", "sol_program_address"]
     )]
-    pub sol_account_sk: Option<String>,
+    pub sol_account_sk: Option<SecretString>,
     /// Solana RPC HTTP URL
     #[arg(
         long,
