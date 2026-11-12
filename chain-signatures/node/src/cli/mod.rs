@@ -1387,4 +1387,45 @@ mod tests {
             );
         }
     }
+
+    /// The parameters a node cannot start without, pinned: a default or an
+    /// `Option` on one of them would let a node start on a guess.
+    #[test]
+    fn required_parameters_are_pinned() {
+        use clap::CommandFactory;
+
+        let cmd = Cli::command();
+        let start = cmd
+            .find_subcommand("start")
+            .expect("start subcommand must exist");
+
+        let mut required: Vec<_> = start
+            .get_arguments()
+            .filter(|arg| arg.is_required_set())
+            .map(|arg| arg.get_id().as_str())
+            .collect();
+        required.sort_unstable();
+        assert_eq!(
+            required,
+            [
+                "account_id",
+                "account_sk",
+                "cipher_sk",
+                "env",
+                "mpc_contract_id",
+                "my_address",
+                "near_rpc",
+                "redis_url",
+                "sign_sk",
+            ]
+        );
+
+        // The key-share store: one of its flags must be given.
+        let required_groups: Vec<_> = start
+            .get_groups()
+            .filter(|group| group.is_required_set())
+            .map(|group| group.get_id().as_str())
+            .collect();
+        assert_eq!(required_groups, ["sk_share"]);
+    }
 }
