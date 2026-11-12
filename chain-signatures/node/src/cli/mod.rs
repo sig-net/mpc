@@ -1005,6 +1005,7 @@ async fn spawn_indexers(
 mod tests {
     use mpc_chain_integration_core::utils::test::make_publish_action;
     use mpc_primitives::{SignId, SignKind};
+    use secrecy::SecretString;
     use std::str::FromStr;
     use std::time::Duration;
 
@@ -1366,5 +1367,79 @@ mod tests {
             .map(|group| group.get_id().as_str())
             .collect();
         assert_eq!(required_groups, ["sk_share"]);
+    }
+
+    /// Chain configs live for the node's lifetime, so their secret fields must
+    /// remain in redacting types rather than plain strings.
+    #[test]
+    fn chain_configs_carry_secrets_as_secret_strings() {
+        let sol_sk = "dummy_solana_payer_secret";
+        let sol = SolConfig {
+            account_sk: sol_sk.into(),
+            rpc_http_url: "http://127.0.0.1:8899".parse().unwrap(),
+            program_address: "11111111111111111111111111111111".parse().unwrap(),
+            indexer: Default::default(),
+        };
+        let _: &SecretString = &sol.account_sk;
+        assert!(!format!("{sol:?}").contains(sol_sk));
+
+        let canton_secret = "dummy_canton_oidc_client_secret";
+        let canton = CantonConfig {
+            json_api_url: "http://127.0.0.1:7575".parse().unwrap(),
+            json_api_ws_url: "ws://127.0.0.1:7575".parse().unwrap(),
+            auth: mpc_chain_canton::CantonAuthConfig {
+                token_url: "http://127.0.0.1:7575/token".parse().unwrap(),
+                client_id: "client-id".to_string(),
+                client_secret: canton_secret.into(),
+                audience: "audience".to_string(),
+                scope: None,
+            },
+            ledger_api_user: "ledger-user".to_string(),
+            party_id: "party".to_string(),
+            signer_contract_id: "contract".to_string(),
+            signer_template_id: "template".to_string(),
+        };
+        let _: &SecretString = &canton.auth.client_secret;
+        assert!(!format!("{canton:?}").contains(canton_secret));
+
+        let midnight_seed = "000102030405060708090a0b0c0d0e0f000102030405060708090a0b0c0d0e0f";
+        let midnight = MidnightConfig {
+            node_url: "http://127.0.0.1:9944".parse().unwrap(),
+            central_address: mpc_chain_midnight::MidnightAddress::from_bytes([0xab; 32]),
+            responder_address: mpc_chain_midnight::MidnightAddress::from_bytes([0xcd; 32]),
+            publisher: mpc_chain_midnight::PublisherConfig {
+                funding_seed: midnight_seed.into(),
+                ..Default::default()
+            },
+            rpc: Default::default(),
+            indexer: Default::default(),
+        };
+        let _: &SecretString = &midnight.publisher.funding_seed;
+        assert!(!format!("{midnight:?}").contains(midnight_seed));
+
+        let tron_key = "dummy_tron_api_key";
+        let tron = TronConfig {
+            api_key: Some(tron_key.into()),
+            ..Default::default()
+        };
+        let _: &Option<SecretString> = &tron.api_key;
+        assert!(!format!("{tron:?}").contains(tron_key));
+    }
+
+    #[test]
+    fn storage_options_redact_the_redis_url() {
+        let options = <storage::Options as Parser>::try_parse_from([
+            "test",
+            "--redis-url",
+            "redis://:redis-password@127.0.0.1:6379",
+            "--sk-share-secret-id",
+            "s",
+            "--gcp-project-id",
+            "p",
+        ])
+        .expect("the redis url and one key-share store are a valid set");
+
+        let _: &SecretString = &options.redis_url;
+        assert!(!format!("{options:?}").contains("redis-password"));
     }
 }
