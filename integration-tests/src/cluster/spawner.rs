@@ -582,7 +582,7 @@ mod tests {
     fn midnight_cfg() -> NodeConfig {
         NodeConfig {
             midnight: Some(MidnightConfig {
-                node_url: "http://127.0.0.1:9944".to_string(),
+                node_url: "http://127.0.0.1:9944".parse().unwrap(),
                 central_address: MidnightAddress::from_bytes([0; 32]),
                 responder_address: MidnightAddress::from_bytes([1; 32]),
                 publisher: PublisherConfig {

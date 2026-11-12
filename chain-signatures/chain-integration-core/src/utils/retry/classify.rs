@@ -2,6 +2,7 @@ use alloy::transports::{
     RpcError as AlloyRpcError, TransportError as AlloyTransportError, TransportErrorKind,
 };
 use http::StatusCode;
+use std::time::Duration;
 
 /// Whether an HTTP status makes an RPC call worth retrying: 408/429 are
 /// transient, 402 stays retryable (pairs with the cooldown gate — providers
@@ -47,6 +48,9 @@ pub struct RpcFailure {
     code: Option<i64>,
     /// Whether this failure is considered terminal.
     terminal: bool,
+    /// Provider-advertised pause (`Retry-After`), read by the gate on
+    /// throttles.
+    retry_after: Option<Duration>,
 }
 
 impl RpcFailure {
@@ -74,6 +78,7 @@ impl RpcFailure {
             status: Some(status),
             code: None,
             terminal,
+            retry_after: None,
         }
     }
 
@@ -84,6 +89,7 @@ impl RpcFailure {
             status: None,
             code: None,
             terminal: true,
+            retry_after: None,
         }
     }
 
@@ -94,6 +100,7 @@ impl RpcFailure {
             status: None,
             code: Some(code),
             terminal: true,
+            retry_after: None,
         }
     }
 
@@ -104,6 +111,7 @@ impl RpcFailure {
             status: None,
             code: None,
             terminal: false,
+            retry_after: None,
         }
     }
 
@@ -122,6 +130,17 @@ impl RpcFailure {
         self.terminal
     }
 
+    /// Sets the advertised pause.
+    pub fn with_retry_after(mut self, retry_after: Duration) -> Self {
+        self.retry_after = Some(retry_after);
+        self
+    }
+
+    /// The advertised pause, if any.
+    pub fn retry_after(&self) -> Option<Duration> {
+        self.retry_after
+    }
+
     /// Carrier reproducing `e`'s classification — verdict carrier or first
     /// typed status — with the full chain render as its message, so fan-out
     /// copies keep outer contexts. `None` when `e` has no typed signal.
@@ -135,6 +154,7 @@ impl RpcFailure {
                 status: failure.status,
                 code: failure.code,
                 terminal: failure.terminal,
+                retry_after: failure.retry_after,
             });
         }
         status.map(|status| Self::send_status(status, format!("{e:#}")))

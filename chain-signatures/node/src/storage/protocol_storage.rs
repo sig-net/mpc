@@ -1010,21 +1010,18 @@ impl<A: ProtocolArtifact, Phase> ProtocolStorage<A, Phase> {
         const SCRIPT: &str = r#"
             local artifact_key = KEYS[2]
             local owner_keys = redis.call("SMEMBERS", KEYS[1])
-            local del = {}
+            local artifact_ids = redis.call("HKEYS", artifact_key)
+
+            -- One DEL per key: unpack() of a large table fails in Redis Lua.
             for _, key in ipairs(KEYS) do
-                table.insert(del, key)
+                redis.call("DEL", key)
             end
             for _, key in ipairs(owner_keys) do
-                table.insert(del, key)
+                redis.call("DEL", key)
             end
-
-            -- Also delete all holders sets for artifacts in the hash
-            local artifact_ids = redis.call("HKEYS", artifact_key)
             for _, id in ipairs(artifact_ids) do
-                table.insert(del, artifact_key .. ':holders:' .. id)
+                redis.call("DEL", artifact_key .. ':holders:' .. id)
             end
-
-            redis.call("DEL", unpack(del))
         "#;
 
         let start = Instant::now();

@@ -1,10 +1,9 @@
 use alloy::primitives::Address;
 use anyhow::Context as _;
-use mpc_chain_ethereum::{EthConfig, IndexerConfig};
+use clap::builder::{PossibleValuesParser, TypedValueParser as _};
+use mpc_chain_ethereum::{EthConfig, EthNetwork, IndexerConfig};
 use secrecy::{ExposeSecret, SecretString};
 use url::Url;
-
-const DEFAULT_ETH_NETWORK: &str = "sepolia";
 
 /// The indexer's production cadence, as `mpc-chain-ethereum` defines it.
 #[cfg(not(feature = "test-feature"))]
@@ -54,21 +53,20 @@ pub struct EthArgs {
     )]
     pub eth_execution_rpc_http_url: Option<Url>,
 
-    /// The network that the eth indexer is running on: "sepolia"/"mainnet",
-    /// or "anvil" for local dev chains (anvil never reports finalized blocks,
-    /// so requests are emitted without waiting for finality).
+    /// The network the RPC serves. On anvil (local dev chains) requests are
+    /// emitted without waiting for finality: it never reports finalized blocks.
     #[arg(
         long,
         env("MPC_ETH_NETWORK"),
-        default_value = DEFAULT_ETH_NETWORK,
-        value_parser = ["sepolia", "mainnet", "anvil"],
+        default_value_t = EthNetwork::Sepolia,
+        value_parser = PossibleValuesParser::new(EthNetwork::ALL.map(EthNetwork::as_str))
+            .try_map(|name| name.parse::<EthNetwork>()),
     )]
-    pub eth_network: String,
+    pub eth_network: EthNetwork,
 }
 
 impl EthArgs {
     pub fn into_config(self) -> anyhow::Result<Option<EthConfig>> {
-        let network = self.eth_network;
         let Some(account_sk) = self.eth_account_sk else {
             return Ok(None);
         };
@@ -87,8 +85,7 @@ impl EthArgs {
             account_sk, // this is safe because EthConfig has custom Debug implementation that redacts the account_sk field
             execution_rpc_http_url,
             contract_address,
-            optimistic_requests: EthConfig::is_optimistic_network(&network),
-            network,
+            network: self.eth_network,
             // TODO: currently we only have Ethereum and Sepolia, so defaults
             // are fine. Make these configurable when we add more chains.
             rpc: Default::default(),
@@ -143,7 +140,7 @@ mod tests {
             config.contract_address,
             CONTRACT.parse::<Address>().unwrap()
         );
-        assert_eq!(config.network, "mainnet");
+        assert_eq!(config.network, EthNetwork::Mainnet);
         assert_eq!(
             config.indexer.refresh_interval,
             indexer_config().refresh_interval
@@ -158,7 +155,7 @@ mod tests {
                 .into_config()
                 .unwrap()
                 .expect("configured chain");
-            assert_eq!(config.optimistic_requests, optimistic, "{network}");
+            assert_eq!(config.network.is_optimistic(), optimistic, "{network}");
         }
     }
 

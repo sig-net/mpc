@@ -1,5 +1,6 @@
 [package]
 name = "integration-tests"
+default-run = "integration-tests"
 version = "0.1.0"
 edition = "2021"
 publish = false
@@ -91,6 +92,14 @@ anyhow.workspace = true
 async-process = "2"
 tokio.workspace = true
 
+
+[[bin]]
+name = "integration-tests"
+path = "src/main.rs"
+
+[[bin]]
+name = "redis-bench"
+path = "src/bin/redis_bench.rs"
 
 [[bench]]
 name = "sign"
