@@ -1831,30 +1831,44 @@ async fn requeue_pending_sign_requests_is_chain_scoped() {
 }
 
 #[tokio::test]
-async fn catchup_blocks_do_not_consume_checkpoint_slots() {
-    // During catchup, process_block_event should NOT create checkpoints
-    // (which consume slots). If it did, 33 checkpoint intervals worth of
-    // blocks would fill the 32-slot cap and stall catchup forever.
+async fn catchup_blocks_vote_for_checkpoints() {
     let chain = Chain::Ethereum;
-    let backlog = Backlog::new();
     let (sign_tx, _sign_rx) = mpsc::channel(4);
     let telemetry = NoopChainTelemetry;
-    let ctx = make_test_stream_context_with_generator_pk(backlog, sign_tx, false);
-
-    // Process 33 checkpoint intervals at caught_up=false
-    let interval = crate::backlog::checkpoint_interval(chain).unwrap();
-    for i in 1..=33 {
-        process_block_event(chain, i * interval, &ctx, &telemetry)
-            .await
-            .unwrap();
-    }
-
-    // Slots should still be available — no pending checkpoints created
-    assert!(
-        ctx.backlog.checkpoints().has_slot(chain),
-        "catchup should not consume checkpoint slots; 33 intervals without caught_up \
-         would fill the 32-slot cap and cause a permanent stall"
+    let (mut ctx, mut rpc_rx) = make_test_stream_context_with_rpc(
+        Backlog::new(),
+        sign_tx,
+        false,
+        ProjectivePoint::GENERATOR.to_affine(),
     );
+    let interval = crate::backlog::checkpoint_interval(chain).unwrap();
+
+    process_block_event(chain, interval, &ctx, &telemetry)
+        .await
+        .unwrap();
+
+    let action = timeout(Duration::from_secs(1), rpc_rx.recv())
+        .await
+        .expect("a boundary passed while catching up is voted")
+        .expect("rpc channel should remain open");
+    match action {
+        crate::rpc::RpcAction::VoteCheckpoint { checkpoint, .. } => {
+            assert_eq!(checkpoint.height, interval);
+        }
+        _ => panic!("unexpected rpc action"),
+    }
+    assert_eq!(ctx.backlog.get_processed_block(chain).await, Some(interval));
+
+    // The first live block is inside the interval, so it adds no checkpoint
+    // at a height the other nodes do not vote at.
+    ctx.caught_up = true;
+    process_block_event(chain, interval + 1, &ctx, &telemetry)
+        .await
+        .unwrap();
+    assert!(timeout(Duration::from_millis(100), rpc_rx.recv())
+        .await
+        .is_err());
+    assert_eq!(ctx.backlog.checkpoints().count(chain), 1);
 }
 
 #[tokio::test]
