@@ -1067,7 +1067,7 @@ async fn inner_call_receipt_attests_the_top_return() -> anyhow::Result<()> {
         &reference,
         reference.timestamp as i64,
     );
-    let mut tx = (*bidirectional_tx(txid, raw.encode_to_vec(), Chain::Solana)).clone();
+    let mut tx = Arc::unwrap_or_clone(bidirectional_tx(txid, raw.encode_to_vec(), Chain::Solana));
     let schema = br#"[{"name":"v","type":"uint256"}]"#;
     tx.output_deserialization_schema = schema.to_vec();
     tx.respond_serialization_schema = schema.to_vec();
