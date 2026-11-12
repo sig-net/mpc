@@ -242,6 +242,48 @@ async fn seed_executing_entry(
         .expect("advance to executing");
 }
 
+/// A deterministic advance failure parks the entry — a retry could never clear it.
+#[tokio::test]
+async fn process_execution_confirmed_failed_advance_parks_the_entry() {
+    let backlog = Backlog::new();
+    // Solana does not encode Unviable, so the transition fails.
+    let tx = test_bidirectional_tx(10, Chain::Solana, Chain::Ethereum);
+    let entry = backlog.insert_mock_executing(&tx).await;
+    backlog.watch_execution(&entry).await;
+
+    let (sign_tx, mut sign_rx) = mpsc::channel(4);
+    let ctx = make_test_stream_context_with_generator_pk(backlog, sign_tx, true);
+
+    let err = confirm_execution(&tx, 41, ExecutionOutcome::Unviable, &ctx)
+        .await
+        .unwrap_err();
+    assert!(
+        format!("{err:#}").contains("only supported for sources that encode them"),
+        "{err:#}"
+    );
+
+    let entry = ctx
+        .backlog
+        .get(tx.source_chain, &tx.sign_id())
+        .await
+        .expect("the entry survives");
+    assert_matches!(
+        entry.status(),
+        SignStatus::Bidirectional(BidirectionalProgress::Parked(_))
+    );
+    assert!(
+        !ctx.backlog
+            .get_execution_watchers(tx.target_chain)
+            .await
+            .contains_key(&tx.id),
+        "no watch left to re-emit the failing confirmation"
+    );
+    assert_matches!(
+        sign_rx.try_recv(),
+        Ok(SignCommand::Completion(id)) if id == tx.sign_id()
+    );
+}
+
 #[tokio::test]
 async fn process_execution_confirmed_resolves_a_displaced_watch_by_sign_id() {
     let backlog = Backlog::new();
