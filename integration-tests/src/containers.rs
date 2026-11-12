@@ -840,7 +840,9 @@ impl Solana {
 
     pub fn get_config(&self, program_address: String) -> SolConfig {
         SolConfig {
-            account_sk: bs58::encode(self.payer_keypair.to_bytes()).into_string(),
+            account_sk: bs58::encode(self.payer_keypair.to_bytes())
+                .into_string()
+                .into(),
             rpc_http_url: self.rpc_address.clone(),
             program_address,
             indexer: Default::default(),

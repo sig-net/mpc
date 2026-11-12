@@ -1,6 +1,7 @@
 use anyhow::Context as _;
 use oauth2::basic::{BasicClient, BasicTokenType};
 use oauth2::{ClientId, ClientSecret, EndpointNotSet, EndpointSet, Scope, TokenResponse, TokenUrl};
+use secrecy::ExposeSecret as _;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
@@ -32,7 +33,9 @@ impl CantonAuthProvider {
         let token_url =
             TokenUrl::new(config.token_url.clone()).context("invalid Canton OIDC token URL")?;
         let oauth_client = BasicClient::new(ClientId::new(config.client_id))
-            .set_client_secret(ClientSecret::new(config.client_secret))
+            .set_client_secret(ClientSecret::new(
+                config.client_secret.expose_secret().to_string(),
+            ))
             .set_token_uri(token_url);
 
         Ok(Self {

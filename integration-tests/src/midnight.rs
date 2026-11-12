@@ -277,7 +277,7 @@ fn responder_config(
                 node_executable,
                 publisher_entrypoint.to_string_lossy().into_owned(),
             ],
-            funding_seed: bootstrap.publisher_seed.clone(),
+            funding_seed: bootstrap.publisher_seed.clone().into(),
             proof_server_url: endpoints.proof_server_url.clone(),
             indexer_url: endpoints.indexer_url.clone(),
             indexer_ws_url: endpoints.indexer_ws_url.clone(),

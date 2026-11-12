@@ -39,7 +39,7 @@ impl HydrationArgs {
     pub fn into_config(self) -> Option<HydrationConfig> {
         Some(HydrationConfig {
             rpc_ws_url: self.rpc_ws_url?,
-            signer_uri: self.signer_uri?.expose_secret().to_string(),
+            signer_uri: self.signer_uri?,
         })
     }
 
@@ -47,7 +47,7 @@ impl HydrationArgs {
         match config {
             Some(config) => HydrationArgs {
                 rpc_ws_url: Some(config.rpc_ws_url),
-                signer_uri: Some(config.signer_uri.into()),
+                signer_uri: Some(config.signer_uri),
             },
             None => HydrationArgs {
                 rpc_ws_url: None,

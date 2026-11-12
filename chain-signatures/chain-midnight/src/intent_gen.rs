@@ -12,6 +12,7 @@ use std::time::Duration;
 use anyhow::Context as _;
 use mpc_chain_integration_core::utils::retry::retry_rpc;
 use mpc_utils::task::AbortOnDrop;
+use secrecy::ExposeSecret as _;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
 use tokio::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command};
@@ -475,7 +476,10 @@ fn intent_gen_command(config: &MidnightConfig, network_id: &str) -> anyhow::Resu
     command
         .env_clear()
         .env("PATH", CHILD_PATH)
-        .env("MIDNIGHT_PUB_FUNDING_SEED", &config.publisher.funding_seed)
+        .env(
+            "MIDNIGHT_PUB_FUNDING_SEED",
+            config.publisher.funding_seed.expose_secret(),
+        )
         .env("MIDNIGHT_PUB_NETWORK_ID", network_id)
         .env("MIDNIGHT_PUB_NODE_URL", &config.node_url)
         .env(
@@ -676,7 +680,7 @@ mod tests {
             central_address: MidnightAddress::from_bytes([0xab; 32]),
             publisher: PublisherConfig {
                 intent_gen_command: vec!["sh".to_string(), "-c".to_string(), script],
-                funding_seed: "ab".repeat(32),
+                funding_seed: "ab".repeat(32).into(),
                 proof_server_url: "http://127.0.0.1:6300".to_string(),
                 indexer_url: "http://127.0.0.1:8088/api/v3/graphql".to_string(),
                 indexer_ws_url: "ws://127.0.0.1:8088/api/v3/graphql/ws".to_string(),
@@ -1242,7 +1246,7 @@ mod tests {
             [
                 (
                     "MIDNIGHT_PUB_FUNDING_SEED".to_string(),
-                    config.publisher.funding_seed.clone(),
+                    config.publisher.funding_seed.expose_secret().to_string(),
                 ),
                 (
                     "MIDNIGHT_PUB_INDEXER_URL".to_string(),

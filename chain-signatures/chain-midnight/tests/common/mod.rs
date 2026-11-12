@@ -49,7 +49,7 @@ pub fn base_live_config() -> MidnightConfig {
         central_address: MidnightAddress::from_bytes([0xab; 32]),
         publisher: PublisherConfig {
             intent_gen_command: vec![node_executable(), path_arg(&entry)],
-            funding_seed: "ab".repeat(32),
+            funding_seed: "ab".repeat(32).into(),
             proof_server_url: "http://127.0.0.1:6300".to_string(),
             indexer_url: "http://127.0.0.1:8088/api/v3/graphql".to_string(),
             indexer_ws_url: "ws://127.0.0.1:8088/api/v3/graphql/ws".to_string(),

@@ -58,13 +58,14 @@ const MAX_SIGN_COMMANDS: usize = 16384;
 #[derive(Parser, Debug)]
 pub enum Cli {
     Start {
-        /// NEAR RPC address
+        /// NEAR RPC address. May carry a provider API key, so it is carried as
+        /// a `SecretString` and only exposed where the RPC client is built.
         #[arg(
             long,
             env("MPC_NEAR_RPC"),
             default_value("https://rpc.testnet.near.org")
         )]
-        near_rpc: String,
+        near_rpc: SecretString,
         /// MPC contract id
         #[arg(long, env("MPC_CONTRACT_ID"), default_value("dev.sig-net.testnet"))]
         mpc_contract_id: AccountId,
@@ -154,7 +155,7 @@ impl Cli {
                 let mut args = vec![
                     "start".to_string(),
                     "--near-rpc".to_string(),
-                    near_rpc,
+                    near_rpc.expose_secret().to_string(),
                     "--mpc-contract-id".to_string(),
                     mpc_contract_id.to_string(),
                     "--account-id".to_string(),
@@ -166,7 +167,7 @@ impl Cli {
                     "--cipher-sk".to_string(),
                     cipher_sk.expose_secret().to_string(),
                     "--redis-url".to_string(),
-                    storage_options.redis_url.to_string(),
+                    storage_options.redis_url.expose_secret().to_string(),
                 ];
                 args.extend(["--sign-sk".to_string(), sign_sk.expose_secret().to_string()]);
                 if let Some(my_address) = my_address {
@@ -268,7 +269,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             // NEAR Indexer is only used for integration tests
             // TODO: Remove this once we have integration tests built on other chains
             if env == "integration-tests" {
-                let rpc_client = near_fetch::Client::new(&near_rpc);
+                let rpc_client = near_fetch::Client::new(near_rpc.expose_secret());
                 let near_sign_tx = SignCommand::forward_near(sign_tx.clone(), backlog.clone());
                 mpc_chain_near::run(
                     &mpc_contract_id,
@@ -609,6 +610,15 @@ impl ChainStack {
     }
 }
 
+/// A NEAR RPC endpoint may carry a provider key in its userinfo, path or query,
+/// so only its host is safe to log.
+fn rpc_host(url: &str) -> String {
+    Url::parse(url)
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_owned))
+        .unwrap_or_else(|| "<unparseable>".to_string())
+}
+
 /// Emit the single structured "starting node" banner describing this node's identity
 /// and which chains it is configured to index.
 #[allow(clippy::too_many_arguments)]
@@ -636,7 +646,7 @@ fn log_startup(
         git_commit_hash = %crate::metrics::git_commit_hash(),
         build_timestamp = %crate::metrics::build_timestamp(),
         sign_pk = %network.sign_sk.public_key(),
-        near_rpc_url = %near_client.rpc_addr(),
+        near_rpc_host = %rpc_host(&near_client.rpc_addr()),
         eth_contract_address = %chains.eth.as_ref().map(|c| c.contract_address.to_string()).unwrap_or_else(|| "None".to_string()),
         eth_signer_address = %eth_signer_address.as_deref().unwrap_or("None"),
         sol_program_address = %chains.sol.as_ref().map(|c| c.program_address.as_str()).unwrap_or("None"),
@@ -691,7 +701,7 @@ struct RpcHandles {
 
 impl RpcHandles {
     async fn new(
-        near_rpc_url: &str,
+        near_rpc: &SecretString,
         my_address: &Url,
         network: &NetworkConfig,
         mpc_contract_id: &AccountId,
@@ -700,7 +710,7 @@ impl RpcHandles {
         backlog: Backlog,
     ) -> Self {
         let publisher_telemetry = Arc::new(NodeTelemetry::new(Chain::NEAR));
-        let near_rpc = near_fetch::Client::new(near_rpc_url);
+        let near_rpc = near_fetch::Client::new(near_rpc.expose_secret());
         // One set of gates for every NEAR call: the publisher and the governance
         // client share the endpoint and the signer.
         let near_gates = NearRpcGates::new(stack.gate(Chain::NEAR));
@@ -764,7 +774,7 @@ impl StorageHandles {
         let gcp_service = GcpService::init(storage_options).await?;
         let key_storage =
             storage::secret_storage::init(Some(&gcp_service), storage_options, account_id);
-        let redis_pool = redis_pool(Url::parse(storage_options.redis_url.as_str())?)?;
+        let redis_pool = redis_pool(Url::parse(storage_options.redis_url.expose_secret())?)?;
         let triple_storage = TriplePair::storage(&redis_pool, account_id);
         let presignature_storage = Presignature::storage(&redis_pool, account_id);
         let backlog = Backlog::persisted(CheckpointStorage::Redis(
@@ -1407,7 +1417,7 @@ mod tests {
                 node_url: "http://127.0.0.1:1".to_string(),
                 central_address: mpc_chain_midnight::MidnightAddress::from_bytes([0xab; 32]),
                 publisher: mpc_chain_midnight::PublisherConfig {
-                    funding_seed: "ab".repeat(32),
+                    funding_seed: "ab".repeat(32).into(),
                     proof_server_url: "http://127.0.0.1:1".to_string(),
                     indexer_url: "http://127.0.0.1:1/api/v3/graphql".to_string(),
                     indexer_ws_url: "ws://127.0.0.1:1/api/v3/graphql/ws".to_string(),
@@ -1448,7 +1458,7 @@ mod tests {
 
     fn sol_config_with_bogus_rpc() -> SolConfig {
         SolConfig {
-            account_sk: mpc_chain_solana::Keypair::new().to_base58_string(),
+            account_sk: mpc_chain_solana::Keypair::new().to_base58_string().into(),
             rpc_http_url: "http://127.0.0.1:1".into(),
             program_address: mpc_chain_solana::Pubkey::new_unique().to_string(),
             indexer: Default::default(),
@@ -1525,9 +1535,11 @@ mod tests {
         let dummy_canton_secret = "super_secret_canton_oidc_client_secret";
         let dummy_midnight_seed =
             "000102030405060708090a0b0c0d0e0f000102030405060708090a0b0c0d0e0f";
+        let dummy_near_rpc = "https://rpc.example.com/provider-api-key";
+        let dummy_redis_url = "redis://:redis-password@127.0.0.1:6379";
 
         let cli = Cli::Start {
-            near_rpc: "http://127.0.0.1:3030".to_string(),
+            near_rpc: dummy_near_rpc.into(),
             mpc_contract_id: "dev.near".parse().unwrap(),
             account_id: "test.near".parse().unwrap(),
             env: "test".to_string(),
@@ -1585,7 +1597,7 @@ mod tests {
                 gcp_project_id: "test".to_string(),
                 sk_share_secret_id: None,
                 sk_share_local_path: None,
-                redis_url: "redis://127.0.0.1:6379".to_string(),
+                redis_url: dummy_redis_url.into(),
             },
             log_options: logs::Options::default(),
             override_config: None,
@@ -1609,6 +1621,8 @@ mod tests {
             dummy_hydration_uri,
             dummy_canton_secret,
             dummy_midnight_seed,
+            dummy_near_rpc,
+            dummy_redis_url,
         ] {
             assert!(
                 !debug_str.contains(secret),
@@ -1616,5 +1630,74 @@ mod tests {
             );
         }
         assert!(debug_str.contains("[REDACTED]"));
+    }
+
+    /// The CLI boundary is not enough: the chain configs are carried into the
+    /// runtime for the node's lifetime, so they must hold secrets in
+    /// `SecretString` rather than plain `String` fields whose redaction depends
+    /// on a hand-written `Debug`.
+    #[test]
+    fn chain_configs_carry_secrets_as_secret_strings() {
+        let sol_sk = "dummy_solana_payer_secret";
+        let sol = SolArgs {
+            sol_account_sk: Some(sol_sk.into()),
+            sol_rpc_http_url: Some("http://127.0.0.1:8899".to_string()),
+            sol_program_address: Some("11111111111111111111111111111111".to_string()),
+            sol_poll_interval_ms: 1000,
+        }
+        .into_config()
+        .expect("every Solana field is set");
+        let _: &SecretString = &sol.account_sk;
+        assert!(!format!("{sol:?}").contains(sol_sk));
+
+        let hydration_uri = "//Alice/dummy/hydration/uri";
+        let hydration = HydrationArgs {
+            rpc_ws_url: Some("ws://127.0.0.1:8000".to_string()),
+            signer_uri: Some(hydration_uri.into()),
+        }
+        .into_config()
+        .expect("every Hydration field is set");
+        let _: &SecretString = &hydration.signer_uri;
+        assert!(!format!("{hydration:?}").contains(hydration_uri));
+
+        let canton_secret = "dummy_canton_oidc_client_secret";
+        let canton = CantonArgs {
+            canton_json_api_url: Some("http://127.0.0.1:7575".to_string()),
+            canton_json_api_ws_url: Some("ws://127.0.0.1:7575".to_string()),
+            canton_ledger_api_user: Some("ledger-user".to_string()),
+            canton_oidc_token_url: Some("http://127.0.0.1:7575/token".to_string()),
+            canton_oidc_client_id: Some("client-id".to_string()),
+            canton_oidc_client_secret: Some(canton_secret.into()),
+            canton_oidc_audience: Some("audience".to_string()),
+            canton_oidc_scope: None,
+            canton_party_id: Some("party".to_string()),
+            canton_signer_contract_id: Some("contract".to_string()),
+            canton_signer_template_id: Some("template".to_string()),
+        }
+        .into_config()
+        .expect("every Canton field is set");
+        let _: &SecretString = &canton.auth.client_secret;
+        assert!(!format!("{canton:?}").contains(canton_secret));
+
+        let midnight_seed = "000102030405060708090a0b0c0d0e0f000102030405060708090a0b0c0d0e0f";
+        let midnight = MidnightArgs {
+            midnight_node_url: Some("http://127.0.0.1:9944".to_string()),
+            midnight_central_address: Some("ab".repeat(32)),
+            midnight_funding_seed: Some(midnight_seed.into()),
+            midnight_intent_gen_command: None,
+            midnight_proof_server_url: Some("http://127.0.0.1:6300".to_string()),
+            midnight_indexer_url: Some("http://127.0.0.1:8088/api/v3/graphql".to_string()),
+            midnight_indexer_ws_url: Some("ws://127.0.0.1:8088/api/v3/graphql/ws".to_string()),
+            midnight_output_storage_bucket: None,
+            midnight_output_storage_prefix: None,
+            midnight_output_storage_timeout_secs: None,
+            #[cfg(feature = "test-feature")]
+            midnight_output_storage_emulator_endpoint: None,
+        }
+        .into_config()
+        .expect("the Midnight CLI arguments are well formed")
+        .expect("every Midnight field is set");
+        let _: &SecretString = &midnight.publisher.funding_seed;
+        assert!(!format!("{midnight:?}").contains(midnight_seed));
     }
 }

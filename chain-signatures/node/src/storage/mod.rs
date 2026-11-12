@@ -8,6 +8,7 @@ use cait_sith::protocol::Participant;
 pub use checkpoint_storage::CheckpointStorage;
 pub use presignature_storage::PresignatureStorage;
 pub use protocol_storage::StorageError;
+use secrecy::SecretString;
 pub use triple_storage::TripleStorage;
 
 // Can be used to "clear" redis storage in case of a breaking change
@@ -26,8 +27,10 @@ pub struct Options {
     /// Mostly for integration tests.
     #[arg(long, env("MPC_SK_SHARE_LOCAL_PATH"))]
     pub sk_share_local_path: Option<String>,
+    /// The URL may carry a password, so it is carried as a [`SecretString`]
+    /// and only exposed where the pool is built.
     #[arg(long, env("MPC_REDIS_URL"))]
-    pub redis_url: String,
+    pub redis_url: SecretString,
 }
 
 impl Options {

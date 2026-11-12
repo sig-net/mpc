@@ -5,6 +5,7 @@ use k256::elliptic_curve::sec1::ToEncodedPoint;
 use mpc_chain_integration_core::{ChainPublisher, PublishAction, PublisherTelemetry};
 use mpc_primitives::{SignId, SignKind, Signature};
 use parity_scale_codec::{Decode, Encode};
+use secrecy::ExposeSecret as _;
 use sp_core::{sr25519, Pair as _};
 use sp_runtime::{
     traits::{IdentifyAccount, Verify},
@@ -176,7 +177,7 @@ impl HydrationClient {
         telemetry: Arc<dyn PublisherTelemetry>,
     ) -> anyhow::Result<Self> {
         let api = OnlineClient::<HydradxConfig>::from_url(&config.rpc_ws_url).await?;
-        let signer = HydrationSigner::from_uri(&config.signer_uri)?;
+        let signer = HydrationSigner::from_uri(config.signer_uri.expose_secret())?;
         Ok(Self {
             api,
             signer,

@@ -157,7 +157,7 @@ impl MidnightArgs {
             return Ok(None);
         };
         let mut publisher = PublisherConfig {
-            funding_seed: funding_seed.expose_secret().to_string(),
+            funding_seed,
             proof_server_url,
             indexer_url,
             indexer_ws_url,
@@ -215,7 +215,7 @@ impl MidnightArgs {
                 let mut args = MidnightArgs {
                     midnight_node_url: Some(node_url),
                     midnight_central_address: Some(central_address.to_hex()),
-                    midnight_funding_seed: Some(funding_seed.into()),
+                    midnight_funding_seed: Some(funding_seed),
                     midnight_intent_gen_command: Some(
                         serde_json::to_string(&intent_gen_command)
                             .expect("a Vec<String> always serializes"),
@@ -271,7 +271,7 @@ mod tests {
             node_url: "http://127.0.0.1:9944".into(),
             central_address: MidnightAddress::from_bytes([0xab; 32]),
             publisher: PublisherConfig {
-                funding_seed: "0f".repeat(32),
+                funding_seed: "0f".repeat(32).into(),
                 // A space and a leading dash, which only a structured encoding gets back out intact.
                 intent_gen_command: vec![
                     "node".into(),
@@ -296,7 +296,7 @@ mod tests {
     #[test]
     fn debug_redacts_the_funding_seed() {
         let config = configured();
-        let funding_seed = config.publisher.funding_seed.clone();
+        let funding_seed = config.publisher.funding_seed.expose_secret().to_string();
         let rendered = format!("{:?}", MidnightArgs::from_config(Some(config)));
 
         assert!(

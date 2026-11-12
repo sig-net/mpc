@@ -5,6 +5,7 @@ use mpc_chain_integration_core::{
     ChainPublisher, PublishAction, PublisherTelemetry,
 };
 use mpc_primitives::SignKind;
+use secrecy::ExposeSecret as _;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use signet_program::accounts::{
@@ -104,7 +105,7 @@ pub struct SolanaClient {
 impl SolanaClient {
     // TODO: reduce duplication between from_config and for_indexer
     pub fn from_config(sol: &SolConfig, telemetry: Arc<dyn PublisherTelemetry>) -> Self {
-        let keypair = Keypair::from_base58_string(&sol.account_sk);
+        let keypair = Keypair::from_base58_string(sol.account_sk.expose_secret());
         let payer = Arc::new(keypair);
         // Empty ws slot: nothing subscribes (the indexer polls finalized blocks).
         let cluster = anchor_client::Cluster::Custom(sol.rpc_http_url.clone(), String::new());

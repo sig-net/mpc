@@ -28,7 +28,7 @@ pub fn make_config() -> anyhow::Result<SolConfig> {
     let rpc_http_url = opt_env("RPC_URL")?;
     Ok(SolConfig {
         // The bench only indexes; the signer is never used.
-        account_sk: String::new(),
+        account_sk: String::new().into(),
         rpc_http_url,
         program_address: opt_env("PROGRAM_ADDRESS")?,
         indexer: Default::default(),

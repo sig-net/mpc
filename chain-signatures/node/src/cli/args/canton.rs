@@ -124,7 +124,7 @@ impl CantonArgs {
         let auth = CantonAuthConfig {
             token_url: self.canton_oidc_token_url?,
             client_id: self.canton_oidc_client_id?,
-            client_secret: self.canton_oidc_client_secret?.expose_secret().to_string(),
+            client_secret: self.canton_oidc_client_secret?,
             audience: self.canton_oidc_audience?,
             scope: self.canton_oidc_scope,
         };
@@ -155,7 +155,7 @@ impl CantonArgs {
                     canton_ledger_api_user: Some(c.ledger_api_user),
                     canton_oidc_token_url: Some(token_url),
                     canton_oidc_client_id: Some(client_id),
-                    canton_oidc_client_secret: Some(client_secret.into()),
+                    canton_oidc_client_secret: Some(client_secret),
                     canton_oidc_audience: Some(audience),
                     canton_oidc_scope: scope,
                     canton_party_id: Some(c.party_id),

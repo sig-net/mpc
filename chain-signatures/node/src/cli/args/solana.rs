@@ -48,7 +48,7 @@ impl SolArgs {
 
     pub fn into_config(self) -> Option<SolConfig> {
         Some(SolConfig {
-            account_sk: self.sol_account_sk?.expose_secret().to_string(),
+            account_sk: self.sol_account_sk?,
             rpc_http_url: self.sol_rpc_http_url?,
             program_address: self.sol_program_address?,
             indexer: SolIndexerConfig {
@@ -60,7 +60,7 @@ impl SolArgs {
     pub fn from_config(config: Option<SolConfig>) -> Self {
         match config {
             Some(config) => SolArgs {
-                sol_account_sk: Some(config.account_sk.into()),
+                sol_account_sk: Some(config.account_sk),
                 sol_rpc_http_url: Some(config.rpc_http_url),
                 sol_program_address: Some(config.program_address),
                 sol_poll_interval_ms: config.indexer.poll_interval.as_millis() as u64,

@@ -1,3 +1,4 @@
+use secrecy::{ExposeSecret as _, SecretString};
 use std::fmt;
 use std::time::Duration;
 
@@ -21,7 +22,11 @@ impl Default for SolIndexerConfig {
 #[derive(Clone)]
 pub struct SolConfig {
     /// The solana account secret key used to sign solana respond txn.
-    pub account_sk: String,
+    ///
+    /// Carried as a [`SecretString`]: the key is only exposed at the point of
+    /// use, so deriving `Debug` (or otherwise formatting the config) cannot
+    /// leak it.
+    pub account_sk: SecretString,
     /// Solana RPC http URL
     pub rpc_http_url: String,
     /// The program address to watch
@@ -34,7 +39,7 @@ impl SolConfig {
     /// Solana payer address derived from the configured account secret key.
     pub fn signer_address(&self) -> String {
         use solana_sdk::signer::Signer;
-        solana_sdk::signer::keypair::Keypair::from_base58_string(&self.account_sk)
+        solana_sdk::signer::keypair::Keypair::from_base58_string(self.account_sk.expose_secret())
             .pubkey()
             .to_string()
     }
@@ -43,7 +48,7 @@ impl SolConfig {
 impl fmt::Debug for SolConfig {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("SolConfig")
-            .field("account_sk", &"<hidden>")
+            .field("account_sk", &self.account_sk)
             .field("rpc_http_url", &self.rpc_http_url)
             .field("program_address", &self.program_address)
             .field("indexer", &self.indexer)

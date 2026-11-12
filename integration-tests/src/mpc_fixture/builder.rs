@@ -673,7 +673,7 @@ impl MpcFixtureNodeBuilder {
                     gcp_project_id: "-".to_owned(),
                     sk_share_secret_id: None,
                     sk_share_local_path: None,
-                    redis_url: ".".to_owned(),
+                    redis_url: ".".into(),
                 },
                 &self.participant_info.account_id,
             )

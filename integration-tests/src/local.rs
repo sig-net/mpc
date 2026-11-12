@@ -71,7 +71,7 @@ impl Node {
         let near_rpc = ctx.worker.rpc_addr();
         let mpc_contract_id = ctx.mpc_contract.id().clone();
         let cli = Cli::Start {
-            near_rpc: near_rpc.clone(),
+            near_rpc: near_rpc.clone().into(),
             mpc_contract_id: mpc_contract_id.clone(),
             account_id: account_id.clone(),
             env: ctx.env.clone(),
@@ -165,7 +165,7 @@ impl Node {
         let canton = CantonArgs::from_config(config.cfg.canton.clone());
         let midnight = MidnightArgs::from_config(config.cfg.midnight.clone());
         let cli = Cli::Start {
-            near_rpc: config.near_rpc.clone(),
+            near_rpc: config.near_rpc.clone().into(),
             mpc_contract_id: ctx.mpc_contract.id().clone(),
             account_id: config.account.id().clone(),
             env: ctx.env.clone(),
