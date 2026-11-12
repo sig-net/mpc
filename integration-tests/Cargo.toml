@@ -10,11 +10,11 @@ publish = false
 alloy = { workspace = true, features = ["provider-anvil-api"] }
 anyhow.workspace = true
 async-process = "2"
-async-trait = "0.1"
+async-trait.workspace = true
 backon.workspace = true
 bollard = "0.21"
 borsh.workspace = true
-bs58 = "0.5.1"
+bs58.workspace = true
 ciborium.workspace = true
 clap.workspace = true
 deadpool-redis.workspace = true
@@ -26,7 +26,7 @@ serde.workspace = true
 serde_json.workspace = true
 shell-escape = "0.1.5"
 testcontainers = "0.28"
-tokio = { version = "1.45.1", features = ["full", "test-util"] }
+tokio = { workspace = true, features = ["test-util"] }
 tokio-util.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
@@ -34,8 +34,8 @@ thiserror.workspace = true
 url.workspace = true
 uuid = { version = "1.0", features = ["v4"] }
 sha3.workspace = true
-sha2 = "0.10"
-rlp = "0.5"
+sha2.workspace = true
+rlp.workspace = true
 
 # solana dependencies
 anchor-client.workspace = true
@@ -46,14 +46,12 @@ solana-client.workspace = true
 solana-transaction-status.workspace = true
 
 # crypto dependencies
-bip32 = "0.5.3"
+bip32 = { workspace = true, features = ["secp256k1", "std"] }
 bip39 = "2.2.0"
-ecdsa = "0.16.9"
-cait-sith = { git = "https://github.com/sig-net/cait-sith", rev = "9f34e8c", features = [
-    "k256",
-] }
+ecdsa.workspace = true
+cait-sith.workspace = true
 elliptic-curve = { version = "0.13.5", default-features = false }
-k256 = { version = "0.13.1", features = ["sha256", "ecdsa", "serde"] }
+k256.workspace = true
 
 # near dependencies
 near-account-id.workspace = true
@@ -75,17 +73,14 @@ mpc-chain-ethereum = { workspace = true, features = ["contract-test"] }
 mpc-chain-hydration.workspace = true
 mpc-chain-midnight = { workspace = true, features = ["sandbox"] }
 mpc-keys.workspace = true
-mpc-node = { path = "../chain-signatures/node", default-features = false, features = [
-    "test-feature",
-    "debug-page",
-] }
+mpc-node = { workspace = true, features = ["test-feature", "debug-page"] }
 mpc-primitives.workspace = true
 mpc-utils.workspace = true
 
 [dev-dependencies]
 criterion = "0.5.1"
 serial_test = "3"
-test-log = { version = "0.2.12", features = ["log", "trace"] }
+test-log.workspace = true
 
 
 [[bin]]
