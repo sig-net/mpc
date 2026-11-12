@@ -6,6 +6,7 @@
 use alloy::primitives::{Bytes, Log, LogData, B256};
 
 use anyhow::{bail, Context};
+use mpc_chain_integration_core::ExtractionFailure;
 use mpc_evm_common::{build_serialized_output, is_contract_call, TraceOutput};
 use mpc_primitives::{BidirectionalTx, ChainConfig as _, ExecutionOutcome};
 use mpc_tron_wire::pb::RawTransaction;
@@ -90,24 +91,25 @@ impl TronReceipt {
 
     /// The attested outcome from the request's own schemas:
     /// `contractResult[0]` is the top call's return data — the bytes
-    /// EVM's `callTracer` top frame yields (§7.5.2.2). A refusal is
-    /// deterministic (receipt and entry immutable), so it parks as
-    /// [`ExecutionOutcome::ExtractionFailed`]; an unclassifiable
-    /// verdict errs, to keep polling.
-    pub fn execution_outcome(&self, tx: &BidirectionalTx) -> anyhow::Result<ExecutionOutcome> {
-        match self.execution_result()? {
+    /// EVM's `callTracer` top frame yields (§7.5.2.2). The consumer
+    /// parks a [`ExtractionFailure::Terminal`] as
+    /// [`ExecutionOutcome::ExtractionFailed`].
+    pub fn execution_outcome(
+        &self,
+        tx: &BidirectionalTx,
+    ) -> Result<ExecutionOutcome, ExtractionFailure> {
+        match self
+            .execution_result()
+            .map_err(ExtractionFailure::Retryable)?
+        {
             TronExecutionResult::Failed => Ok(ExecutionOutcome::Failed),
-            TronExecutionResult::Succeeded => match self.extract_output(tx) {
-                Ok(output) => Ok(ExecutionOutcome::Success { output }),
-                Err(err) => {
-                    tracing::warn!(?tx.id, "output extraction failed terminally: {err:#}");
-                    Ok(ExecutionOutcome::ExtractionFailed)
-                }
-            },
+            TronExecutionResult::Succeeded => self
+                .extract_output(tx)
+                .map(|output| ExecutionOutcome::Success { output }),
         }
     }
 
-    fn extract_output(&self, tx: &BidirectionalTx) -> anyhow::Result<Vec<u8>> {
+    fn extract_output(&self, tx: &BidirectionalTx) -> Result<Vec<u8>, ExtractionFailure> {
         RawTransaction::parse(&tx.serialized_transaction)
             .and_then(|raw| raw.calldata())
             .and_then(|calldata| {
@@ -123,6 +125,7 @@ impl TronReceipt {
                     &tx.respond_serialization_schema,
                 )
             })
+            .map_err(ExtractionFailure::Terminal)
     }
 }
 
@@ -227,9 +230,6 @@ mod tests {
             succeeded.execution_outcome(&watcher_tx(1).2).unwrap(),
             ExecutionOutcome::Success { output } if output.is_empty()
         ));
-        assert!(receipt(None, None)
-            .execution_outcome(&watcher_tx(1).2)
-            .is_err());
 
         // contractResult[0] decoded and re-serialized: Fab `false`.
         let returning = receipt_returning(vec![vec![0u8; 32]]);
@@ -239,14 +239,16 @@ mod tests {
                 .unwrap(),
             ExecutionOutcome::Success { output } if output == vec![0]
         ));
-        // A table refusal is deterministic: park, don't err.
+        // Deterministic against immutable data: Terminal, not Retryable.
         let undecodable = receipt_returning(vec![vec![0u8; 2]]);
-        assert!(matches!(
-            undecodable
-                .execution_outcome(&schema_carrying_tx(1).2)
-                .unwrap(),
-            ExecutionOutcome::ExtractionFailed
-        ));
+        let err = undecodable
+            .execution_outcome(&schema_carrying_tx(1).2)
+            .unwrap_err();
+        assert!(matches!(err, ExtractionFailure::Terminal(_)));
+        let err = receipt(None, None)
+            .execution_outcome(&watcher_tx(1).2)
+            .unwrap_err();
+        assert!(matches!(err, ExtractionFailure::Retryable(_)));
     }
 
     /// Only failure prints both (top-level FAILED, nested member) — never

@@ -16,7 +16,7 @@ use alloy::primitives::{Address, B256};
 use alloy::rpc::types::{Block, BlockId, BlockTransactions, TransactionReceipt};
 use futures_util::{stream, StreamExt};
 use mpc_chain_integration_core::{
-    unexecutable_outcome, ChainTelemetry, ExtractionFailureKind, StateManager, WatchedExecution,
+    unexecutable_outcome, ChainTelemetry, ExtractionFailure, StateManager, WatchedExecution,
 };
 use mpc_evm_common::{build_serialized_output, is_contract_call, TraceOutput};
 use mpc_primitives::{
@@ -68,32 +68,6 @@ enum ConfirmationOutcome {
     /// Output extraction failed for a node-local reason. No event is emitted;
     /// the watcher is re-attempted on the next block.
     RetryExtraction,
-}
-
-/// A failed output extraction.
-///
-/// Only failures that are a pure function of on-chain data and the request's
-/// own schemas are [`Terminal`](ExtractionFailure::Terminal): every node
-/// derives them identically. Anything that depends on *this* node's RPC
-/// endpoint — transport errors, missing `debug_traceTransaction` support, a
-/// malformed provider response — is
-/// [`Retryable`](ExtractionFailure::Retryable), because a peer with a healthy
-/// endpoint would extract an output just fine and unilaterally failing here
-/// would stall signing on divergent responses.
-/// A terminal classification does not authorize removing source-checkpoint
-/// membership based on independently advancing destination observations.
-enum ExtractionFailure {
-    Retryable(anyhow::Error),
-    Terminal(anyhow::Error),
-}
-
-impl ExtractionFailure {
-    fn kind(&self) -> ExtractionFailureKind {
-        match self {
-            Self::Retryable(_) => ExtractionFailureKind::Retryable,
-            Self::Terminal(_) => ExtractionFailureKind::Terminal,
-        }
-    }
 }
 
 /// RPC-acquired inputs to deterministic output interpretation.

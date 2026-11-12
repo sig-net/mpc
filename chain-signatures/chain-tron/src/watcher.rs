@@ -9,7 +9,8 @@ use alloy::primitives::B256;
 use anyhow::Context;
 use futures_util::stream::{iter, Stream, StreamExt};
 use mpc_chain_integration_core::{
-    ChainIndexer, ChainTelemetry, ExtractionFailureKind, StateManager, WatchedExecution,
+    ChainIndexer, ChainTelemetry, ExtractionFailure, ExtractionFailureKind, StateManager,
+    WatchedExecution,
 };
 use mpc_primitives::{BidirectionalTxId, Chain, ChainEvent, ExecutionOutcome};
 use tokio::sync::mpsc;
@@ -120,22 +121,27 @@ impl<S: StateManager, T: ChainTelemetry> TronWatcher<S, T> {
     fn member_event(&self, member: WatchedExecution, receipt: &TronReceipt) -> Option<ChainEvent> {
         let WatchedExecution { sign_id, tx } = member;
         let tx_id = tx.id;
-        let result = receipt
-            .execution_outcome(&tx)
-            .inspect_err(|err| {
-                tracing::warn!(?tx_id, ?sign_id, "{err:#}");
+        let result = match receipt.execution_outcome(&tx) {
+            Ok(result) => result,
+            Err(failure) => {
                 self.telemetry
-                    .bidirectional_extraction_failed(ExtractionFailureKind::Retryable);
-            })
-            .ok()?;
-
-        // Terminal telemetry; the cause is logged at the policy site
-        // (`execution_outcome`).
-        if matches!(result, ExecutionOutcome::ExtractionFailed) {
-            self.telemetry
-                .bidirectional_extraction_failed(ExtractionFailureKind::Terminal);
-            tracing::error!(?tx_id, ?sign_id, "output extraction failed; parking");
-        }
+                    .bidirectional_extraction_failed(failure.kind());
+                match failure {
+                    ExtractionFailure::Retryable(err) => {
+                        tracing::warn!(?tx_id, ?sign_id, "{err:#}");
+                        return None;
+                    }
+                    ExtractionFailure::Terminal(err) => {
+                        tracing::error!(
+                            ?tx_id,
+                            ?sign_id,
+                            "output extraction failed; parking: {err:#}"
+                        );
+                        ExecutionOutcome::ExtractionFailed
+                    }
+                }
+            }
+        };
 
         Some(ChainEvent::ExecutionConfirmed {
             tx_id,
