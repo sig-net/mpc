@@ -183,26 +183,13 @@ impl SignBidirectionalEventExt for SignBidirectionalEvent {
         // ops): wall-clock anchors would split verdicts, block time does not.
         let calldata = validate_unsigned_transaction(target, &self.serialized_transaction)
             .context("undecodable serialized_transaction")?;
-        match calldata {
-            Some(calldata) => mpc_evm_common::validate_schemas(
-                calldata,
-                &self.output_deserialization_schema,
-                self.chain.respond_serialization_format(),
-                &self.respond_serialization_schema,
-            )
-            .context("unprocessable output schemas"),
-            // Tron: receipt-based output extraction arrives with the execution
-            // watcher, which also defines its schemas; until then admission
-            // requires a Tron target to carry none.
-            None => {
-                anyhow::ensure!(
-                    self.output_deserialization_schema.is_empty()
-                        && self.respond_serialization_schema.is_empty(),
-                    "Tron targets define no output schemas yet"
-                );
-                Ok(())
-            }
-        }
+        mpc_evm_common::validate_schemas(
+            &calldata,
+            &self.output_deserialization_schema,
+            self.chain.respond_serialization_format(),
+            &self.respond_serialization_schema,
+        )
+        .context("unprocessable output schemas")
     }
 
     fn to_bidirectional_tx(
@@ -408,7 +395,7 @@ mod tests {
 
         let event = tron_event(unsigned.clone());
         assert!(event.validate().is_ok());
-
+        
         // The txID is sha256(raw_data): independent of the signature, so any
         // (low-s normalized) signature names the same transaction.
         let big_r = k256::ProjectivePoint::GENERATOR.to_affine();
@@ -426,6 +413,23 @@ mod tests {
         assert_eq!(id_low, id_high);
         assert_eq!(nonce, 0);
         assert_eq!(hex::encode(id_low), TXID_HEX);
+    }
+
+    /// The recorded USDT transfer returns `bool`; the same schema pair
+    /// extraction decodes at execution.
+    #[test]
+    fn validate_admits_a_tron_target_with_schemas() {
+        let mut event = tron_event(hex::decode(RAW_HEX).unwrap());
+        event.output_deserialization_schema = br#"[{"name":"ok","type":"bool"}]"#.to_vec();
+        event.respond_serialization_schema = br#"[{"name":"ok","type":"bool"}]"#.to_vec();
+        assert!(event.validate().is_ok());
+
+        // A Borsh respond encoding carries exactly one field.
+        event.chain = Chain::Solana;
+        event.respond_serialization_schema =
+            br#"[{"name":"a","type":"bool"},{"name":"b","type":"bool"}]"#.to_vec();
+        let err = format!("{:#}", event.validate().unwrap_err());
+        assert!(err.contains("unprocessable output schemas"), "{err}");
     }
 
     #[test]

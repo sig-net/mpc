@@ -771,8 +771,10 @@ const TRON_RAW_HEX: &str = "0a02db6f220815ff9c9c504ad4a8409a80f5a491345aae01081f
 fn tron_bidirectional_event(serialized_transaction: Vec<u8>) -> SignBidirectionalEvent {
     SignBidirectionalEvent {
         caip2_id: Chain::Tron.caip2_chain_id().to_string(),
-        output_deserialization_schema: vec![],
-        respond_serialization_schema: vec![],
+        // The recorded transfer returns `bool` — a schema pair admission
+        // accepts and extraction decodes.
+        output_deserialization_schema: br#"[{"name":"ok","type":"bool"}]"#.to_vec(),
+        respond_serialization_schema: br#"[{"name":"ok","type":"bool"}]"#.to_vec(),
         ..bidirectional_event(serialized_transaction)
     }
 }

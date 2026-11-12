@@ -1146,6 +1146,5 @@ Checked against `develop` at `1d823c4e`. Still to change:
   anchors for them too.
 * Tron: Unviable at expiry for packable spans past the 24 h walk cap
   (the admission bound anchors at the source block, which sits after
-  the TaPoS reference — such windows are admitted but never verdicted);
-  output schemas.
+  the TaPoS reference — such windows are admitted but never verdicted).
 * Solana, Hydration and Canton: structures of Section 7, and Unviable.
