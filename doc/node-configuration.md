@@ -12,14 +12,14 @@ from, and the rules a parameter follows in each.
 
 1. **Fewer parameters.** Each one is a way to misconfigure a node, so it needs
    a real use case.
-2. **One source per value.** No override, no fallback, no second way to set it.
-3. **Strict.** A wrong or missing value stops the node at startup. It never
-   runs on a guess.
-4. **The operator states, the node does not guess.** Nothing about a
-   deployment is detected, probed or defaulted.
-5. **Shared values come from the contract**, not from each operator.
-6. **A release build has no test behaviour.**
-7. **Secrets stay out of output.** Any value may hold one, so an error never
+2. **One source per value.** Per node from the operator, shared from the
+   contract, with no fallback to another source. A flag and its env variable
+   are one parameter.
+3. **No guessing.** A wrong value, or a missing required one, stops the node
+   at startup, and nothing that names a deployment is detected, probed or
+   defaulted.
+4. **A release build has no test behaviour.**
+5. **Secrets stay out of output.** Any value may hold one, so an error never
    echoes a value, and logs and `--help` show only values known to be public.
 
 ## The model
@@ -31,7 +31,7 @@ A new value goes to the first source that fits.
 | Env variables and CLI flags | What differs per node or deployment: identity, keys, endpoints (chain RPCs, Redis, the key-share store), logging, which chains run | The operator | On restart |
 | Contract | What every node must share and governance must change without a release | Governance votes | On the node's next poll, no restart |
 | Feature flags | What only tests need, and unfinished work | The build | At compile time |
-| Constants | Everything else: timeouts, cadences, limits | A release | With the upgrade |
+| Constants | Everything else: timeouts, cadences, limits | A release | With the upgrade; an incident that needs another value needs a hotfix ([releasing.md](releasing.md)) |
 
 ## Env variables and CLI flags
 
@@ -102,17 +102,14 @@ It polls all three and applies a change without a restart.
 - **C1. The contract is the only source.** No parameter, file or constant
   repeats or overrides it: no peer list, no threshold, no local protocol
   config. Peers learn a node's `--my-address` from the protocol state.
-- **C2. Contract config is small.** A value belongs in `ProtocolConfig` only
-  if every node must share it and governance must change it without a
-  release.
-- **C3. A change is a vote**: `propose_update` and `vote_update` for
-  `ProtocolConfig`; `vote_join`, `vote_leave` and `vote_threshold` for
-  membership and the threshold.
+- **C2. A change is a governance vote**, for `ProtocolConfig`, membership
+  and the threshold alike.
 
 ## Feature flags
 
 Cargo features of the node crate decide what is compiled: `test-feature` for
-what only tests may use, `unstable-<name>` for work that is not ready,
+what only tests may use, `unstable-<name>` for work that is not ready
+([CONTRIBUTING](../CONTRIBUTING.md#pull-requests)),
 `debug-page` and `bench` for development tools.
 
 - **B1. A release build has no features**, and no crate it depends on turns
@@ -126,8 +123,6 @@ what only tests may use, `unstable-<name>` for work that is not ready,
   `mpc-primitives` has no test feature. It holds the production value and may
   offer a faster one; only the node chooses, and only in a `test-feature`
   build.
-- **B4. Unfinished work sits behind `unstable-<name>`**
-  ([CONTRIBUTING](../CONTRIBUTING.md#pull-requests)).
 
 ## Constants
 
@@ -136,8 +131,6 @@ what only tests may use, `unstable-<name>` for work that is not ready,
   the number.
 - **K2. Pinned when others depend on it.** A value every node must share has a
   test that fails when it changes.
-- **K3. Changed by a release.** There is no runtime override: an incident that
-  needs another value needs a hotfix ([releasing.md](releasing.md)).
 
 ## Startup
 
@@ -153,12 +146,11 @@ tasks: the contract poll, the mesh, the protocol and one indexer per chain.
 - **S3. The wrong network is refused.** Each indexer checks that its endpoint
   serves the configured network. Another network is never indexed from or
   published to.
-- **S4. An error names the parameter, never the value.**
-  `invalid value for MPC_NEAR_RPC (--near-rpc)`: the env variable, the flag,
-  and nothing the operator typed (`Cli::parse_redacted`).
-- **S5. The startup log shows identity, not secrets.** The account, public
-  keys, contract and program addresses, the node's own address, and the host
-  of each service it calls, never that service's full URL
+- **S4. Output names, never values.** An error names the parameter:
+  `invalid value for MPC_NEAR_RPC (--near-rpc)`, nothing the operator typed
+  (`Cli::parse_redacted`). The startup log shows the account, public keys,
+  contract and program addresses, the node's own address, and the host of
+  each service it calls, never that service's full URL
   ([logging.md](logging.md)).
 
 ## Changing a parameter
@@ -173,23 +165,20 @@ mean for a parameter:
 - **P2. What breaks operators.** A new required parameter, a rename, a
   removal, a changed default, a stricter check. A change to `ProtocolConfig`
   is a contract change and follows the two-phase rule in releasing.md.
-- **P3. What the PR does.** The title carries `!`. The **Operator** line of
-  the Breaking changes section says what breaks and what each operator must
-  do, naming the env variable. That text becomes the release notes.
-- **P4. What operators do.** Parameters are per node, so each operator changes
+- **P3. What operators do.** Parameters are per node, so each operator changes
   its variables together with its own upgrade: a rolling upgrade needs no
   coordination between operators. A rollback reverts both.
-- **P5. A removed variable fails silently.** clap rejects an unknown flag but
+- **P4. A removed variable fails silently.** clap rejects an unknown flag but
   ignores a variable it no longer declares, and deployed nodes use variables.
   The release notes are the only warning: name every retired variable.
-- **P6. The previous release must keep starting.** The compatibility test is
+- **P5. The previous release must keep starting.** The compatibility test is
   a required check and starts the previous release from the same harness.
   Where its arguments differ, `integration-tests/src/node_args.rs` renders
   the old ones (`is_current_node`). Remove that branch after the release.
-- **P7. A rename changes both spellings and every user in the repository**:
+- **P6. A rename changes both spellings and every user in the repository**:
   the harness, examples, benches and docs. The node has no code that turns a
   config back into arguments.
-- **P8. A parameter nobody sets differently becomes a constant.** The PR says
+- **P7. A parameter nobody sets differently becomes a constant.** The PR says
   how that was checked.
 
 ## Not followed yet
