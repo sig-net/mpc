@@ -308,6 +308,15 @@ impl Gate {
     /// artifact via the node's `deploycontract` builder (raw bytes +
     /// pre-computed address), settled like any other broadcast.
     async fn with_deployed_token(self, artifact: &str) -> anyhow::Result<Self> {
+        let (_, deployed) = self.deploy(artifact).await?;
+        Ok(Self {
+            contract: deployed,
+            ..self
+        })
+    }
+
+    /// Deploys the artifact's contract, returning its name and address.
+    async fn deploy(&self, artifact: &str) -> anyhow::Result<(String, TronAddress)> {
         let artifact = std::fs::read_to_string(artifact)
             .with_context(|| format!("token artifact {artifact}"))?;
         let artifact: serde_json::Value = serde_json::from_str(&artifact)?;
@@ -365,10 +374,7 @@ impl Gate {
             .or(receipt.receipt_result.as_deref());
         anyhow::ensure!(result == Some("SUCCESS"), "deploy executed {result:?}");
         println!("[deploy] {name} at {deployed}");
-        Ok(Self {
-            contract: deployed,
-            ..self
-        })
+        Ok((name.to_string(), deployed))
     }
 
     /// Runs the sequence: acceptance, watcher, duplicate, codeless.
@@ -1021,6 +1027,60 @@ async fn expiry_leg_runs_against_recorded_nile_responses() -> anyhow::Result<()>
     Ok(())
 }
 
+/// `contractResult` order, replayed from the TRE-recorded probe
+/// receipt (§7.5.2.2): the field carries the top call's return data
+/// alone — element 0, here 43. The probe's internal call (42) never
+/// appears; `internal_transactions` reports it instead.
+#[tokio::test]
+async fn inner_call_receipt_attests_the_top_return() -> anyhow::Result<()> {
+    let body = std::fs::read_to_string("tests/fixtures/tre/ret-probe-receipt.json")?;
+    let recorded: serde_json::Value = serde_json::from_str(&body)?;
+    let txid: [u8; 32] = recorded["id"]
+        .as_str()
+        .context("recorded id")?
+        .parse::<B256>()?
+        .into();
+
+    let mut server = mockito::Server::new_async().await;
+    receipt_stub(&mut server, &txid, body, None).await;
+    let client = TronHttp::new(&mock_config(server.url().parse().unwrap()))?;
+    let receipt = client
+        .get_transaction_info_solidity(&B256::from(txid))
+        .await?
+        .context("recorded receipt present")?;
+
+    let mut word = [0u8; 32];
+    word[31] = 43;
+    assert_eq!(receipt.contract_result, vec![word.to_vec()]);
+
+    // Extraction reads element 0: uint256 schema, Borsh respond
+    // encoding — 43 little-endian.
+    let (_, reference) = recorded_nowblock();
+    let probe = TronAddress::from_evm(parse_hex(
+        recorded["contract_address"].as_str().context("contract")?,
+    )?);
+    let calldata = alloy::primitives::keccak256(b"f()")[..4].to_vec();
+    let raw = build_raw(
+        &TronAddress::from_evm(Address::ZERO),
+        &probe,
+        &calldata,
+        &reference,
+        reference.timestamp as i64,
+    );
+    let mut tx = (*bidirectional_tx(txid, raw.encode_to_vec(), Chain::Solana)).clone();
+    let schema = br#"[{"name":"v","type":"uint256"}]"#;
+    tx.output_deserialization_schema = schema.to_vec();
+    tx.respond_serialization_schema = schema.to_vec();
+
+    let mut want = [0u8; 32];
+    want[0] = 43;
+    assert!(matches!(
+        receipt.execution_outcome(&tx)?,
+        ExecutionOutcome::Success { output } if output == want
+    ));
+    Ok(())
+}
+
 #[tokio::test]
 #[ignore = "live network: TRON_ENDPOINT, TRON_PRIVATE_KEY"]
 async fn live_gate() -> anyhow::Result<()> {
@@ -1031,4 +1091,65 @@ async fn live_gate() -> anyhow::Result<()> {
 #[ignore = "live network: TRON_ENDPOINT, TRON_PRIVATE_KEY"]
 async fn live_gate_expiry() -> anyhow::Result<()> {
     Gate::from_env().await?.expiry().await
+}
+
+/// `contractResult` element order, live-pinned (§7.5.2.2): element 0
+/// is the top call's return data. The probe contract's `f()` returns 43
+/// over an internal call returning 42; the recorded receipt pins the
+/// replay test.
+#[tokio::test]
+#[ignore = "live network: TRON_ENDPOINT, TRON_PRIVATE_KEY"]
+async fn live_gate_inner_call_return_order() -> anyhow::Result<()> {
+    let gate = Gate::from_env().await?;
+    let (_, probe) = gate.deploy("tests/fixtures/tre/ret-probe.json").await?;
+
+    let reference = gate.client.get_now_block().await?;
+    let calldata = alloy::primitives::keccak256(b"f()")[..4].to_vec();
+    let raw = build_raw(
+        &gate.owner,
+        &probe,
+        &calldata,
+        &reference,
+        reference.timestamp as i64,
+    );
+    let (signed, txid) = sign(&gate.key, &raw.encode_to_vec())?;
+    match gate.client.broadcast_transaction(&signed).await? {
+        BroadcastOutcome::Accepted => {}
+        other => anyhow::bail!("[ret-probe] {other:?}"),
+    }
+    let receipt = gate.settle(&txid).await?;
+    anyhow::ensure!(
+        matches!(receipt.execution_result()?, TronExecutionResult::Succeeded),
+        "probe call must execute"
+    );
+    let top = receipt
+        .contract_result
+        .first()
+        .context("probe receipt carries no contractResult")?;
+    anyhow::ensure!(
+        alloy::primitives::U256::from_be_slice(top) == alloy::primitives::U256::from(43),
+        "element 0 must be the top call's 43, got {:?}",
+        receipt.contract_result
+    );
+    for (i, ret) in receipt.contract_result.iter().enumerate() {
+        println!(
+            "[ret-probe] contractResult[{i}] = {}",
+            alloy::primitives::U256::from_be_slice(ret)
+        );
+    }
+    // The wire body, for the replay fixture.
+    let body: String = reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()?
+        .post(
+            gate.endpoint
+                .join("walletsolidity/gettransactioninfobyid")?,
+        )
+        .json(&serde_json::json!({ "value": hex::encode(txid), "visible": false }))
+        .send()
+        .await?
+        .text()
+        .await?;
+    println!("[ret-probe] receipt body: {body}");
+    Ok(())
 }
