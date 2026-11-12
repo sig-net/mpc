@@ -422,25 +422,35 @@ impl<W: FeePayer, C: SubmitChain> NativeIntentClient<W, C> {
         deadline: Instant,
     ) -> Result<Landing, SubmitError> {
         let mut scanned = after;
+        // The head a scan last finished at: while it stands, no block is new and its
+        // time was already compared with the TTL.
+        let mut scanned_head = None;
         loop {
             let scan = async {
                 let head = self.chain.finalized_head().await?;
+                if scanned_head.as_ref() == Some(&head) {
+                    return anyhow::Ok(None);
+                }
                 let head_number = self.chain.block_number(&head).await?;
                 while scanned < head_number {
                     let number = scanned + 1;
-                    let hash = self
-                        .chain
-                        .block_hash_at(number)
-                        .await?
-                        .with_context(|| format!("the node has no finalized block {number}"))?;
+                    let hash = if number == head_number {
+                        head.clone()
+                    } else {
+                        self.chain
+                            .block_hash_at(number)
+                            .await?
+                            .with_context(|| format!("the node has no finalized block {number}"))?
+                    };
                     if let Some(landing) = self.chain.landing(&hash, tx_hash).await? {
-                        return anyhow::Ok(Some(landing));
+                        return Ok(Some(landing));
                     }
                     scanned = number;
                 }
                 if self.chain.block_time(&head).await? > ttl {
                     return Ok(Some(Landing::Expired));
                 }
+                scanned_head = Some(head);
                 Ok(None)
             };
             match tokio::time::timeout_at(deadline, scan).await {
@@ -677,11 +687,16 @@ mod tests {
         }
     }
 
-    /// A chain whose finalized head moves one block per ask, from `head` up to `last`,
-    /// with blocks six seconds apart from time 1000.
+    /// A chain whose finalized head moves `step` blocks (one by default) per ask, from
+    /// `head` up to `last`, with blocks six seconds apart from time 1000.
     pub(super) struct ScriptedChain {
         head: Mutex<u64>,
         last: u64,
+        step: u64,
+        /// The blocks each head read asked about, by method.
+        number_reads: Mutex<Vec<u64>>,
+        time_reads: Mutex<Vec<u64>>,
+        hash_lookups: Mutex<Vec<u64>>,
         submit: Mutex<Option<SubmitRefusal>>,
         landing: Option<(u64, Landing)>,
         landing_reads: Mutex<VecDeque<u64>>,
@@ -694,11 +709,20 @@ mod tests {
             Self {
                 head: Mutex::new(head),
                 last,
+                step: 1,
+                number_reads: Mutex::new(Vec::new()),
+                time_reads: Mutex::new(Vec::new()),
+                hash_lookups: Mutex::new(Vec::new()),
                 submit: Mutex::new(None),
                 landing,
                 landing_reads: Mutex::new(VecDeque::new()),
                 failing_read: Mutex::new(None),
             }
+        }
+
+        fn stepping(mut self, step: u64) -> Self {
+            self.step = step;
+            self
         }
 
         fn failing_once_at(self, number: u64) -> Self {
@@ -724,7 +748,7 @@ mod tests {
     impl PinnedReads for ScriptedChain {
         async fn finalized_head(&self) -> anyhow::Result<String> {
             let mut head = self.head.lock().unwrap();
-            *head = (*head + 1).min(self.last);
+            *head = (*head + self.step).min(self.last);
             Ok(block_hash(*head))
         }
 
@@ -740,15 +764,20 @@ mod tests {
     #[async_trait]
     impl SubmitChain for ScriptedChain {
         async fn block_number(&self, at_hash_0x: &str) -> anyhow::Result<u64> {
-            Ok(block_number_of(at_hash_0x))
+            let number = block_number_of(at_hash_0x);
+            self.number_reads.lock().unwrap().push(number);
+            Ok(number)
         }
 
         async fn block_hash_at(&self, number: u64) -> anyhow::Result<Option<String>> {
+            self.hash_lookups.lock().unwrap().push(number);
             Ok(Some(block_hash(number)))
         }
 
         async fn block_time(&self, at_hash_0x: &str) -> anyhow::Result<Timestamp> {
-            Ok(Timestamp::from_secs(1000 + 6 * block_number_of(at_hash_0x)))
+            let number = block_number_of(at_hash_0x);
+            self.time_reads.lock().unwrap().push(number);
+            Ok(Timestamp::from_secs(1000 + 6 * number))
         }
 
         async fn submit(&self, _transaction: &[u8]) -> Result<(), SubmitRefusal> {
@@ -1500,6 +1529,76 @@ mod tests {
             "{error}"
         );
         assert!(client.wallet.released.lock().unwrap().is_empty());
+        assert_eq!(
+            *client.chain.number_reads.lock().unwrap(),
+            [11, 12],
+            "a standing head is read once"
+        );
+        assert_eq!(*client.chain.time_reads.lock().unwrap(), [11, 12]);
+        assert_eq!(
+            *client.chain.landing_reads.lock().unwrap(),
+            [11, 12],
+            "every block after the pin, once"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_failed_read_at_a_standing_head_is_retried() {
+        // The head stops at 13, the block whose first read fails: the next scan of
+        // that same head reads it again rather than taking it as scanned.
+        let client = client_over(
+            managed_dir(|_, bytes| bytes),
+            ScriptedChain::new(10, 13, Some((13, Landing::Applied))).failing_once_at(13),
+        );
+        let landed = client
+            .post(
+                b"tx",
+                TX_HASH,
+                &spent(),
+                10,
+                Timestamp::from_secs(5000),
+                deadline(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(landed, hex::encode(TX_HASH));
+        assert_eq!(
+            *client.chain.landing_reads.lock().unwrap(),
+            [11, 12, 13, 13]
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_head_that_jumps_is_scanned_through_every_block_before_it() {
+        // Heads 13 and 16: blocks 11, 12, 14 and 15 are looked up by number, each
+        // head is its own hash, and the transaction lands in block 15.
+        let client = client_over(
+            managed_dir(|_, bytes| bytes),
+            ScriptedChain::new(10, 20, Some((15, Landing::Applied))).stepping(3),
+        );
+        let landed = client
+            .post(
+                b"tx",
+                TX_HASH,
+                &spent(),
+                10,
+                Timestamp::from_secs(5000),
+                deadline(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(landed, hex::encode(TX_HASH));
+        assert_eq!(*client.chain.hash_lookups.lock().unwrap(), [11, 12, 14, 15]);
+        assert_eq!(
+            *client.chain.landing_reads.lock().unwrap(),
+            [11, 12, 13, 14, 15]
+        );
+        assert_eq!(*client.chain.number_reads.lock().unwrap(), [13, 16]);
+        assert_eq!(
+            *client.chain.time_reads.lock().unwrap(),
+            [13],
+            "the scan that lands reads no time"
+        );
     }
 }
 
