@@ -770,7 +770,7 @@ mod tests {
         response_payload, sample_record, test_root_pk, EventRecorder,
     };
     use midnight_onchain_state::state::StateValue;
-    use mpc_chain_integration_core::utils::stream::chain_event_channel;
+    use mpc_chain_integration_core::utils::{hashing::hash_payload, stream::chain_event_channel};
     use mpc_chain_integration_core::{MockStateManager, NoopChainTelemetry};
     use mpc_primitives::SignId;
     use std::collections::{HashMap, HashSet, VecDeque};
@@ -1321,7 +1321,10 @@ mod tests {
                 panic!("expected SignRequest");
             };
             assert_eq!(request.id, SignId::new(rid));
-            assert_eq!(request.args.entropy, hash_bytes(9));
+            assert_eq!(
+                request.args.entropy,
+                hash_payload(&[hash_bytes(9), rid].concat())
+            );
         }
     }
 

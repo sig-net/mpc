@@ -135,11 +135,13 @@ A short hash that stands for a larger structure. The docs use two:
 
 ## Entropy
 
-A value from the finalized block that holds a [request](#request). On Midnight,
-this is the containing block hash. The requester cannot know or influence it
-before that block is validated. Nodes read it from a final block, so every node derives the same delta (`SignArgs::entropy`,
-`chain-signatures/primitives/src/crypto.rs`). It also seeds the
-[proposer](#proposer) election. See
+A chain-specific shared input to delta derivation and [proposer](#proposer)
+election. On Midnight, nodes set it to `Keccak256(block_hash || request_id)`,
+where `block_hash` is the finalized block containing the request. The block
+hash supplies unpredictability, while the request ID spreads proposer election
+across requests in the same block. Every node reads the same finalized hash
+and derives the same entropy (`SignArgs::entropy`,
+`chain-signatures/primitives/src/crypto.rs`). See
 [delta-derivation.md](delta-derivation.md).
 
 ## Epoch

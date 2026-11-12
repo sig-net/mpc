@@ -311,10 +311,10 @@ which is why agreeing on `r` is all the nodes need:
 - round length: `round_timeout(r)` (§6)
 
 Entropy granularity can correlate proposer schedules across requests. On
-Midnight, entropy is the containing finalized block hash, so requests in the
-same block elect the same proposer in each corresponding round. This can
-concentrate work for a batch, but does not merge their signing derivations:
-`derive_delta` also binds each request ID.
+Midnight, entropy is `Keccak256(block_hash || request_id)`, where `block_hash`
+is the containing finalized block hash. Requests in the same block therefore
+get request-specific proposer schedules, while the block hash supplies the
+unpredictable input. `derive_delta` also binds each request ID.
 
 ## 6. The round timeout
 

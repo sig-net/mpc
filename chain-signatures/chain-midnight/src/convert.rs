@@ -6,7 +6,9 @@
 //! would let a caller sign under another contract's key. The two are asserted
 //! equal.
 
-use mpc_chain_integration_core::utils::payload::bidirectional_payload_scalar;
+use mpc_chain_integration_core::utils::{
+    hashing::hash_payload, payload::bidirectional_payload_scalar,
+};
 use mpc_primitives::{
     Chain, IndexedSignRequest, SignArgs, SignBidirectionalEvent, SignId, TxParams,
 };
@@ -92,9 +94,10 @@ pub fn generate_sign_request(
     );
     let payload = bidirectional_payload_scalar(target, &serialized)?;
 
-    // The finalized containing block hash is not known to the requester before
-    // inclusion. Keep request identity separate: derive_delta binds both inputs.
-    let entropy = block_hash;
+    // Mix the unpredictable finalized block hash with request identity so
+    // requests in one block get distinct proposer-election seeds. `derive_delta`
+    // also binds the request ID independently.
+    let entropy = hash_payload(&[block_hash, request_id].concat());
 
     Ok(IndexedSignRequest::sign_bidirectional(
         SignId::new(request_id),
@@ -158,7 +161,7 @@ mod tests {
     use k256::elliptic_curve::bigint::U256;
     use k256::elliptic_curve::ops::Reduce;
     use k256::{FieldBytes, Scalar};
-    use mpc_chain_integration_core::utils::payload::derive_user_address;
+    use mpc_chain_integration_core::utils::{hashing::hash_payload, payload::derive_user_address};
     use mpc_primitives::{Chain, SignKind};
     use mpc_tron_wire::TronAddress;
 
@@ -235,7 +238,15 @@ mod tests {
         // signs the txid itself.
         let expected = <Scalar as Reduce<U256>>::reduce_bytes(&FieldBytes::from(raw.txid()));
         assert_eq!(request.args.payload, expected);
-        assert_eq!(request.args.entropy, BLOCK_HASH);
+        assert_eq!(
+            request.args.entropy,
+            hash_payload(&[BLOCK_HASH, REQUEST_ID].concat())
+        );
+        assert_ne!(
+            request.args.entropy,
+            hash_payload(&[BLOCK_HASH, [0x78; 32]].concat()),
+            "request IDs spread entropy for proposer election within one block"
+        );
     }
 
     #[test]
