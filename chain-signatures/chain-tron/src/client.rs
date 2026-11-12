@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use url::Url;
 
 use mpc_chain_integration_core::utils::retry::{retry_rpc, RetryConfig, SharedBackoff};
+use secrecy::{ExposeSecret as _, SecretString};
 
 use crate::config::TronConfig;
 use crate::types::{BroadcastOutcome, NowBlock, SolidifiedBlock, TronLog, TronReceipt};
@@ -15,7 +16,7 @@ use mpc_tron_wire::{encoding::decode_bytes, parse_hex, TronAddress};
 pub struct TronHttp {
     http: reqwest::Client,
     endpoint: Url,
-    api_key: Option<String>,
+    api_key: Option<SecretString>,
     request_timeout: Duration,
     retry: RetryConfig,
     gate: SharedBackoff,
@@ -191,7 +192,7 @@ impl TronHttp {
         let mut request = self.http.post(url).json(body);
 
         if let Some(api_key) = &self.api_key {
-            request = request.header("TRON-PRO-API-KEY", api_key);
+            request = request.header("TRON-PRO-API-KEY", api_key.expose_secret());
         }
 
         let response = request.send().await.context("sending tron request")?;
@@ -441,7 +442,7 @@ mod tests {
         let server = mockito::Server::new_async().await;
         let client = TronHttp::new(&TronConfig {
             endpoint: Url::parse(&server.url()).unwrap(),
-            api_key: Some("test-key".to_string()),
+            api_key: Some("test-key".into()),
             retry,
             ..TronConfig::default()
         })

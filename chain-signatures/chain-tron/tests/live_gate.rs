@@ -191,7 +191,7 @@ impl WatcherRun {
 struct Gate {
     client: TronHttp,
     endpoint: Url,
-    api_key: Option<String>,
+    api_key: Option<secrecy::SecretString>,
     key: SigningKey,
     owner: TronAddress,
     contract: TronAddress,
@@ -276,7 +276,7 @@ impl Gate {
         let deadline = env_secs("TRON_DEADLINE_SECS", 180)?;
         let config = TronConfig {
             endpoint: endpoint.clone(),
-            api_key: std::env::var("TRON_API_KEY").ok(),
+            api_key: std::env::var("TRON_API_KEY").ok().map(Into::into),
             poll_interval: poll,
             ..Default::default()
         };

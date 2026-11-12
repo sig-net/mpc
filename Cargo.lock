@@ -7794,6 +7794,7 @@ dependencies = [
  "mpc-tron-wire",
  "prost-types",
  "reqwest 0.12.28",
+ "secrecy 0.10.3",
  "serde",
  "serde_json",
  "sha2 0.11.0",

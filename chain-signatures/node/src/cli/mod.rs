@@ -1470,6 +1470,14 @@ mod tests {
         };
         let _: &SecretString = &midnight.publisher.funding_seed;
         assert!(!format!("{midnight:?}").contains(midnight_seed));
+
+        let tron_key = "dummy_tron_api_key";
+        let tron = TronConfig {
+            api_key: Some(tron_key.into()),
+            ..Default::default()
+        };
+        let _: &Option<SecretString> = &tron.api_key;
+        assert!(!format!("{tron:?}").contains(tron_key));
     }
 
     #[test]
