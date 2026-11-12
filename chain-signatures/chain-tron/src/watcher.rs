@@ -88,25 +88,25 @@ impl<S: StateManager, T: ChainTelemetry> TronWatcher<S, T> {
         members: Vec<WatchedExecution>,
     ) -> Vec<ChainEvent> {
         let member_count = members.len();
-        let Some(receipt) = self
+        let receipt = match self
             .client
             .get_transaction_info_solidity(&B256::from(tx_id.0))
             .await
-            .inspect_err(|err| match err {
-                // The malformed-provider-response class — same contract
-                // as an unclassifiable verdict.
-                ReceiptError::Malformed(err) => {
-                    tracing::warn!(?tx_id, members = member_count, "{err:#}");
-                    self.telemetry
-                        .bidirectional_extraction_failed(ExtractionFailureKind::Retryable);
-                }
-                ReceiptError::Transport(err) => {
-                    tracing::warn!(?tx_id, members = member_count, ?err, "receipt poll failed");
-                }
-            })
-            .ok()
-            .flatten()
-        else {
+        {
+            Ok(receipt) => receipt,
+            Err(err) => {
+                let failure = ExtractionFailure::from(err);
+                self.telemetry
+                    .bidirectional_extraction_failed(failure.kind());
+                tracing::warn!(
+                    ?tx_id,
+                    members = member_count,
+                    "receipt poll failed: {failure:#}"
+                );
+                return Vec::new();
+            }
+        };
+        let Some(receipt) = receipt else {
             return Vec::new();
         };
 
@@ -745,8 +745,16 @@ mod tests {
             )),
             "the failing watcher must not resolve: {seen:?}"
         );
-        // Transport failures only warn, as on Ethereum.
-        assert_eq!(telemetry.retryable_failures(), 0);
+        // A Block certifies the completed pass — seed 1's retries drain
+        // within it.
+        loop {
+            match run.events.recv().await.expect("watcher channel open") {
+                ChainEvent::Block(_) => break,
+                _ => {}
+            }
+        }
+        // Counted, as on Ethereum's post-retry fetch failures.
+        assert!(telemetry.retryable_failures() >= 1);
         assert_eq!(telemetry.terminal_failures(), 0);
 
         run.stop().await;

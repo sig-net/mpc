@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use url::Url;
 
 use mpc_chain_integration_core::utils::retry::{retry_rpc, RetryConfig, SharedBackoff};
+use mpc_chain_integration_core::ExtractionFailure;
 
 use crate::config::TronConfig;
 use crate::types::{BroadcastOutcome, NowBlock, SolidifiedBlock, TronLog, TronReceipt};
@@ -222,6 +223,14 @@ pub enum ReceiptError {
     Transport(#[from] anyhow::Error),
     #[error("malformed receipt body: {0:#}")]
     Malformed(#[source] anyhow::Error),
+}
+
+/// Both classes are node-local retries: a malformed body can still be
+/// served intact by another replica.
+impl From<ReceiptError> for ExtractionFailure {
+    fn from(err: ReceiptError) -> Self {
+        Self::Retryable(err.into())
+    }
 }
 
 /// Wire → domain, after transport; `Ok(None)` is the pending receipt.
