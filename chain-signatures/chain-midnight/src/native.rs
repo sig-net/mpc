@@ -1504,6 +1504,7 @@ mod tests {
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods)]
 mod bench {
     //! What each proof costs in process. `MIDNIGHT_BENCH_ARTIFACTS` is the package's
     //! `dist/managed`, `MIDNIGHT_BENCH_ZK_PARAMS` the parameter store, and
@@ -1605,6 +1606,7 @@ mod bench {
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods)]
 mod live {
     //! Against a running stack: `MIDNIGHT_LIVE_*` name a node, its indexer, a deployed
     //! responder, a funded seed and the artifact directories. Proving wants `--release`.

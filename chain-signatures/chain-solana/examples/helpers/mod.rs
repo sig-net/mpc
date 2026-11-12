@@ -1,5 +1,7 @@
 //! Shared helpers for the Solana benchmark examples.
 
+#![allow(clippy::disallowed_methods)]
+
 use anyhow::anyhow;
 use mpc_chain_integration_core::{
     utils::retry::SharedBackoff, utils::stream::chain_event_channel, MockStateManager,

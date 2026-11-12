@@ -3476,6 +3476,7 @@ pub(crate) mod tests {
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods)]
 mod live {
     use super::*;
     use crate::dust_feed::IndexerDustEvents;

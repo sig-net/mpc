@@ -1,0 +1,9 @@
+# Only clap reads the environment, so every setting is a parameter that
+# `mpc-node start --help` lists. Tests, examples and benches allow the lint
+# where they read it.
+disallowed-methods = [
+    { path = "std::env::var", reason = "only clap reads the environment" },
+    { path = "std::env::var_os", reason = "only clap reads the environment" },
+    { path = "std::env::vars", reason = "only clap reads the environment" },
+    { path = "std::env::vars_os", reason = "only clap reads the environment" },
+]
