@@ -1,3 +1,4 @@
+use secrecy::SecretString;
 use std::fmt;
 use url::Url;
 
@@ -6,7 +7,9 @@ use url::Url;
 pub struct CantonAuthConfig {
     pub token_url: Url,
     pub client_id: String,
-    pub client_secret: String,
+    /// Carried as a [`SecretString`]: the secret is only exposed when the OIDC
+    /// client is built, so deriving `Debug` cannot leak it.
+    pub client_secret: SecretString,
     pub audience: String,
     pub scope: Option<String>,
 }

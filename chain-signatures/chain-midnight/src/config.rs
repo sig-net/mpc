@@ -2,6 +2,7 @@
 
 use crate::types::MidnightAddress;
 use mpc_chain_integration_core::utils::retry::RetryConfig;
+use secrecy::{ExposeSecret as _, SecretString};
 use std::fmt;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -90,7 +91,11 @@ pub struct PublisherConfig {
     /// Initialization retries in the background with backoff until the cache is available.
     pub output_storage: Option<OutputStorageConfig>,
     /// Funds respond transactions.
-    pub funding_seed: String,
+    ///
+    /// Carried as a [`SecretString`]: the seed is only exposed when it is
+    /// validated or parsed into a signing key, so deriving `Debug` cannot
+    /// leak it.
+    pub funding_seed: SecretString,
     /// The indexer's GraphQL subscription URL: spendable DUST derives only from the
     /// ledger events it serves.
     pub indexer_ws_url: Url,
@@ -110,7 +115,7 @@ impl Default for PublisherConfig {
     fn default() -> Self {
         Self {
             output_storage: None,
-            funding_seed: String::new(),
+            funding_seed: String::new().into(),
             // Replaced by every real config; the empty funding seed fails validation.
             indexer_ws_url: Url::parse("ws://placeholder.invalid").expect("a valid literal"),
             // Where the node image installs them.
@@ -176,7 +181,7 @@ impl PublisherConfig {
 
     fn validate(&self) -> anyhow::Result<()> {
         self.validate_output_storage()?;
-        validate_funding_seed(&self.funding_seed)?;
+        validate_funding_seed(self.funding_seed.expose_secret())?;
         for (field, dir) in [
             (
                 "publisher.contract_artifacts_dir",
@@ -231,7 +236,7 @@ mod tests {
             central_address: MidnightAddress::from_bytes([0xab; 32]),
             responder_address: MidnightAddress::from_bytes([0xcd; 32]),
             publisher: PublisherConfig {
-                funding_seed: "0f".repeat(32),
+                funding_seed: "0f".repeat(32).into(),
                 indexer_ws_url: "ws://127.0.0.1:8088/api/v3/graphql/ws".parse().unwrap(),
                 ..Default::default()
             },
@@ -269,7 +274,7 @@ mod tests {
     fn debug_redacts_the_funding_seed() {
         let seed = "0123456789abcdef0123456789abcdef";
         let mut config = valid_config();
-        config.publisher.funding_seed = seed.to_string();
+        config.publisher.funding_seed = seed.into();
 
         let rendered = format!("{config:?}");
         assert!(
@@ -289,7 +294,7 @@ mod tests {
         let seed = "0123456789abcdef0123456789abcdef";
         let endpoint = "http://127.0.0.1:4443";
         let mut config = valid_config();
-        config.publisher.funding_seed = seed.to_string();
+        config.publisher.funding_seed = seed.into();
         config.publisher.output_storage = Some(OutputStorageConfig {
             emulator_endpoint: Some(endpoint.to_string()),
             ..OutputStorageConfig::new("outputs".into(), "v1".into(), Duration::from_secs(30))
@@ -403,7 +408,7 @@ mod tests {
                 }) as fn(&mut MidnightConfig),
             ),
             ("funding_seed", |config: &mut MidnightConfig| {
-                config.publisher.funding_seed = "not hex".to_string();
+                config.publisher.funding_seed = "not hex".into();
             }),
             ("submit_timeout", |config: &mut MidnightConfig| {
                 config.publisher.submit_timeout = Duration::ZERO;
@@ -430,7 +435,7 @@ mod tests {
             format!("0X{}", "AB".repeat(32)),
         ] {
             let mut config = valid_config();
-            config.publisher.funding_seed = valid;
+            config.publisher.funding_seed = valid.into();
             config.validate().expect("the SDK accepts this hex seed");
         }
 
@@ -443,7 +448,7 @@ mod tests {
                 .to_string(),
         ] {
             let mut config = valid_config();
-            config.publisher.funding_seed = invalid.clone();
+            config.publisher.funding_seed = invalid.clone().into();
             let error = config.validate().unwrap_err().to_string();
             assert!(error.contains("funding_seed"), "unexpected error: {error}");
             assert!(

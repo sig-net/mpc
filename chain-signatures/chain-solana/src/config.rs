@@ -1,3 +1,4 @@
+use secrecy::{ExposeSecret as _, SecretString};
 use solana_sdk::pubkey::Pubkey;
 use std::fmt;
 use std::time::Duration;
@@ -23,7 +24,7 @@ impl Default for SolIndexerConfig {
 #[derive(Clone)]
 pub struct SolConfig {
     /// The solana account secret key used to sign solana respond txn.
-    pub account_sk: String,
+    pub account_sk: SecretString,
     /// Solana RPC http URL
     pub rpc_http_url: Url,
     /// The program address to watch
@@ -36,7 +37,7 @@ impl SolConfig {
     /// Solana payer address derived from the configured account secret key.
     pub fn signer_address(&self) -> String {
         use solana_sdk::signer::Signer;
-        solana_sdk::signer::keypair::Keypair::from_base58_string(&self.account_sk)
+        solana_sdk::signer::keypair::Keypair::from_base58_string(self.account_sk.expose_secret())
             .pubkey()
             .to_string()
     }

@@ -9,6 +9,7 @@ use cait_sith::protocol::Participant;
 pub use checkpoint_storage::CheckpointStorage;
 pub use presignature_storage::PresignatureStorage;
 pub use protocol_storage::{Initializing, Ready, StorageError};
+use secrecy::SecretString;
 #[cfg(feature = "test-feature")]
 use std::path::PathBuf;
 pub use triple_storage::TripleStorage;
@@ -38,10 +39,11 @@ pub struct Options {
     #[cfg(feature = "test-feature")]
     #[arg(long, env("MPC_SK_SHARE_LOCAL_PATH"), group = "sk_share")]
     pub sk_share_local_path: Option<PathBuf>,
-    /// Redis URL. Holds triples, presignatures, checkpoints and the Midnight
-    /// wallet's DUST checkpoint.
+    /// The URL may carry a password, so it is carried as a [`SecretString`]
+    /// and only exposed where the pool is built. Redis holds triples,
+    /// presignatures, checkpoints and the Midnight wallet's DUST checkpoint.
     #[arg(long, env("MPC_REDIS_URL"), hide_env_values = true)]
-    pub redis_url: Url,
+    pub redis_url: SecretString,
 }
 
 fn owner_key(base: &str, owner: Participant) -> String {
