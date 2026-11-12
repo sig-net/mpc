@@ -24,6 +24,8 @@ pub struct SharedBackoff {
 struct SharedBackoffInner {
     /// Epoch millis until which all requests should wait.
     limited_until_ms: AtomicU64,
+    /// Window endpoint already park-warned.
+    warned_until_ms: AtomicU64,
     /// Exponential penalty level, used to compute the cooldown duration.
     penalty_level: AtomicU32,
     /// Base cooldown duration for the first penalty level.
@@ -47,6 +49,7 @@ impl SharedBackoff {
         Self {
             inner: Arc::new(SharedBackoffInner {
                 limited_until_ms: AtomicU64::new(0),
+                warned_until_ms: AtomicU64::new(0),
                 penalty_level: AtomicU32::new(0),
                 base_cooldown,
                 max_cooldown,
@@ -83,9 +86,10 @@ impl SharedBackoff {
     }
 
     /// Extends the cooldown if `err` looks like provider throttling (429/402).
-    /// An advertised pause (`Retry-After` on the carrier) replaces the
-    /// ladder's guess, clamped by policy. Returns the applied cooldown, or
-    /// `None` when the error is not a throttle
+    /// An advertised pause (`Retry-After`) extends the window to at least
+    /// it, clamped by policy — the ladder rung still applies underneath.
+    /// Returns the applied cooldown, or `None` when the error is not a
+    /// throttle
     pub fn engage_if_throttled(&self, err: &anyhow::Error) -> Option<Duration> {
         if !is_provider_throttled(err) {
             return None;
@@ -125,6 +129,12 @@ impl SharedBackoff {
         Duration::from_millis(ms)
     }
 
+    /// True once per window; an extended window is claimable again.
+    fn claim_park_warn(&self) -> bool {
+        let until = self.inner.limited_until_ms.load(Ordering::Relaxed);
+        self.inner.warned_until_ms.swap(until, Ordering::Relaxed) != until
+    }
+
     fn cooldown_for_level(&self, level: u32) -> Duration {
         let millis = (self.inner.base_cooldown.as_millis() as u64)
             .saturating_mul(1u64 << level.min(MAX_PENALTY_LEVEL));
@@ -144,7 +154,7 @@ where
     F: Future<Output = anyhow::Result<T>>,
 {
     let remaining = gate.remaining();
-    if remaining > GATE_WAIT_WARN_AFTER {
+    if remaining > GATE_WAIT_WARN_AFTER && gate.claim_park_warn() {
         tracing::warn!(
             operation,
             ?remaining,
@@ -261,7 +271,7 @@ mod tests {
     }
 
     #[test]
-    fn advertised_retry_after_replaces_the_ladders_guess() {
+    fn advertised_retry_after_extends_the_window() {
         let gate =
             SharedBackoff::with_cooldowns(Duration::from_millis(100), Duration::from_secs(60));
         let err = anyhow::Error::new(
@@ -284,5 +294,17 @@ mod tests {
         let applied = gate.engage_if_throttled(&err).unwrap();
         assert_eq!(applied, Duration::from_millis(600));
         assert!(gate.remaining() <= Duration::from_millis(600));
+    }
+
+    #[test]
+    fn park_warn_is_claimed_once_per_window() {
+        let gate =
+            SharedBackoff::with_cooldowns(Duration::from_millis(100), Duration::from_secs(60));
+        gate.extend_cooldown();
+        assert!(gate.claim_park_warn());
+        assert!(!gate.claim_park_warn());
+        // a new endpoint re-arms the claim
+        gate.extend_cooldown();
+        assert!(gate.claim_park_warn());
     }
 }
