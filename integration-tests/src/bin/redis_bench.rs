@@ -321,7 +321,7 @@ async fn main() -> anyhow::Result<()> {
             let items = (args.items / 3).max(50);
             println!("\n>>> Running Scenario 7: Mixed MPC Storage Workload (Triples + Presigs + Signers)");
             println!("    Running concurrent triple gen, presig gen, sign requests, and one-second polling on per-node connection pools...");
-            println!("    Signing excludes newly generated local-only presignatures; paired deliberators hold pre-stocked shares.");
+            println!("    Signing excludes newly generated local-only presignatures; deliberators hold pre-stocked shares.");
             let results = harness.bench_mixed_pipeline(items).await?;
             harness.report_results(&results).await?;
             record(results);

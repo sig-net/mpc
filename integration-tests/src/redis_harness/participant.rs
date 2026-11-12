@@ -401,10 +401,11 @@ impl SimulatedParticipant {
         barrier: Arc<Barrier>,
         count: usize,
         excluded: Vec<u64>,
-        deliberator: Option<tokio::sync::mpsc::UnboundedSender<u64>>,
+        deliberators: Vec<tokio::sync::mpsc::UnboundedSender<(u64, Participant)>>,
     ) -> [MeasuredOp; 2] {
         barrier.wait().await;
         let mut metrics: [MeasuredOp; 2] = Default::default();
+        let me = self.participant;
         for _ in 0..count {
             let start = Instant::now();
             let reservation = self.presignatures.peek_mine(&excluded).await;
@@ -417,8 +418,8 @@ impl SimulatedParticipant {
             let committed = reservation.commit().await.is_some();
             metrics[1].record_optional(start, committed);
             if committed {
-                if let Some(sender) = &deliberator {
-                    let _ = sender.send(id);
+                for sender in &deliberators {
+                    let _ = sender.send((id, me));
                 }
             }
         }
@@ -429,12 +430,11 @@ impl SimulatedParticipant {
     pub async fn sign_deliberator_measured(
         self,
         barrier: Arc<Barrier>,
-        mut ids: tokio::sync::mpsc::UnboundedReceiver<u64>,
-        owner: Participant,
+        mut ids: tokio::sync::mpsc::UnboundedReceiver<(u64, Participant)>,
     ) -> MeasuredOp {
         barrier.wait().await;
         let mut metric = MeasuredOp::default();
-        while let Some(id) = ids.recv().await {
+        while let Some((id, owner)) = ids.recv().await {
             let start = Instant::now();
             metric.record_optional(start, self.presignatures.take(id, owner).await.is_some());
         }

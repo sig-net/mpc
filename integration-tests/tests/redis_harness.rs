@@ -50,7 +50,7 @@ async fn mixed_pipeline_uses_independent_node_pools() -> anyhow::Result<()> {
             | "mixed_presig_commit_triple"
             | "mixed_insert_presig" => 6,
             "mixed_sign_peek_presig" | "mixed_sign_commit_presig" => 4,
-            "mixed_sign_take_presig" => 2,
+            "mixed_sign_take_presig" => 4,
             name => panic!("unexpected operation: {name}"),
         };
         assert_eq!(result.count, expected, "{}", result.op_name);

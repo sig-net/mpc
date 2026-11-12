@@ -692,8 +692,8 @@ impl RedisHarness {
 
     /// SCENARIO 7: Concurrent triple generation, presignature generation, and signing.
     /// Each node shares its own pool across these operations and stock-count refreshes.
-    /// Signing excludes newly generated local-only shares because the paired
-    /// deliberator has copies only of the pre-stocked shares.
+    /// Signing excludes newly generated local-only shares because deliberators
+    /// hold pre-stocked shares (with t-1 deliberators per signing proposer).
     pub async fn bench_mixed_pipeline(
         &self,
         items_per_participant: usize,
@@ -720,31 +720,49 @@ impl RedisHarness {
         self.populate_all_triples(triple_base, items_per_participant)
             .await?;
         let participant_list = self.participant_ids();
-        for (idx, p) in self.participants.iter().enumerate() {
-            let proposer = idx - idx % 2;
-            p.clone()
-                .populate_owned_by(
+
+        let threshold = mpc_contract::utils::compute_threshold(num_p);
+        let num_deliberators = threshold.saturating_sub(1).min(num_p.saturating_sub(1));
+        let proposers: Vec<usize> = (0..num_p).filter(|idx| idx % 2 == 0).collect();
+
+        let mut pop_tasks = Vec::new();
+        for &p_idx in &proposers {
+            let owner = self.participants[p_idx].participant;
+            let base = presig_base + (p_idx * items_per_participant) as u64;
+            pop_tasks.push(self.participants[p_idx].clone().populate_owned_by(
+                ArtifactKind::Presignatures,
+                base,
+                items_per_participant,
+                participant_list.clone(),
+                owner,
+            ));
+            for k in 1..=num_deliberators {
+                let d_idx = (p_idx + k) % num_p;
+                pop_tasks.push(self.participants[d_idx].clone().populate_owned_by(
                     ArtifactKind::Presignatures,
-                    presig_base + (proposer * items_per_participant) as u64,
+                    base,
                     items_per_participant,
                     participant_list.clone(),
-                    self.participants[proposer].participant,
-                )
-                .await?;
+                    owner,
+                ));
+            }
         }
+        futures::future::try_join_all(pop_tasks).await?;
 
         let poller = self.spawn_background_polling(true);
-        let gate = StartingGate::new(num_p * 3);
+        let gate = StartingGate::new(num_p * 2 + proposers.len() + num_p);
         let mut triple_tasks = Vec::new();
         let mut presig_tasks = Vec::new();
         let mut sign_tasks = Vec::new();
-        let mut senders = vec![None; num_p];
-        let mut receivers: Vec<_> = (0..num_p).map(|_| None).collect();
-        for idx in (0..num_p.saturating_sub(1)).step_by(2) {
-            let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
-            senders[idx] = Some(sender);
-            receivers[idx + 1] = Some(receiver);
+
+        let mut senders = Vec::with_capacity(num_p);
+        let mut receivers = Vec::with_capacity(num_p);
+        for _ in 0..num_p {
+            let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+            senders.push(tx);
+            receivers.push(rx);
         }
+
         for (idx, p) in self.participants.iter().enumerate() {
             let base = gen_base + (idx * items_per_participant * 2) as u64;
             triple_tasks.push(tokio::spawn(p.clone().insert_measured(
@@ -760,28 +778,42 @@ impl RedisHarness {
                 items_per_participant,
                 participant_list.clone(),
             )));
-            let p = p.clone();
+        }
+
+        for &p_idx in &proposers {
+            let p = self.participants[p_idx].clone();
             let barrier = gate.barrier();
-            let sender = senders[idx].take();
-            let receiver = receivers[idx].take();
+            let base = gen_base + (p_idx * items_per_participant * 2) as u64;
             // Newly generated shares are local to this simulated node; only
-            // pre-stocked shares have a matching copy at the deliberator.
+            // pre-stocked shares have matching copies at the deliberators.
             let excluded: Vec<_> = (0..items_per_participant)
                 .map(|i| base + items_per_participant as u64 + i as u64)
                 .collect();
-            let owner = self.participants[idx - idx % 2].participant;
+            let mut proposer_deliberators = Vec::with_capacity(num_deliberators);
+            for k in 1..=num_deliberators {
+                let d_idx = (p_idx + k) % num_p;
+                proposer_deliberators.push(senders[d_idx].clone());
+            }
             sign_tasks.push(tokio::spawn(async move {
-                if idx % 2 == 0 {
-                    let [peek, commit] = p
-                        .sign_measured(barrier, items_per_participant, excluded, sender)
-                        .await;
-                    [peek, commit, MeasuredOp::default()]
-                } else {
-                    let take = p
-                        .sign_deliberator_measured(barrier, receiver.unwrap(), owner)
-                        .await;
-                    [MeasuredOp::default(), MeasuredOp::default(), take]
-                }
+                let [peek, commit] = p
+                    .sign_measured(
+                        barrier,
+                        items_per_participant,
+                        excluded,
+                        proposer_deliberators,
+                    )
+                    .await;
+                [peek, commit, MeasuredOp::default()]
+            }));
+        }
+        drop(senders);
+
+        for (p, rx) in self.participants.iter().zip(receivers) {
+            let p = p.clone();
+            let barrier = gate.barrier();
+            sign_tasks.push(tokio::spawn(async move {
+                let take = p.sign_deliberator_measured(barrier, rx).await;
+                [MeasuredOp::default(), MeasuredOp::default(), take]
             }));
         }
 
