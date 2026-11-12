@@ -12,7 +12,7 @@ const OUTPUT_DESERIALIZATION_FORMAT: SerDeserFormat = SerDeserFormat::Abi;
 
 /// Whether a transaction's calldata represents a contract call: the
 /// same predicate on every EVM-family target.
-pub fn is_contract_call(input: &Bytes) -> bool {
+pub fn is_contract_call(input: &[u8]) -> bool {
     !input.is_empty()
 }
 
@@ -197,7 +197,7 @@ pub fn validate_schemas(
     respond_serialization_format: SerDeserFormat,
     respond_serialization_schema: &[u8],
 ) -> anyhow::Result<()> {
-    let is_contract_call = is_contract_call(&Bytes::copy_from_slice(calldata));
+    let is_contract_call = is_contract_call(calldata);
     if respond_serialization_format == SerDeserFormat::Fab {
         return validate_output_schema(is_contract_call, output_deserialization_schema);
     }
@@ -514,7 +514,7 @@ mod tests {
         ];
         for (calldata, output, format, respond, trace, accepted) in cases {
             let case = format!("{format:?} {calldata:?} {output:?} {respond:?}");
-            let is_contract_call = is_contract_call(&Bytes::copy_from_slice(calldata));
+            let is_contract_call = is_contract_call(calldata);
             let extracted =
                 build_serialized_output(is_contract_call, output, trace, format, respond);
             assert_eq!(extracted.is_ok(), accepted, "{case}: {extracted:?}");
@@ -753,7 +753,7 @@ mod tests {
         for calldata in [&[0xa9][..], &[0xa9, 0x05]] {
             // Not the plain-transfer default `true`.
             let out = build_serialized_output(
-                is_contract_call(&Bytes::copy_from_slice(calldata)),
+                is_contract_call(calldata),
                 bool_schema,
                 TraceOutput::Output(abi_bool(false)),
                 SerDeserFormat::Abi,

@@ -34,25 +34,26 @@ pub(crate) fn test_config(endpoint: Url) -> TronConfig {
     }
 }
 
-/// A parseable raw, absent calldata unless given
-fn fixture_raw(calldata: Option<([u8; 4], Vec<[u8; 32]>)>) -> Vec<u8> {
-    let calldata = match calldata {
-        Some((selector, words)) => CompactMaybe {
+/// A parseable raw, `true` carrying transfer calldata.
+fn fixture_raw(calling: bool) -> Vec<u8> {
+    let calldata = if calling {
+        CompactMaybe {
             is_some: true,
             value: Calldata {
-                selector,
-                no_words: words.len() as u16,
-                words,
+                selector: [0xa9, 0x05, 0x9c, 0xbb],
+                no_words: 1,
+                words: vec![[0u8; 32]],
             },
-        },
-        None => CompactMaybe {
+        }
+    } else {
+        CompactMaybe {
             is_some: false,
             value: Calldata {
                 selector: [0; 4],
                 no_words: 0,
                 words: Vec::new(),
             },
-        },
+        }
     };
     let params = TronTxParams {
         ref_block_bytes: [0x00, 0x03],
@@ -83,7 +84,7 @@ pub(crate) fn watcher_tx(seed: u8) -> (BidirectionalTxId, SignId, Arc<Bidirectio
     let tx = Arc::new(BidirectionalTx {
         id: BidirectionalTxId(id),
         sender: [0u8; 32],
-        serialized_transaction: fixture_raw(None),
+        serialized_transaction: fixture_raw(false),
         source_chain: mpc_primitives::Chain::Midnight,
         target_chain: mpc_primitives::Chain::Tron,
         caip2_id: "tron:mainnet".to_string(),
@@ -106,8 +107,7 @@ pub(crate) fn watcher_tx(seed: u8) -> (BidirectionalTxId, SignId, Arc<Bidirectio
 pub(crate) fn schema_carrying_tx(seed: u8) -> (BidirectionalTxId, SignId, Arc<BidirectionalTx>) {
     let (tx_id, sign_id, tx) = watcher_tx(seed);
     let mut with_schema = (*tx).clone();
-    with_schema.serialized_transaction =
-        fixture_raw(Some(([0xa9, 0x05, 0x9c, 0xbb], vec![[0u8; 32]])));
+    with_schema.serialized_transaction = fixture_raw(true);
     with_schema.output_deserialization_schema = br#"[{"name":"output","type":"bool"}]"#.to_vec();
     (tx_id, sign_id, with_schema.into())
 }
@@ -116,8 +116,7 @@ pub(crate) fn schema_carrying_tx(seed: u8) -> (BidirectionalTxId, SignId, Arc<Bi
 pub(crate) fn calling_tx(seed: u8) -> (BidirectionalTxId, SignId, Arc<BidirectionalTx>) {
     let (tx_id, sign_id, tx) = watcher_tx(seed);
     let mut with_calldata = (*tx).clone();
-    with_calldata.serialized_transaction =
-        fixture_raw(Some(([0xa9, 0x05, 0x9c, 0xbb], vec![[0u8; 32]])));
+    with_calldata.serialized_transaction = fixture_raw(true);
     (tx_id, sign_id, with_calldata.into())
 }
 

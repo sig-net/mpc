@@ -97,31 +97,32 @@ impl TronReceipt {
     pub fn execution_outcome(&self, tx: &BidirectionalTx) -> anyhow::Result<ExecutionOutcome> {
         match self.execution_result()? {
             TronExecutionResult::Failed => Ok(ExecutionOutcome::Failed),
-            TronExecutionResult::Succeeded => {
-                let built = RawTransaction::parse(&tx.serialized_transaction)
-                    .and_then(|raw| raw.calldata())
-                    .and_then(|calldata| {
-                        let trace = match self.contract_result.first() {
-                            Some(data) => TraceOutput::Output(Bytes::from(data.clone())),
-                            None => TraceOutput::NoReturnData,
-                        };
-                        build_serialized_output(
-                            is_contract_call(&Bytes::from(calldata)),
-                            &tx.output_deserialization_schema,
-                            trace,
-                            tx.source_chain.respond_serialization_format(),
-                            &tx.respond_serialization_schema,
-                        )
-                    });
-                match built {
-                    Ok(output) => Ok(ExecutionOutcome::Success { output }),
-                    Err(err) => {
-                        tracing::warn!(?tx.id, "output extraction failed terminally: {err:#}");
-                        Ok(ExecutionOutcome::ExtractionFailed)
-                    }
+            TronExecutionResult::Succeeded => match self.extract_output(tx) {
+                Ok(output) => Ok(ExecutionOutcome::Success { output }),
+                Err(err) => {
+                    tracing::warn!(?tx.id, "output extraction failed terminally: {err:#}");
+                    Ok(ExecutionOutcome::ExtractionFailed)
                 }
-            }
+            },
         }
+    }
+
+    fn extract_output(&self, tx: &BidirectionalTx) -> anyhow::Result<Vec<u8>> {
+        RawTransaction::parse(&tx.serialized_transaction)
+            .and_then(|raw| raw.calldata())
+            .and_then(|calldata| {
+                let trace = match self.contract_result.first() {
+                    Some(data) => TraceOutput::Output(Bytes::from(data.clone())),
+                    None => TraceOutput::NoReturnData,
+                };
+                build_serialized_output(
+                    is_contract_call(&calldata),
+                    &tx.output_deserialization_schema,
+                    trace,
+                    tx.source_chain.respond_serialization_format(),
+                    &tx.respond_serialization_schema,
+                )
+            })
     }
 }
 

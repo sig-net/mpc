@@ -30,27 +30,25 @@ impl RawTransaction {
         Sha256::digest(self.encode_to_vec()).into()
     }
 
-    /// The trigger's `owner_address`, for admission checks that bind the
-    /// owner to the request's derived key.
-    pub fn owner_address(&self) -> anyhow::Result<Vec<u8>> {
+    /// The one trigger contract `parse` admitted, decoded.
+    fn trigger(&self) -> anyhow::Result<TriggerSmartContract> {
         let any = self
             .contract
             .first()
             .and_then(|contract| contract.parameter.as_ref())
             .context("missing TriggerSmartContract parameter")?;
-        let trigger = TriggerSmartContract::decode(any.value.as_slice())?;
-        Ok(trigger.owner_address)
+        Ok(TriggerSmartContract::decode(any.value.as_slice())?)
+    }
+
+    /// The trigger's `owner_address`, for admission checks that bind the
+    /// owner to the request's derived key.
+    pub fn owner_address(&self) -> anyhow::Result<Vec<u8>> {
+        Ok(self.trigger()?.owner_address)
     }
 
     /// The trigger's `data`, for output recovery's `is_contract_call` predicate.
     pub fn calldata(&self) -> anyhow::Result<Vec<u8>> {
-        let any = self
-            .contract
-            .first()
-            .and_then(|contract| contract.parameter.as_ref())
-            .context("missing TriggerSmartContract parameter")?;
-        let trigger = TriggerSmartContract::decode(any.value.as_slice())?;
-        Ok(trigger.data)
+        Ok(self.trigger()?.data)
     }
 
     /// Parses and validates the bytes the multichain API carries for Tron

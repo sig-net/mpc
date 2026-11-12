@@ -3,7 +3,7 @@
 
 use crate::abi::{ChainSignatures, SignatureRequestedEncoding};
 use alloy::primitives::hex::ToHexExt;
-use alloy::primitives::{Address, Bytes, U256};
+use alloy::primitives::{Address, U256};
 use alloy::rpc::types::Log;
 use alloy::sol_types::SolEvent;
 use k256::elliptic_curve::sec1::FromEncodedPoint;
@@ -228,7 +228,7 @@ pub fn generate_request_id(
 mod tests {
     use super::*;
     use crate::abi::ChainSignatures;
-    use alloy::primitives::{Address, FixedBytes, Log as PrimitiveLog, U256};
+    use alloy::primitives::{Address, Bytes, FixedBytes, Log as PrimitiveLog, U256};
     use alloy::sol_types::SolEvent;
 
     fn sample_requested_event() -> ChainSignatures::SignatureRequested {

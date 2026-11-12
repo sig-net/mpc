@@ -395,7 +395,7 @@ mod tests {
 
         let event = tron_event(unsigned.clone());
         assert!(event.validate().is_ok());
-        
+
         // The txID is sha256(raw_data): independent of the signature, so any
         // (low-s normalized) signature names the same transaction.
         let big_r = k256::ProjectivePoint::GENERATOR.to_affine();
