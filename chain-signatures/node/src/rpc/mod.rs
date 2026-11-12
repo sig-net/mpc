@@ -37,8 +37,8 @@ const MAX_CONCURRENT_RPC_REQUESTS: usize = 1024;
 const UPDATE_INTERVAL: Duration = Duration::from_secs(10);
 
 /// First delay of the backoff between attempts to publish a response or vote
-/// for a checkpoint. A proposer's first retry must land inside
-/// `DEFAULT_OBSERVE_MARGIN`, which a test in `publish_failover` checks.
+/// for a checkpoint. Jitter can double it. A proposer's first retry must land
+/// inside `DEFAULT_OBSERVE_MARGIN`, which a test in `publish_failover` checks.
 pub(crate) const PUBLISH_MIN_DELAY: Duration = Duration::from_secs(5);
 /// Cap of that backoff. Both retry without limit, so the delay must stop
 /// growing.
