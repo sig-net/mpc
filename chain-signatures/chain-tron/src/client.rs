@@ -113,22 +113,24 @@ impl TronHttp {
         &self,
         tx_id: &B256,
     ) -> Result<Option<TronReceipt>, ReceiptError> {
-        let response = retry_rpc!(
+        let text = retry_rpc!(
             self.request_timeout,
             self.retry,
             self.gate,
             "get_transaction_info_solidity",
             {
-                let response: TransactionInfoResponse = self
-                    .post_json(
-                        "walletsolidity/gettransactioninfobyid",
-                        &serde_json::json!({ "value": hex::encode(tx_id), "visible": false }),
-                    )
-                    .await?;
-                Ok(response)
+                self.post_text(
+                    "walletsolidity/gettransactioninfobyid",
+                    &serde_json::json!({ "value": hex::encode(tx_id), "visible": false }),
+                )
+                .await
             }
         )
         .map_err(ReceiptError::Transport)?;
+
+        let response: TransactionInfoResponse = serde_json::from_str(&text)
+            .with_context(|| format!("decoding tron receipt response: {text}"))
+            .map_err(ReceiptError::Malformed)?;
 
         decode_receipt(response).map_err(ReceiptError::Malformed)
     }
@@ -167,12 +169,9 @@ impl TronHttp {
         response.into_outcome()
     }
 
-    /// Sends a JSON POST request to the Tron node and deserializes the response.
-    async fn post_json<T: for<'de> Deserialize<'de>>(
-        &self,
-        path: &str,
-        body: &impl Serialize,
-    ) -> anyhow::Result<T> {
+    /// JSON POST → the success body as text: transport and status only,
+    /// so deterministic decodes stay outside a caller's retry closure.
+    async fn post_text(&self, path: &str, body: &impl Serialize) -> anyhow::Result<String> {
         let url = self
             .endpoint
             .join(path)
@@ -191,7 +190,16 @@ impl TronHttp {
         if !status.is_success() {
             return Err(anyhow!("tron http {path}: {status}: {text}"));
         }
+        Ok(text)
+    }
 
+    /// [`post_text`](Self::post_text) plus the JSON decode.
+    async fn post_json<T: for<'de> Deserialize<'de>>(
+        &self,
+        path: &str,
+        body: &impl Serialize,
+    ) -> anyhow::Result<T> {
+        let text = self.post_text(path, body).await?;
         serde_json::from_str(&text)
             .with_context(|| format!("decoding tron {path} response: {text}"))
     }
@@ -806,6 +814,54 @@ mod tests {
         };
         let rendered = format!("{err:#}");
         assert!(rendered.contains("contractResult"), "{rendered}");
+    }
+
+    /// Transport is the retried class — budget burns, then the variant.
+    #[tokio::test]
+    async fn transport_failure_is_retried_then_transport() {
+        let (mut server, client) = test_client(fast_retry()).await;
+        let mock = server
+            .mock("POST", "/walletsolidity/gettransactioninfobyid")
+            .with_status(500)
+            .with_body("internal")
+            .expect(3) // 1 + fast_retry's 2
+            .create_async()
+            .await;
+
+        let err = client
+            .get_transaction_info_solidity(&test_hash(4))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ReceiptError::Transport(_)), "{err:#}");
+        assert!(format!("{err:#}").contains("exhausted"), "{err:#}");
+        mock.assert_async().await;
+    }
+
+    /// A non-JSON 200 body is deterministic per response: one fetch, `Malformed`.
+    #[tokio::test]
+    async fn non_json_success_body_is_malformed_not_transport() {
+        let (mut server, client) = test_client(fast_retry()).await;
+        let mock = server
+            .mock("POST", "/walletsolidity/gettransactioninfobyid")
+            .with_status(200)
+            .with_header("content-type", "text/html")
+            .with_body("<html>gateway error page</html>")
+            .expect(1)
+            .create_async()
+            .await;
+
+        let err = client
+            .get_transaction_info_solidity(&test_hash(5))
+            .await
+            .unwrap_err();
+        let ReceiptError::Malformed(err) = err else {
+            panic!("a mangled 200 body must not classify as transport: {err:#}")
+        };
+        assert!(
+            format!("{err:#}").contains("decoding tron receipt response"),
+            "{err:#}"
+        );
+        mock.assert_async().await;
     }
 
     #[tokio::test]
