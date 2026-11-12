@@ -252,6 +252,48 @@ async fn seed_executing_entry(
         .expect("advance to executing");
 }
 
+/// A deterministic advance failure parks the entry — a retry could never clear it.
+#[tokio::test]
+async fn process_execution_confirmed_failed_advance_parks_the_entry() {
+    let backlog = Backlog::new();
+    // Solana does not encode Unviable, so the transition fails.
+    let tx = test_bidirectional_tx(10, Chain::Solana, Chain::Ethereum);
+    let entry = backlog.insert_mock_executing(&tx).await;
+    backlog.watch_execution(&entry).await;
+
+    let (sign_tx, mut sign_rx) = mpsc::channel(4);
+    let ctx = make_test_stream_context_with_generator_pk(backlog, sign_tx, true);
+
+    let err = confirm_execution(&tx, 41, ExecutionOutcome::Unviable, &ctx)
+        .await
+        .unwrap_err();
+    assert!(
+        format!("{err:#}").contains("only supported for sources that encode them"),
+        "{err:#}"
+    );
+
+    let entry = ctx
+        .backlog
+        .get(tx.source_chain, &tx.sign_id())
+        .await
+        .expect("the entry survives");
+    assert_matches!(
+        entry.status(),
+        SignStatus::Bidirectional(BidirectionalProgress::Parked(_))
+    );
+    assert!(
+        !ctx.backlog
+            .get_execution_watchers(tx.target_chain)
+            .await
+            .contains_key(&tx.id),
+        "no watch left to re-emit the failing confirmation"
+    );
+    assert_matches!(
+        sign_rx.try_recv(),
+        Ok(SignCommand::Completion(id)) if id == tx.sign_id()
+    );
+}
+
 #[tokio::test]
 async fn process_execution_confirmed_resolves_a_displaced_watch_by_sign_id() {
     let backlog = Backlog::new();
@@ -3602,4 +3644,36 @@ async fn final_response_settles_on_the_published_output() {
             "{published}"
         );
     }
+}
+
+/// Catching up deletes the records of requests no longer in the backlog, such as one a rebase
+/// skipped the `Response` of, and keeps the others.
+#[tokio::test]
+async fn catching_up_deletes_records_without_an_entry() {
+    let chain = Chain::Solana;
+    let storage = CheckpointStorage::in_memory();
+    let backlog = Backlog::persisted(storage.clone());
+    let kept = mock_sign_request(SignId::new([1; 32]), chain);
+    backlog.insert(Arc::clone(&kept)).await;
+    let record = SignStatus::Sign(SignProgress::Publishing(
+        crate::backlog::mock::mock_publishing(),
+    ));
+    for id in [kept.id, SignId::new([2; 32])] {
+        storage.put_local(chain, id, &record).await.unwrap();
+    }
+    let (sign_tx, _sign_rx) = mpsc::channel(4);
+    let mut ctx = make_test_stream_context_with_generator_pk(backlog, sign_tx, false);
+
+    crate::stream::handle_chain_event(
+        mpc_primitives::ChainEvent::CatchupCompleted,
+        &mut ctx,
+        &NoopChainTelemetry,
+        test_root_pk(),
+        chain,
+    )
+    .await
+    .unwrap();
+
+    let records = storage.load_local(chain).await.unwrap();
+    assert_eq!(records, vec![(kept.id, record)]);
 }

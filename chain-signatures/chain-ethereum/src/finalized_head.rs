@@ -135,7 +135,7 @@ impl FinalizedHeadTracker {
     pub fn new(eth: &EthConfig) -> Self {
         Self {
             head: watch::channel(None).0,
-            optimistic: eth.optimistic_requests,
+            optimistic: eth.network.is_optimistic(),
             refresh_interval: eth.indexer.refresh_interval,
             stall_rewarn_secs: eth.indexer.stall_rewarn_secs,
         }

@@ -69,6 +69,79 @@ macro_rules! impl_test_indexer {
 impl_test_indexer!(SolanaTestIndexer, Chain::Solana);
 impl_test_indexer!(EthereumTestIndexer, Chain::Ethereum);
 
+/// Through the supervisor's whole recovery: a node restarted with a stored signature publishes
+/// it instead of signing again.
+#[tokio::test]
+async fn a_supervised_restart_publishes_a_stored_signature() {
+    let chain = Chain::Solana;
+    let storage = crate::storage::checkpoint_storage::CheckpointStorage::in_memory();
+    let request = mock_sign_request(SignId::new([1u8; 32]), chain);
+    let (root_pk, output) = crate::backlog::mock::mock_signature_output(&request.args);
+    Backlog::persisted(storage.clone())
+        .insert(Arc::clone(&request))
+        .await
+        .0
+        .advance(
+            root_pk,
+            &output,
+            crate::backlog::mock::mock_participants(),
+            true,
+        )
+        .await
+        .unwrap();
+
+    let indexer = SolanaTestIndexer::new(vec![
+        Some(ChainEvent::SignRequest {
+            request: Arc::clone(&request),
+            block_timestamp: None,
+        }),
+        Some(ChainEvent::CatchupCompleted),
+        None,
+    ]);
+    let (sign_tx, mut sign_rx) = mpsc::channel(4);
+    let (contract_watcher, _tx) = ContractStateWatcher::with_running(
+        &"test.near".parse::<AccountId>().unwrap(),
+        root_pk,
+        0,
+        Default::default(),
+    );
+    let (_mesh_state_tx, mesh_state_rx) = watch::channel(MeshState::default());
+    let (_cp_tx, cp_rx) = watch::channel(None);
+    let (rpc, mut rpc_rx) = test_rpc_channel(4);
+    let restarted = Backlog::persisted(storage.clone());
+
+    run_supervised(
+        indexer,
+        crate::stream::StreamContext::new(
+            restarted.clone(),
+            sign_tx,
+            rpc,
+            contract_watcher,
+            mesh_state_rx,
+            NodeClient::new(),
+            cp_rx,
+        ),
+        mpc_chain_integration_core::NoopChainTelemetry,
+    )
+    .await
+    .expect("supervisor should exit cleanly");
+
+    assert!(sign_rx.try_recv().is_err(), "nothing is signed again");
+    let published = timeout(Duration::from_secs(1), rpc_rx.recv()).await;
+    assert!(
+        matches!(published, Ok(Some(RpcAction::Publish(action)))
+            if action.request.id == request.id),
+        "the proposer publishes it"
+    );
+    assert_eq!(restarted.publishable_requests(chain).await.len(), 1);
+    assert!(storage
+        .load_local(chain)
+        .await
+        .unwrap()
+        .iter()
+        .any(|(id, _)| *id == request.id));
+}
+
 #[tokio::test]
 async fn test_stream_handles_sign_and_respond() {
     let backlog = Backlog::new();
@@ -332,8 +405,8 @@ async fn test_respond_event_advances_to_pending_execution() {
 
     let watchers = backlog.get_execution_watchers(Chain::Ethereum).await;
     assert_eq!(watchers.len(), 1, "expected exactly one execution watcher");
-    let (watched_sign_id, _watched_tx) = watchers.values().next().unwrap();
-    assert_eq!(*watched_sign_id, sign_id);
+    let watched_sign_id = watchers.values().next().unwrap()[0].sign_id;
+    assert_eq!(watched_sign_id, sign_id);
 }
 
 /// `process_execution_confirmed` on a watched bidirectional tx should advance the

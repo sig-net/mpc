@@ -97,11 +97,20 @@ pub(crate) fn receipt_stub(
     seed: u8,
     body: String,
 ) -> mockito::Mock {
-    let tx_id = watcher_tx(seed).0;
+    receipt_mock(server, &watcher_tx(seed).0, body)
+}
+
+/// The un-created receipt mock — callers chain `.create()` or
+/// `.expect(n).create()`.
+fn receipt_mock(
+    server: &mut mockito::ServerGuard,
+    id: &BidirectionalTxId,
+    body: String,
+) -> mockito::Mock {
     server
         .mock("POST", "/walletsolidity/gettransactioninfobyid")
         .match_body(Matcher::PartialJson(serde_json::json!({
-            "value": hex::encode(tx_id.0)
+            "value": hex::encode(id.0)
         })))
         .with_header("content-type", "application/json")
         .with_body(body)
@@ -215,14 +224,16 @@ pub(crate) fn success_receipt(id: &BidirectionalTxId) -> String {
 }
 
 pub(crate) fn receipt_for(server: &mut mockito::ServerGuard, id: &BidirectionalTxId, body: String) {
-    server
-        .mock("POST", "/walletsolidity/gettransactioninfobyid")
-        .match_body(Matcher::PartialJson(serde_json::json!({
-            "value": hex::encode(id.0)
-        })))
-        .with_header("content-type", "application/json")
-        .with_body(body)
-        .create();
+    receipt_mock(server, id, body).create();
+}
+
+/// [`receipt_for`] asserting exactly one fetch.
+pub(crate) fn receipt_for_once(
+    server: &mut mockito::ServerGuard,
+    id: &BidirectionalTxId,
+    body: String,
+) -> mockito::Mock {
+    receipt_mock(server, id, body).expect(1).create()
 }
 
 /// An entry whose serialized bytes carry `expiration`; the id is

@@ -9,7 +9,7 @@ use std::sync::Arc;
 use anyhow::Context;
 use futures_util::stream::{iter, StreamExt};
 use futures_util::TryStreamExt;
-use mpc_chain_integration_core::unexecutable_outcome;
+use mpc_chain_integration_core::{unexecutable_outcome, WatchedExecution};
 use mpc_primitives::{BidirectionalTx, BidirectionalTxId, ChainEvent, SignId};
 use mpc_tron_wire::{pb::RawTransaction, MAX_EXPIRATION_SPAN_MS};
 use tokio::sync::Mutex;
@@ -65,12 +65,9 @@ pub(crate) fn expired_event(sign_id: SignId, tx: &BidirectionalTx, boundary: u64
 }
 
 /// Groups pending entries whose TaPoS windows have closed relative to the given head block.
-pub(crate) fn closed_groups(
-    pending: Vec<(SignId, Arc<BidirectionalTx>)>,
-    head: &SolidifiedBlock,
-) -> Vec<Group> {
+pub(crate) fn closed_groups(pending: Vec<WatchedExecution>, head: &SolidifiedBlock) -> Vec<Group> {
     let mut groups: HashMap<BidirectionalTxId, Vec<_>> = HashMap::new();
-    for (sign_id, tx) in pending {
+    for WatchedExecution { sign_id, tx } in pending {
         if let Some(window) = tx_window(&tx).filter(|w| head.timestamp >= w.expiration) {
             groups.entry(tx.id).or_default().push((sign_id, tx, window));
         }
@@ -396,7 +393,10 @@ mod tests {
         };
         let tx = || expiry_tx(1, Chain::Midnight, EXPIRATION as u64).2;
         let eligible = |head_ts: i64| {
-            let pending = vec![(SignId::new([1; 32]), tx())];
+            let pending = vec![WatchedExecution {
+                sign_id: SignId::new([1; 32]),
+                tx: tx(),
+            }];
             let groups = closed_groups(pending, &head(head_ts));
             groups.len() == 1 && groups[0].len() == 1
         };
@@ -406,7 +406,10 @@ mod tests {
         let mut unparsable = (*tx()).clone();
         unparsable.serialized_transaction = vec![0xff];
         let groups = closed_groups(
-            vec![(SignId::new([1; 32]), unparsable.into())],
+            vec![WatchedExecution {
+                sign_id: SignId::new([1; 32]),
+                tx: unparsable.into(),
+            }],
             &head(i64::MAX),
         );
         assert!(groups.is_empty(), "unparsable bytes never scan");
