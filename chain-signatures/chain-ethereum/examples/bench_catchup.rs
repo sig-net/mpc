@@ -14,13 +14,9 @@
 //!   height).
 //! - `START` (optional) — inclusive start of the range. If omitted, only
 //!   the single block `END - 1` is processed.
-//! - `MPC_ETH_NETWORK` (optional, default `sepolia`).
-//! - `MPC_ETH_OPTIMISTIC_REQUESTS` (optional, default `false`) — production
-//!   (non-optimistic) path by default; the finalized-head watcher drives
-//!   finality. Set to `true` for the demo/soft-tip path (no finality wait).
-//! - `MPC_ETH_REFRESH_FINALIZED_INTERVAL` (optional, default `10000` ms) —
-//!   cadence of the finalized-head watcher in
-//!   `MPC_ETH_OPTIMISTIC_REQUESTS=false` mode.
+//! - `MPC_ETH_NETWORK` (optional, default `sepolia`) — `sepolia` and `mainnet`
+//!   take the production path, where the finalized-head watcher drives
+//!   finality; `anvil` takes the soft-tip path with no finality wait.
 //!
 //! # Usage
 //!

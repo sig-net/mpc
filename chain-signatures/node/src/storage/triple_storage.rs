@@ -8,11 +8,11 @@ use cait_sith::protocol::Participant;
 use crate::protocol::triple::{Triple, TripleId};
 
 use super::protocol_storage::{
-    ArtifactReservation, ArtifactSlot, ArtifactTaken, ArtifactTakenDropper, ProtocolArtifact,
-    ProtocolStorage,
+    ArtifactReservation, ArtifactSlot, ArtifactTaken, ArtifactTakenDropper, Initializing,
+    ProtocolArtifact, ProtocolStorage, Ready,
 };
 
-pub type TripleStorage = ProtocolStorage<TriplePair>;
+pub type TripleStorage<Phase = Ready> = ProtocolStorage<TriplePair, Phase>;
 pub type TriplePairSlot = ArtifactSlot<TriplePair>;
 pub type TriplesTaken = ArtifactTaken<TriplePair>;
 pub type TriplesTakenDropper = ArtifactTakenDropper<TriplePair>;
@@ -30,8 +30,12 @@ pub struct TriplePair {
 }
 
 impl TriplePair {
-    pub fn storage(pool: &Pool, account_id: &AccountId) -> TripleStorage {
+    pub fn storage(pool: &Pool, account_id: &AccountId) -> TripleStorage<Initializing> {
         ProtocolStorage::new(pool, account_id, "triples")
+    }
+
+    pub fn ready_storage(pool: &Pool, account_id: &AccountId, me: Participant) -> TripleStorage {
+        ProtocolStorage::ready(pool, account_id, "triples", me)
     }
 }
 
@@ -86,7 +90,7 @@ impl FromRedisValue for TriplePair {
 }
 
 #[cfg(feature = "test-feature")]
-impl ProtocolStorage<TriplePair> {
+impl<Phase> ProtocolStorage<TriplePair, Phase> {
     pub fn triple_key(&self) -> &str {
         self.artifact_key()
     }

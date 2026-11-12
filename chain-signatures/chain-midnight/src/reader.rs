@@ -324,7 +324,7 @@ fn decode_response_signature(
     Ok(mpc_primitives::Signature::new(big_r, s, recovery_id))
 }
 
-/// Decode the fields at the front of a singleton response event payload. The fixed
+/// Decode the fields at the front of a `SignatureRespondedEvent` payload. The fixed
 /// 256-byte input has already been recovered from the VM's `Misc` log item.
 pub(crate) fn decode_response_payload(
     emitted: &[u8; crate::emissions::MISC_PAYLOAD_LEN],
@@ -343,7 +343,7 @@ pub(crate) fn decode_response_payload(
     }
 }
 
-/// Decode the singleton's `RespondBidirectionalEvent` layout. Metadata is an
+/// Decode the `RespondBidirectionalEvent` layout. Metadata is an
 /// unverified claim until the node compares it with its stored attestation and
 /// verifies the signature against the expected digest.
 pub(crate) fn decode_bidirectional_response_payload(

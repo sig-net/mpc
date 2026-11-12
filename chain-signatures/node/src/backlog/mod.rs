@@ -15,10 +15,9 @@ use crate::storage::checkpoint_storage::CheckpointStorage;
 pub use checkpoints::{Checkpoint, CheckpointError, Checkpoints};
 
 use enum_map::EnumMap;
-use mpc_chain_integration_core::StateManager;
+use mpc_chain_integration_core::{StateManager, WatchKey, WatchedExecution};
 use mpc_primitives::{
-    BidirectionalTx, BidirectionalTxId, Chain, ChainConfig as _, IndexedSignRequest, SignId,
-    SignKind,
+    BidirectionalTx, BidirectionalTxId, Chain, IndexedSignRequest, SignId, SignKind,
 };
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -94,6 +93,21 @@ impl PendingRequests {
             .collect()
     }
 
+    fn executing_targeting(&self, target: Chain) -> Vec<WatchedExecution> {
+        self.requests
+            .values()
+            .filter_map(|entry| {
+                entry
+                    .execution_tx()
+                    .filter(|tx| tx.target_chain == target)
+                    .map(|tx| WatchedExecution {
+                        sign_id: entry.sign_id(),
+                        tx: Arc::clone(tx),
+                    })
+            })
+            .collect()
+    }
+
     /// Get the processed block height for this chain
     fn processed_block_height(&self) -> Option<u64> {
         self.processed_block_height
@@ -117,25 +131,54 @@ impl PendingRequests {
     }
 }
 
+// TODO: move wait starts out of this polling index into their own
+// table — the map then holds only `WatchKey` → tx, and the carry and
+// rebuild arms go away. Do it together with the extraction (state.rs
+// TODO).
 #[derive(Debug, Clone, Default)]
 struct ExecutionWatchers {
-    watchers: HashMap<BidirectionalTxId, ExecutionWatch>,
+    watches: HashMap<WatchKey, ExecutionWatch>,
 }
 
 impl ExecutionWatchers {
-    fn insert(&mut self, watch: ExecutionWatch) -> Option<ExecutionWatch> {
-        self.watchers.insert(watch.tx.id, watch)
+    /// Registers `watch`, keeping the resident's wait start.
+    fn insert(&mut self, mut watch: ExecutionWatch) {
+        let key = WatchKey::of(&watch.tx);
+        watch.respond_observed_at = watch.respond_observed_at.or_else(|| {
+            self.watches
+                .get(&key)
+                .and_then(|resident| resident.respond_observed_at)
+        });
+        self.watches.insert(key, watch);
     }
 
-    fn remove(&mut self, tx_id: &BidirectionalTxId) -> Option<ExecutionWatch> {
-        self.watchers.remove(tx_id)
+    /// Replaces `source`'s watches with `entries`, keeping a returning
+    /// member's wait start.
+    fn rebuild(&mut self, source: Chain, entries: impl IntoIterator<Item = ExecutionWatch>) {
+        let fresh: HashMap<WatchKey, ExecutionWatch> = entries
+            .into_iter()
+            .map(|watch| (WatchKey::of(&watch.tx), watch))
+            .collect();
+        self.watches
+            .retain(|key, _| key.source != source || fresh.contains_key(key));
+        for (_, watch) in fresh {
+            self.insert(watch);
+        }
     }
 
-    fn all(&self) -> HashMap<BidirectionalTxId, (SignId, Arc<BidirectionalTx>)> {
-        self.watchers
-            .iter()
-            .map(|(id, watch)| (*id, (watch.tx.sign_id(), Arc::clone(&watch.tx))))
-            .collect()
+    fn remove(&mut self, key: &WatchKey) -> Option<ExecutionWatch> {
+        self.watches.remove(key)
+    }
+
+    fn all(&self) -> HashMap<BidirectionalTxId, Vec<WatchedExecution>> {
+        let mut grouped: HashMap<BidirectionalTxId, Vec<WatchedExecution>> = HashMap::new();
+        for watch in self.watches.values() {
+            grouped
+                .entry(watch.tx.id)
+                .or_default()
+                .push(WatchedExecution::of(Arc::clone(&watch.tx)));
+        }
+        grouped
     }
 }
 
@@ -158,6 +201,26 @@ pub struct Backlog {
 impl Default for Backlog {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Blocks between checkpoints: the chain's production cadence, or in test
+/// builds the mock one so checkpoint tests finish in seconds.
+pub fn checkpoint_interval(chain: Chain) -> Option<u64> {
+    #[cfg(feature = "test-feature")]
+    return mock_checkpoint_interval(chain);
+    #[cfg(not(feature = "test-feature"))]
+    mpc_primitives::ChainConfig::checkpoint_interval(&chain)
+}
+
+/// Short cadence for test networks. Mirrors `ChainConfig::checkpoint_interval`
+/// in which chains have one.
+#[cfg(any(test, feature = "test-feature"))]
+fn mock_checkpoint_interval(chain: Chain) -> Option<u64> {
+    match chain {
+        Chain::NEAR | Chain::Bitcoin | Chain::Tron => None,
+        Chain::Ethereum => Some(2),
+        Chain::Solana | Chain::Hydration | Chain::Canton | Chain::Midnight => Some(5),
     }
 }
 
@@ -232,10 +295,38 @@ impl Backlog {
         // Only decrement total pending if an entry was actually removed
         if removed {
             self.total_pending.fetch_sub(1, Ordering::Relaxed);
+            // Only a restart reads the record, so it goes in the background; catching up deletes
+            // any this misses.
+            let (storage, id) = (self.checkpoints.storage().clone(), *id);
+            tokio::spawn(async move {
+                if let Err(err) = storage.remove_local(chain, &[id]).await {
+                    tracing::warn!(?chain, ?id, ?err, "failed to remove a local record");
+                }
+            });
         }
 
         self.observe_backlog_size(chain, len);
         removed
+    }
+
+    /// Delete the records of requests no longer in the backlog, which a rebase past their
+    /// `Response` or a failed delete leaves. Call it once caught up.
+    pub(crate) async fn forget_stale_local(&self, chain: Chain) {
+        let storage = self.checkpoints.storage();
+        let stale: Vec<SignId> = match storage.load_local(chain).await {
+            Ok(records) => {
+                let pending = self.pending(&chain).read().await;
+                let gone = |id: &SignId| pending.get(id).is_none();
+                records.into_iter().map(|(id, _)| id).filter(gone).collect()
+            }
+            Err(err) => {
+                tracing::warn!(?chain, ?err, "failed to load local records");
+                return;
+            }
+        };
+        if let Err(err) = storage.remove_local(chain, &stale).await {
+            tracing::warn!(?chain, ?err, "failed to remove local records");
+        }
     }
 
     /// Get an in-flight sign request entry from the backlog for the specified chain.
@@ -337,13 +428,23 @@ impl Backlog {
         publishable
     }
 
-    /// Returns all backlog entries currently in destination-chain execution for a specific chain.
+    /// Entries in destination-chain execution on `chain`, the chain that
+    /// owns them.
     pub async fn pending_executions(
         &self,
         chain: Chain,
     ) -> Vec<SignEntry<Bidirectional<Executing>>> {
         let pending = self.pending(&chain).read().await;
         pending.pending_executions(chain, self)
+    }
+
+    /// `Executing` entries targeting `target`, from every owning chain.
+    async fn pending_executions_targeting(&self, target: Chain) -> Vec<WatchedExecution> {
+        let mut targeting = Vec::new();
+        for pending in self.requests.values() {
+            targeting.extend(pending.read().await.executing_targeting(target));
+        }
+        targeting
     }
 
     /// Returns the number of pending requests for a specific chain
@@ -360,17 +461,21 @@ impl Backlog {
         watchers.insert(entry.execution_watch());
     }
 
-    /// Stop watching for execution of a bidirectional transaction on the destination chain
-    /// and retrieve the executing backlog entry from its source chain.
+    /// Stops watching and retrieves the entry, keyed by flat id plus
+    /// the entry's own source and sign id; sibling watches stay.
     pub async fn unwatch_execution(
         &self,
         chain: Chain,
         tx_id: &BidirectionalTxId,
+        source_chain: Chain,
+        sign_id: &SignId,
     ) -> Option<SignEntry<Bidirectional<Executing>>> {
-        let watch = {
-            let mut watchers = self.watchers(&chain).write().await;
-            watchers.remove(tx_id)?
+        let key = WatchKey {
+            flat_id: *tx_id,
+            source: source_chain,
+            sign_id: *sign_id,
         };
+        let watch = self.watchers(&chain).write().await.remove(&key)?;
 
         // Restore the observation time absent from backlog status.
         self.get_by::<Bidirectional<Executing>>(watch.tx.source_chain, &watch.tx.sign_id())
@@ -378,10 +483,49 @@ impl Backlog {
             .map(|entry| entry.with_respond_observed_at(watch.respond_observed_at))
     }
 
+    /// Parks the entry by key — the confirmation error path, whose
+    /// `advance` consumed the handle.
+    pub async fn park_execution(
+        &self,
+        chain: Chain,
+        sign_id: &SignId,
+        tx: &Arc<BidirectionalTx>,
+    ) -> Result<(), BacklogError> {
+        let mut pending = self.pending(&chain).write().await;
+        let entry = pending
+            .requests
+            .get_mut(sign_id)
+            .ok_or(BacklogError::NotFound {
+                chain,
+                id: *sign_id,
+            })?;
+        entry.status = SignStatus::Bidirectional(BidirectionalProgress::Parked(Arc::clone(tx)));
+        Ok(())
+    }
+
+    /// The executing entry a confirmation attests: by the entry's own
+    /// watch, or by source and sign id from the backlog.
+    pub async fn executing_entry_for(
+        &self,
+        target_chain: Chain,
+        tx_id: &BidirectionalTxId,
+        source_chain: Chain,
+        sign_id: &SignId,
+    ) -> Option<SignEntry<Bidirectional<Executing>>> {
+        if let Some(entry) = self
+            .unwatch_execution(target_chain, tx_id, source_chain, sign_id)
+            .await
+        {
+            return Some(entry);
+        }
+        self.get_by::<Bidirectional<Executing>>(source_chain, sign_id)
+            .await
+    }
+
     /// Set the processed block height for a specific chain.
     /// Returns Some(Checkpoint) if a checkpoint should be created and submitted at this block height.
     pub async fn set_processed_block(&self, chain: Chain, height: u64) -> Option<Checkpoint> {
-        let interval = chain.checkpoint_interval()?;
+        let interval = checkpoint_interval(chain)?;
         self.set_processed_block_interval(chain, height, interval)
             .await
     }
@@ -469,6 +613,16 @@ impl Backlog {
         self.recover_local(chain).await
     }
 
+    /// Give each entry its stored records, once replay has rebuilt the backlog.
+    pub(crate) async fn claim_local(&self, chain: Chain, records: Vec<(SignId, SignStatus)>) {
+        let mut pending = self.pending(&chain).write().await;
+        for (id, record) in records {
+            if let Some(entry) = pending.requests.get_mut(&id) {
+                entry.apply_record(record);
+            }
+        }
+    }
+
     /// Recovers local backlog state from the latest durable checkpoint if one exists.
     pub async fn recover_local(&self, chain: Chain) -> Result<Option<Checkpoint>, CheckpointError> {
         let Some(checkpoint) = self.checkpoints.latest(chain).await? else {
@@ -535,25 +689,23 @@ impl Backlog {
             pending.pending_executions(chain, self)
         };
 
-        // Replace this chain's watches, retaining wait start times for executions
-        // that are still being awaited.
+        // Replace this chain's watches, retaining wait start times for
+        // executions that are still being awaited.
+        let mut by_target: HashMap<Chain, Vec<ExecutionWatch>> = HashMap::new();
+        for entry in &execution_to_watch {
+            let watch = entry.execution_watch();
+            by_target
+                .entry(watch.tx.target_chain)
+                .or_default()
+                .push(watch);
+        }
         for destination_chain in Chain::iter() {
-            let mut watchers = self.watchers(&destination_chain).write().await;
-            let mut observed = HashMap::new();
-            watchers.watchers.retain(|id, watch| {
-                if watch.tx.source_chain != chain {
-                    return true;
-                }
-                observed.insert(*id, watch.respond_observed_at);
-                false
-            });
-            for entry in &execution_to_watch {
-                let mut watch = entry.execution_watch();
-                if watch.tx.target_chain == destination_chain {
-                    watch.respond_observed_at = observed.remove(&watch.tx.id).flatten();
-                    watchers.insert(watch);
-                }
-            }
+            let empty = Vec::new();
+            let entries = by_target.get(&destination_chain).unwrap_or(&empty);
+            self.watchers(&destination_chain)
+                .write()
+                .await
+                .rebuild(chain, entries.iter().cloned());
         }
     }
 }
@@ -575,8 +727,19 @@ impl StateManager for Backlog {
     async fn get_execution_watchers(
         &self,
         chain: Chain,
-    ) -> HashMap<BidirectionalTxId, (SignId, Arc<BidirectionalTx>)> {
+    ) -> HashMap<BidirectionalTxId, Vec<WatchedExecution>> {
         self.watchers(&chain).read().await.all()
+    }
+
+    async fn get_pending_executions(&self, chain: Chain) -> Vec<WatchedExecution> {
+        self.pending_executions_targeting(chain).await
+    }
+
+    async fn watch_execution(&self, chain: Chain, tx: Arc<BidirectionalTx>) {
+        self.watchers(&chain)
+            .write()
+            .await
+            .insert(ExecutionWatch::new(tx, None));
     }
 }
 
@@ -617,6 +780,25 @@ impl BacklogEntry {
 
     pub fn with_status(request: Arc<IndexedSignRequest>, status: SignStatus) -> Self {
         Self { request, status }
+    }
+
+    /// Take a stored status unless the entry has moved past it. A record is written only on
+    /// publishing, so a first leg's stays behind once the request executes.
+    fn apply_record(&mut self, record: SignStatus) {
+        use BidirectionalProgress::{Executing, Final, Initial};
+        use SignStatus::{Bidirectional, Sign};
+        let applies = match (&record, &self.status) {
+            (Sign(_), Sign(progress))
+            | (Bidirectional(Initial(_)), Bidirectional(Initial(progress)))
+            | (Bidirectional(Final { .. }), Bidirectional(Final { progress, .. })) => {
+                progress.is_generating()
+            }
+            (Bidirectional(Final { .. }), Bidirectional(Initial(_) | Executing(_))) => true,
+            _ => false,
+        };
+        if applies {
+            self.status = record;
+        }
     }
 
     pub fn sign_id(&self) -> SignId {

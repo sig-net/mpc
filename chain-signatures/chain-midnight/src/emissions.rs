@@ -1,7 +1,7 @@
-//! Singleton contract emissions recovered by executing transaction transcripts with the ledger VM.
+//! Signet contract emissions recovered by executing transaction transcripts with the ledger VM.
 
 use anyhow::Context as _;
-use midnight_base_crypto::fab::{AlignedValue, AlignmentAtom, AlignmentSegment, Value};
+use midnight_base_crypto::fab::{AlignmentAtom, AlignmentSegment};
 use midnight_ledger_v9::structure::{ContractCall, ProofKind, ProofMarker, Signature, Transaction};
 use midnight_onchain_runtime::context::QueryContext;
 use midnight_onchain_runtime::cost_model::INITIAL_COST_MODEL;
@@ -9,7 +9,6 @@ use midnight_onchain_runtime::ops::{LogEventType, Op, VersionedLogItem};
 use midnight_onchain_runtime::result_mode::ResultModeVerify;
 use midnight_onchain_runtime::state::{ChargedState, StateValue};
 use midnight_onchain_runtime::transcript::Transcript;
-use midnight_storage::arena::Sp;
 use midnight_storage::storage::Array;
 use midnight_storage::DefaultDB;
 
@@ -56,7 +55,7 @@ pub enum TranscriptPhase {
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]
-pub struct SingletonCallEmissions {
+pub struct ContractCallEmissions {
     /// Position in [`DecodedTransaction::calls`] before filtering or execution-order sorting.
     pub call_index: u32,
     pub physical_segment: u16,
@@ -86,7 +85,7 @@ fn log_items<P: ProofKind<DefaultDB>>(
     call: &ContractCall<P, DefaultDB>,
     transcript: &Transcript<DefaultDB>,
 ) -> anyhow::Result<Vec<VersionedLogItem<DefaultDB>>> {
-    let program = proven_program(Vec::from(&transcript.program));
+    let program = Vec::from(&transcript.program);
     // Live ingestion establishes the node status first; transaction normalization is
     // the ledger's responsibility. Only constrain what we can replay correctly.
     // Noops and checkpoints only consume gas during VM execution; they cannot
@@ -102,7 +101,7 @@ fn log_items<P: ProofKind<DefaultDB>>(
             && pairs
                 .iter()
                 .all(|pair| matches!(pair, [Op::Push { storage: false, .. }, Op::Log])),
-        "unsupported-singleton-transcript: expected literal non-storage Push/Log pairs with Noops and checkpoints"
+        "unsupported-contract-transcript: expected literal non-storage Push/Log pairs with Noops and checkpoints"
     );
     // The ledger starts each phase with a fresh query context. The accepted subset
     // cannot observe its omitted contract state, balance or block context.
@@ -112,57 +111,13 @@ fn log_items<P: ProofKind<DefaultDB>>(
     );
     let result = context
         .query::<ResultModeVerify>(&program, None, &INITIAL_COST_MODEL)
-        .context("singleton transcript rejected by the ledger VM")?;
+        .context("contract transcript rejected by the ledger VM")?;
     // Push/Log pairs produce no effects, so the ledger fails such a phase in any contract
     // state, with `EffectsMismatch` if nothing fails it earlier.
     if result.context.effects != transcript.effects {
         return Err(DeclaredEffectsMismatch.into());
     }
     Ok(result.events)
-}
-
-/// The program as its proof covers it. Ledger 9.1.0-rc.3, which this crate pins and Stagenet
-/// runs, accepts `idx []`, which has no field representation, and atoms past a pushed cell's
-/// alignment, which the field representation drops, so a transaction's author can add either
-/// to a proven program. Midnight closed both in 9.1.0-rc.5, so this can go once every
-/// ledger-9 network we read runs rc.5 or later.
-fn proven_program(
-    program: Vec<Op<ResultModeVerify, DefaultDB>>,
-) -> Vec<Op<ResultModeVerify, DefaultDB>> {
-    program
-        .into_iter()
-        .filter(|op| !matches!(op, Op::Idx { path, .. } if path.is_empty()))
-        .map(|op| match op {
-            Op::Push { storage, value } => Op::Push {
-                storage,
-                value: proven_value(&value),
-            },
-            op => op,
-        })
-        .collect()
-}
-
-fn proven_value(value: &StateValue<DefaultDB>) -> StateValue<DefaultDB> {
-    match value {
-        StateValue::Cell(cell) => {
-            let Some((_, surplus)) = cell.alignment.consume(&cell.value) else {
-                return value.clone();
-            };
-            let proven = cell.value.0.len() - surplus.0.len();
-            StateValue::Cell(Sp::new(AlignedValue {
-                value: Value(cell.value.0[..proven].to_vec()),
-                alignment: cell.alignment.clone(),
-            }))
-        }
-        StateValue::Array(items) => StateValue::Array(
-            items
-                .iter()
-                .map(|item| proven_value(&item))
-                .collect::<Vec<_>>()
-                .into(),
-        ),
-        _ => value.clone(),
-    }
 }
 
 /// A transcript declaring effects its program does not produce. The circuit does not
@@ -173,7 +128,7 @@ struct DeclaredEffectsMismatch;
 impl std::fmt::Display for DeclaredEffectsMismatch {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(
-            "unsupported-singleton-transcript: declared effects differ from the replayed effects",
+            "unsupported-contract-transcript: declared effects differ from the replayed effects",
         )
     }
 }
@@ -224,7 +179,7 @@ fn emission_from_log_item(item: &VersionedLogItem<DefaultDB>) -> anyhow::Result<
         SIGNATURE_RESPONDED_EVENT => EmissionKind::SignatureResponded,
         RESPOND_BIDIRECTIONAL_EVENT => EmissionKind::RespondBidirectional,
         _ => anyhow::bail!(
-            "emission-schema: unknown singleton event name {}",
+            "emission-schema: unknown signet event name {}",
             String::from_utf8_lossy(&name)
         ),
     };
@@ -262,7 +217,7 @@ pub fn emissions_of_call<P: ProofKind<DefaultDB>>(
     Ok(emissions)
 }
 
-/// A fallible singleton phase [`partial_success_emissions_in`] leaves out, and why.
+/// A fallible phase [`partial_success_emissions_in`] leaves out, and why.
 #[derive(Debug)]
 pub struct SkippedFallibleCall {
     pub call_index: u32,
@@ -274,9 +229,9 @@ pub struct SkippedFallibleCall {
 /// A partial-success transaction uses [`partial_success_emissions_in`].
 pub fn emissions_in(
     tx: &DecodedTransaction,
-    singleton: &[u8; 32],
-) -> anyhow::Result<Vec<SingletonCallEmissions>> {
-    let (decoded, skipped) = decode_singleton_calls(tx, singleton, false)?;
+    contract: &[u8; 32],
+) -> anyhow::Result<Vec<ContractCallEmissions>> {
+    let (decoded, skipped) = decode_contract_calls(tx, contract, false)?;
     debug_assert!(skipped.is_empty());
     Ok(decoded)
 }
@@ -290,21 +245,21 @@ pub fn emissions_in(
 /// as in [`emissions_in`].
 pub fn partial_success_emissions_in(
     tx: &DecodedTransaction,
-    singleton: &[u8; 32],
-) -> anyhow::Result<(Vec<SingletonCallEmissions>, Vec<SkippedFallibleCall>)> {
-    decode_singleton_calls(tx, singleton, true)
+    contract: &[u8; 32],
+) -> anyhow::Result<(Vec<ContractCallEmissions>, Vec<SkippedFallibleCall>)> {
+    decode_contract_calls(tx, contract, true)
 }
 
-fn decode_singleton_calls(
+fn decode_contract_calls(
     tx: &DecodedTransaction,
-    singleton: &[u8; 32],
+    contract: &[u8; 32],
     partial_success: bool,
-) -> anyhow::Result<(Vec<SingletonCallEmissions>, Vec<SkippedFallibleCall>)> {
+) -> anyhow::Result<(Vec<ContractCallEmissions>, Vec<SkippedFallibleCall>)> {
     let all_calls: Vec<_> = tx.calls().collect();
     let mut calls = all_calls
         .iter()
         .enumerate()
-        .filter(|(_, (_, call))| call.address.0 .0 == *singleton)
+        .filter(|(_, (_, call))| call.address.0 .0 == *contract)
         .map(|(call_index, (physical_segment, call))| {
             Ok((
                 *physical_segment,
@@ -327,7 +282,7 @@ fn decode_singleton_calls(
             };
             let emissions = if let Some(transcript) = transcript {
                 let emissions = emissions_of_transcript(call, transcript).with_context(|| {
-                    format!("singleton call {call_index}, segment {physical_segment}, {phase:?}")
+                    format!("contract call {call_index}, segment {physical_segment}, {phase:?}")
                 });
                 if partial_success && phase == TranscriptPhase::Fallible {
                     let mut skip = |reason| {
@@ -344,7 +299,7 @@ fn decode_singleton_calls(
                         // Holding on this one would let anyone halt the reader: the node checks
                         // a fallible phase's declared effects against its program only when it
                         // applies the phase. Every other failure comes from the proven program,
-                        // which each singleton circuit makes decodable, so only a format change
+                        // which each signet circuit makes decodable, so only a format change
                         // reaches it, and that change holds fully applied calls too.
                         Err(reason)
                             if reason.downcast_ref::<DeclaredEffectsMismatch>().is_some() =>
@@ -372,7 +327,7 @@ fn decode_singleton_calls(
             } else {
                 continue;
             };
-            decoded.push(SingletonCallEmissions {
+            decoded.push(ContractCallEmissions {
                 call_index: *call_index,
                 physical_segment: *physical_segment,
                 phase,
@@ -388,8 +343,9 @@ fn decode_singleton_calls(
 mod tests {
     use super::*;
 
-    use crate::test_utils::{array_of, cell_from_atoms, hex_32, trim};
+    use crate::test_utils::{alignment_of, array_of, cell_from_atoms, hex_32, trim};
     use midnight_base_crypto::cost_model::RunningCost;
+    use midnight_base_crypto::fab::{AlignedValue, Value, ValueAtom};
     use midnight_base_crypto::time::Timestamp;
     use midnight_ledger_v9::structure::{
         ContractAction, ContractCall, Intent, ProofMarker, ProofVersioned, StandardTransaction,
@@ -397,7 +353,7 @@ mod tests {
     use midnight_onchain_runtime::context::{ClaimedContractCallsValue, Effects};
     use midnight_onchain_runtime::ops::{Key, LogEventType, Op, VersionedLogItem};
     use midnight_onchain_runtime::result_mode::ResultModeVerify;
-    use midnight_onchain_runtime::state::{EntryPointBuf, StateValue};
+    use midnight_onchain_runtime::state::{AlignedValueChecked, EntryPointBuf, StateValue};
     use midnight_onchain_runtime::transcript::Transcript;
     use midnight_storage::arena::Sp;
     use midnight_storage::storage::{Array, HashMap};
@@ -453,7 +409,7 @@ mod tests {
         vec![
             Op::Push {
                 storage: false,
-                value,
+                value: value.try_into_checked().expect("canonical test value"),
             },
             Op::Log,
         ]
@@ -897,7 +853,7 @@ mod tests {
                     call(SINGLETON, Some(program.clone()), None)
                 };
                 let error = emissions_in(&transaction(vec![call]), &SINGLETON).unwrap_err();
-                assert!(format!("{error:#}").contains("unsupported-singleton-transcript"));
+                assert!(format!("{error:#}").contains("unsupported-contract-transcript"));
             }
         }
     }
@@ -1011,7 +967,7 @@ mod tests {
 
         assert_eq!(
             emissions_in(&tx, &SINGLETON).unwrap(),
-            vec![SingletonCallEmissions {
+            vec![ContractCallEmissions {
                 call_index: 1,
                 caller: None,
                 physical_segment: 1,
@@ -1094,6 +1050,170 @@ mod tests {
         );
     }
 
+    /// `direct_caller` trusts the ledger to reject call graphs that would attribute a
+    /// singleton call to a contract that did not make it. Pin those rules on the pinned
+    /// ledger, so a ledger upgrade that relaxes one fails here.
+    #[test]
+    fn the_ledger_rejects_call_graphs_that_would_misattribute_the_singleton_caller() {
+        use midnight_ledger_v9::error::{
+            EffectsCheckError, MalformedTransaction, SequencingCheckError,
+        };
+        use midnight_ledger_v9::structure::LedgerState;
+        use midnight_ledger_v9::verify::WellFormedStrictness;
+
+        #[derive(Debug)]
+        enum Verdict {
+            /// Hand-built intents carry no real binding commitment, so reaching the
+            /// Pedersen check means every call-graph check passed.
+            CallGraphAccepted,
+            ClaimOfAbsentCall,
+            DoubleClaim,
+            DuplicatedClaimedCall,
+        }
+        /// Case name, transaction, ledger verdict, and the direct caller the MPC reads
+        /// for each singleton call.
+        type Case = (
+            &'static str,
+            DecodedTransaction,
+            Verdict,
+            Vec<Option<[u8; 32]>>,
+        );
+
+        let in_segments = |segments: Vec<(u16, Vec<ContractCall<ProofMarker, DefaultDB>>)>| {
+            let mut intents = HashMap::new();
+            for (segment, calls) in segments {
+                let actions: Vec<ContractAction<ProofMarker, DefaultDB>> =
+                    calls.into_iter().map(ContractAction::from).collect();
+                intents = intents.insert(
+                    segment,
+                    Intent {
+                        guaranteed_unshielded_offer: None,
+                        fallible_unshielded_offer: None,
+                        actions: Array::new_from_slice(&actions),
+                        dust_actions: None,
+                        ttl: Timestamp::from_secs(0),
+                        binding_commitment: PureGeneratorPedersen::largest_representable(),
+                    },
+                );
+            }
+            midnight_ledger_v9::structure::Transaction::Standard(StandardTransaction {
+                network_id: "undeployed".to_string(),
+                intents,
+                guaranteed_coins: None,
+                fallible_coins: HashMap::new(),
+                binding_randomness: EmbeddedFr::default(),
+            })
+        };
+
+        const IMPOSTOR: [u8; 32] = [0x56; 32];
+        let singleton = call(SINGLETON, Some(Vec::new()), None);
+        let mut unrelated_singleton = call(SINGLETON, Some(Vec::new()), None);
+        unrelated_singleton.communication_commitment = Fr::from(7u64);
+        let cases: Vec<Case> = vec![
+            (
+                "the integrator claims the singleton call",
+                transaction(vec![
+                    claiming(OTHER_CONTRACT, &singleton),
+                    singleton.clone(),
+                ]),
+                Verdict::CallGraphAccepted,
+                vec![Some(OTHER_CONTRACT)],
+            ),
+            (
+                "an unclaimed singleton call beside a call on the integrator",
+                transaction(vec![
+                    call(OTHER_CONTRACT, Some(Vec::new()), None),
+                    singleton.clone(),
+                ]),
+                Verdict::CallGraphAccepted,
+                vec![None],
+            ),
+            (
+                "the integrator claims a call the transaction does not contain",
+                transaction(vec![
+                    claiming(OTHER_CONTRACT, &unrelated_singleton),
+                    singleton.clone(),
+                ]),
+                Verdict::ClaimOfAbsentCall,
+                vec![None],
+            ),
+            (
+                "the claim and the singleton call sit in different intents",
+                in_segments(vec![
+                    (1, vec![claiming(OTHER_CONTRACT, &singleton)]),
+                    (2, vec![singleton.clone()]),
+                ]),
+                Verdict::ClaimOfAbsentCall,
+                vec![None],
+            ),
+            (
+                "the integrator and an impostor both claim the singleton call",
+                transaction(vec![
+                    claiming(OTHER_CONTRACT, &singleton),
+                    claiming(IMPOSTOR, &singleton),
+                    singleton.clone(),
+                ]),
+                Verdict::DoubleClaim,
+                vec![None],
+            ),
+            (
+                "a copy of the claimed singleton call rides along unclaimed",
+                transaction(vec![
+                    claiming(OTHER_CONTRACT, &singleton),
+                    singleton.clone(),
+                    singleton.clone(),
+                ]),
+                Verdict::DuplicatedClaimedCall,
+                // Both copies would read as the integrator's: only the ledger stops this.
+                vec![Some(OTHER_CONTRACT), Some(OTHER_CONTRACT)],
+            ),
+        ];
+
+        let mut strictness = WellFormedStrictness::default();
+        strictness.enforce_balancing = false;
+        strictness.verify_native_proofs = false;
+        strictness.verify_contract_proofs = false;
+        strictness.verify_signatures = false;
+        strictness.enforce_limits = false;
+        let state: LedgerState<DefaultDB> = LedgerState::new("undeployed");
+        for (name, tx, verdict, callers) in cases {
+            let err = tx
+                .well_formed(&state, strictness, Timestamp::from_secs(0))
+                .err()
+                .unwrap_or_else(|| panic!("{name}: hand-built intents cannot bind"));
+            let matched = match verdict {
+                Verdict::CallGraphAccepted => {
+                    matches!(err, MalformedTransaction::PedersenCheckFailure { .. })
+                }
+                Verdict::ClaimOfAbsentCall => matches!(
+                    err,
+                    MalformedTransaction::EffectsCheckFailure(
+                        EffectsCheckError::RealCallsSubsetCheckFailure(_)
+                    )
+                ),
+                Verdict::DoubleClaim => matches!(
+                    err,
+                    MalformedTransaction::EffectsCheckFailure(
+                        EffectsCheckError::ClaimedCallsUniquenessFailure(_)
+                    )
+                ),
+                Verdict::DuplicatedClaimedCall => matches!(
+                    err,
+                    MalformedTransaction::SequencingCheckFailure(
+                        SequencingCheckError::SequencingCorrelationViolation { .. }
+                    )
+                ),
+            };
+            assert!(matched, "{name}: expected {verdict:?}, got {err:?}");
+            let decoded: Vec<Option<[u8; 32]>> = emissions_in(&tx, &SINGLETON)
+                .unwrap()
+                .iter()
+                .map(|call| call.caller)
+                .collect();
+            assert_eq!(decoded, callers, "{name}: direct caller");
+        }
+    }
+
     #[test]
     fn a_partial_success_keeps_only_notifications_from_fallible_phases() {
         let both = [
@@ -1119,7 +1239,7 @@ mod tests {
         assert_eq!(
             decoded,
             vec![
-                SingletonCallEmissions {
+                ContractCallEmissions {
                     call_index: 0,
                     caller: None,
                     physical_segment: 1,
@@ -1129,7 +1249,7 @@ mod tests {
                         payload: GUARANTEED,
                     }],
                 },
-                SingletonCallEmissions {
+                ContractCallEmissions {
                     call_index: 0,
                     caller: None,
                     physical_segment: 1,
@@ -1199,61 +1319,40 @@ mod tests {
         assert!(error.downcast_ref::<DeclaredEffectsMismatch>().is_some());
     }
 
-    /// Programs with the honest program's field representation, each accepted by ledger
-    /// 9.1.0-rc.3.
-    fn malleated_emit_ops(payload: [u8; MISC_PAYLOAD_LEN]) -> Vec<Vec<TestOp>> {
-        let mut data = SIGN_BIDIRECTIONAL_EVENT.to_vec();
-        data.extend_from_slice(&payload);
-        let width = (MISC_NAME_LEN + MISC_PAYLOAD_LEN) as u32;
-        let item = |version: Vec<Vec<u8>>, data: Vec<Vec<u8>>| {
-            logging(array_of(vec![
-                cell_from_atoms(&version, &[4]),
-                cell_from_atoms(&[trim(&[LogEventType::Misc as u8])], &[1]),
-                cell_from_atoms(&data, &[width]),
-            ]))
-        };
-        let version = trim(&LOG_ITEM_VERSION.to_le_bytes());
-        let honest = emit_ops(SIGN_BIDIRECTIONAL_EVENT, payload);
-        let mut programs = vec![
-            item(vec![version.clone()], vec![trim(&data), vec![1]]),
-            item(vec![version, vec![1]], vec![trim(&data)]),
-            [vec![Op::Noop { n: 0 }], honest.clone()].concat(),
-        ];
-        for (cached, push_path) in [(false, false), (true, false), (false, true), (true, true)] {
-            let idx = Op::Idx {
-                cached,
-                push_path,
-                path: Vec::new().into_iter().collect(),
-            };
-            programs.push([vec![idx.clone()], honest.clone()].concat());
-            programs.push(vec![honest[0].clone(), idx, honest[1].clone()]);
-        }
-        programs
-    }
-
+    /// An `idx []` and atoms past a pushed cell's alignment keep the proven field
+    /// representation; the ledger crates refuse to decode either, so neither reaches the
+    /// emission reader.
     #[test]
-    fn decodes_the_proven_program_of_a_malleated_transcript() {
-        let expected = vec![Emission {
-            kind: EmissionKind::SignBidirectional,
-            payload: FALLIBLE,
-        }];
-        for program in malleated_emit_ops(FALLIBLE) {
-            for fallible in [false, true] {
-                let call = if fallible {
-                    call(SINGLETON, None, Some(program.clone()))
-                } else {
-                    call(SINGLETON, Some(program.clone()), None)
-                };
-                let tx = transaction(vec![call]);
-                let (decoded, skipped) = partial_success_emissions_in(&tx, &SINGLETON).unwrap();
-                assert!(skipped.is_empty(), "{skipped:?}");
-                assert_eq!(decoded[0].emissions, expected, "{program:?}");
-                assert_eq!(
-                    emissions_in(&tx, &SINGLETON).unwrap()[0].emissions,
-                    expected
-                );
-            }
-        }
+    fn the_ledger_refuses_to_decode_a_malleated_program() {
+        let honest = emit_ops(SIGN_BIDIRECTIONAL_EVENT, FALLIBLE);
+        let empty_idx: TestOp = Op::Idx {
+            cached: false,
+            push_path: false,
+            path: Vec::new().into_iter().collect(),
+        };
+        let tx = transaction(vec![call(
+            SINGLETON,
+            None,
+            Some([vec![empty_idx], honest].concat()),
+        )]);
+        let mut bytes = Vec::new();
+        midnight_serialize::tagged_serialize(&tx, &mut bytes).unwrap();
+        assert!(
+            midnight_serialize::tagged_deserialize::<DecodedTransaction>(&mut &bytes[..]).is_err()
+        );
+
+        let surplus = AlignedValue {
+            value: Value(vec![
+                ValueAtom(trim(&LOG_ITEM_VERSION.to_le_bytes())),
+                ValueAtom(vec![1]),
+            ]),
+            alignment: alignment_of(&[4]),
+        };
+        let mut bytes = Vec::new();
+        midnight_serialize::tagged_serialize(&surplus, &mut bytes).unwrap();
+        assert!(
+            midnight_serialize::tagged_deserialize::<AlignedValueChecked>(&mut &bytes[..]).is_err()
+        );
     }
 
     #[test]
@@ -1279,8 +1378,8 @@ mod tests {
             data_cell(&SIGN_BIDIRECTIONAL_EVENT, &FALLIBLE, 288),
         ));
         for (program, expected) in [
-            (vec![Op::Root, Op::Log], "unsupported-singleton-transcript"),
-            (vec![Op::Log], "unsupported-singleton-transcript"),
+            (vec![Op::Root, Op::Log], "unsupported-contract-transcript"),
+            (vec![Op::Log], "unsupported-contract-transcript"),
             (schema_drift, "emission-schema"),
         ] {
             let tx = transaction(vec![
@@ -1305,7 +1404,7 @@ mod tests {
 
         assert_eq!(
             emissions_in(&tx, &SINGLETON).unwrap(),
-            vec![SingletonCallEmissions {
+            vec![ContractCallEmissions {
                 call_index: 0,
                 caller: None,
                 physical_segment: 1,
