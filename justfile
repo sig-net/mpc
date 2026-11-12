@@ -179,4 +179,4 @@ test-compat: (setup "")
 
 # Usage: just bench-redis [args] (e.g. just bench-redis, or just bench-redis "--rounds 2 --items 50" for quick CI)
 bench-redis args="":
-    MPC_SETUP_SKIP=1 cargo run --release -p integration-tests --bin redis-bench -- {{args}}
+    cargo run --release -p integration-tests --bin redis-bench -- {{args}}
