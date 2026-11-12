@@ -35,7 +35,7 @@ RUN curl -fsSL --retry 4 -o responder.tgz \
       "d211cacb22391b9db60f945787d98c16d344cbb4790246132117084c080399c1  dust/10/spend.bzkir" \
       | sha256sum -c
 
-FROM rust:1.95-bookworm AS node-builder
+FROM rust:1.95.0-bookworm AS node-builder
 RUN rustc --version --verbose
 WORKDIR /usr/src/app
 ARG GIT_COMMIT_HASH
