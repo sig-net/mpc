@@ -607,6 +607,7 @@ fn log_startup(
         version = build::VERSION,
         git_commit_hash = build::GIT_COMMIT_HASH,
         build_timestamp = build::BUILD_TIMESTAMP,
+        test_build = build::TEST_BUILD,
         sign_pk = %network.sign_sk.public_key(),
         near_rpc_host = %host_of(near_rpc),
         eth_contract_address = %chains.eth.as_ref().map(|c| c.contract_address.to_string()).unwrap_or_else(|| "None".to_string()),
