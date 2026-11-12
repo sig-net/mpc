@@ -15,7 +15,7 @@ use mpc_primitives::{BidirectionalTxId, Chain, ChainEvent, ExecutionOutcome};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use crate::client::TronHttp;
+use crate::client::{ReceiptError, TronHttp};
 use crate::config::TronConfig;
 use crate::expiry::{
     closed_groups, expired_event, ExpiryVerdict, Group, SolidityCache, SolidityView,
@@ -91,8 +91,17 @@ impl<S: StateManager, T: ChainTelemetry> TronWatcher<S, T> {
             .client
             .get_transaction_info_solidity(&B256::from(tx_id.0))
             .await
-            .inspect_err(|err| {
-                tracing::warn!(?tx_id, members = member_count, ?err, "receipt poll failed")
+            .inspect_err(|err| match err {
+                // The malformed-provider-response class — same contract
+                // as an unclassifiable verdict.
+                ReceiptError::Malformed(err) => {
+                    tracing::warn!(?tx_id, members = member_count, "{err:#}");
+                    self.telemetry
+                        .bidirectional_extraction_failed(ExtractionFailureKind::Retryable);
+                }
+                ReceiptError::Transport(err) => {
+                    tracing::warn!(?tx_id, members = member_count, ?err, "receipt poll failed");
+                }
             })
             .ok()
             .flatten()
@@ -607,6 +616,41 @@ mod tests {
         let (_, result) = until_confirmed(&mut run, 1).await;
         assert!(matches!(result, ExecutionOutcome::ExtractionFailed));
         assert!(telemetry.terminal_failures() >= 1);
+
+        run.stop().await;
+    }
+
+    /// Counted per tick, never resolved — no verdict off an unreadable body.
+    #[tokio::test]
+    async fn malformed_receipt_counts_retryable_and_resolves_nothing() {
+        let server = mockito::Server::new_async().await;
+        let config = test_config(server.url().parse().unwrap());
+        let mut server = server;
+        nowblock_mock(&mut server);
+        let malformed = format!(
+            r#"{{ "id": "{}", "blockNumber": 1, "contractResult": ["zz"],
+                 "receipt": {{ "result": "SUCCESS" }} }}"#,
+            hex::encode(watcher_tx(3).0 .0)
+        );
+        receipt_stub(&mut server, 3, malformed).create();
+
+        let state = MockStateManager::new();
+        state.watch_execution(Chain::Tron, watcher_tx(3).2).await;
+
+        let telemetry = CountingTelemetry::default();
+        let mut run = spawn_watcher(config, state, telemetry.clone());
+        first_is_catchup_completed(&mut run).await;
+        for _ in 0..5 {
+            match run.events.recv().await.expect("watcher channel open") {
+                ChainEvent::Block(_) => {}
+                other => panic!("unexpected event: {other:?}"),
+            }
+        }
+        assert!(
+            telemetry.retryable_failures() >= 5,
+            "one malformed-receipt count per tick"
+        );
+        assert_eq!(telemetry.terminal_failures(), 0);
 
         run.stop().await;
     }

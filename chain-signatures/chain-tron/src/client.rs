@@ -112,8 +112,8 @@ impl TronHttp {
     pub async fn get_transaction_info_solidity(
         &self,
         tx_id: &B256,
-    ) -> anyhow::Result<Option<TronReceipt>> {
-        retry_rpc!(
+    ) -> Result<Option<TronReceipt>, ReceiptError> {
+        let response = retry_rpc!(
             self.request_timeout,
             self.retry,
             self.gate,
@@ -125,27 +125,12 @@ impl TronHttp {
                         &serde_json::json!({ "value": hex::encode(tx_id), "visible": false }),
                     )
                     .await?;
-
-                match response.id {
-                    Some(id) => Ok(Some(TronReceipt {
-                        id: id.parse().context("receipt id")?,
-                        block_number: response.block_number,
-                        block_timestamp: response.block_timestamp,
-                        fee: response.fee,
-                        result: response.result,
-                        res_message: response.res_message.as_deref().map(decode_hex_ascii),
-                        receipt_result: response.receipt.result,
-                        contract_result: response
-                            .contract_result
-                            .iter()
-                            .map(|raw| decode_bytes(raw).context("contractResult element"))
-                            .collect::<anyhow::Result<_>>()?,
-                        logs: response.log,
-                    })),
-                    None => Ok(None),
-                }
+                Ok(response)
             }
         )
+        .map_err(ReceiptError::Transport)?;
+
+        decode_receipt(response).map_err(ReceiptError::Malformed)
     }
 
     /// `POST /wallet/getaccount`, returning the TRX balance in sun. Zero
@@ -218,6 +203,39 @@ fn decode_hex_ascii(s: &str) -> String {
         .ok()
         .and_then(|bytes| String::from_utf8(bytes).ok())
         .unwrap_or_else(|| s.to_string())
+}
+
+/// Receipt-fetch classes: transport retries inside; a malformed body is
+/// deterministic per response, but another replica may serve the same
+/// solidified receipt intact — the watcher counts it and keeps polling.
+#[derive(Debug, thiserror::Error)]
+pub enum ReceiptError {
+    #[error(transparent)]
+    Transport(#[from] anyhow::Error),
+    #[error("malformed receipt body: {0:#}")]
+    Malformed(#[source] anyhow::Error),
+}
+
+/// Wire → domain, after transport; `Ok(None)` is the pending receipt.
+fn decode_receipt(response: TransactionInfoResponse) -> anyhow::Result<Option<TronReceipt>> {
+    let Some(id) = response.id else {
+        return Ok(None);
+    };
+    Ok(Some(TronReceipt {
+        id: id.parse().context("receipt id")?,
+        block_number: response.block_number,
+        block_timestamp: response.block_timestamp,
+        fee: response.fee,
+        result: response.result,
+        res_message: response.res_message.as_deref().map(decode_hex_ascii),
+        receipt_result: response.receipt.result,
+        contract_result: response
+            .contract_result
+            .iter()
+            .map(|raw| decode_bytes(raw).context("contractResult element"))
+            .collect::<anyhow::Result<_>>()?,
+        logs: response.log,
+    }))
 }
 
 /// Response structure for the `now` block query.
@@ -741,7 +759,6 @@ mod tests {
         assert_eq!(receipt.res_message, None);
         // ABI `false` — the recorded USDT transfer's return value.
         assert_eq!(receipt.contract_result, vec![vec![0u8; 32]]);
-
         let usdt = address!("eca9bc828a3005b9a3b909f2cc5c2a54794de05f");
         let holder = "000000000000000000000000bdf81069827deba7d39729eb387eda8827e5525c";
         let topics = [
@@ -762,6 +779,33 @@ mod tests {
         )
         .unwrap();
         assert_eq!(receipt.logs, vec![expected_log]);
+    }
+
+    /// A body that arrives but fails to decode is its own class, not transport.
+    #[tokio::test]
+    async fn malformed_contract_result_is_classified_not_transport() {
+        let (mut server, client) = test_client(fast_retry()).await;
+        let tx_id = test_hash(9);
+        server
+            .mock("POST", "/walletsolidity/gettransactioninfobyid")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(format!(
+                r#"{{ "id": "{tx_id}", "blockNumber": 1, "contractResult": ["zz"],
+                     "receipt": {{ "result": "SUCCESS" }} }}"#
+            ))
+            .create_async()
+            .await;
+
+        let err = client
+            .get_transaction_info_solidity(&tx_id)
+            .await
+            .unwrap_err();
+        let ReceiptError::Malformed(err) = err else {
+            panic!("decode must not classify as transport: {err:#}")
+        };
+        let rendered = format!("{err:#}");
+        assert!(rendered.contains("contractResult"), "{rendered}");
     }
 
     #[tokio::test]
