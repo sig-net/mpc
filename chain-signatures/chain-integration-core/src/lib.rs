@@ -6,7 +6,7 @@ mod state;
 mod telemetry;
 pub mod utils;
 
-pub use indexer::ChainIndexer;
+pub use indexer::{unexecutable_outcome, ChainIndexer};
 pub use publish::{ChainPublisher, GatedPublisher, PublishAction};
 pub use state::{MockStateManager, StateManager};
 pub use telemetry::{
@@ -14,6 +14,6 @@ pub use telemetry::{
     PublisherTelemetry,
 };
 
-// Re-export backon because `retry_rpc!` uses `Retryable` trait internally
+// Re-export backon because `retry_op!`/`retry_rpc!` use the `Retryable` trait internally
 #[doc(hidden)]
 pub use ::backon;

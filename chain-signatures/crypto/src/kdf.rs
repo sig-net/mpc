@@ -27,10 +27,15 @@ use sha3::Sha3_256;
 pub use signet_crypto::{
     derive_epsilon, derive_epsilon_bitcoin, derive_epsilon_canton, derive_epsilon_eth,
     derive_epsilon_hydration, derive_epsilon_midnight, derive_epsilon_sol, derive_key,
-    DerivationParams, EPSILON_DERIVATION_PREFIX_V1, EPSILON_DERIVATION_PREFIX_V2,
+    DerivationParams, UnsupportedKeyVersion, EPSILON_DERIVATION_PREFIX_V1,
+    EPSILON_DERIVATION_PREFIX_V2,
 };
 
-pub fn derive_epsilon_near(key_version: KeyVersion, account_id: &AccountId, path: &str) -> Scalar {
+pub fn derive_epsilon_near(
+    key_version: KeyVersion,
+    account_id: &AccountId,
+    path: &str,
+) -> Result<Scalar, UnsupportedKeyVersion> {
     derive_epsilon(&DerivationParams::UserAccount(
         key_version,
         Chain::NEAR,
@@ -281,7 +286,8 @@ mod tests {
             0,
             Chain::Ethereum,
             "signing_contract_control".to_string(),
-        ));
+        ))
+        .unwrap();
 
         // Mainnet root PK
         let root_pk = "secp256k1:4tY4qMzusmgX5wYdG35663Y3Qar3CTbpApotwk9ZKLoF79XA4DjG8XoByaKdNHKQX9Lz5hd7iJqsWdTKyA7dKa6Z";

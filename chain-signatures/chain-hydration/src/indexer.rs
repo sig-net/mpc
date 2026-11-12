@@ -6,14 +6,13 @@ use anyhow::{anyhow, Context as _, Result};
 use k256::elliptic_curve::sec1::FromEncodedPoint;
 use k256::{AffinePoint, EncodedPoint, FieldBytes, Scalar};
 use mpc_chain_integration_core::{
-    utils::hashing::{compute_request_id, hash_payload},
-    ChainIndexer, ChainTelemetry,
+    utils::hashing::compute_request_id, utils::payload::bidirectional_payload_scalar, ChainIndexer,
+    ChainTelemetry,
 };
 use mpc_crypto::ScalarExt as _;
 use mpc_primitives::{
     Chain, ChainEvent, IndexedSignRequest, RespondBidirectionalEvent, SignArgs,
-    SignBidirectionalEvent, SignId, Signature, SignatureRespondedEvent, LATEST_MPC_KEY_VERSION,
-    MAX_SECP256K1_SCALAR,
+    SignBidirectionalEvent, SignId, Signature, SignatureRespondedEvent, MAX_SECP256K1_SCALAR,
 };
 use mpc_utils::time::current_unix_timestamp;
 use sp_core::crypto::{AccountId32 as SpAccountId32, Ss58AddressFormatRegistry, Ss58Codec};
@@ -62,10 +61,6 @@ impl HydrationSignatureRequestedEvent {
 
     fn generate_sign_request(&self, entropy: [u8; 32]) -> Option<IndexedSignRequest> {
         tracing::info!("found hydration event: {:?}", self);
-        if self.key_version > LATEST_MPC_KEY_VERSION {
-            tracing::warn!("unsupported key version: {}", self.key_version);
-            return None;
-        }
 
         let payload = Scalar::from_bytes(self.payload).or_else(|| {
             tracing::warn!(
@@ -84,7 +79,14 @@ impl HydrationSignatureRequestedEvent {
             self.key_version,
             &self.sender_string(),
             &self.path,
-        );
+        )
+        .inspect_err(|_| {
+            tracing::info!(
+                key_version = self.key_version,
+                "unsupported key version; dropping sign request"
+            )
+        })
+        .ok()?;
 
         let sign_id = SignId::new(self.generate_request_id());
         tracing::info!(?sign_id, "hydration signature requested");
@@ -178,33 +180,38 @@ impl HydrationSignBidirectionalRequestedEvent {
 
     pub fn generate_sign_request(&self, entropy: [u8; 32]) -> Option<IndexedSignRequest> {
         tracing::info!("found hydration event: {:?}", self);
-        if self.key_version > LATEST_MPC_KEY_VERSION {
-            tracing::warn!("unsupported key version: {}", self.key_version);
-            return None;
-        }
 
         let request_id = self.generate_request_id();
 
-        // Call the existing derive_epsilon_sol function with the correct parameters
-        // to match the TypeScript implementation
         let epsilon = mpc_crypto::kdf::derive_epsilon_hydration(
             self.key_version,
             &self.sender_string(),
             &self.path,
-        );
+        )
+        .inspect_err(|_| {
+            tracing::info!(
+                key_version = self.key_version,
+                "unsupported key version; dropping sign request"
+            )
+        })
+        .ok()?;
 
         let sign_id = SignId::new(request_id);
         tracing::info!(?sign_id, "hydration signature requested");
-        let unsigned_tx_hash = hash_payload(&self.serialized_transaction);
-        let payload = Scalar::from_bytes(unsigned_tx_hash).or_else(|| {
-            tracing::warn!("failed to convert unsigned_tx_hash to scalar: {unsigned_tx_hash:?}");
-            None
-        })?;
-
-        if payload > *MAX_SECP256K1_SCALAR {
-            tracing::warn!("payload exceeds secp256k1 curve order: {payload:?}");
-            return None;
-        }
+        let target = match Chain::from_caip2_chain_id(&self.caip2_id) {
+            Ok(chain) => chain,
+            Err(_) => {
+                tracing::info!(?sign_id, caip2 = %self.caip2_id, "unknown target chain; dropping");
+                return None;
+            }
+        };
+        let payload = match bidirectional_payload_scalar(target, &self.serialized_transaction) {
+            Ok(payload) => payload,
+            Err(err) => {
+                tracing::info!(?sign_id, ?target, "dropping: {err:#}");
+                return None;
+            }
+        };
 
         Some(IndexedSignRequest::sign_bidirectional(
             sign_id,
@@ -436,6 +443,9 @@ impl<T: ChainTelemetry> HydrationIndexer<T> {
         }
 
         // Bidirectional request
+        // TODO: decode the block's timestamp inherent (one
+        // chain_getBlock) so §4.3's expiry bound anchors for Hydration
+        // sources too.
         if ev.pallet_name() == PALLET_SIGNET
             && ev.variant_name() == EVENT_SIGN_BIDIRECTIONAL_REQUESTED
         {
@@ -485,6 +495,13 @@ impl<T: ChainTelemetry> HydrationIndexer<T> {
                     return Ok(());
                 }
             };
+            let output = match get_named_vec_u8(&fields, "serialized_output") {
+                Ok(output) => output,
+                Err(e) => {
+                    tracing::error!(?e, "failed to get serialized_output");
+                    return Ok(());
+                }
+            };
             tracing::info!(
                 "Hydration::Signet::RespondBidirectionalEvent in block #{number} ({hash:?})"
             );
@@ -492,6 +509,7 @@ impl<T: ChainTelemetry> HydrationIndexer<T> {
                 .send(ChainEvent::RespondBidirectional(
                     RespondBidirectionalEvent {
                         attestation: None,
+                        output: Some(output),
                         request_id,
                         signature,
                         chain: Chain::Hydration,
@@ -521,7 +539,7 @@ impl<T: ChainTelemetry> ChainIndexer for HydrationIndexer<T> {
             .context("failed to send hydration catchup completed event")?;
 
         let ws_url: &str = self.config.rpc_ws_url.as_str();
-        tracing::info!("connecting to hydration rpc at {ws_url}");
+        tracing::info!("connecting to hydration rpc");
         let (hydration_api, legacy_rpc) = self.connect_rpc(ws_url).await?;
 
         // `subscribe_finalized` returns a private subxt stream alias, so it is
@@ -793,6 +811,72 @@ fn value_to_vec_u8(v: &Value<u32>) -> Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use k256::elliptic_curve::{bigint::U256, ops::Reduce};
+
+    fn bidirectional_event(caip2_id: &str) -> HydrationSignBidirectionalRequestedEvent {
+        HydrationSignBidirectionalRequestedEvent {
+            sender: [0xAA; 32],
+            serialized_transaction: vec![1, 2, 3, 4],
+            caip2_id: caip2_id.to_string(),
+            key_version: 1,
+            deposit: 0,
+            path: "m/0".to_string(),
+            algo: "secp256k1".to_string(),
+            dest: String::new(),
+            params: String::new(),
+            output_deserialization_schema: Vec::new(),
+            respond_serialization_schema: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn bidirectional_payload_follows_the_targets_scheme() {
+        let raw = [1u8, 2, 3, 4];
+        let evm = bidirectional_event(Chain::Ethereum.caip2_chain_id())
+            .generate_sign_request([0; 32])
+            .expect("an ethereum target signs keccak256 of the raw");
+        let keccak: [u8; 32] = alloy::primitives::keccak256(raw).into();
+        assert_eq!(evm.args.payload, Scalar::from_bytes(keccak).unwrap());
+
+        let tron = bidirectional_event(Chain::Tron.caip2_chain_id())
+            .generate_sign_request([0; 32])
+            .expect("a tron target signs its sha256 txid reduced mod n");
+        assert_eq!(
+            tron.args.payload,
+            <Scalar as Reduce<U256>>::reduce_bytes(&FieldBytes::from(sp_core::hashing::sha2_256(
+                &raw,
+            )))
+        );
+        assert_ne!(tron.args.payload, evm.args.payload);
+    }
+
+    #[test]
+    fn bidirectional_targets_without_a_signing_scheme_drop() {
+        for caip2 in [Chain::Solana.caip2_chain_id(), "eip155:31337"] {
+            assert!(
+                bidirectional_event(caip2)
+                    .generate_sign_request([0; 32])
+                    .is_none(),
+                "{caip2} must drop at the indexer"
+            );
+        }
+    }
+
+    /// The response output decodes to the bytes the pallet emitted, whatever its length.
+    #[test]
+    fn serialized_output_decodes_any_length() {
+        for output in [vec![], vec![7u8], vec![0xde, 0xad, 0xbe, 0xef, 1]] {
+            let bytes = output.iter().map(|byte| Value::u128(u128::from(*byte)));
+            let fields = Composite::Named(vec![(
+                "serialized_output".to_string(),
+                Value::unnamed_composite(bytes).map_context(|_| 0u32),
+            )]);
+            assert_eq!(
+                get_named_vec_u8(&fields, "serialized_output").unwrap(),
+                output
+            );
+        }
+    }
 
     #[test]
     fn request_id_matches_ethabi() {

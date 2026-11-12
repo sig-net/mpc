@@ -18,7 +18,7 @@ setup mode="" scope="":
     @if [ "{{mode}}" = "act" ]; then \
       ./scripts/setup-deps.sh --install-act; \
     else \
-      ./scripts/setup-deps.sh --install {{scope}} && ./setup.sh; \
+      ./scripts/setup-deps.sh --install {{scope}} && just build contract && just build test-node; \
     fi
 alias s := setup
 
@@ -70,15 +70,17 @@ fmt-check:
 fmt:
     cargo fmt
 
-# Fast unit tests (mirrors CI: no integration-tests, no Docker)
+# Fast unit tests (mirrors CI: no integration-tests, no Docker). The node
+# gates its test-only stores and flags behind test-feature, so its lib tests
+# run a second time with the feature on.
 # Usage: just test-unit [filter]
 test-unit filter="":
     cargo test --workspace --exclude integration-tests {{filter}}
+    cargo test -p mpc-node --lib --features test-feature {{filter}}
 alias tu := test-unit
 
 # Full CI gate locally: format check + clippy + unit tests
-ci: fmt-check lint
-    cargo test --workspace --exclude integration-tests
+ci: fmt-check lint test-unit
 alias c := ci
 
 # Security audit of dependencies (mirrors CI audit job)
@@ -94,17 +96,20 @@ alias ts := test-seq
 
 # Build artifacts: `just build` = whole Rust workspace (via setup),
 # `just build eth` = EVM artifacts, `just build contract` = NEAR contract wasm,
-# `just build midnight` = midnight-publisher-ts fixtures,
+# `just build test-node` = mpc-node with test-feature, the binary the integration harness spawns (not the release build),
+# `just build midnight` = midnight-devtools real-stack fixtures,
 # `just build tests` = integration test binaries without running them,
-# `just build compat` = historical prod-compat node binaries
-# Usage: just build [target] (target="" | eth | contract | midnight | tests | compat)
+# `just build compat` = latest release node binary for the compat test
+# Usage: just build [target] (target="" | eth | contract | test-node | midnight | tests | compat)
 build target="":
     @if [ "{{target}}" = "eth" ]; then \
       cd chain-signatures/contract-eth && npm ci && npx hardhat compile; \
     elif [ "{{target}}" = "contract" ]; then \
-      ./build-contract.sh && mkdir -p target/wasm32-unknown-unknown/release && cp target/near/mpc_contract/mpc_contract.wasm target/wasm32-unknown-unknown/release/mpc_contract.wasm; \
+      ./build-contract.sh; \
+    elif [ "{{target}}" = "test-node" ]; then \
+      cargo build -p mpc-node --release --features test-feature,debug-page; \
     elif [ "{{target}}" = "midnight" ]; then \
-      cd chain-signatures/midnight-publisher-ts && npm ci && npm run build && npm run compile:real-stack-caller && npm run typecheck:real-stack; \
+      cd chain-signatures/midnight-devtools && npm ci && npm run compile:real-stack-caller && npm run compile:real-stack-vault && npm run typecheck:real-stack; \
     elif [ "{{target}}" = "tests" ]; then \
       cargo build -p integration-tests --tests; \
     elif [ "{{target}}" = "compat" ]; then \
@@ -112,7 +117,7 @@ build target="":
     elif [ -z "{{target}}" ]; then \
       just setup && cargo build --workspace; \
     else \
-      echo "Unknown build target: {{target}} (expected '' | eth | contract | midnight | tests | compat)" >&2; exit 1; \
+      echo "Unknown build target: {{target}} (expected '' | eth | contract | test-node | midnight | tests | compat)" >&2; exit 1; \
     fi
 
 # Anvil-backed EVM tests: real EVM + real contract bytecode (needs anvil + eth-build output)
@@ -129,18 +134,45 @@ lint-eth: (build "eth")
 test-eth-unit:
     cd chain-signatures/contract-eth && npx hardhat test
 
-# Midnight real-stack test (ignored by default; needs Midnight node/indexer/proof-server + anvil)
-test-midnight: (setup "")
-    cargo nextest run -p integration-tests --test lib --run-ignored only --no-capture -E 'test(=cases::midnight_stream::midnight_to_ethereum_to_midnight_consumes_caller_response)'
+# TRE-backed Tron gate: dockerized java-tron, token deployed via deploycontract
+# Usage: just test-tron-tre  (TRE_PORT overrides the host port, default 9090)
+tre-port := env_var_or_default('TRE_PORT', '9090')
 
-# Midnight TS/Rust seam differential (needs dist/ built via npm test in midnight-publisher-ts)
-test-midnight-seam:
-    cargo nextest run -p mpc-chain-midnight --run-ignored all -E 'binary(intent_seam)'
+test-tron-tre:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # Tag-pinned only: the vendor publishes no digest, so a republished
+    # 2.0.0 tag would change this chain silently.
+    trap 'docker rm -f tre >/dev/null 2>&1 || true' EXIT
+    docker rm -f tre >/dev/null 2>&1 || true
+    docker run -d --name tre -p {{tre-port}}:9090 -e useDefaultPrivateKey=true tronbox/tre:2.0.0 >/dev/null
+    # Readiness: account funding is async after healthcheck, and a deploy
+    # built against the genesis block fails broadcast.
+    ready=0
+    for _ in $(seq 1 60); do
+        if curl -fsS -m 2 http://127.0.0.1:{{tre-port}}/admin/accounts | grep -q 'Available Accounts'; then ready=1; break; fi
+        sleep 1
+    done
+    [ "$ready" = 1 ] || { echo "TRE did not become ready within 60s" >&2; exit 1; }
+    # Serial: both live gates deploy the same token from the one
+    # deterministic key; concurrent builds share a TRE block window and
+    # produce identical bytes (AlreadyKnown), spread builds do not.
+    TRON_ENDPOINT=http://127.0.0.1:{{tre-port}} \
+    TRON_PRIVATE_KEY=0000000000000000000000000000000000000000000000000000000000000001 \
+    TRON_TOKEN_ARTIFACT=tests/fixtures/tre/gate-token.json \
+    TRON_DEADLINE_SECS=60 \
+    cargo test -p mpc-chain-tron --test live_gate -- --ignored --nocapture --test-threads 1
+
+# Midnight real-stack tests (ignored by default; each starts a Midnight node/indexer/proof-server,
+# Anvil and an MPC cluster). Runs one named test from cases::midnight_stream, or all of them.
+# Usage: just test-midnight [test]
+test-midnight test="": (build "eth") (setup "")
+    cargo nextest run -p integration-tests --test lib --run-ignored only --no-capture -E '{{ if test == "" { "test(/^cases::midnight_stream::/)" } else { "test(=cases::midnight_stream::" + test + ")" } }}'
 
 # Canton tests (default: stream; e2e via `just test-canton cases::canton`)
 test-canton filter="canton_stream": (setup "")
     cargo test -p integration-tests --test lib -- {{filter}} --ignored --nocapture --test-threads 1
 
-# Prod-compat suite (needs `just build compat` output)
-test-compat:
+# Release compatibility test (needs `just build compat` output)
+test-compat: (setup "")
     ./scripts/test-prod-compat.sh

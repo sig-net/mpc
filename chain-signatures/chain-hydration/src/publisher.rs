@@ -61,7 +61,10 @@ impl subxt::tx::Signer<HydradxConfig> for HydrationSigner {
 
 #[derive(Clone)]
 pub struct HydrationClient {
-    api: OnlineClient<HydradxConfig>,
+    rpc_ws_url: String,
+    /// Dialed on first use: an unreachable RPC fails a publish, which the
+    /// caller retries, not node startup.
+    api: Arc<tokio::sync::OnceCell<OnlineClient<HydradxConfig>>>,
     signer: HydrationSigner,
     telemetry: Arc<dyn PublisherTelemetry>,
 }
@@ -172,17 +175,30 @@ impl Payload for HydrationRespondBidirectionalTx {
 }
 
 impl HydrationClient {
-    pub async fn new(
+    /// Validates the signer; does not dial the RPC.
+    pub fn new(
         config: &HydrationConfig,
         telemetry: Arc<dyn PublisherTelemetry>,
     ) -> anyhow::Result<Self> {
-        let api = OnlineClient::<HydradxConfig>::from_url(&config.rpc_ws_url).await?;
         let signer = HydrationSigner::from_uri(config.signer_uri.expose_secret())?;
         Ok(Self {
-            api,
+            rpc_ws_url: config.rpc_ws_url.to_string(),
+            api: Arc::default(),
             signer,
             telemetry,
         })
+    }
+
+    /// The RPC client, connecting on first call; a failed dial is retried on
+    /// the next one.
+    async fn api(&self) -> anyhow::Result<&OnlineClient<HydradxConfig>> {
+        self.api
+            .get_or_try_init(|| async {
+                let api = OnlineClient::<HydradxConfig>::from_url(&self.rpc_ws_url).await?;
+                tracing::info!("hydration rpc connected");
+                anyhow::Ok(api)
+            })
+            .await
     }
 
     fn to_hydration_signature(sig: &Signature) -> anyhow::Result<HydrationSignature> {
@@ -218,7 +234,8 @@ impl HydrationClient {
         };
 
         let progress = self
-            .api
+            .api()
+            .await?
             .tx()
             .sign_and_submit_then_watch_default(&tx, &self.signer)
             .await?;
@@ -240,7 +257,8 @@ impl HydrationClient {
         };
 
         let progress = self
-            .api
+            .api()
+            .await?
             .tx()
             .sign_and_submit_then_watch_default(&tx, &self.signer)
             .await?;

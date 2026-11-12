@@ -11,6 +11,7 @@ by construction.
 use signet_crypto::{derive_epsilon_eth, derive_key};
 use signet_primitives::LATEST_MPC_KEY_VERSION;
 
-let epsilon = derive_epsilon_eth(LATEST_MPC_KEY_VERSION, "0xabc…", "my/path");
+// Fails for a key version the network does not know.
+let epsilon = derive_epsilon_eth(LATEST_MPC_KEY_VERSION, "0xabc…", "my/path")?;
 let user_key = derive_key(root_public_key, epsilon);
 ```

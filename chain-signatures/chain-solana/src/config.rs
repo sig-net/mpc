@@ -1,6 +1,8 @@
 use secrecy::{ExposeSecret as _, SecretString};
+use solana_sdk::pubkey::Pubkey;
 use std::fmt;
 use std::time::Duration;
+use url::Url;
 
 /// Configuration for the Solana indexer.
 #[derive(Clone, Copy, Debug)]
@@ -28,9 +30,9 @@ pub struct SolConfig {
     /// leak it.
     pub account_sk: SecretString,
     /// Solana RPC http URL
-    pub rpc_http_url: String,
+    pub rpc_http_url: Url,
     /// The program address to watch
-    pub program_address: String,
+    pub program_address: Pubkey,
     /// Indexer polling tunables.
     pub indexer: SolIndexerConfig,
 }

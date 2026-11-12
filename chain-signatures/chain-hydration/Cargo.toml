@@ -27,3 +27,4 @@ subxt = { version = "0.44", default-features = false, features = ["jsonrpsee", "
 tokio.workspace = true
 tokio-util.workspace = true
 tracing.workspace = true
+url.workspace = true

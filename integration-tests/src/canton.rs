@@ -22,6 +22,7 @@ use serde_json::{json, Value};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
+use url::Url;
 
 const CANTON_JSON_API_PORT: u16 = 7575;
 const DEFAULT_DAR_RELATIVE_PATH: &str = "fixtures/canton/signet-signer-v1-0.0.1.dar";
@@ -170,7 +171,7 @@ pub fn test_sign_request_event(
         caip2_id: Chain::Ethereum.caip2_chain_id().to_string(),
         key_version: LATEST_MPC_KEY_VERSION,
         path: sandbox.requester_party.clone(),
-        algo: String::new(),
+        algo: "ECDSA".to_string(),
         dest: String::new(),
         params: String::new(),
         output_deserialization_schema: EVM_TYPE2_BOOL_OUTPUT_SCHEMA.to_string(),
@@ -183,8 +184,8 @@ pub struct CantonSandbox {
     process: Child,
     auth_conf_path: PathBuf,
     oidc_provider: OidcTestProvider,
-    pub json_api_url: String,
-    pub json_api_ws_url: String,
+    pub json_api_url: Url,
+    pub json_api_ws_url: Url,
     pub app_ledger_api_user: String,
     pub ledger_api_user: String,
     pub party_id: String,
@@ -300,8 +301,12 @@ canton.participants.sandbox.ledger-api {{
             .spawn()
             .context("failed to start dpm sandbox")?;
 
-        let base_url = format!("http://127.0.0.1:{CANTON_JSON_API_PORT}");
-        let ws_url = format!("ws://127.0.0.1:{CANTON_JSON_API_PORT}");
+        let base_url: Url = format!("http://127.0.0.1:{CANTON_JSON_API_PORT}")
+            .parse()
+            .expect("a valid url");
+        let ws_url: Url = format!("ws://127.0.0.1:{CANTON_JSON_API_PORT}")
+            .parse()
+            .expect("a valid url");
 
         // Wait for synchronizer readiness (covers HTTP not up + auth loading + synchronizer).
         let admin_client = CantonTestClient::new(canton_test_client_config(
@@ -538,7 +543,7 @@ canton.participants.sandbox.ledger-api {{
             json_api_url: self.json_api_url.clone(),
             json_api_ws_url: self.json_api_ws_url.clone(),
             auth: CantonAuthConfig {
-                token_url: self.oidc_provider.token_url().to_string(),
+                token_url: self.oidc_provider.token_url().clone(),
                 client_id: self.ledger_api_user.clone(),
                 client_secret: LOCAL_OIDC_CLIENT_SECRET.into(),
                 audience: LOCAL_OIDC_AUDIENCE.to_string(),
@@ -857,7 +862,10 @@ impl CantonTestClient {
 }
 
 fn is_package_not_ready(e: &anyhow::Error) -> bool {
-    let msg = e.to_string();
+    // Full chain render: the submit retry macro wraps the final error in an
+    // `exhausted after N attempts` context, so the Canton body text only
+    // survives in the source chain.
+    let msg = format!("{e:#}");
     msg.contains("PACKAGE_SELECTION_FAILED")
         || msg.contains("JSON_API_PACKAGE_SELECTION_FAILED")
         || msg.contains("PACKAGE_NAMES_NOT_FOUND")
@@ -865,17 +873,17 @@ fn is_package_not_ready(e: &anyhow::Error) -> bool {
 }
 
 fn canton_test_client_config(
-    base_url: &str,
-    ws_url: &str,
-    token_url: &str,
+    base_url: &Url,
+    ws_url: &Url,
+    token_url: &Url,
     ledger_api_user: &str,
     party_id: &str,
 ) -> CantonConfig {
     CantonConfig {
-        json_api_url: base_url.to_string(),
-        json_api_ws_url: ws_url.to_string(),
+        json_api_url: base_url.clone(),
+        json_api_ws_url: ws_url.clone(),
         auth: CantonAuthConfig {
-            token_url: token_url.to_string(),
+            token_url: token_url.clone(),
             client_id: ledger_api_user.to_string(),
             client_secret: LOCAL_OIDC_CLIENT_SECRET.into(),
             audience: LOCAL_OIDC_AUDIENCE.to_string(),

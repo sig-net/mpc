@@ -2,14 +2,18 @@ use cait_sith::protocol::Participant;
 use integration_tests::cluster::spawner::ClusterSpawner;
 use integration_tests::containers;
 use mpc_crypto::PublicKey;
+use mpc_node::backlog::Checkpoint;
 use mpc_node::protocol::presignature::PresignatureSpawner;
 use mpc_node::protocol::triple::TripleSpawner;
 use mpc_node::protocol::MessageChannel;
+use mpc_node::storage::checkpoint_storage::CheckpointStorage;
 use mpc_node::types::SecretKeyShare;
 use test_log::test;
 
-use super::helpers::{dummy_backlog_entry, dummy_pair, dummy_presignature};
-use mpc_primitives::SignId;
+use super::helpers::{
+    dummy_backlog_entry, dummy_indexed_sign_request, dummy_pair, dummy_presignature,
+};
+use mpc_primitives::{Chain, SignId};
 
 #[test(tokio::test)]
 async fn test_triple_persistence() -> anyhow::Result<()> {
@@ -323,9 +327,6 @@ async fn test_presignature_persistence() -> anyhow::Result<()> {
 
 #[test(tokio::test)]
 async fn test_checkpoint_persistence() -> anyhow::Result<()> {
-    use mpc_node::backlog::Checkpoint;
-    use mpc_node::storage::checkpoint_storage::CheckpointStorage;
-    use mpc_primitives::Chain;
     use near_account_id::AccountId;
 
     let spawner = ClusterSpawner::default()
@@ -387,9 +388,6 @@ async fn test_checkpoint_persistence() -> anyhow::Result<()> {
 #[test(tokio::test)]
 async fn test_pending_checkpoint_persistence() -> anyhow::Result<()> {
     use deadpool_redis::redis;
-    use mpc_node::backlog::Checkpoint;
-    use mpc_node::storage::checkpoint_storage::CheckpointStorage;
-    use mpc_primitives::Chain;
 
     let spawner = ClusterSpawner::default()
         .network("test-pending-checkpoint-persistence")
@@ -489,5 +487,122 @@ async fn test_pending_checkpoint_persistence() -> anyhow::Result<()> {
     assert!(restarted.latest(Chain::Solana).await.is_err());
     assert!(restarted.has_checkpoint(Chain::Solana).await?);
 
+    Ok(())
+}
+
+#[test(tokio::test)]
+async fn test_clear_clears_pending_reservations() -> anyhow::Result<()> {
+    let spawner = ClusterSpawner::default()
+        .network("test-clear-pending")
+        .init_network()
+        .await?;
+
+    let node0 = Participant::from(0);
+    let node0_id = "party0.near".parse().unwrap();
+    let redis = containers::Redis::run(&spawner).await;
+    let triple_storage = redis.triple_storage(&node0_id, node0);
+
+    let id = 42u64;
+    triple_storage
+        .create_slot(id, node0)
+        .await
+        .unwrap()
+        .insert(dummy_pair(id), node0)
+        .await;
+
+    // Peek the triple: marks it as pending in memory
+    let reservation = triple_storage
+        .peek_mine(&[])
+        .await
+        .expect("should peek artifact");
+    assert_eq!(reservation.id, id);
+
+    // Deliberately forget the reservation so Drop does not release it from state.pending
+    std::mem::forget(reservation);
+
+    // Clear storage: should clear both Redis keys and in-memory reservations
+    assert!(triple_storage.clear().await);
+
+    // Re-insert the same artifact ID
+    triple_storage
+        .create_slot(id, node0)
+        .await
+        .unwrap()
+        .insert(dummy_pair(id), node0)
+        .await;
+
+    // Without state.pending.clear(), peek_mine will exclude `id` because it
+    // remains stuck in state.pending. With the fix, peek_mine succeeds.
+    let peeked = triple_storage.peek_mine(&[]).await;
+    assert!(peeked.is_some(), "artifact must be peekable after clear()");
+
+    Ok(())
+}
+
+#[test(tokio::test)]
+async fn test_clear_removes_more_artifacts_than_one_unpack_allows() -> anyhow::Result<()> {
+    use deadpool_redis::redis;
+
+    let spawner = ClusterSpawner::default()
+        .network("test-clear-many")
+        .init_network()
+        .await?;
+
+    let node0 = Participant::from(0);
+    let node0_id = "party0.near".parse().unwrap();
+    let redis_container = containers::Redis::run(&spawner).await;
+    let triple_storage = redis_container.triple_storage(&node0_id, node0);
+
+    // Lua's unpack in Redis 7.4 fails somewhere above 8000 entries.
+    let artifact_key = triple_storage.artifact_key();
+    let mut pipe = redis::pipe();
+    for id in 1..=10_000u64 {
+        pipe.hset(artifact_key, id, "x")
+            .sadd(format!("{artifact_key}:holders:{id}"), 1)
+            .ignore();
+    }
+    let mut conn = redis_container.pool().get().await?;
+    let _: () = pipe.query_async(&mut conn).await?;
+
+    assert!(triple_storage.clear().await);
+    let remaining: u64 = redis::cmd("DBSIZE").query_async(&mut conn).await?;
+    assert_eq!(remaining, 0);
+
+    Ok(())
+}
+
+#[test(tokio::test)]
+async fn test_local_records_persist() -> anyhow::Result<()> {
+    use mpc_node::backlog::mock::mock_publishing;
+    use mpc_node::sign_bidirectional::{BidirectionalProgress, SignProgress, SignStatus};
+
+    let spawner = ClusterSpawner::default()
+        .network("test-local-records")
+        .init_network()
+        .await?;
+    let redis_container = containers::Redis::run(&spawner).await;
+    let account_id = "party0.near".parse()?;
+    let storage = CheckpointStorage::Redis(redis_container.pool(), account_id);
+    let id = dummy_backlog_entry(1, Chain::Solana).sign_id();
+    let sign_id = dummy_backlog_entry(3, Chain::Solana).sign_id();
+    let publishing = || SignProgress::Publishing(mock_publishing());
+    let status = SignStatus::Bidirectional(BidirectionalProgress::Initial(publishing()));
+    let attestation = SignStatus::Bidirectional(BidirectionalProgress::Final {
+        respond_request: dummy_indexed_sign_request(2, Chain::Solana),
+        progress: publishing(),
+    });
+    let sign = SignStatus::Sign(publishing());
+
+    storage.put_local(Chain::Solana, id, &status).await?;
+    storage.put_local(Chain::Solana, id, &attestation).await?;
+    storage.put_local(Chain::Solana, sign_id, &sign).await?;
+    let records = storage.load_local(Chain::Solana).await?;
+    assert_eq!(records.len(), 3);
+    assert!(records.contains(&(id, status)) && records.contains(&(id, attestation)));
+    assert!(records.contains(&(sign_id, sign)));
+    assert!(storage.load_local(Chain::Canton).await?.is_empty());
+
+    storage.remove_local(Chain::Solana, &[id, sign_id]).await?;
+    assert!(storage.load_local(Chain::Solana).await?.is_empty());
     Ok(())
 }

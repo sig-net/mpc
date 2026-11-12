@@ -4,37 +4,36 @@ use std::time::{Duration, Instant};
 use cait_sith::protocol::Participant;
 use mpc_keys::hpke::{self, Ciphered};
 use serde::{Deserialize, Serialize};
-use tokio::sync::{mpsc, oneshot, watch};
-use tokio::task::{JoinHandle, JoinSet};
+use tokio::sync::{mpsc, watch};
+use tokio::task::JoinSet;
 
 use crate::config::NetworkConfig;
 use crate::mesh::MeshState;
 use crate::node_client::NodeClient;
+use crate::protocol::ProtocolState;
 use crate::rpc::ContractStateWatcher;
-use crate::storage::{PresignatureStorage, StorageError, TripleStorage};
+use crate::storage::{Initializing, PresignatureStorage, StorageError, TripleStorage};
 
 use super::contract::primitives::{ParticipantInfo, ParticipantMap, Participants};
 use super::message::{MessageError, SignedMessage};
 use super::presignature::PresignatureId;
 use super::triple::TripleId;
 
-/// The maximum number of update requests that can be queued. This is pretty much just
-/// based on the number of participants in the network. If we have 1024 participants then
-/// our issue will more than likely not be the channel size.
-const MAX_SYNC_UPDATE_REQUESTS: usize = 1024;
-
-/// Timeout for waiting for a sync response from the sync task
-const SYNC_RESPONSE_TIMEOUT: Duration = Duration::from_secs(60);
-
-/// Timeout for the entire broadcast operation (waiting for all peers to respond)
-const BROADCAST_TIMEOUT: Duration = Duration::from_secs(120);
+/// Capacity of the sync report channel. This is pretty much just based on the
+/// number of participants in the network. If we have 1024 participants then our
+/// issue will more than likely not be the channel size.
+const MAX_SYNC_REPORTS: usize = 1024;
 
 #[derive(Debug, thiserror::Error)]
 pub enum SyncError {
-    #[error("failed to queue sync request")]
-    QueueFailed,
-    #[error("failed to receive sync response")]
-    ResponseFailed,
+    #[error("not a participant yet")]
+    NotParticipant,
+    #[error("rejected sync update: {0}")]
+    Rejected(MessageError),
+    #[error(transparent)]
+    Storage(#[from] StorageError),
+    #[error("failed to encrypt sync response: {0}")]
+    Encrypt(MessageError),
 }
 
 /// Result of a sync RPC to a single peer.
@@ -45,6 +44,13 @@ pub enum SyncPeerResponse {
     Success(SyncUpdate),
     /// RPC to peer failed.
     Failed(String),
+}
+
+/// Outcome of handling broadcast responses for a sync cycle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SyncResponseOutcome {
+    Processed,
+    Dropped,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -66,97 +72,62 @@ impl SyncUpdate {
     }
 }
 
-pub struct SyncRequest {
-    /// A `SyncUpdate` signed by its sender and encrypted to us.
-    pub update: Ciphered,
-    /// Our reply, signed by us and encrypted to the sender.
-    pub response_tx: oneshot::Sender<Result<Ciphered, StorageError>>,
-}
+/// Handle a peer's `/sync` request: drop the artifacts the signer no longer
+/// owns and reply, signed and encrypted to the signer, with the ids we do not
+/// hold.
+pub async fn process_sync_update<P1, P2>(
+    update: &Ciphered,
+    triples: &TripleStorage<P1>,
+    presignatures: &PresignatureStorage<P2>,
+    me: Participant,
+    network: &NetworkConfig,
+    participants: &ParticipantMap,
+) -> Result<Ciphered, SyncError> {
+    let start = Instant::now();
 
-impl SyncRequest {
-    async fn process(
-        self,
-        triples: TripleStorage,
-        presignatures: PresignatureStorage,
-        me: Participant,
-        network: NetworkConfig,
-        participants: ParticipantMap,
-    ) {
-        let start = Instant::now();
+    // The signer is the owner whose shares we drop.
+    let (from, update) = SignedMessage::decrypt_with::<SyncUpdate, _>(
+        update,
+        &network.cipher_sk,
+        participants,
+        |_| Ok(()),
+    )
+    .map_err(SyncError::Rejected)?;
 
-        // The signer is the owner whose shares we drop.
-        let (from, update) = match SignedMessage::decrypt_with::<SyncUpdate, _>(
-            &self.update,
-            &network.cipher_sk,
-            &participants,
-            |_| Ok(()),
-        ) {
-            Ok(verified) => verified,
-            Err(err) => {
-                tracing::warn!(?err, "rejected sync update");
-                return;
-            }
-        };
+    let outdated_triples = triples.remove_outdated(from, &update.triples).await?;
+    let outdated_presignatures = presignatures
+        .remove_outdated(from, &update.presignatures)
+        .await?;
 
-        let outdated_triples = match triples.remove_outdated(from, &update.triples).await {
-            Ok(result) => result,
-            Err(err) => {
-                let _ = self.response_tx.send(Err(err));
-                return;
-            }
-        };
-        let outdated_presignatures = match presignatures
-            .remove_outdated(from, &update.presignatures)
-            .await
-        {
-            Ok(result) => result,
-            Err(err) => {
-                let _ = self.response_tx.send(Err(err));
-                return;
-            }
-        };
+    tracing::info!(
+        removed_triples = outdated_triples.removed.len(),
+        removed_presignatures = outdated_presignatures.removed.len(),
+        not_found_triples = outdated_triples.not_found.len(),
+        not_found_presignatures = outdated_presignatures.not_found.len(),
+        elapsed = ?start.elapsed(),
+        "processed sync update",
+    );
 
-        tracing::info!(
-            removed_triples = outdated_triples.removed.len(),
-            removed_presignatures = outdated_presignatures.removed.len(),
-            not_found_triples = outdated_triples.not_found.len(),
-            not_found_presignatures = outdated_presignatures.not_found.len(),
-            elapsed = ?start.elapsed(),
-            "processed sync update",
-        );
-
-        let response = SyncUpdate {
-            triples: outdated_triples.not_found,
-            presignatures: outdated_presignatures.not_found,
-        };
-        // The signature check above found the sender in `participants`.
-        let Some(info) = participants.get(&from) else {
-            return;
-        };
-        let response =
-            match SignedMessage::encrypt(&response, me, &network.sign_sk, &info.cipher_pk) {
-                Ok(response) => response,
-                Err(err) => {
-                    tracing::warn!(?err, "failed to encrypt sync response");
-                    return;
-                }
-            };
-
-        let _ = self.response_tx.send(Ok(response));
-    }
-}
-
-pub struct SyncRequestReceiver {
-    updates: mpsc::Receiver<SyncRequest>,
+    let response = SyncUpdate {
+        triples: outdated_triples.not_found,
+        presignatures: outdated_presignatures.not_found,
+    };
+    // The signature check above found the sender in `participants`.
+    let info = participants
+        .get(&from)
+        .ok_or(SyncError::Rejected(MessageError::Verification(
+            "sync sender is not a participant",
+        )))?;
+    SignedMessage::encrypt(&response, me, &network.sign_sk, &info.cipher_pk)
+        .map_err(SyncError::Encrypt)
 }
 
 pub struct SyncTask {
     client: NodeClient,
-    triples: TripleStorage,
-    presignatures: PresignatureStorage,
+    triples: TripleStorage<Initializing>,
+    presignatures: PresignatureStorage<Initializing>,
     mesh_state: watch::Receiver<MeshState>,
     contract: ContractStateWatcher,
-    requests: SyncRequestReceiver,
     sync_report_tx: SyncReportSender,
     network: NetworkConfig,
 }
@@ -164,120 +135,101 @@ pub struct SyncTask {
 impl SyncTask {
     pub fn new(
         client: &NodeClient,
-        triples: TripleStorage,
-        presignatures: PresignatureStorage,
+        triples: TripleStorage<Initializing>,
+        presignatures: PresignatureStorage<Initializing>,
         mesh_state: watch::Receiver<MeshState>,
         contract: ContractStateWatcher,
         sync_report_tx: SyncReportSender,
         network: NetworkConfig,
-    ) -> (SyncChannel, Self) {
-        let (requests, channel) = SyncChannel::new();
-        let task = Self {
+    ) -> Self {
+        Self {
             client: client.clone(),
             triples,
             presignatures,
             mesh_state,
             contract,
-            requests,
             sync_report_tx,
             network,
-        };
-        (channel, task)
-    }
-
-    pub async fn run(mut self) {
-        tracing::info!("sync task has been started");
-        // Trigger sync broadcasts to peers in need_sync state
-        let mut sync_interval = tokio::time::interval(Duration::from_millis(200));
-        // Poll whether any ongoing sync task has completed
-        let mut sync_check_interval = tokio::time::interval(Duration::from_millis(100));
-
-        // Do NOT start until we have our own participant info
-        tracing::info!("sync waiting for participant info");
-        let start = Instant::now();
-        let (_, me) = self.contract.wait_info().await;
-        tracing::info!(?me, elapsed = ?start.elapsed(), "starting sync loop...");
-
-        self.triples.set_me(me);
-        self.presignatures.set_me(me);
-
-        let mut broadcast = Option::<(Instant, JoinHandle<_>)>::None;
-        loop {
-            tokio::select! {
-                // find nodes that need syncing and initiate it
-                _ = sync_interval.tick() => {
-                    if broadcast.is_some() {
-                        // another broadcast task is still ongoing, skip.
-                        continue;
-                    }
-
-                    let need_sync = self.mesh_state.borrow().need_sync().clone();
-                    if need_sync.is_empty() {
-                        continue;
-                    }
-
-                    let Some(update) = self.new_update().await else {
-                        continue;
-                    };
-                    let start = Instant::now();
-                    let receivers = need_sync
-                        .iter()
-                        .map(|(p, info)|(*p, info.clone()))
-                        .collect::<Vec<_>>();
-                    let task = tokio::spawn(broadcast_sync(
-                        self.client.clone(),
-                        update,
-                        receivers.into_iter(),
-                        me,
-                        self.network.clone(),
-                    ));
-                    broadcast = Some((start, task));
-                }
-                // check that our broadcast has completed, and if so process the result.
-                _ = sync_check_interval.tick() => {
-                    let Some((start, handle)) = broadcast.take() else {
-                        continue;
-                    };
-                    if !handle.is_finished() {
-                        // task is not finished yet, put it back:
-                        broadcast = Some((start, handle));
-                        continue;
-                    }
-
-                    match handle.await {
-                        Ok(responses) => {
-                            // Re-read every time: resharing can change the threshold.
-                            let Some((threshold, _)) = self.contract.info().await else {
-                                tracing::warn!("contract has no threshold yet, dropping sync responses");
-                                continue;
-                            };
-                            // Process sync responses: update artifact participants based on not_found data
-                            if let Err(err) = self.process_sync_responses(responses, threshold).await {
-                                tracing::warn!(?err, "failed to process sync responses");
-                            }
-                            tracing::debug!(elapsed = ?start.elapsed(), "processed broadcast");
-                        }
-                        Err(err) => {
-                            tracing::warn!(?err, "broadcast task failed");
-                        }
-                    }
-                }
-                Some(sync_req) = self.requests.updates.recv() => {
-                    let participants = self.contract.participant_map().await;
-                    tokio::spawn(sync_req.process(
-                        self.triples.clone(),
-                        self.presignatures.clone(),
-                        me,
-                        self.network.clone(),
-                        participants,
-                    ));
-                }
-            }
         }
     }
 
-    async fn new_update(&self) -> Option<SyncUpdate> {
-        let triples = match self.triples.fetch_owned_with_reserved().await {
+    pub async fn run(self) -> anyhow::Result<()> {
+        tracing::info!("sync task has been started");
+        // Trigger sync broadcasts to peers in need_sync state
+        let mut sync_interval = tokio::time::interval(Duration::from_millis(200));
+
+        loop {
+            sync_interval.tick().await;
+            self.run_step().await;
+        }
+    }
+
+    /// Runs a single iteration of the sync cycle if any peers need syncing.
+    pub(crate) async fn run_step(&self) {
+        // Skip the sync cycle unless the contract is Running and we are an active participant.
+        let Some(ProtocolState::Running(running)) = self.contract.state() else {
+            return;
+        };
+        let Some(&me) = running
+            .participants
+            .find_participant(self.contract.account_id())
+        else {
+            return;
+        };
+
+        let need_sync = self.mesh_state.borrow().need_sync().clone();
+        if need_sync.is_empty() {
+            return;
+        }
+
+        let triples = self.triples.to_ready(me);
+        let presignatures = self.presignatures.to_ready(me);
+
+        let Some(update) = Self::new_update(&triples, &presignatures).await else {
+            return;
+        };
+        let start = Instant::now();
+        let responses = broadcast_sync(
+            self.client.clone(),
+            update,
+            need_sync.into_iter(),
+            me,
+            self.network.clone(),
+        )
+        .await;
+
+        if let Err(err) = self
+            .handle_sync_responses(&triples, &presignatures, responses)
+            .await
+        {
+            tracing::warn!(?err, "failed to process sync responses");
+        }
+        tracing::debug!(elapsed = ?start.elapsed(), "processed broadcast");
+    }
+
+    /// Process responses from a sync broadcast if the contract is still running.
+    /// Responses are dropped if the contract has transitioned out of the running state.
+    pub(crate) async fn handle_sync_responses(
+        &self,
+        triples: &TripleStorage,
+        presignatures: &PresignatureStorage,
+        responses: Vec<(Participant, SyncPeerResponse)>,
+    ) -> Result<SyncResponseOutcome, String> {
+        let Some(ProtocolState::Running(running)) = self.contract.state() else {
+            tracing::warn!("contract is not running, dropping sync responses");
+            return Ok(SyncResponseOutcome::Dropped);
+        };
+
+        self.process_sync_responses(triples, presignatures, responses, running.threshold)
+            .await?;
+        Ok(SyncResponseOutcome::Processed)
+    }
+
+    async fn new_update(
+        triples: &TripleStorage,
+        presignatures: &PresignatureStorage,
+    ) -> Option<SyncUpdate> {
+        let triples = match triples.fetch_owned_with_reserved().await {
             Ok(ids) => ids,
             Err(err) => {
                 tracing::warn!(
@@ -287,7 +239,7 @@ impl SyncTask {
                 return None;
             }
         };
-        let presignatures = match self.presignatures.fetch_owned_with_reserved().await {
+        let presignatures = match presignatures.fetch_owned_with_reserved().await {
             Ok(ids) => ids,
             Err(err) => {
                 tracing::warn!(
@@ -309,6 +261,8 @@ impl SyncTask {
     /// 2. Send synced peer notifications to mesh (for status transitions)
     async fn process_sync_responses(
         &self,
+        triples: &TripleStorage,
+        presignatures: &PresignatureStorage,
         responses: Vec<(Participant, SyncPeerResponse)>,
         threshold: usize,
     ) -> Result<(), String> {
@@ -334,14 +288,12 @@ impl SyncTask {
                     );
 
                     // Batch remove peer from all triples and prune
-                    let triple_res = self
-                        .triples
+                    let triple_res = triples
                         .remove_holder_and_prune(peer, threshold, &response.triples)
                         .await;
 
                     // Batch remove peer from all presignatures and prune
-                    let presig_res = self
-                        .presignatures
+                    let presig_res = presignatures
                         .remove_holder_and_prune(peer, threshold, &response.presignatures)
                         .await;
 
@@ -393,7 +345,7 @@ impl SyncTask {
     /// report is being sent, and the cost of losing a desync report is one
     /// more failed round for that peer.
     pub fn sync_report_channel() -> (SyncReportSender, SyncReportReceiver) {
-        mpsc::channel(MAX_SYNC_UPDATE_REQUESTS)
+        mpsc::channel(MAX_SYNC_REPORTS)
     }
 }
 
@@ -410,8 +362,8 @@ pub type SyncReportSender = mpsc::Sender<(Participant, SyncKind)>;
 pub type SyncReportReceiver = mpsc::Receiver<(Participant, SyncKind)>;
 
 /// Broadcast an update to all participants specified by `receivers`.
-/// Returns results for all peers that complete within BROADCAST_TIMEOUT.
-/// Peers that don't respond are not included in results and will be retried later.
+/// Returns results for all peers. Every call is bounded by the client's sync
+/// timeout, and peers that fail are retried on a later broadcast.
 async fn broadcast_sync(
     client: NodeClient,
     update: SyncUpdate,
@@ -439,34 +391,12 @@ async fn broadcast_sync(
         });
     }
 
-    let deadline = Instant::now() + BROADCAST_TIMEOUT;
     let mut results = Vec::new();
-    while !tasks.is_empty() {
-        let now = Instant::now();
-        if now >= deadline {
-            break;
+    while let Some(res) = tasks.join_next().await {
+        match res {
+            Ok((p, sync_result)) => results.push((p, sync_result)),
+            Err(err) => tracing::warn!(?err, "sync task failed"),
         }
-
-        tokio::select! {
-            res = tasks.join_next() => {
-                match res {
-                    Some(Ok((p, sync_result))) => {
-                        results.push((p, sync_result));
-                    }
-                    Some(Err(err)) => {
-                        tracing::warn!(?err, "sync task failed");
-                    }
-                    None => break,
-                }
-            }
-            _ = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => {
-                break;
-            }
-        }
-    }
-
-    if !tasks.is_empty() {
-        tasks.abort_all();
     }
 
     results
@@ -524,50 +454,309 @@ pub fn open_reply_for_test(
     open_reply(reply, cipher_sk, peer, info)
 }
 
-#[derive(Clone)]
-pub struct SyncChannel {
-    request_update: mpsc::Sender<SyncRequest>,
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::mesh::connection::NodeStatus;
+    use crate::mesh::MeshState;
+    use crate::protocol::contract::primitives::Participants;
+    use crate::protocol::ProtocolState;
+    use crate::rpc::ContractStateWatcher;
+    use crate::storage::presignature_storage::Presignature;
+    use crate::storage::triple_storage::TriplePair;
+    use near_account_id::AccountId;
 
-impl SyncChannel {
-    pub fn new() -> (SyncRequestReceiver, Self) {
-        let (request_update_tx, request_update_rx) = mpsc::channel(MAX_SYNC_UPDATE_REQUESTS);
-
-        let requests = SyncRequestReceiver {
-            updates: request_update_rx,
-        };
-        let channel = Self {
-            request_update: request_update_tx,
-        };
-
-        (requests, channel)
+    struct TestContext {
+        my_account: AccountId,
+        me: Participant,
+        my_info: ParticipantInfo,
+        peer: Participant,
+        contract_tx: tokio::sync::watch::Sender<Option<ProtocolState>>,
+        mesh_tx: tokio::sync::watch::Sender<MeshState>,
+        sync_task: SyncTask,
+        sync_report_rx: SyncReportReceiver,
     }
 
-    pub async fn request_update(&self, update: Ciphered) -> Result<Ciphered, SyncError> {
-        let (response_tx, response_rx) = oneshot::channel();
-        let request = SyncRequest {
-            update,
-            response_tx,
+    impl TestContext {
+        fn set_need_sync(&self) {
+            let mut mesh = MeshState::default();
+            mesh.update(self.me, NodeStatus::Syncing, self.my_info.clone());
+            self.mesh_tx.send(mesh).unwrap();
+        }
+    }
+
+    async fn spawn_mock_redis() -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            while let Ok((mut stream, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 1024];
+                    while let Ok(n) = stream.read(&mut buf).await {
+                        if n == 0 {
+                            break;
+                        }
+                        let data = String::from_utf8_lossy(&buf[..n]);
+                        if data.contains("CLIENT") {
+                            let count = data.matches("CLIENT").count();
+                            let resp = "+OK\r\n".repeat(count);
+                            if stream.write_all(resp.as_bytes()).await.is_err() {
+                                break;
+                            }
+                            continue;
+                        }
+                        if data.contains("UNWATCH") {
+                            let resp = "+OK\r\n$1\r\n0\r\n";
+                            if stream.write_all(resp.as_bytes()).await.is_err() {
+                                break;
+                            }
+                            continue;
+                        }
+                        if data.contains("PING") {
+                            let resp = "+PONG\r\n";
+                            if stream.write_all(resp.as_bytes()).await.is_err() {
+                                break;
+                            }
+                            continue;
+                        }
+                        let resp = if data.contains("SMEMBERS") {
+                            "*0\r\n"
+                        } else {
+                            "+OK\r\n"
+                        };
+                        if stream.write_all(resp.as_bytes()).await.is_err() {
+                            break;
+                        }
+                    }
+                });
+            }
+        });
+        format!("redis://127.0.0.1:{port}/")
+    }
+
+    async fn test_setup(initial_threshold: usize) -> TestContext {
+        let my_account: AccountId = "node0.test".parse().unwrap();
+        let peer_account: AccountId = "node1.test".parse().unwrap();
+        let other_account: AccountId = "node2.test".parse().unwrap();
+
+        let me = Participant::from(0);
+        let peer = Participant::from(1);
+        let other = Participant::from(2);
+
+        let my_network = NetworkConfig {
+            sign_sk: near_crypto::SecretKey::from_seed(
+                near_crypto::KeyType::ED25519,
+                "my-test-seed",
+            ),
+            cipher_sk: hpke::SecretKey::from_bytes(&[1; 32]),
+        };
+        let peer_network = NetworkConfig {
+            sign_sk: near_crypto::SecretKey::from_seed(
+                near_crypto::KeyType::ED25519,
+                "peer-test-seed",
+            ),
+            cipher_sk: hpke::SecretKey::from_bytes(&[2; 32]),
         };
 
-        if let Err(_err) = self.request_update.send(request).await {
-            return Err(SyncError::QueueFailed);
+        let my_info = ParticipantInfo {
+            id: 0,
+            account_id: my_account.clone(),
+            url: "http://127.0.0.1:1".to_string(),
+            cipher_pk: my_network.cipher_sk.public_key(),
+            sign_pk: my_network.sign_sk.public_key(),
+        };
+
+        let mut participants = Participants::default();
+        participants.insert(&me, my_info.clone());
+        participants.insert(
+            &peer,
+            ParticipantInfo {
+                id: 1,
+                account_id: peer_account.clone(),
+                url: "http://127.0.0.1:2".to_string(),
+                cipher_pk: peer_network.cipher_sk.public_key(),
+                sign_pk: peer_network.sign_sk.public_key(),
+            },
+        );
+        participants.insert(
+            &other,
+            ParticipantInfo {
+                id: 2,
+                account_id: other_account.clone(),
+                url: "http://127.0.0.1:3".to_string(),
+                cipher_pk: hpke::SecretKey::from_bytes(&[3; 32]).public_key(),
+                sign_pk: near_crypto::SecretKey::from_seed(
+                    near_crypto::KeyType::ED25519,
+                    "other-test-seed",
+                )
+                .public_key(),
+            },
+        );
+
+        let (contract_watcher, contract_tx) = ContractStateWatcher::with_running(
+            &my_account,
+            k256::AffinePoint::default(),
+            initial_threshold,
+            participants,
+        );
+
+        let redis_url = spawn_mock_redis().await;
+        let redis_cfg = deadpool_redis::Config::from_url(redis_url);
+        let pool = redis_cfg
+            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+            .unwrap();
+        let (sync_report_tx, sync_report_rx) = SyncTask::sync_report_channel();
+        let (mesh_tx, mesh_rx) = tokio::sync::watch::channel(MeshState::default());
+
+        let sync_task = SyncTask::new(
+            &NodeClient::new(),
+            TriplePair::storage(&pool, &my_account),
+            Presignature::storage(&pool, &my_account),
+            mesh_rx,
+            contract_watcher,
+            sync_report_tx,
+            my_network,
+        );
+
+        TestContext {
+            my_account,
+            me,
+            my_info,
+            peer,
+            contract_tx,
+            mesh_tx,
+            sync_task,
+            sync_report_rx,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_handle_sync_responses_processed_when_running() {
+        let TestContext {
+            me,
+            peer,
+            sync_task,
+            mut sync_report_rx,
+            ..
+        } = test_setup(3).await;
+
+        let responses = vec![(peer, SyncPeerResponse::Success(SyncUpdate::empty()))];
+        let triples = sync_task.triples.to_ready(me);
+        let presignatures = sync_task.presignatures.to_ready(me);
+
+        let outcome = sync_task
+            .handle_sync_responses(&triples, &presignatures, responses)
+            .await
+            .unwrap();
+
+        assert_eq!(outcome, SyncResponseOutcome::Processed);
+        assert_eq!(sync_report_rx.try_recv(), Ok((peer, SyncKind::Synced)));
+    }
+
+    #[tokio::test]
+    async fn test_handle_sync_responses_dropped_when_not_running() {
+        let TestContext {
+            me,
+            peer,
+            contract_tx,
+            sync_task,
+            mut sync_report_rx,
+            ..
+        } = test_setup(3).await;
+
+        let responses = vec![(peer, SyncPeerResponse::Success(SyncUpdate::empty()))];
+
+        // Transition contract state to Resharing while broadcast is pending
+        contract_tx
+            .send(Some(ProtocolState::Resharing(
+                crate::protocol::contract::ResharingContractState {
+                    old_epoch: 0,
+                    old_participants: Participants::default(),
+                    new_participants: Participants::default(),
+                    threshold: 3,
+                    new_threshold: 3,
+                    public_key: k256::AffinePoint::default(),
+                    finished_votes: Default::default(),
+                    cancel_votes: Default::default(),
+                },
+            )))
+            .unwrap();
+
+        let triples = sync_task.triples.to_ready(me);
+        let presignatures = sync_task.presignatures.to_ready(me);
+
+        let outcome = sync_task
+            .handle_sync_responses(&triples, &presignatures, responses)
+            .await
+            .unwrap();
+
+        // Responses must be dropped because contract is no longer Running
+        assert_eq!(outcome, SyncResponseOutcome::Dropped);
+        assert!(sync_report_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn test_run_step_runs_when_running_and_participant() {
+        let mut ctx = test_setup(3).await;
+        ctx.set_need_sync();
+
+        ctx.sync_task.run_step().await;
+
+        assert_eq!(
+            ctx.sync_report_rx.try_recv(),
+            Ok((ctx.me, SyncKind::Synced))
+        );
+    }
+
+    #[tokio::test]
+    async fn test_run_step_skips_when_not_running() {
+        let mut ctx = test_setup(3).await;
+        ctx.set_need_sync();
+
+        // Contract state is Resharing, so sync must be skipped
+        ctx.contract_tx
+            .send(Some(ProtocolState::Resharing(
+                crate::protocol::contract::ResharingContractState {
+                    old_epoch: 0,
+                    old_participants: Participants::default(),
+                    new_participants: Participants::default(),
+                    threshold: 3,
+                    new_threshold: 3,
+                    public_key: k256::AffinePoint::default(),
+                    finished_votes: Default::default(),
+                    cancel_votes: Default::default(),
+                },
+            )))
+            .unwrap();
+
+        ctx.sync_task.run_step().await;
+
+        assert!(ctx.sync_report_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn test_run_step_skips_when_not_participant() {
+        let mut ctx = test_setup(3).await;
+        ctx.set_need_sync();
+
+        // Remove my node from contract participants
+        let current_state = ctx.contract_tx.borrow().clone();
+        if let Some(ProtocolState::Running(mut state)) = current_state {
+            let mut new_participants = Participants::default();
+            for (p, info) in state.participants.iter() {
+                if info.account_id != ctx.my_account {
+                    new_participants.insert(p, info.clone());
+                }
+            }
+            state.participants = new_participants;
+            ctx.contract_tx
+                .send(Some(ProtocolState::Running(state)))
+                .unwrap();
         }
 
-        let result = tokio::time::timeout(SYNC_RESPONSE_TIMEOUT, response_rx)
-            .await
-            .map_err(|_err| {
-                tracing::debug!("sync response timeout");
-                SyncError::ResponseFailed
-            })?
-            .map_err(|_err| {
-                tracing::debug!("failed to receive sync response from channel");
-                SyncError::ResponseFailed
-            })?;
+        ctx.sync_task.run_step().await;
 
-        result.map_err(|err| {
-            tracing::debug!(?err, "sync processing failed in storage layer");
-            SyncError::ResponseFailed
-        })
+        assert!(ctx.sync_report_rx.try_recv().is_err());
     }
 }

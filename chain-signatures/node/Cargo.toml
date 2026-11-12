@@ -12,13 +12,13 @@ path = "src/main.rs"
 async-trait.workspace = true
 axum = "0.7.9"
 axum-extra = "0.9.6"
+tower-http = { version = "0.6", features = ["timeout"] }
 backon.workspace = true
 chrono = "0.4.24"
 base64 = "0.22"
 dashmap = "6.1"
 google-cloud-auth = { version = "1.16", default-features = false, features = ["default-rustls-provider"] }
-http = "1.1.0"
-local-ip-address = "0.5.4"
+http.workspace = true
 lru = "0.18"
 mime = "0.3.17"
 prometheus = "0.14.0"
@@ -78,6 +78,7 @@ mpc-chain-near.workspace = true
 mpc-chain-hydration.workspace = true
 mpc-chain-midnight.workspace = true
 mpc-chain-tron.workspace = true
+mpc-tron-wire.workspace = true
 mpc-compact-hashing.workspace = true
 mpc-keys.workspace = true
 mpc-primitives.workspace = true

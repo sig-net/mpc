@@ -5,11 +5,11 @@ use anyhow::{anyhow, Context};
 use serde::{Deserialize, Serialize};
 use url::Url;
 
-use mpc_chain_integration_core::utils::retry::{retry_rpc_gated, RetryConfig, SharedBackoff};
+use mpc_chain_integration_core::utils::retry::{retry_rpc, RetryConfig, SharedBackoff};
 
-use crate::address::{parse_hex, TronAddress};
 use crate::config::TronConfig;
-use crate::types::{AccountResources, BroadcastOutcome, NowBlock, TronLog, TronReceipt};
+use crate::types::{BroadcastOutcome, NowBlock, SolidifiedBlock, TronLog, TronReceipt};
+use mpc_tron_wire::{encoding::decode_bytes, parse_hex, TronAddress};
 
 /// Tron HTTP client for interacting with the Tron blockchain.
 pub struct TronHttp {
@@ -41,7 +41,7 @@ impl TronHttp {
     /// `POST /wallet/getnowblock`. Tron has no nonces, this feeds the
     /// ref-block replay fields filled at assembly.
     pub async fn get_now_block(&self) -> anyhow::Result<NowBlock> {
-        retry_rpc_gated!(
+        retry_rpc!(
             self.request_timeout,
             self.retry,
             self.gate,
@@ -50,21 +50,55 @@ impl TronHttp {
                 let response: NowBlockResponse = self
                     .post_json("wallet/getnowblock", &serde_json::json!({}))
                     .await?;
-                Ok(NowBlock {
-                    block_id: response.block_id.parse().context("blockID")?,
-                    number: response.block_header.raw_data.number,
-                    timestamp: response.block_header.raw_data.timestamp,
-                })
+                response.into_now_block()
+            }
+        )
+    }
+
+    /// `POST /walletsolidity/getnowblock` — the solidified head as a
+    /// [`SolidifiedBlock`] with empty `txids` (the response carries no
+    /// transactions; the head only gates the expiry scan).
+    pub async fn get_now_block_solidity(&self) -> anyhow::Result<SolidifiedBlock> {
+        retry_rpc!(
+            self.request_timeout,
+            self.retry,
+            self.gate,
+            "get_now_block_solidity",
+            {
+                let response: SolidBlockResponse = self
+                    .post_json("walletsolidity/getnowblock", &serde_json::json!({}))
+                    .await?;
+                response.into_block().context("solidified head absent")
+            }
+        )
+    }
+
+    /// `POST /walletsolidity/getblockbynum` — one final block's
+    /// header and resident txIDs; `Ok(None)` means not solidified yet.
+    pub async fn get_block_solidity(&self, number: u64) -> anyhow::Result<Option<SolidifiedBlock>> {
+        retry_rpc!(
+            self.request_timeout,
+            self.retry,
+            self.gate,
+            "get_block_solidity",
+            {
+                let response: SolidBlockResponse = self
+                    .post_json(
+                        "walletsolidity/getblockbynum",
+                        &serde_json::json!({ "num": number }),
+                    )
+                    .await?;
+                Ok(response.into_block())
             }
         )
     }
 
     /// `POST /wallet/broadcasthex` with the raw (protobuf-serialized)
-    /// transaction. Congestion errors (`TooManyTransactions`,
-    /// `CONNECTION_CLOSED`) become `Err` so the gate rebroadcasts identical
-    /// bytes. Other rejections are terminal.
+    /// transaction. Congestion errors (`SERVER_BUSY`, `NO_CONNECTION`,
+    /// `NOT_ENOUGH_EFFECTIVE_CONNECTION`) become `Err` so the gate retries
+    /// identical bytes. Other rejections are terminal.
     pub async fn broadcast_transaction(&self, raw_tx: &[u8]) -> anyhow::Result<BroadcastOutcome> {
-        retry_rpc_gated!(
+        retry_rpc!(
             self.request_timeout,
             self.retry,
             self.gate,
@@ -79,7 +113,7 @@ impl TronHttp {
         &self,
         tx_id: &B256,
     ) -> anyhow::Result<Option<TronReceipt>> {
-        retry_rpc_gated!(
+        retry_rpc!(
             self.request_timeout,
             self.retry,
             self.gate,
@@ -98,10 +132,8 @@ impl TronHttp {
                         block_number: response.block_number,
                         block_timestamp: response.block_timestamp,
                         fee: response.fee,
-                        contract_ret: response.contract_ret,
+                        result: response.result,
                         res_message: response.res_message.as_deref().map(decode_hex_ascii),
-                        energy_usage: response.receipt.energy_usage,
-                        net_usage: response.receipt.net_usage,
                         receipt_result: response.receipt.result,
                         logs: response.log,
                     })),
@@ -111,25 +143,25 @@ impl TronHttp {
         )
     }
 
-    /// `POST /wallet/getaccountresource`.
-    pub async fn get_account_resource(
-        &self,
-        address: &TronAddress,
-    ) -> anyhow::Result<AccountResources> {
-        retry_rpc_gated!(
+    /// `POST /wallet/getaccount`, returning the TRX balance in sun. Zero
+    /// for an account the chain has never seen.
+    pub async fn get_account_balance(&self, address: &TronAddress) -> anyhow::Result<u64> {
+        retry_rpc!(
             self.request_timeout,
             self.retry,
             self.gate,
-            "get_account_resource",
+            "get_account_balance",
             {
-                self.post_json(
-                    "wallet/getaccountresource",
-                    &serde_json::json!({
-                        "value": hex::encode(address.as_bytes()),
-                        "visible": false
-                    }),
-                )
-                .await
+                let response: AccountResponse = self
+                    .post_json(
+                        "wallet/getaccount",
+                        &serde_json::json!({
+                            "address": address.to_hex(),
+                            "visible": false
+                        }),
+                    )
+                    .await?;
+                Ok(response.balance)
             }
         )
     }
@@ -177,7 +209,7 @@ impl TronHttp {
 
 /// Tron error/reason strings (`message`, `resMessage`) are hex-encoded ASCII.
 fn decode_hex_ascii(s: &str) -> String {
-    hex::decode(s)
+    decode_bytes(s)
         .ok()
         .and_then(|bytes| String::from_utf8(bytes).ok())
         .unwrap_or_else(|| s.to_string())
@@ -204,6 +236,68 @@ struct NowBlockRawData {
     timestamp: u64,
 }
 
+/// Response structure for `getblockbynum`/`getnowblock` on the
+/// solidity router; `{}` (not solidified) reads as an absent header.
+#[derive(Deserialize)]
+struct SolidBlockResponse {
+    #[serde(default, rename = "blockID")]
+    block_id: Option<String>,
+    #[serde(default)]
+    block_header: Option<NowBlockHeader>,
+    #[serde(default)]
+    transactions: Vec<SolidBlockTx>,
+}
+
+/// One resident transaction; only its hex `txID` is read.
+#[derive(Deserialize)]
+struct SolidBlockTx {
+    #[serde(rename = "txID", default)]
+    tx_id: Option<String>,
+}
+
+impl SolidBlockResponse {
+    fn into_block(self) -> Option<SolidifiedBlock> {
+        let raw = self.block_header?.raw_data;
+        // A malformed blockID reads as an unmatchable slice — the
+        // reference check defers.
+        let ref_slice = self
+            .block_id
+            .as_deref()
+            .and_then(|id| id.parse::<B256>().ok())
+            .map_or([0; 8], |id| id.0[8..16].try_into().expect("8 of 32 bytes"));
+
+        Some(SolidifiedBlock {
+            number: raw.number,
+            timestamp: raw.timestamp as i64,
+            ref_slice,
+            txids: self
+                .transactions
+                .iter()
+                .filter_map(|tx| tx.tx_id.as_deref())
+                .filter_map(|id| id.parse::<B256>().ok())
+                .map(|id| id.0)
+                .collect(),
+        })
+    }
+}
+
+impl NowBlockResponse {
+    fn into_now_block(self) -> anyhow::Result<NowBlock> {
+        Ok(NowBlock {
+            block_id: self.block_id.parse().context("blockID")?,
+            number: self.block_header.raw_data.number,
+            timestamp: self.block_header.raw_data.timestamp,
+        })
+    }
+}
+
+/// Response structure for `getaccount`; `{}` for unseen accounts.
+#[derive(Deserialize)]
+struct AccountResponse {
+    #[serde(default)]
+    balance: u64,
+}
+
 /// Response structure for the broadcast transaction result.
 #[derive(Deserialize)]
 struct BroadcastResponse {
@@ -221,7 +315,8 @@ impl BroadcastResponse {
     fn into_outcome(self) -> anyhow::Result<BroadcastOutcome> {
         let code = self.code.as_deref().unwrap_or_default();
         match (self.result, code) {
-            (_, "DUP_TRANSACTION_ERROR") | (true, _) => Ok(BroadcastOutcome::Accepted),
+            (true, _) => Ok(BroadcastOutcome::Accepted),
+            (_, "DUP_TRANSACTION_ERROR") => Ok(BroadcastOutcome::AlreadyKnown),
             (false, "SERVER_BUSY" | "NO_CONNECTION" | "NOT_ENOUGH_EFFECTIVE_CONNECTION") => {
                 Err(anyhow!("broadcast rejected: {code}"))
             }
@@ -248,8 +343,8 @@ struct TransactionInfoResponse {
     block_timestamp: u64,
     #[serde(default)]
     fee: u64,
-    #[serde(default, rename = "contractRet")]
-    contract_ret: Option<String>,
+    #[serde(default)]
+    result: Option<String>,
     #[serde(default, rename = "resMessage")]
     res_message: Option<String>,
     #[serde(default)]
@@ -258,13 +353,11 @@ struct TransactionInfoResponse {
     log: Vec<TronLog>,
 }
 
-/// Response structure for the usage information in a transaction receipt.
+/// `receipt.result` classification; success carries its verdict here alone
+/// (the top-level `code` is proto3-zero-omitted), failure alongside the
+/// top-level `FAILED`. Usage counters stay unread.
 #[derive(Deserialize, Default)]
 struct ReceiptUsage {
-    #[serde(default, rename = "energy_usage")]
-    energy_usage: u64,
-    #[serde(default, rename = "net_usage")]
-    net_usage: u64,
     #[serde(default)]
     result: Option<String>,
 }
@@ -294,9 +387,11 @@ where
                 .map(|t| t.parse::<B256>().with_context(|| format!("log topic {t}")))
                 .collect::<anyhow::Result<Vec<_>>>()
                 .map_err(serde::de::Error::custom)?;
-            let data = hex::decode(raw.data.strip_prefix("0x").unwrap_or(&raw.data))
+
+            let data = decode_bytes(&raw.data)
                 .context("decoding log data")
                 .map_err(serde::de::Error::custom)?;
+
             Log::new(
                 parse_hex(&raw.address).map_err(serde::de::Error::custom)?,
                 topics,
@@ -376,6 +471,73 @@ mod tests {
         assert_eq!(block.block_id, block_hash);
     }
 
+    #[tokio::test]
+    async fn solidity_head_parses_the_recorded_nile_body() {
+        let (mut server, client) = test_client(fast_retry()).await;
+        // Recorded 2026-10-30 off nile.trongrid.io
+        server
+            .mock("POST", "/walletsolidity/getnowblock")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(include_str!(
+                "../tests/fixtures/nile/nowblock-solidity.json"
+            ))
+            .create_async()
+            .await;
+
+        let block = client.get_now_block_solidity().await.unwrap();
+        assert_eq!(block.number, 72_266_582);
+        assert_eq!(block.timestamp, 1_793_335_731_000);
+    }
+
+    #[tokio::test]
+    async fn solidity_block_parses_the_recorded_nile_body() {
+        let (mut server, client) = test_client(fast_retry()).await;
+        // Recorded 2026-10-31 off api.nileex.io
+        server
+            .mock("POST", "/walletsolidity/getblockbynum")
+            .match_body(Matcher::PartialJson(
+                serde_json::json!({ "num": 71_896_096 }),
+            ))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(include_str!(
+                "../tests/fixtures/nile/solid-block-71896096.json"
+            ))
+            .create_async()
+            .await;
+
+        let block = client
+            .get_block_solidity(71_896_096)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(block.number, 71_896_096);
+        assert_eq!(block.timestamp, 1_792_220_499_000);
+        assert_eq!(block.txids.len(), 9);
+        assert_eq!(
+            block.txids[0],
+            "b4e8076ad07087c23b857a4649686954f235b57425bce5205295a5f5e9274e88"
+                .parse::<B256>()
+                .unwrap()
+                .0
+        );
+    }
+
+    #[tokio::test]
+    async fn solidity_block_absent_reads_as_none() {
+        let (mut server, client) = test_client(fast_retry()).await;
+        server
+            .mock("POST", "/walletsolidity/getblockbynum")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body("{}")
+            .create_async()
+            .await;
+
+        assert!(client.get_block_solidity(99).await.unwrap().is_none());
+    }
+
     #[test]
     fn broadcast_codes_classify() {
         fn outcome(result: bool, code: Option<&str>) -> anyhow::Result<BroadcastOutcome> {
@@ -391,6 +553,11 @@ mod tests {
         assert_eq!(outcome(true, None).unwrap(), BroadcastOutcome::Accepted);
         assert_eq!(
             outcome(false, Some("DUP_TRANSACTION_ERROR")).unwrap(),
+            BroadcastOutcome::AlreadyKnown
+        );
+        // `result: true` outranks a stale code field.
+        assert_eq!(
+            outcome(true, Some("DUP_TRANSACTION_ERROR")).unwrap(),
             BroadcastOutcome::Accepted
         );
         for code in [
@@ -427,7 +594,7 @@ mod tests {
             ))
             .with_status(200)
             .with_header("content-type", "application/json")
-            .with_body(r#"{ "result": true, "txid": "aa11…22" }"#)
+            .with_body(include_str!("../tests/fixtures/nile/broadcast-accept.json"))
             .create_async()
             .await;
 
@@ -439,7 +606,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn broadcast_duplicate_is_accepted_without_retry() {
+    async fn broadcast_duplicate_is_already_known_without_retry() {
         let (mut server, client) = test_client(fast_retry()).await;
         let mock = server
             .mock("POST", "/wallet/broadcasthex")
@@ -447,12 +614,12 @@ mod tests {
             .expect(1)
             .with_status(200)
             .with_header("content-type", "application/json")
-            .with_body(r#"{ "result": false, "code": "DUP_TRANSACTION_ERROR", "message": "" }"#)
+            .with_body(include_str!("../tests/fixtures/nile/broadcast-dup.json"))
             .create_async()
             .await;
 
         let outcome = client.broadcast_transaction(&[0x0a]).await.unwrap();
-        assert_eq!(outcome, BroadcastOutcome::Accepted);
+        assert_eq!(outcome, BroadcastOutcome::AlreadyKnown);
         mock.assert_async().await;
     }
 
@@ -465,10 +632,9 @@ mod tests {
             .expect(1)
             .with_status(200)
             .with_header("content-type", "application/json")
-            .with_body(
-                r#"{ "result": false, "code": "CONTRACT_VALIDATE_ERROR",
-                      "message": "Contract validate error : No contract!" }"#,
-            )
+            .with_body(include_str!(
+                "../tests/fixtures/nile/broadcast-codeless.json"
+            ))
             .create_async()
             .await;
 
@@ -477,7 +643,7 @@ mod tests {
             outcome,
             BroadcastOutcome::Rejected {
                 code: "CONTRACT_VALIDATE_ERROR".into(),
-                message: "Contract validate error : No contract!".into()
+                message: "Contract validate error : No contract or not a smart contract".into()
             }
         );
         mock.assert_async().await;
@@ -496,21 +662,21 @@ mod tests {
             .await;
 
         let err = client.broadcast_transaction(&[0x0a]).await.unwrap_err();
-        assert!(err.to_string().contains("SERVER_BUSY"));
+        assert!(format!("{err:#}").contains("SERVER_BUSY"));
     }
 
     #[tokio::test]
     async fn transport_errors_are_retried() {
         let (mut server, client) = test_client(fast_retry()).await;
         let mock = server
-            .mock("POST", "/wallet/getaccountresource")
+            .mock("POST", "/wallet/getaccount")
             .with_status(429)
             .expect_at_least(2)
             .create_async()
             .await;
 
         let err = client
-            .get_account_resource(&TronAddress::from_evm(Address::ZERO))
+            .get_account_balance(&TronAddress::from_evm(Address::ZERO))
             .await
             .unwrap_err();
         assert!(
@@ -542,37 +708,69 @@ mod tests {
     #[tokio::test]
     async fn solidity_receipt_parses() {
         let (mut server, client) = test_client(fast_retry()).await;
+        // The recorded nile receipt, verbatim; its id is this test's hash.
+        let tx_id: B256 = "24157817b0db1a156e7244d4417cbd7303f32b06449fcbad739f124b6b8e4c82"
+            .parse()
+            .unwrap();
+        server
+            .mock("POST", "/walletsolidity/gettransactioninfobyid")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(include_str!("../tests/fixtures/nile/receipt-success.json"))
+            .create_async()
+            .await;
+
+        let receipt = client
+            .get_transaction_info_solidity(&tx_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(receipt.id, tx_id);
+        assert_eq!(receipt.block_number, 71896097);
+        assert_eq!(receipt.fee, 472800);
+        // Recorded receipts carry the outcome in receipt.result only.
+        assert_eq!(receipt.result, None);
+        assert_eq!(receipt.receipt_result.as_deref(), Some("SUCCESS"));
+        assert_eq!(receipt.res_message, None);
+
+        let usdt = address!("eca9bc828a3005b9a3b909f2cc5c2a54794de05f");
+        let holder = "000000000000000000000000bdf81069827deba7d39729eb387eda8827e5525c";
+        let topics = [
+            "ddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef",
+            holder,
+            holder,
+        ]
+        .iter()
+        .map(|t| t.parse::<B256>().unwrap())
+        .collect::<Vec<_>>();
+        let expected_log = Log::new(
+            usdt,
+            topics,
+            Bytes::from(
+                hex::decode("0000000000000000000000000000000000000000000000000000000000000001")
+                    .unwrap(),
+            ),
+        )
+        .unwrap();
+        assert_eq!(receipt.logs, vec![expected_log]);
+    }
+
+    #[tokio::test]
+    async fn receipt_tolerates_prefixed_addresses_and_hex_messages() {
+        // Deliberate parser leniencies, not node shapes: a 0x41-prefixed
+        // log address and a hex-ASCII resMessage (plain text is the other
+        // live encoding).
+        let (mut server, client) = test_client(fast_retry()).await;
         let tx_id = test_hash(9);
-        let usdt_topic = "ddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
-        let data_hex = "00000000000000000000000000000000000000000000000000000000001e8480";
-        // Log address is the 20-byte EVM form.
-        // The 21-byte 0x41-prefixed form stays tolerated.
         server
             .mock("POST", "/walletsolidity/gettransactioninfobyid")
             .with_status(200)
             .with_header("content-type", "application/json")
             .with_body(format!(
-                r#"{{
-                    "id": "{tx_id}",
-                    "fee": 2765000,
-                    "blockNumber": 3035010,
-                    "blockTimeStamp": 1730000031000,
-                    "contractRet": "SUCCESS",
-                    "resMessage": "53554343455353",
-                    "receipt": {{ "energy_usage": 262, "net_usage": 343, "result": "SUCCESS" }},
-                    "log": [
-                        {{
-                            "address": "41a614f803b6fd780986a42c78ec9c7f77e6ded13c",
-                            "topics": ["{usdt_topic}"],
-                            "data": "{data_hex}"
-                        }},
-                        {{
-                            "address": "a614f803b6fd780986a42c78ec9c7f77e6ded13c",
-                            "topics": ["{usdt_topic}"],
-                            "data": "{data_hex}"
-                        }}
-                    ]
-                }}"#
+                r#"{{ "id": "{tx_id}", "resMessage": "53554343455353",
+                     "log": [{{ "address": "41eca9bc828a3005b9a3b909f2cc5c2a54794de05f",
+                                "topics": ["ddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"],
+                                "data": "" }}] }}"#
             ))
             .create_async()
             .await;
@@ -583,51 +781,10 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(receipt.id, tx_id);
-        assert_eq!(receipt.block_number, 3035010);
-        assert_eq!(receipt.fee, 2765000);
-        assert_eq!(receipt.contract_ret.as_deref(), Some("SUCCESS"));
-        assert_eq!(receipt.receipt_result.as_deref(), Some("SUCCESS"));
         assert_eq!(receipt.res_message.as_deref(), Some("SUCCESS"));
-        assert_eq!(receipt.energy_usage, 262);
-        assert_eq!(receipt.net_usage, 343);
-
-        let expected_log = Log::new(
-            address!("a614f803b6fd780986a42c78ec9c7f77e6ded13c"),
-            vec![usdt_topic.parse::<B256>().unwrap()],
-            Bytes::from(hex::decode(data_hex).unwrap()),
-        )
-        .unwrap();
-        assert_eq!(receipt.logs, vec![expected_log.clone(), expected_log]);
-    }
-
-    #[tokio::test]
-    async fn account_resources_parse() {
-        let (mut server, client) = test_client(fast_retry()).await;
-        server
-            .mock("POST", "/wallet/getaccountresource")
-            .match_header("TRON-PRO-API-KEY", "test-key")
-            .with_status(200)
-            .with_header("content-type", "application/json")
-            .with_body(
-                r#"{
-                    "freeNetUsed": 284,
-                    "freeNetLimit": 600,
-                    "NetUsed": 150,
-                    "NetLimit": 5000,
-                    "EnergyUsed": 131,
-                    "EnergyLimit": 100000
-                }"#,
-            )
-            .create_async()
-            .await;
-
-        let address = TronAddress::from_evm(Address::ZERO);
-        let resources = client.get_account_resource(&address).await.unwrap();
-        assert_eq!(resources.free_net_used, 284);
-        assert_eq!(resources.free_net_limit, 600);
-        assert_eq!(resources.net_used, 150);
-        assert_eq!(resources.net_limit, 5000);
-        assert_eq!(resources.energy_used, 131);
-        assert_eq!(resources.energy_limit, 100000);
+        assert_eq!(
+            receipt.logs.first().unwrap().address,
+            address!("eca9bc828a3005b9a3b909f2cc5c2a54794de05f")
+        );
     }
 }

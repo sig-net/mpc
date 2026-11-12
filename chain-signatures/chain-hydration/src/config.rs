@@ -5,11 +5,12 @@ use sp_runtime::traits::{IdentifyAccount, Verify};
 use sp_runtime::MultiSignature as SpMultiSignature;
 use std::fmt;
 use subxt::config::substrate::AccountId32;
+use url::Url;
 
 #[derive(Clone)]
 pub struct HydrationConfig {
     /// Hydration RPC ws URL
-    pub rpc_ws_url: String,
+    pub rpc_ws_url: Url,
     /// Hydration signer URI
     ///
     /// Carried as a [`SecretString`]: the URI is only exposed when the signer

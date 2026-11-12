@@ -4,7 +4,7 @@ use std::time::Duration;
 use crate::gates::NearRpcGates;
 use crate::util::AffinePointExt as _;
 
-use mpc_chain_integration_core::utils::retry::{retry_rpc_gated, RetryConfig};
+use mpc_chain_integration_core::utils::retry::{retry_rpc, RetryConfig};
 use mpc_chain_integration_core::{ChainPublisher, PublishAction, PublisherTelemetry};
 use mpc_primitives::{SignId, Signature};
 
@@ -74,7 +74,7 @@ impl ChainPublisher for NearClient {
     async fn publish_signature(&self, action: &PublishAction) -> anyhow::Result<()> {
         let timestamp = action.timestamp;
         let signature = &action.signature;
-        let outcome = retry_rpc_gated!(
+        let outcome = retry_rpc!(
             Duration::MAX, // the RPC's own timeout bounds a send
             NEAR_RESPOND_RETRY,
             self.gates.provider,

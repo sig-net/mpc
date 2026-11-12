@@ -6,18 +6,19 @@
 //!
 //! # Configuration (env vars only)
 //!
-//! - `RPC_URL` (required) — execution-layer RPC endpoint, e.g. an Alchemy URL.
-//! - `CONTRACT_ADDRESS` (required) — contract address to watch.
+//! - `MPC_ETH_EXECUTION_RPC_HTTP_URL` (required) — execution-layer RPC
+//!   endpoint, e.g. an Alchemy URL.
+//! - `MPC_ETH_CONTRACT_ADDRESS` (required) — contract address to watch.
 //! - `END` (required) — exclusive end of the catchup range.
 //! - `START` (optional) — inclusive start of the range.
-//! - `WATCHERS` (optional, default `50`) — number of pending dummy watchers to simulate.
-//! - `NETWORK` (optional, default `sepolia`).
+//! - `WATCHERS` (optional, default `1000`) — number of pending dummy watchers to simulate.
+//! - `MPC_ETH_NETWORK` (optional, default `sepolia`).
 //!
 //! # Usage
 //!
 //! ```sh
-//! RPC_URL=http://localhost:4000/sepolia/evm/11155111 \
-//! CONTRACT_ADDRESS=0x69C6b28Fdc74618817fa380De29a653060e14009 \
+//! MPC_ETH_EXECUTION_RPC_HTTP_URL=http://localhost:4000/sepolia/evm/11155111 \
+//! MPC_ETH_CONTRACT_ADDRESS=0x69C6b28Fdc74618817fa380De29a653060e14009 \
 //! START=11214938 END=11215038 WATCHERS=100 \
 //! RUST_LOG=mpc_chain_ethereum::bench=info \
 //! cargo run --example bench_watchers --features bench
@@ -28,7 +29,7 @@ mod helpers;
 use anyhow::anyhow;
 use helpers::{env_u64, init_tracing, make_config, run_catchup};
 use mpc_chain_integration_core::{MockStateManager, StateManager};
-use mpc_primitives::{BidirectionalTx, BidirectionalTxId, Chain, SignId, LATEST_MPC_KEY_VERSION};
+use mpc_primitives::{BidirectionalTx, BidirectionalTxId, Chain, LATEST_MPC_KEY_VERSION};
 use std::sync::Arc;
 
 #[tokio::main]
@@ -73,9 +74,7 @@ async fn main() -> anyhow::Result<()> {
             nonce: u64::MAX,
         };
 
-        state
-            .watch_execution(Chain::Ethereum, SignId::new(hash), Arc::new(tx))
-            .await;
+        state.watch_execution(Chain::Ethereum, Arc::new(tx)).await;
     }
     tracing::info!("bench_watchers: injected {watchers_count} dummy watchers");
 

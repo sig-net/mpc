@@ -1,5 +1,6 @@
 use mpc_chain_canton::{CantonAuthConfig, CantonConfig};
-use secrecy::{ExposeSecret as _, SecretString};
+use secrecy::SecretString;
+use url::Url;
 
 /// CLI arguments for the Canton indexer.
 #[derive(Debug, Clone, clap::Parser)]
@@ -8,6 +9,7 @@ pub struct CantonArgs {
     #[arg(
         long,
         env("MPC_CANTON_JSON_API_URL"),
+        hide_env_values = true,
         requires_all = [
             "canton_json_api_ws_url",
             "canton_ledger_api_user",
@@ -20,13 +22,14 @@ pub struct CantonArgs {
             "canton_signer_template_id",
         ]
     )]
-    pub canton_json_api_url: Option<String>,
+    pub canton_json_api_url: Option<Url>,
     #[arg(
         long,
         env("MPC_CANTON_JSON_API_WS_URL"),
+        hide_env_values = true,
         requires = "canton_json_api_url"
     )]
-    pub canton_json_api_ws_url: Option<String>,
+    pub canton_json_api_ws_url: Option<Url>,
     #[arg(
         long,
         env("MPC_CANTON_LEDGER_API_USER"),
@@ -36,9 +39,10 @@ pub struct CantonArgs {
     #[arg(
         long,
         env("MPC_CANTON_OIDC_TOKEN_URL"),
+        hide_env_values = true,
         requires = "canton_json_api_url"
     )]
-    pub canton_oidc_token_url: Option<String>,
+    pub canton_oidc_token_url: Option<Url>,
     #[arg(
         long,
         env("MPC_CANTON_OIDC_CLIENT_ID"),
@@ -48,6 +52,7 @@ pub struct CantonArgs {
     #[arg(
         long,
         env("MPC_CANTON_OIDC_CLIENT_SECRET"),
+        hide_env_values = true,
         requires = "canton_json_api_url"
     )]
     pub canton_oidc_client_secret: Option<SecretString>,
@@ -79,47 +84,6 @@ pub struct CantonArgs {
 }
 
 impl CantonArgs {
-    pub fn into_str_args(self) -> Vec<String> {
-        let mut args = Vec::with_capacity(16);
-        if let Some(v) = self.canton_json_api_url {
-            args.extend(["--canton-json-api-url".to_string(), v]);
-        }
-        if let Some(v) = self.canton_json_api_ws_url {
-            args.extend(["--canton-json-api-ws-url".to_string(), v]);
-        }
-        if let Some(v) = self.canton_ledger_api_user {
-            args.extend(["--canton-ledger-api-user".to_string(), v]);
-        }
-        if let Some(v) = self.canton_oidc_token_url {
-            args.extend(["--canton-oidc-token-url".to_string(), v]);
-        }
-        if let Some(v) = self.canton_oidc_client_id {
-            args.extend(["--canton-oidc-client-id".to_string(), v]);
-        }
-        if let Some(v) = self.canton_oidc_client_secret {
-            args.extend([
-                "--canton-oidc-client-secret".to_string(),
-                v.expose_secret().to_string(),
-            ]);
-        }
-        if let Some(v) = self.canton_oidc_audience {
-            args.extend(["--canton-oidc-audience".to_string(), v]);
-        }
-        if let Some(v) = self.canton_oidc_scope {
-            args.extend(["--canton-oidc-scope".to_string(), v]);
-        }
-        if let Some(v) = self.canton_party_id {
-            args.extend(["--canton-party-id".to_string(), v]);
-        }
-        if let Some(v) = self.canton_signer_contract_id {
-            args.extend(["--canton-signer-contract-id".to_string(), v]);
-        }
-        if let Some(v) = self.canton_signer_template_id {
-            args.extend(["--canton-signer-template-id".to_string(), v]);
-        }
-        args
-    }
-
     pub fn into_config(self) -> Option<CantonConfig> {
         let auth = CantonAuthConfig {
             token_url: self.canton_oidc_token_url?,
@@ -137,47 +101,5 @@ impl CantonArgs {
             signer_contract_id: self.canton_signer_contract_id?,
             signer_template_id: self.canton_signer_template_id?,
         })
-    }
-
-    pub fn from_config(config: Option<CantonConfig>) -> Self {
-        match config {
-            Some(c) => {
-                let CantonAuthConfig {
-                    token_url,
-                    client_id,
-                    client_secret,
-                    audience,
-                    scope,
-                } = c.auth;
-                CantonArgs {
-                    canton_json_api_url: Some(c.json_api_url),
-                    canton_json_api_ws_url: Some(c.json_api_ws_url),
-                    canton_ledger_api_user: Some(c.ledger_api_user),
-                    canton_oidc_token_url: Some(token_url),
-                    canton_oidc_client_id: Some(client_id),
-                    canton_oidc_client_secret: Some(client_secret),
-                    canton_oidc_audience: Some(audience),
-                    canton_oidc_scope: scope,
-                    canton_party_id: Some(c.party_id),
-
-                    canton_signer_contract_id: Some(c.signer_contract_id),
-                    canton_signer_template_id: Some(c.signer_template_id),
-                }
-            }
-            None => CantonArgs {
-                canton_json_api_url: None,
-                canton_json_api_ws_url: None,
-                canton_ledger_api_user: None,
-                canton_oidc_token_url: None,
-                canton_oidc_client_id: None,
-                canton_oidc_client_secret: None,
-                canton_oidc_audience: None,
-                canton_oidc_scope: None,
-                canton_party_id: None,
-
-                canton_signer_contract_id: None,
-                canton_signer_template_id: None,
-            },
-        }
     }
 }

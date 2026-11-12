@@ -3,11 +3,11 @@ mod args;
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use crate::backlog::Backlog;
-use crate::config::{Config, LocalConfig, NetworkConfig, OverrideConfig};
-use crate::gcp::GcpService;
+use crate::build;
+use crate::config::{Config, NetworkConfig};
 use crate::mesh::{self, Mesh, MeshState};
 use crate::metrics::telemetry::NodeTelemetry;
-use crate::node_client::{self, NodeClient};
+use crate::node_client::NodeClient;
 use crate::protocol::contract::ProtocolState;
 use crate::protocol::message::MessageChannel;
 use crate::protocol::presignature::Presignature;
@@ -17,38 +17,43 @@ use crate::protocol::sync::{SyncReportSender, SyncTask};
 use crate::protocol::{spawn_system_metrics, MpcSignProtocol};
 use crate::rpc::{self, ContractStateWatcher, NearGovernanceClient, RpcChannel, RpcExecutor};
 use crate::storage::checkpoint_storage::CheckpointStorage;
+use crate::storage::keystore::Keystore;
+use crate::storage::midnight_dust_storage::MidnightDustStorage;
 use crate::storage::presignature_storage::PresignatureStorage;
-use crate::storage::secret_storage::SecretNodeStorageVariant;
 use crate::storage::triple_storage::{TriplePair, TripleStorage};
+use crate::storage::Initializing;
 use crate::stream::{supervisor::run_supervised, StreamContext};
 use crate::types::SignCommand;
 use crate::{logs, storage, web};
+#[cfg(feature = "test-feature")]
+pub use args::ethereum::mock_indexer_config;
 pub use args::{
     canton::CantonArgs, ethereum::EthArgs, hydration::HydrationArgs, midnight::MidnightArgs,
-    solana::SolArgs,
+    solana::SolArgs, tron::TronArgs,
 };
 
 use anyhow::Context as _;
 use clap::Parser;
 use deadpool_redis::{Hook, Runtime};
 use enum_map::EnumMap;
-use k256::sha2::Sha256;
-use local_ip_address::local_ip;
 use mpc_chain_canton::{CantonClient, CantonConfig, CantonIndexer};
 use mpc_chain_ethereum::{publisher, EthConfig, EthereumIndexer};
 use mpc_chain_hydration::{HydrationConfig, HydrationIndexer};
 use mpc_chain_integration_core::{utils::retry::SharedBackoff, ChainPublisher, GatedPublisher};
-use mpc_chain_midnight::{MidnightConfig, MidnightIndexer, RecoveringMidnightPublisher};
+use mpc_chain_midnight::{
+    DustCheckpointStore, MidnightConfig, MidnightIndexer, RecoveringMidnightPublisher,
+};
 use mpc_chain_near::{NearClient, NearRpcGates};
 use mpc_chain_solana::{SolConfig, SolanaClient, SolanaIndexer};
-use mpc_chain_tron::TronConfig;
+use mpc_chain_tron::{TronConfig, TronWatcher};
 use mpc_keys::hpke;
 use mpc_primitives::{Chain, CheckpointDigest};
 use near_account_id::AccountId;
-use near_crypto::{InMemorySigner, PublicKey, SecretKey};
+use near_crypto::{InMemorySigner, SecretKey};
 use secrecy::{ExposeSecret as _, SecretString};
-use sha3::Digest;
 use tokio::sync::{mpsc, watch};
+use tokio::task::JoinSet;
+use tokio_util::sync::CancellationToken;
 use url::Url;
 
 /// Capacity of the SignCommand channel that feeds chain sign events from the
@@ -56,6 +61,7 @@ use url::Url;
 const MAX_SIGN_COMMANDS: usize = 16384;
 
 #[derive(Parser, Debug)]
+#[command(version = build::version_with_commit())]
 pub enum Cli {
     Start {
         /// NEAR RPC address. May carry a provider API key, so it is carried as
@@ -63,21 +69,21 @@ pub enum Cli {
         #[arg(
             long,
             env("MPC_NEAR_RPC"),
-            default_value("https://rpc.testnet.near.org")
+            hide_env_values = true,
+            value_parser = parse_rpc_url
         )]
         near_rpc: SecretString,
         /// MPC contract id
-        #[arg(long, env("MPC_CONTRACT_ID"), default_value("dev.sig-net.testnet"))]
+        #[arg(long, env("MPC_CONTRACT_ID"))]
         mpc_contract_id: AccountId,
         /// This node's account id
         #[arg(long, env("MPC_ACCOUNT_ID"))]
         account_id: AccountId,
-        /// Environment this node runs in (e.g. `testnet`, `mainnet`,
-        /// `integration-tests`). Labels logs and telemetry.
-        #[arg(long, env("MPC_ENV"))]
-        env: String,
+        /// Deployment this node belongs to. Labels logs and telemetry.
+        #[arg(long, env("MPC_ENV"), value_enum)]
+        env: logs::Env,
         /// This node's account ed25519 secret key
-        #[arg(long, env("MPC_ACCOUNT_SK"))]
+        #[arg(long, env("MPC_ACCOUNT_SK"), hide_env_values = true)]
         account_sk: SecretString,
         /// The web port for this server
         /// this is default to 3000 for all nodes now.
@@ -85,10 +91,10 @@ pub enum Cli {
         #[arg(long, env("MPC_WEB_PORT"), default_value = "3000")]
         web_port: u16,
         /// The cipher secret key used to decrypt messages between nodes.
-        #[arg(long, env("MPC_CIPHER_SK"))]
+        #[arg(long, env("MPC_CIPHER_SK"), hide_env_values = true)]
         cipher_sk: SecretString,
         /// The secret key used to sign messages to be sent between nodes.
-        #[arg(long, env("MPC_SIGN_SK"))]
+        #[arg(long, env("MPC_SIGN_SK"), hide_env_values = true)]
         sign_sk: SecretString,
         /// Ethereum Indexer options
         #[command(flatten)]
@@ -105,95 +111,93 @@ pub enum Cli {
         /// Midnight Indexer options
         #[command(flatten)]
         midnight: MidnightArgs,
-        /// Local address that other peers can use to message this node.
-        /// mainnet nodes: this should be set to their domain name
-        /// testnet nodes: this should be set to their http://ip:web_port
-        /// dev nodes: this should be set to their local network domain name
-        /// integration test nodes: this should be set to None
-        #[arg(long, env("MPC_LOCAL_ADDRESS"))]
-        my_address: Option<Url>,
+        /// Tron execution watcher options
+        #[command(flatten)]
+        tron: TronArgs,
+        /// URL at which other nodes reach this node's web port, e.g. `https://node.example.org`.
+        #[arg(long, env("MPC_LOCAL_ADDRESS"), value_parser = parse_peer_address)]
+        my_address: Url,
         /// Storage options
         #[command(flatten)]
         storage_options: storage::Options,
         /// Logging options
         #[command(flatten)]
         log_options: logs::Options,
-        /// The set of configurations that we will use to override contract configurations.
-        #[arg(long, env("MPC_OVERRIDE_CONFIG"), value_parser = clap::value_parser!(OverrideConfig))]
-        override_config: Option<OverrideConfig>,
-        #[command(flatten)]
-        mesh_options: mesh::Options,
-        #[command(flatten)]
-        message_options: node_client::Options,
     },
 }
 
 impl Cli {
-    pub fn into_str_args(self) -> Vec<String> {
-        match self {
-            Cli::Start {
-                near_rpc,
-                account_id,
-                env,
-                mpc_contract_id,
-                account_sk,
-                web_port,
-                cipher_sk,
-                sign_sk,
-                eth,
-                sol,
-                hydration,
-                canton,
-                midnight,
-                my_address,
-                storage_options,
-                log_options,
-                override_config,
-                mesh_options,
-                message_options,
-            } => {
-                let mut args = vec![
-                    "start".to_string(),
-                    "--near-rpc".to_string(),
-                    near_rpc.expose_secret().to_string(),
-                    "--mpc-contract-id".to_string(),
-                    mpc_contract_id.to_string(),
-                    "--account-id".to_string(),
-                    account_id.to_string(),
-                    "--env".to_string(),
-                    env,
-                    "--account-sk".to_string(),
-                    account_sk.expose_secret().to_string(),
-                    "--cipher-sk".to_string(),
-                    cipher_sk.expose_secret().to_string(),
-                    "--redis-url".to_string(),
-                    storage_options.redis_url.expose_secret().to_string(),
-                ];
-                args.extend(["--sign-sk".to_string(), sign_sk.expose_secret().to_string()]);
-                if let Some(my_address) = my_address {
-                    args.extend(["--my-address".to_string(), my_address.to_string()]);
-                }
-                if let Some(override_config) = override_config {
-                    args.extend([
-                        "--override-config".to_string(),
-                        serde_json::to_string(&override_config).unwrap(),
-                    ]);
-                }
+    /// `Cli::parse`, except an error never prints what the operator typed:
+    /// values can hold API keys and passwords, and clap echoes them even with
+    /// `hide_env_values`, which only covers `--help`. A rejected value names
+    /// its env var, which is what operators set, and its flag. An unknown
+    /// argument or subcommand is not named at all: it can be a secret split
+    /// off by a missing quote, or glued to a flag.
+    pub fn parse_redacted() -> Self {
+        Self::try_parse_redacted(std::env::args_os()).unwrap_or_else(|err| err.exit())
+    }
 
-                args.extend(["--web-port".to_string(), web_port.to_string()]);
+    fn try_parse_redacted<I, T>(args: I) -> Result<Self, clap::Error>
+    where
+        I: IntoIterator<Item = T>,
+        T: Into<std::ffi::OsString> + Clone,
+    {
+        use clap::error::{ContextKind, ContextValue, ErrorKind};
+        Self::try_parse_from(args).map_err(|err| {
+            let message = match err.kind() {
+                // An empty value is clap's "a value is required": nothing to hide.
+                ErrorKind::InvalidValue
+                    if matches!(err.get(ContextKind::InvalidValue), Some(ContextValue::String(v)) if v.is_empty()) =>
+                {
+                    return err;
+                }
+                ErrorKind::InvalidValue | ErrorKind::ValueValidation | ErrorKind::TooManyValues => {
+                    // Clap names the flag as `--near-rpc <NEAR_RPC>`.
+                    let arg = err.get(ContextKind::InvalidArg).map(ToString::to_string);
+                    let flag = arg.as_deref().unwrap_or_default().split(' ').next().unwrap_or_default();
+                    match env_var_of(flag) {
+                        Some(env) => format!("invalid value for {env} ({flag})"),
+                        None => format!("invalid value for {flag}"),
+                    }
+                }
+                ErrorKind::UnknownArgument => "unexpected argument".to_string(),
+                ErrorKind::InvalidSubcommand => "unrecognized subcommand".to_string(),
+                // The other kinds print flag names only.
+                _ => return err,
+            };
+            clap::Error::raw(err.kind(), format!("{message}\n"))
+        })
+    }
+}
 
-                args.extend(eth.into_str_args());
-                args.extend(sol.into_str_args());
-                args.extend(hydration.into_str_args());
-                args.extend(canton.into_str_args());
-                args.extend(midnight.into_str_args());
-                args.extend(storage_options.into_str_args());
-                args.extend(log_options.into_str_args());
-                args.extend(mesh_options.into_str_args());
-                args.extend(message_options.into_str_args());
-                args
-            }
-        }
+/// The env var behind a `start` flag, such as `MPC_NEAR_RPC` for `--near-rpc`.
+fn env_var_of(flag: &str) -> Option<String> {
+    let command = <Cli as clap::CommandFactory>::command();
+    let start = command.find_subcommand("start")?;
+    let arg = start.get_arguments().find(|arg| {
+        arg.get_long()
+            .is_some_and(|long| flag == format!("--{long}"))
+    })?;
+    Some(arg.get_env()?.to_string_lossy().into_owned())
+}
+
+/// A NEAR RPC endpoint may carry a provider API key, so clap hands it on as a
+/// `SecretString`; validating it here still fails a malformed endpoint at
+/// startup rather than at the first call.
+fn parse_rpc_url(s: &str) -> Result<SecretString, String> {
+    Url::parse(s).map_err(|e| format!("not a valid URL: {e}"))?;
+    Ok(s.into())
+}
+
+/// `Url` alone accepts `node.example.org:8080`, reading the host as the scheme,
+/// and the contract cannot change a participant's URL once it has joined.
+fn parse_peer_address(s: &str) -> Result<Url, String> {
+    let url = Url::parse(s).map_err(|e| format!("`{s}` is not a valid URL: {e}"))?;
+    match (url.scheme(), url.host()) {
+        ("http" | "https", Some(_)) => Ok(url),
+        (scheme, _) => Err(format!(
+            "`--my-address` must be an http/https URL with a host, got scheme `{scheme}`"
+        )),
     }
 }
 
@@ -213,22 +217,22 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             hydration,
             canton,
             midnight,
+            tron,
             my_address,
             storage_options,
             log_options,
-            override_config,
-            mesh_options,
-            message_options,
         } => {
-            let _guard = logs::setup(&env, account_id.as_str(), &log_options).await;
+            let _guard = logs::setup(env, account_id.as_str(), &log_options).await;
             let _span = tracing::trace_span!("cli").entered();
-            crate::metrics::init_metrics(
-                &account_id,
-                env!("CARGO_PKG_VERSION"),
-                option_env!("GIT_COMMIT_HASH"),
-                option_env!("BUILD_TIMESTAMP"),
-            );
+            // Installed before the slow startup steps, so a stop during them
+            // is an orderly exit rather than the OS default.
+            let shutdown = shutdown_signal();
+            crate::metrics::init_metrics(&account_id);
 
+            // Exposed here, once, where the runtime takes ownership of the
+            // keys; everything up to this point moved only redacted values.
+            let near_rpc =
+                Url::parse(near_rpc.expose_secret()).context("`--near-rpc` is not a valid URL")?;
             let cipher_sk =
                 hpke::SecretKey::try_from_bytes(&hex::decode(cipher_sk.expose_secret())?)?;
             let account_sk: SecretKey = account_sk
@@ -239,37 +243,22 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
 
             let cipher_pk_hex = hex::encode(cipher_sk.public_key().to_bytes());
 
-            let digest = configuration_digest(
-                mpc_contract_id.clone(),
-                account_id.clone(),
-                account_sk.clone(),
-                cipher_pk_hex.clone(),
-                sign_sk.clone(),
-                eth.clone(),
-            );
-            crate::metrics::nodes::CONFIGURATION_DIGEST.set(digest);
-
             // SignCommand channel: sign requests and completions from the
             // indexers/streams into the SignatureSpawner.
             let (sign_tx, sign_rx) = mpsc::channel(MAX_SIGN_COMMANDS);
 
             let StorageHandles {
-                key_storage,
+                keystore,
                 triple_storage,
                 presignature_storage,
                 backlog,
+                midnight_dust,
             } = StorageHandles::new(&account_id, &storage_options).await?;
 
-            let my_address = my_address.unwrap_or_else(|| {
-                let my_ip = local_ip().unwrap();
-                Url::parse(&format!("http://{my_ip}:{web_port}")).unwrap()
-            });
-            tracing::info!(%my_address, "address detected");
-
-            // NEAR Indexer is only used for integration tests
-            // TODO: Remove this once we have integration tests built on other chains
-            if env == "integration-tests" {
-                let rpc_client = near_fetch::Client::new(near_rpc.expose_secret());
+            // NEAR as a source chain exists for the integration tests only, and the
+            // test harness builds this binary with `test-feature`.
+            if cfg!(feature = "test-feature") {
+                let rpc_client = near_fetch::Client::new(near_rpc.as_str());
                 let near_sign_tx = SignCommand::forward_near(sign_tx.clone(), backlog.clone());
                 mpc_chain_near::run(
                     &mpc_contract_id,
@@ -287,19 +276,20 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 contract_watcher,
                 contract_state_tx,
                 sync_report_tx,
-            } = MeshHandles::new(message_options, mesh_options, &account_id);
+            } = MeshHandles::new(&account_id);
 
             let stack = ChainStack::new(ChainConfigs::from_args(
-                eth, sol, hydration, canton, midnight,
-            )?);
+                eth, sol, hydration, canton, midnight, tron,
+            )?)
+            .with_midnight_dust(midnight_dust);
             let network = NetworkConfig { cipher_sk, sign_sk };
             let signer = match InMemorySigner::from_secret_key(account_id.clone(), account_sk) {
                 near_crypto::Signer::InMemory(s) => s,
                 _ => unreachable!(),
             };
+            let account_pk = signer.public_key();
 
             let RpcHandles {
-                near_client,
                 near_governance_client,
                 rpc_channel,
                 rpc_executor,
@@ -312,9 +302,9 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 &stack,
                 backlog.clone(),
             )
-            .await;
+            .await?;
 
-            let (sync_channel, sync_task) = SyncTask::new(
+            let sync_task = SyncTask::new(
                 &node_client,
                 triple_storage.clone(),
                 presignature_storage.clone(),
@@ -325,13 +315,13 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             );
 
             log_startup(
-                digest,
                 &mpc_contract_id,
                 &account_id,
+                &account_pk,
                 &my_address,
                 &cipher_pk_hex,
                 &network,
-                &near_client,
+                &near_rpc,
                 &stack.configs,
             );
 
@@ -345,12 +335,11 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 checkpoints_rx,
             } = ProtocolHandles::new(
                 &account_id,
-                override_config,
-                network,
+                network.clone(),
                 sign_rx,
                 &node_client,
                 &contract_watcher,
-                key_storage,
+                keystore,
                 triple_storage.clone(),
                 presignature_storage.clone(),
                 mesh_state.clone(),
@@ -360,35 +349,38 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             .await;
 
             tracing::info!("protocol initialized");
-            tokio::spawn(sync_task.run());
-            tokio::spawn(rpc_executor.run(
+            let mut tasks = JoinSet::new();
+            tasks.spawn(sync_task.run());
+            tasks.spawn(rpc_executor.run(
                 backlog.clone(),
                 contract_state_tx,
                 config_tx.clone(),
                 checkpoints_tx,
             ));
-
-            tokio::spawn(mesh.run(contract_watcher.clone()));
-            let system_handle = spawn_system_metrics().await;
-            let protocol_handle = tokio::spawn(protocol.run(
+            tasks.spawn(mesh.run(contract_watcher.clone()));
+            // A blocking loop; `main` shuts the runtime down in the background
+            // so it does not keep the process alive.
+            spawn_system_metrics().await;
+            tasks.spawn(protocol.run(
                 node,
                 near_governance_client,
                 contract_watcher.clone(),
                 mesh_state.clone(),
             ));
-            tracing::info!("protocol thread spawned");
-            let web_handle = tokio::spawn(web::run(
+            tasks.spawn(web::run(
                 web_port,
                 message_channel,
                 node_watcher,
                 triple_storage,
                 presignature_storage,
-                sync_channel,
+                contract_watcher.clone(),
+                network.clone(),
                 account_id,
                 backlog.clone(),
             ));
 
             spawn_indexers(
+                &mut tasks,
                 stack,
                 sign_tx,
                 rpc_channel.clone(),
@@ -398,73 +390,68 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 node_client.clone(),
                 checkpoints_rx,
             )
-            .await;
-            tracing::info!("protocol http server spawned");
-            protocol_handle.await?;
-            web_handle.await?;
-            system_handle.abort();
-            tracing::info!("spinning down");
+            .await?;
+            tracing::info!("node tasks spawned");
+
+            // A core task never returns in normal operation, so the first to
+            // finish ends the node; a stop signal ends it cleanly.
+            let outcome = tokio::select! {
+                finished = tasks.join_next() => Err(match finished {
+                    Some(Ok(Err(err))) => err,
+                    Some(Err(join)) => anyhow::Error::from(join),
+                    _ => anyhow::anyhow!("core task exited"),
+                }),
+                _ = shutdown.cancelled() => Ok(()),
+            };
+            match &outcome {
+                Ok(()) => tracing::info!("shutdown requested, stopping"),
+                Err(err) => tracing::error!(?err, "core task ended, shutting down"),
+            }
+            tasks.abort_all();
+            while let Some(result) = tasks.join_next().await {
+                match result {
+                    Ok(Err(err)) => tracing::error!(?err, "core task also failed"),
+                    Err(join) if !join.is_cancelled() => {
+                        tracing::error!(?join, "core task also failed")
+                    }
+                    _ => {}
+                }
+            }
+            outcome
         }
-    };
-
-    Ok(())
+    }
 }
 
-fn configuration_digest(
-    mpc_contract_id: AccountId,
-    account_id: AccountId,
-    account_sk: SecretKey,
-    cipher_pk: String,
-    sign_sk: SecretKey,
-    eth: EthArgs,
-) -> i64 {
-    let eth_contract_address = eth.eth_contract_address.unwrap_or_default();
-    calculate_digest(
-        mpc_contract_id,
-        account_id,
-        account_sk.public_key(),
-        cipher_pk,
-        sign_sk.public_key(),
-        eth_contract_address,
-    )
-}
-
-fn calculate_digest(
-    mpc_contract_id: AccountId,
-    account_id: AccountId,
-    account_pk: PublicKey,
-    cipher_pk: String,
-    sign_pk: PublicKey,
-    eth_contract_address: String,
-) -> i64 {
-    let mpc_contract_id_str = mpc_contract_id.to_string();
-    let account_id_str = account_id.to_string();
-    let account_pk_str = account_pk.to_string();
-    let sign_pk_str = sign_pk.to_string();
-
-    tracing::info!(
-        %mpc_contract_id_str,
-        %account_id_str,
-        %account_pk_str,
-        %cipher_pk,
-        %sign_pk_str,
-        eth_contract_address = %eth_contract_address,
-        "digest hash inputs (exact strings)"
-    );
-
-    let mut hasher = Sha256::new();
-    hasher.update(&mpc_contract_id_str);
-    hasher.update(&account_id_str);
-    hasher.update(&account_pk_str);
-    hasher.update(&cipher_pk);
-    hasher.update(&sign_pk_str);
-    hasher.update(&eth_contract_address);
-
-    let result = hasher.finalize();
-    // Convert the first 8 bytes of the hash to an i64
-    let mut bytes = [0u8; 8];
-    bytes.copy_from_slice(&result[..8]);
-    i64::from_le_bytes(bytes)
+/// Cancelled on SIGTERM or Ctrl-C. If a handler cannot be installed the node
+/// runs without one and stops the way the OS stops it.
+fn shutdown_signal() -> CancellationToken {
+    let token = CancellationToken::new();
+    let cancel = token.clone();
+    tokio::spawn(async move {
+        let terminate = async {
+            match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+                Ok(mut signal) => {
+                    signal.recv().await;
+                }
+                Err(err) => {
+                    tracing::error!(?err, "no SIGTERM handler; stops will not be orderly");
+                    std::future::pending::<()>().await;
+                }
+            }
+        };
+        tokio::select! {
+            _ = terminate => tracing::info!(signal = "SIGTERM", "stop signal received"),
+            result = tokio::signal::ctrl_c() => match result {
+                Ok(()) => tracing::info!(signal = "SIGINT", "stop signal received"),
+                Err(err) => {
+                    tracing::error!(?err, "no SIGINT handler; stops will not be orderly");
+                    std::future::pending::<()>().await;
+                }
+            },
+        }
+        cancel.cancel();
+    });
+    token
 }
 
 #[allow(clippy::type_complexity)]
@@ -495,6 +482,7 @@ impl ChainConfigs {
         hydration: HydrationArgs,
         canton: CantonArgs,
         midnight: MidnightArgs,
+        tron: TronArgs,
     ) -> anyhow::Result<Self> {
         Ok(Self {
             eth: eth.into_config()?,
@@ -502,7 +490,7 @@ impl ChainConfigs {
             hydration: hydration.into_config(),
             canton: canton.into_config(),
             midnight: midnight.into_config()?,
-            tron: None, // Tron is a target-only chain with no indexer
+            tron: tron.into_config()?,
         })
     }
 }
@@ -513,6 +501,8 @@ struct ChainStack {
     /// One 429 cooldown gate per chain, shared by that chain's indexer and
     /// publisher (they hit the same RPC endpoint).
     gates: EnumMap<Chain, SharedBackoff>,
+    /// Where the Midnight funding wallet keeps its DUST replay across restarts.
+    midnight_dust: Option<Arc<dyn DustCheckpointStore>>,
 }
 
 impl ChainStack {
@@ -520,7 +510,13 @@ impl ChainStack {
         Self {
             configs,
             gates: EnumMap::from_fn(|_| SharedBackoff::new()),
+            midnight_dust: None,
         }
+    }
+
+    fn with_midnight_dust(mut self, store: Arc<dyn DustCheckpointStore>) -> Self {
+        self.midnight_dust = Some(store);
+        self
     }
 
     fn gate(&self, chain: Chain) -> SharedBackoff {
@@ -543,14 +539,14 @@ impl ChainStack {
     }
 
     /// Build the registry of chain publishers, keyed by chain. NEAR is always present;
-    /// each other chain is added only when configured. A client that fails to build is
-    /// logged and skipped rather than aborting startup.
+    /// each other chain is added only when configured. A configured chain whose client
+    /// cannot be built fails startup: a node must not sign for a chain it cannot reach.
     /// `backlog` lets publishers that queue (Midnight) re-check a response before spending on it.
     async fn publishers(
         &self,
         near: NearClient,
         backlog: Backlog,
-    ) -> HashMap<Chain, Arc<dyn ChainPublisher>> {
+    ) -> anyhow::Result<HashMap<Chain, Arc<dyn ChainPublisher>>> {
         let mut publishers: HashMap<Chain, Arc<dyn ChainPublisher>> = HashMap::new();
         publishers.insert(Chain::NEAR, Arc::new(near));
 
@@ -573,63 +569,56 @@ impl ChainStack {
         }
         if let Some(hydration) = &self.configs.hydration {
             let telemetry = Arc::new(NodeTelemetry::new(Chain::Hydration));
-            match rpc::HydrationClient::new(hydration, telemetry).await {
-                Ok(client) => {
-                    publishers.insert(
-                        Chain::Hydration,
-                        self.gated_publisher(Chain::Hydration, "hydration publish", client),
-                    );
-                }
-                Err(e) => tracing::error!(%e, "failed to create hydration client"),
-            }
+            let client = rpc::HydrationClient::new(hydration, telemetry)
+                .context("failed to create hydration client")?;
+            publishers.insert(
+                Chain::Hydration,
+                self.gated_publisher(Chain::Hydration, "hydration publish", client),
+            );
         }
         if let Some(canton) = &self.configs.canton {
             let telemetry = Arc::new(NodeTelemetry::new(Chain::Canton));
-            match CantonClient::new(canton, telemetry, self.gate(Chain::Canton)).await {
-                Ok(client) => {
-                    publishers.insert(Chain::Canton, Arc::new(client));
-                }
-                Err(e) => tracing::error!(%e, "failed to create canton client"),
-            }
+            let client = CantonClient::new(canton, telemetry, self.gate(Chain::Canton))
+                .await
+                .context("failed to create canton client")?;
+            publishers.insert(Chain::Canton, Arc::new(client));
         }
         if let Some(midnight) = &self.configs.midnight {
             let telemetry = Arc::new(NodeTelemetry::new(Chain::Midnight));
             let awaiter = Arc::new(rpc::BacklogAwaiter::new(backlog));
-            match RecoveringMidnightPublisher::start(midnight, telemetry, awaiter) {
-                Ok(client) => {
-                    publishers.insert(
-                        Chain::Midnight,
-                        self.gated_publisher(Chain::Midnight, "midnight publish", client),
-                    );
-                }
-                Err(e) => tracing::error!(%e, "failed to create midnight publisher"),
-            }
+            let client = RecoveringMidnightPublisher::start(
+                midnight,
+                telemetry,
+                awaiter,
+                self.midnight_dust.clone(),
+            )
+            .context("failed to create midnight publisher")?;
+            publishers.insert(
+                Chain::Midnight,
+                self.gated_publisher(Chain::Midnight, "midnight publish", client),
+            );
         }
 
-        publishers
+        Ok(publishers)
     }
 }
 
-/// A NEAR RPC endpoint may carry a provider key in its userinfo, path or query,
-/// so only its host is safe to log.
-fn rpc_host(url: &str) -> String {
-    Url::parse(url)
-        .ok()
-        .and_then(|url| url.host_str().map(str::to_owned))
-        .unwrap_or_else(|| "<unparseable>".to_string())
+/// Host of `url` for the startup log: RPC URLs may carry API keys.
+fn host_of(url: &Url) -> &str {
+    url.host_str().unwrap_or("invalid")
 }
 
 /// Emit the single structured "starting node" banner describing this node's identity
 /// and which chains it is configured to index.
 #[allow(clippy::too_many_arguments)]
 fn log_startup(
-    digest: i64,
     mpc_contract_id: &AccountId,
     account_id: &AccountId,
+    account_pk: &near_crypto::PublicKey,
     my_address: &Url,
     cipher_pk_hex: &str,
     network: &NetworkConfig,
-    near_client: &NearClient,
+    near_rpc: &Url,
     chains: &ChainConfigs,
 ) {
     let eth_signer_address = chains.eth.as_ref().map(|c| c.signer_address());
@@ -637,26 +626,26 @@ fn log_startup(
     let hydration_signer_address = chains.hydration.as_ref().and_then(|c| c.signer_address());
 
     tracing::info!(
-        %digest,
         %mpc_contract_id,
         %account_id,
+        %account_pk,
         %my_address,
         cipher_pk_hex = %cipher_pk_hex,
-        version = %crate::metrics::version(),
-        git_commit_hash = %crate::metrics::git_commit_hash(),
-        build_timestamp = %crate::metrics::build_timestamp(),
+        version = build::VERSION,
+        git_commit_hash = build::GIT_COMMIT_HASH,
+        build_timestamp = build::BUILD_TIMESTAMP,
         sign_pk = %network.sign_sk.public_key(),
-        near_rpc_host = %rpc_host(&near_client.rpc_addr()),
+        near_rpc_host = %host_of(near_rpc),
         eth_contract_address = %chains.eth.as_ref().map(|c| c.contract_address.to_string()).unwrap_or_else(|| "None".to_string()),
         eth_signer_address = %eth_signer_address.as_deref().unwrap_or("None"),
-        sol_program_address = %chains.sol.as_ref().map(|c| c.program_address.as_str()).unwrap_or("None"),
-        sol_rpc_url = %chains.sol.as_ref().map(|c| c.rpc_http_url.as_str()).unwrap_or("None"),
+        sol_program_address = %chains.sol.as_ref().map(|c| c.program_address.to_string()).unwrap_or_else(|| "None".to_string()),
+        sol_rpc_host = %chains.sol.as_ref().map_or("None", |c| host_of(&c.rpc_http_url)),
         sol_signer_address = %sol_signer_address.as_deref().unwrap_or("None"),
-        hydration_rpc_url = %chains.hydration.as_ref().map(|c| c.rpc_ws_url.as_str()).unwrap_or("None"),
+        hydration_rpc_host = %chains.hydration.as_ref().map_or("None", |c| host_of(&c.rpc_ws_url)),
         hydration_signer_address = %hydration_signer_address.as_deref().unwrap_or("None"),
-        canton_json_api_url = %chains.canton.as_ref().map(|c| c.json_api_url.as_str()).unwrap_or("None"),
-        midnight_node_url = %chains.midnight.as_ref().map(|c| c.node_url.as_str()).unwrap_or("None"),
-        tron_endpoint = %chains.tron.as_ref().map(|c| c.endpoint.as_str()).unwrap_or("None"),
+        canton_json_api_host = %chains.canton.as_ref().map_or("None", |c| host_of(&c.json_api_url)),
+        midnight_node_host = %chains.midnight.as_ref().map_or("None", |c| host_of(&c.node_url)),
+        tron_host = %chains.tron.as_ref().map_or("None", |c| host_of(&c.endpoint)),
         "starting node",
     );
 }
@@ -671,14 +660,15 @@ struct MeshHandles {
 }
 
 impl MeshHandles {
-    fn new(
-        message_options: node_client::Options,
-        mesh_options: mesh::Options,
-        account_id: &AccountId,
-    ) -> Self {
-        let node_client = NodeClient::new(&message_options);
+    fn new(account_id: &AccountId) -> Self {
+        let node_client = NodeClient::new();
         let (sync_report_tx, sync_report_rx) = SyncTask::sync_report_channel();
-        let mesh = Mesh::new(&node_client, mesh_options, account_id, sync_report_rx);
+        let mesh = Mesh::new(
+            &node_client,
+            mesh::PING_INTERVAL,
+            account_id,
+            sync_report_rx,
+        );
         let mesh_state = mesh.watch();
         let (contract_watcher, contract_state_tx) = ContractStateWatcher::new(account_id);
         Self {
@@ -693,7 +683,6 @@ impl MeshHandles {
 }
 
 struct RpcHandles {
-    near_client: NearClient,
     near_governance_client: NearGovernanceClient,
     rpc_channel: RpcChannel,
     rpc_executor: RpcExecutor,
@@ -701,16 +690,16 @@ struct RpcHandles {
 
 impl RpcHandles {
     async fn new(
-        near_rpc: &SecretString,
+        near_rpc_url: &Url,
         my_address: &Url,
         network: &NetworkConfig,
         mpc_contract_id: &AccountId,
         signer: InMemorySigner,
         stack: &ChainStack,
         backlog: Backlog,
-    ) -> Self {
+    ) -> anyhow::Result<Self> {
         let publisher_telemetry = Arc::new(NodeTelemetry::new(Chain::NEAR));
-        let near_rpc = near_fetch::Client::new(near_rpc.expose_secret());
+        let near_rpc = near_fetch::Client::new(near_rpc_url.as_str());
         // One set of gates for every NEAR call: the publisher and the governance
         // client share the endpoint and the signer.
         let near_gates = NearRpcGates::new(stack.gate(Chain::NEAR));
@@ -730,23 +719,23 @@ impl RpcHandles {
             signer,
             near_gates,
         );
-        let publishers = stack.publishers(near_client.clone(), backlog).await;
+        let publishers = stack.publishers(near_client, backlog).await?;
         let (rpc_channel, rpc_executor) =
             RpcExecutor::new(near_governance_client.clone(), publishers).await;
-        Self {
-            near_client,
+        Ok(Self {
             near_governance_client,
             rpc_channel,
             rpc_executor,
-        }
+        })
     }
 }
 
 struct StorageHandles {
-    key_storage: SecretNodeStorageVariant,
-    triple_storage: TripleStorage,
-    presignature_storage: PresignatureStorage,
+    keystore: Keystore,
+    triple_storage: TripleStorage<Initializing>,
+    presignature_storage: PresignatureStorage<Initializing>,
     backlog: Backlog,
+    midnight_dust: Arc<dyn DustCheckpointStore>,
 }
 
 const REDIS_TIMEOUT: Duration = Duration::from_secs(5);
@@ -771,9 +760,7 @@ impl StorageHandles {
         account_id: &AccountId,
         storage_options: &storage::Options,
     ) -> anyhow::Result<Self> {
-        let gcp_service = GcpService::init(storage_options).await?;
-        let key_storage =
-            storage::secret_storage::init(Some(&gcp_service), storage_options, account_id);
+        let keystore = Keystore::init(storage_options, account_id).await?;
         let redis_pool = redis_pool(Url::parse(storage_options.redis_url.expose_secret())?)?;
         let triple_storage = TriplePair::storage(&redis_pool, account_id);
         let presignature_storage = Presignature::storage(&redis_pool, account_id);
@@ -781,11 +768,13 @@ impl StorageHandles {
             redis_pool.clone(),
             account_id.clone(),
         ));
+        let midnight_dust = Arc::new(MidnightDustStorage::new(redis_pool, account_id));
         Ok(Self {
-            key_storage,
+            keystore,
             triple_storage,
             presignature_storage,
             backlog,
+            midnight_dust,
         })
     }
 }
@@ -804,29 +793,25 @@ impl ProtocolHandles {
     #[allow(clippy::too_many_arguments)]
     async fn new(
         account_id: &AccountId,
-        override_config: Option<OverrideConfig>,
         network: NetworkConfig,
         sign_rx: mpsc::Receiver<SignCommand>,
         node_client: &NodeClient,
         contract_watcher: &ContractStateWatcher,
-        key_storage: SecretNodeStorageVariant,
-        triple_storage: TripleStorage,
-        presignature_storage: PresignatureStorage,
+        keystore: Keystore,
+        triple_storage: TripleStorage<Initializing>,
+        presignature_storage: PresignatureStorage<Initializing>,
         mesh_state: watch::Receiver<MeshState>,
         rpc_channel: RpcChannel,
         sync_report_tx: SyncReportSender,
     ) -> Self {
-        let config = Config::new(LocalConfig {
-            over: override_config.unwrap_or_default(),
-            network,
-        });
-        let (config_tx, config_rx) = watch::channel(config);
+        let (config_tx, config_rx) = Config::channel();
         let (checkpoints_tx, checkpoints_rx) = checkpoint_watchers();
         let node = Node::new();
         let node_watcher = node.watch();
 
         let message_channel = MessageChannel::spawn(
             node_client.clone(),
+            network,
             config_rx.clone(),
             contract_watcher.clone(),
         )
@@ -848,7 +833,7 @@ impl ProtocolHandles {
             resharing: message_channel.subscribe_resharing().await,
             ready: message_channel.subscribe_ready().await,
             sign_task,
-            secret_storage: key_storage,
+            keystore,
             triple_storage,
             presignature_storage,
             config: config_rx,
@@ -869,6 +854,7 @@ impl ProtocolHandles {
 
 #[allow(clippy::too_many_arguments)]
 async fn spawn_indexers(
+    tasks: &mut JoinSet<anyhow::Result<()>>,
     stack: ChainStack,
     sign_tx: mpsc::Sender<SignCommand>,
     rpc_channel: RpcChannel,
@@ -877,8 +863,8 @@ async fn spawn_indexers(
     mesh_state: watch::Receiver<MeshState>,
     node_client: NodeClient,
     checkpoints_rx: EnumMap<Chain, watch::Receiver<Option<CheckpointDigest>>>,
-) {
-    let ChainStack { configs, gates } = stack;
+) -> anyhow::Result<()> {
+    let ChainStack { configs, gates, .. } = stack;
     let ChainConfigs {
         eth,
         sol,
@@ -898,66 +884,75 @@ async fn spawn_indexers(
         "spawning chain indexers"
     );
 
+    // Every source chain's stream admits bidirectional requests targeting Ethereum.
+    // Admission must match across nodes, so they all need the same Ethereum network.
+    let ethereum_chain_id = eth.as_ref().map(EthConfig::chain_id);
+    if ethereum_chain_id.is_none() {
+        tracing::warn!(
+            "ethereum not configured: Ethereum-targeted requests are admitted without the \
+             chain id check that nodes with ethereum configured apply"
+        );
+    }
+
+    if tron.is_none() {
+        tracing::warn!(
+            "tron endpoint not configured: Tron-targeted requests are admitted and signed, \
+             but nothing watches their execution or expiry — they stay Executing until a Tron \
+             endpoint is configured"
+        );
+    }
+
     if let Some(eth_config) = eth {
         let eth_telemetry = NodeTelemetry::new(Chain::Ethereum);
-        match EthereumIndexer::new(
+        let eth_indexer = EthereumIndexer::new(
             eth_config,
             backlog.clone(),
             eth_telemetry.clone(),
             gates[Chain::Ethereum].clone(),
         )
         .await
-        {
-            Ok(eth_indexer) => {
-                tracing::info!("ethereum indexer created successfully");
-                tokio::spawn(run_supervised(
-                    eth_indexer,
-                    StreamContext::new(
-                        backlog.clone(),
-                        sign_tx.clone(),
-                        rpc_channel.clone(),
-                        contract_watcher.clone(),
-                        mesh_state.clone(),
-                        node_client.clone(),
-                        checkpoints_rx[Chain::Ethereum].clone(),
-                    ),
-                    eth_telemetry,
-                ));
-            }
-            Err(err) => {
-                tracing::error!(?err, "failed to create ethereum indexer");
-            }
-        }
+        .context("failed to create ethereum indexer")?;
+        tracing::info!("ethereum indexer created successfully");
+        tasks.spawn(run_supervised(
+            eth_indexer,
+            StreamContext::new(
+                backlog.clone(),
+                sign_tx.clone(),
+                rpc_channel.clone(),
+                contract_watcher.clone(),
+                mesh_state.clone(),
+                node_client.clone(),
+                checkpoints_rx[Chain::Ethereum].clone(),
+            )
+            .with_ethereum_chain_id(ethereum_chain_id),
+            eth_telemetry,
+        ));
     }
 
     if let Some(sol_config) = sol {
         let sol_telemetry = NodeTelemetry::new(Chain::Solana);
-        match SolanaIndexer::new(
+        let sol_indexer = SolanaIndexer::new(
             sol_config,
             backlog.clone(),
             sol_telemetry.clone(),
             gates[Chain::Solana].clone(),
-        ) {
-            Ok(sol_indexer) => {
-                tracing::info!("solana indexer created successfully");
-                tokio::spawn(run_supervised(
-                    sol_indexer,
-                    StreamContext::new(
-                        backlog.clone(),
-                        sign_tx.clone(),
-                        rpc_channel.clone(),
-                        contract_watcher.clone(),
-                        mesh_state.clone(),
-                        node_client.clone(),
-                        checkpoints_rx[Chain::Solana].clone(),
-                    ),
-                    sol_telemetry,
-                ));
-            }
-            Err(err) => {
-                tracing::error!(?err, "failed to create solana indexer");
-            }
-        }
+        )
+        .context("failed to create solana indexer")?;
+        tracing::info!("solana indexer created successfully");
+        tasks.spawn(run_supervised(
+            sol_indexer,
+            StreamContext::new(
+                backlog.clone(),
+                sign_tx.clone(),
+                rpc_channel.clone(),
+                contract_watcher.clone(),
+                mesh_state.clone(),
+                node_client.clone(),
+                checkpoints_rx[Chain::Solana].clone(),
+            )
+            .with_ethereum_chain_id(ethereum_chain_id),
+            sol_telemetry,
+        ));
     }
 
     if let Some(hydration_config) = hydration {
@@ -967,7 +962,7 @@ async fn spawn_indexers(
         let hydration_indexer =
             HydrationIndexer::new(hydration_config, hydration_telemetry.clone());
         tracing::info!("hydration indexer created successfully");
-        tokio::spawn(run_supervised(
+        tasks.spawn(run_supervised(
             hydration_indexer,
             StreamContext::new(
                 backlog.clone(),
@@ -977,84 +972,163 @@ async fn spawn_indexers(
                 mesh_state.clone(),
                 node_client.clone(),
                 checkpoints_rx[Chain::Hydration].clone(),
-            ),
+            )
+            .with_ethereum_chain_id(ethereum_chain_id),
             hydration_telemetry,
         ));
     }
 
     if let Some(canton_config) = canton {
         let canton_telemetry = NodeTelemetry::new(Chain::Canton);
-        match CantonIndexer::new(
+        let canton_indexer = CantonIndexer::new(
             canton_config,
             backlog.clone(),
             canton_telemetry.clone(),
             gates[Chain::Canton].clone(),
         )
         .await
-        {
-            Ok(canton_indexer) => {
-                tracing::info!("canton indexer created successfully");
-                tokio::spawn(run_supervised(
-                    canton_indexer,
-                    StreamContext::new(
-                        backlog.clone(),
-                        sign_tx.clone(),
-                        rpc_channel.clone(),
-                        contract_watcher.clone(),
-                        mesh_state.clone(),
-                        node_client.clone(),
-                        checkpoints_rx[Chain::Canton].clone(),
-                    ),
-                    canton_telemetry,
-                ));
-            }
-            Err(err) => {
-                tracing::error!(?err, "failed to create canton indexer");
-            }
-        }
+        .context("failed to create canton indexer")?;
+        tracing::info!("canton indexer created successfully");
+        tasks.spawn(run_supervised(
+            canton_indexer,
+            StreamContext::new(
+                backlog.clone(),
+                sign_tx.clone(),
+                rpc_channel.clone(),
+                contract_watcher.clone(),
+                mesh_state.clone(),
+                node_client.clone(),
+                checkpoints_rx[Chain::Canton].clone(),
+            )
+            .with_ethereum_chain_id(ethereum_chain_id),
+            canton_telemetry,
+        ));
     }
 
     if let Some(midnight_config) = midnight {
         let midnight_telemetry = NodeTelemetry::new(Chain::Midnight);
         // TODO: read-side gating - this indexer's reads don't share the
         // chain's cooldown gate yet
-        match MidnightIndexer::new(midnight_config, backlog.clone(), midnight_telemetry.clone())
+        // Waits for the network public key inside the task, so a stop signal or
+        // a failed core task during the wait still ends the node.
+        let mut contract_watcher = contract_watcher.clone();
+        let ctx = StreamContext::new(
+            backlog.clone(),
+            sign_tx.clone(),
+            rpc_channel.clone(),
+            contract_watcher.clone(),
+            mesh_state.clone(),
+            node_client.clone(),
+            checkpoints_rx[Chain::Midnight].clone(),
+        )
+        .with_ethereum_chain_id(ethereum_chain_id);
+        let backlog = backlog.clone();
+        tasks.spawn(async move {
+            tracing::info!("Midnight indexer waiting for the network public key");
+            // Fails only when the contract watcher is gone, and then the process
+            // is already ending.
+            let root_pk = contract_watcher
+                .wait_public_key()
+                .await
+                .context("midnight indexer: no network public key")?;
+            let midnight_indexer = MidnightIndexer::new(
+                midnight_config,
+                backlog,
+                midnight_telemetry.clone(),
+                root_pk,
+            )
             .await
-        {
-            Ok(midnight_indexer) => {
-                tracing::info!("midnight indexer created successfully");
-                tokio::spawn(run_supervised(
-                    midnight_indexer,
-                    StreamContext::new(
-                        backlog,
-                        sign_tx,
-                        rpc_channel,
-                        contract_watcher,
-                        mesh_state,
-                        node_client,
-                        checkpoints_rx[Chain::Midnight].clone(),
-                    ),
-                    midnight_telemetry,
-                ));
-            }
-            Err(err) => {
-                tracing::error!(?err, "failed to create midnight indexer");
-            }
-        }
+            .context("failed to create midnight indexer")?;
+            tracing::info!("midnight indexer created successfully");
+            run_supervised(midnight_indexer, ctx, midnight_telemetry).await
+        });
     }
+
+    // Target-only: no source indexer — the watcher serves every source
+    // chain's Tron-targeted requests.
+    if let Some(tron_config) = tron {
+        let tron_telemetry = NodeTelemetry::new(Chain::Tron);
+        let watcher = TronWatcher::new(tron_config, backlog.clone(), tron_telemetry.clone())
+            .context("failed to create tron watcher")?;
+        tracing::info!("tron execution watcher created successfully");
+        tasks.spawn(run_supervised(
+            watcher,
+            StreamContext::new(
+                backlog.clone(),
+                sign_tx.clone(),
+                rpc_channel.clone(),
+                contract_watcher.clone(),
+                mesh_state.clone(),
+                node_client.clone(),
+                checkpoints_rx[Chain::Tron].clone(),
+            )
+            .with_ethereum_chain_id(ethereum_chain_id),
+            tron_telemetry,
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use mpc_chain_integration_core::utils::test::make_publish_action;
-    use mpc_chain_integration_core::NoopPublisherTelemetry;
     use mpc_primitives::{SignId, SignKind};
     use std::str::FromStr;
     use std::time::Duration;
 
     use super::*;
 
-    const ETH_CONTRACT_ADDRESS: &str = "f8bdC0612361a1E49a8E01423d4C0cFc5dF4791A";
+    /// No error echoes what the operator typed: every flag meets every way a
+    /// secret can land in the input.
+    #[test]
+    fn no_error_echoes_the_input() {
+        use clap::CommandFactory as _;
+        let parse = |input: &[String]| {
+            let args = ["mpc-node", "start"].map(String::from).into_iter();
+            Cli::try_parse_redacted(args.chain(input.iter().cloned()))
+                .unwrap_err()
+                .to_string()
+        };
+        let command = Cli::command();
+        let flags = command.find_subcommand("start").unwrap().get_arguments();
+        for flag in flags.map(|arg| format!("--{}", arg.get_long().unwrap())) {
+            for input in [
+                vec![format!("{flag}=s3cr3t")],      // bad value, inline
+                vec![flag.clone(), "s3cr3t".into()], // bad value, separate
+                vec![format!("{flag}s3cr3t")],       // glued to the flag
+                vec![flag.clone(), "s3cr3t".into(), "s3cr3t".into()], // stray after the value
+            ] {
+                let error = parse(&input);
+                assert!(!error.contains("s3cr3t"), "{input:?} echoed: {error}");
+            }
+        }
+
+        // Outside the loop: a secret in the subcommand's place, before `start`.
+        let subcommand = Cli::try_parse_redacted(["mpc-node", "s3cr3t"])
+            .unwrap_err()
+            .to_string();
+        assert!(!subcommand.contains("s3cr3t"), "{subcommand}");
+
+        // Operators set env vars, so a rejected value names the one to fix.
+        let named = parse(&["--near-rpc=s3cr3t".into()]);
+        assert!(named.contains("MPC_NEAR_RPC (--near-rpc)"), "{named}");
+    }
+
+    #[test]
+    fn peer_address_must_be_http_or_https_with_a_host() {
+        for ok in ["http://10.0.0.1:3000", "https://node.example.org"] {
+            assert!(parse_peer_address(ok).is_ok(), "{ok} must be accepted");
+        }
+        for bad in [
+            "node.example.org:8080",
+            "localhost:3000",
+            "ws://node.example.org",
+            "file:///tmp/node",
+            "node.example.org",
+        ] {
+            assert!(parse_peer_address(bad).is_err(), "{bad} must be rejected");
+        }
+    }
 
     /// A listener that never replies stands in for a stalled Redis.
     #[tokio::test]
@@ -1074,202 +1148,17 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_digest_staking() {
-        let mpc_contract_id = AccountId::from_str("v1.sig-net.near").unwrap();
-        let account_id = AccountId::from_str("sig.stakin.near").unwrap();
-        let account_pk =
-            PublicKey::from_str("ed25519:B1vW5HddtmV526QjtwHwBDupKH9A7mgsVttYvE6sZP59").unwrap();
-        let cipher_pk = "395418b55b73977f16dfa0fe8a1c488fb6935451deaaa20c51cb5f542ec9c118";
-        let sign_pk =
-            PublicKey::from_str("ed25519:7dqefRWCwt4XsxnMpgj4pBSXWuzoFjEVQadarZ7GydpU").unwrap();
-        let _eth_account_pk = "04f92c9a55c73db4f916fa017b747a3b3bc14b100f4b40e1d67bbf913c6795563b101b8554db46f4206a3a8640e5baff935b7a4df30fe2719e59c1bb9cd7c97ba9";
-
-        let digest = calculate_digest(
-            mpc_contract_id,
-            account_id,
-            account_pk,
-            cipher_pk.to_string(),
-            sign_pk,
-            ETH_CONTRACT_ADDRESS.to_string(),
-        );
-
-        assert_eq!(digest, -1051225187120159684);
-    }
-
-    #[test]
-    fn test_digest_taxistake() {
-        let mpc_contract_id = AccountId::from_str("v1.sig-net.near").unwrap();
-        let account_id = AccountId::from_str("taxistake-sig.near").unwrap();
-        let account_pk =
-            PublicKey::from_str("ed25519:5gEt9Aqo1hXwK3Ym6Fqw2zxgzHCEyMyZbJMH1C6irBam").unwrap();
-        let cipher_pk = "472a3f1d0c34b89f45d589949e5f907cc10b1ffdced34012a9b0a7244ae01124";
-        let sign_pk =
-            PublicKey::from_str("ed25519:7LY7SA8g2HamrdBNnQwadrjb2wfVRy5cbVaY8wyurxk8").unwrap();
-        let _eth_account_pk = "0452ef3e306b9aae7f8a9e5fe15824b367e34315e26be7bcafc676182a9c45d95714d3e7c8a29a2e3a12adcdc430ad56956e6fc0a8a0c1bd25a195dd2973d47714";
-
-        let digest = calculate_digest(
-            mpc_contract_id,
-            account_id,
-            account_pk,
-            cipher_pk.to_string(),
-            sign_pk,
-            ETH_CONTRACT_ADDRESS.to_string(),
-        );
-
-        assert_eq!(digest, -4992003418219576839);
-    }
-
-    #[test]
-    fn test_digest_staking_for_all() {
-        let mpc_contract_id = AccountId::from_str("v1.sig-net.near").unwrap();
-        let account_id = AccountId::from_str("sig-mpc-staking4all-01.near").unwrap();
-        let account_pk =
-            PublicKey::from_str("ed25519:9FfqwhurgHnRqbfQoekYZbqWUSiPokS7vF5akysmbSmL").unwrap();
-        let cipher_pk = "7983950637824082c17d45fb4d84111b872f537223bb26a54521b5ddf84b7417";
-        let sign_pk =
-            PublicKey::from_str("ed25519:2NxYvtbMRncbtEoX7963FweMUJ6TaWjyBeKxeCi1EMnd").unwrap();
-        let _eth_account_pk = "046cb1cbe5bab2e5b0de7068bbcd976a8370c54f0583ca26e8308994690dedb8933e8729b39a31cf72bab122165cfaafc2daf12a55c9b6b2e6dd61a4667725fd35";
-
-        let digest = calculate_digest(
-            mpc_contract_id,
-            account_id,
-            account_pk,
-            cipher_pk.to_string(),
-            sign_pk,
-            ETH_CONTRACT_ADDRESS.to_string(),
-        );
-
-        assert_eq!(digest, -930268115875971858);
-    }
-
-    #[test]
-    fn test_digest_lifted() {
-        let mpc_contract_id = AccountId::from_str("v1.sig-net.near").unwrap();
-        let account_id = AccountId::from_str("lifted-sig.near").unwrap();
-        let account_pk =
-            PublicKey::from_str("ed25519:Ds7DppCJ84399g7oskRRTNbBLsm61CJJn7j5837JikiT").unwrap();
-        let cipher_pk = "196e53521c601145b5280c06468393ce41fd307276b574471401fad3d449480b";
-        let sign_pk =
-            PublicKey::from_str("ed25519:48AtaVmpT7r2Bo6AV6nRU27ioNe7NWwfYnZFgm8mU8T5").unwrap();
-        let _eth_account_pk = "042c56cb509a7a1381155b25fc2bc2ce97930e0aad1508485189235e63838fcf01b0b0cc678d52ca6911bf24344e5ab223a07750c4bfd5f3cf8c3c8224eaece3fc";
-
-        let digest = calculate_digest(
-            mpc_contract_id,
-            account_id,
-            account_pk,
-            cipher_pk.to_string(),
-            sign_pk,
-            ETH_CONTRACT_ADDRESS.to_string(),
-        );
-
-        // Grafan value: -1056529302944347500
-        assert_eq!(digest, -1056529302944347488);
-    }
-
-    #[test]
-    fn test_digest_piertwo() {
-        let mpc_contract_id = AccountId::from_str("v1.sig-net.near").unwrap();
-        let account_id = AccountId::from_str("sig-piertwo.near").unwrap();
-        let account_pk =
-            PublicKey::from_str("ed25519:4w4vtSWsRwCdRhnwDG6YqXM5SfYn4d8AcN5d3qnPnjQD").unwrap();
-        let cipher_pk = "65171d682c0ed98eeb0797940c752ae8fafb9c9939533f42f0dbc9f7201ad409";
-        let sign_pk =
-            PublicKey::from_str("ed25519:nATG1EmJTTeEo9m7BGpcd49Zx3BxpaqazGohYSyQTt4").unwrap();
-        let _eth_account_pk = "04f92c9a55c73db4f916fa017b747a3b3bc14b100f4b40e1d67bbf913c6795563b101b8554db46f4206a3a8640e5baff935b7a4df30fe2719e59c1bb9cd7c97ba9";
-
-        let digest = calculate_digest(
-            mpc_contract_id,
-            account_id,
-            account_pk,
-            cipher_pk.to_string(),
-            sign_pk,
-            ETH_CONTRACT_ADDRESS.to_string(),
-        );
-
-        assert_eq!(digest, 695826193095166746);
-    }
-
-    #[test]
-    fn test_digest_natsai() {
-        let mpc_contract_id = AccountId::from_str("v1.sig-net.near").unwrap();
-        let account_id = AccountId::from_str("natsai-bp.near").unwrap();
-        let account_pk =
-            PublicKey::from_str("ed25519:5eRSDpU4qyULkCsMVT2ghLhwR6VQb68K7pBAZFZDT9U6").unwrap();
-        let cipher_pk = "f11d23a6dff8823853e1777041d1bf60d185b63564536e9a5a7c94110cc1563a";
-        let sign_pk =
-            PublicKey::from_str("ed25519:9v1215AcbHrWhC3muPvUu5EPY93o7AYcSvcxMUeRYDx6").unwrap();
-        let _eth_account_pk = "04ced0dc6ededb6a19aaa42c46544ff81fbb984673ea4285b8b4e147a807292a43d82595588ae9c86382bac2921a8b5006c43bc993ce0f02a268dbda477b9f0b8c";
-
-        let digest = calculate_digest(
-            mpc_contract_id,
-            account_id,
-            account_pk,
-            cipher_pk.to_string(),
-            sign_pk,
-            ETH_CONTRACT_ADDRESS.to_string(),
-        );
-
-        assert_eq!(digest, -8209029844787147492);
-    }
-
-    #[test]
-    fn test_digest_fountain_labs() {
-        let mpc_contract_id = AccountId::from_str("v1.sig-net.near").unwrap();
-        let account_id = AccountId::from_str("node.sig-net.near").unwrap();
-        let account_pk =
-            PublicKey::from_str("ed25519:JQJSjyqF35rHsGrNLSEUVYNdeSANiZNDNNjheN2kszq").unwrap();
-        let cipher_pk = "756111207e38f2518bfdcbda746eafa0ec3a340baeecc02084a75f2240f48651";
-        let sign_pk =
-            PublicKey::from_str("ed25519:6jGbVGEGPqz8QZD5qKJYYxGZCV56tgcRKD9pM55Uey7A").unwrap();
-        let _eth_account_pk = "04ced0dc6ededb6a19aaa42c46544ff81fbb984673ea4285b8b4e147a807292a43d82595588ae9c86382bac2921a8b5006c43bc993ce0f02a268dbda477b9f0b8c";
-
-        let digest = calculate_digest(
-            mpc_contract_id,
-            account_id,
-            account_pk,
-            cipher_pk.to_string(),
-            sign_pk,
-            ETH_CONTRACT_ADDRESS.to_string(),
-        );
-        assert_eq!(digest, -4889179067099199685);
-    }
-
-    #[test]
-    fn test_digest_blacksand() {
-        let mpc_contract_id = AccountId::from_str("v1.sig-net.near").unwrap();
-        let account_id = AccountId::from_str("blacksandtech-sig.near").unwrap();
-        let account_pk =
-            PublicKey::from_str("ed25519:67w2feimgcV21ZgEegvGhHTxyd9DR4yRxguqP8MctyJE").unwrap();
-        let cipher_pk = "231f6ddc22796c076dcc11a90b92c23e54071b1673abd2743fb84d5a1fc53f61";
-        let sign_pk =
-            PublicKey::from_str("ed25519:D5Pccv8i88AuDGXuXQoNSVGAZLfuHCZw2TQmoZxi2tEM").unwrap();
-
-        let digest = calculate_digest(
-            mpc_contract_id,
-            account_id,
-            account_pk,
-            cipher_pk.to_string(),
-            sign_pk,
-            ETH_CONTRACT_ADDRESS.to_string(),
-        );
-
-        assert_eq!(digest, -6950551088322443092);
-    }
-
     /// The `MPC_MIDNIGHT_*` env vars feed the same clap fields as the
-    /// `--midnight-*` flags, so a set variable can silently backfill a flag
-    /// `into_str_args` dropped and turn the round-trip test green. Those
-    /// fixtures use the values a developer running a local stack exports,
-    /// which makes that the likely case rather than a remote one.
+    /// `--midnight-*` flags, so a set variable can silently backfill a flag a
+    /// test left out. Those fixtures use the values a developer running a
+    /// local stack exports, which makes that the likely case rather than a
+    /// remote one.
     pub(super) fn assert_midnight_env_unset() {
         for var in [
             "MPC_MIDNIGHT_NODE_URL",
             "MPC_MIDNIGHT_CENTRAL_ADDRESS",
+            "MPC_MIDNIGHT_RESPONDER_ADDRESS",
             "MPC_MIDNIGHT_FUNDING_SEED",
-            "MPC_MIDNIGHT_INTENT_GEN_COMMAND",
-            "MPC_MIDNIGHT_PROOF_SERVER_URL",
-            "MPC_MIDNIGHT_INDEXER_URL",
             "MPC_MIDNIGHT_INDEXER_WS_URL",
             "MPC_MIDNIGHT_OUTPUT_STORAGE_BUCKET",
             "MPC_MIDNIGHT_OUTPUT_STORAGE_PREFIX",
@@ -1278,89 +1167,6 @@ mod tests {
             assert!(
                 std::env::var_os(var).is_none(),
                 "{var} is set: these tests require an unpolluted environment"
-            );
-        }
-    }
-
-    /// Dockerized test nodes receive their whole configuration as CLI strings
-    /// rebuilt through `Cli::into_str_args`. If Midnight were flattened into
-    /// `Cli::Start` but missing from that extension, its config would be
-    /// accepted on the command line and then silently dropped on
-    /// reconstruction.
-    #[test]
-    fn into_str_args_forwards_midnight() {
-        assert_midnight_env_unset();
-
-        let account_sk = SecretKey::from_seed(near_crypto::KeyType::ED25519, "test").to_string();
-        let sign_sk = SecretKey::from_seed(near_crypto::KeyType::ED25519, "sign").to_string();
-        let central_address = "ab".repeat(32);
-        let funding_seed = "0f".repeat(32);
-        let intent_gen_command = r#"["midnight-publisher"]"#;
-        let argv = [
-            "mpc-node",
-            "start",
-            "--account-id",
-            "test.near",
-            "--account-sk",
-            &account_sk,
-            "--sign-sk",
-            &sign_sk,
-            "--cipher-sk",
-            "cipher",
-            "--env",
-            "unit-tests",
-            "--gcp-project-id",
-            "project",
-            "--redis-url",
-            "redis://127.0.0.1:6379",
-            "--midnight-node-url",
-            "http://127.0.0.1:9944",
-            "--midnight-central-address",
-            &central_address,
-            "--midnight-funding-seed",
-            &funding_seed,
-            "--midnight-intent-gen-command",
-            intent_gen_command,
-            "--midnight-proof-server-url",
-            "http://127.0.0.1:6300",
-            "--midnight-indexer-url",
-            "http://127.0.0.1:8088/api/v3/graphql",
-            "--midnight-indexer-ws-url",
-            "ws://127.0.0.1:8088/api/v3/graphql/ws",
-            "--midnight-output-storage-bucket",
-            "midnight-results",
-            "--midnight-output-storage-prefix",
-            "staging/testnet",
-            "--midnight-output-storage-timeout-secs",
-            "47",
-        ];
-        let out = Cli::try_parse_from(argv).unwrap().into_str_args();
-
-        for expected in [
-            "--midnight-node-url",
-            "http://127.0.0.1:9944",
-            "--midnight-central-address",
-            central_address.as_str(),
-            "--midnight-funding-seed",
-            funding_seed.as_str(),
-            "--midnight-intent-gen-command",
-            intent_gen_command,
-            "--midnight-proof-server-url",
-            "http://127.0.0.1:6300",
-            "--midnight-indexer-url",
-            "http://127.0.0.1:8088/api/v3/graphql",
-            "--midnight-indexer-ws-url",
-            "ws://127.0.0.1:8088/api/v3/graphql/ws",
-            "--midnight-output-storage-bucket",
-            "midnight-results",
-            "--midnight-output-storage-prefix",
-            "staging/testnet",
-            "--midnight-output-storage-timeout-secs",
-            "47",
-        ] {
-            assert!(
-                out.contains(&expected.to_string()),
-                "into_str_args dropped {expected}"
             );
         }
     }
@@ -1374,11 +1180,12 @@ mod tests {
         assert_midnight_env_unset();
 
         let chains = ChainConfigs::from_args(
-            EthArgs::from_config(None),
-            SolArgs::from_config(None),
-            HydrationArgs::from_config(None),
-            CantonArgs::from_config(None),
-            MidnightArgs::from_config(None),
+            EthArgs::parse_from(["test"]),
+            SolArgs::parse_from(["test"]),
+            HydrationArgs::parse_from(["test"]),
+            CantonArgs::parse_from(["test"]),
+            MidnightArgs::parse_from(["test"]),
+            TronArgs::parse_from(["test"]),
         )
         .unwrap();
 
@@ -1386,10 +1193,15 @@ mod tests {
             chains.midnight.is_none(),
             "empty MidnightArgs must not produce a MidnightConfig"
         );
+        assert!(
+            chains.tron.is_none(),
+            "empty TronArgs must not produce a TronConfig"
+        );
 
         let publishers = ChainStack::new(chains)
             .publishers(undialed_near_client(), Backlog::new())
-            .await;
+            .await
+            .unwrap();
 
         assert!(
             !publishers.contains_key(&Chain::Midnight),
@@ -1403,6 +1215,54 @@ mod tests {
         assert!(publishers.contains_key(&Chain::NEAR));
     }
 
+    /// A configured Tron must survive `from_args` into `ChainConfigs``
+    #[test]
+    fn from_args_routes_a_configured_tron() {
+        let chains = ChainConfigs::from_args(
+            EthArgs::parse_from(["test"]),
+            SolArgs::parse_from(["test"]),
+            HydrationArgs::parse_from(["test"]),
+            CantonArgs::parse_from(["test"]),
+            MidnightArgs::parse_from(["test"]),
+            TronArgs::parse_from(["test", "--tron-endpoint", "https://api.trongrid.io"]),
+        )
+        .unwrap();
+
+        let tron = chains
+            .tron
+            .expect("configured TronArgs must produce a TronConfig");
+        assert_eq!(tron.endpoint.as_str(), "https://api.trongrid.io/");
+    }
+
+    /// Hydration's RPC is dialed on first publish: a node whose Hydration
+    /// endpoint is down still starts, and a bad signer still fails startup.
+    #[tokio::test]
+    async fn hydration_publisher_registers_while_its_rpc_is_unreachable() {
+        let chains = |signer_uri: &str| ChainConfigs {
+            eth: None,
+            sol: None,
+            hydration: Some(HydrationConfig {
+                // Nothing listens on port 1.
+                rpc_ws_url: "ws://127.0.0.1:1".parse().unwrap(),
+                signer_uri: signer_uri.into(),
+            }),
+            canton: None,
+            midnight: None,
+            tron: None,
+        };
+
+        let publishers = ChainStack::new(chains("//Alice"))
+            .publishers(undialed_near_client(), Backlog::new())
+            .await
+            .unwrap();
+        assert!(publishers.contains_key(&Chain::Hydration));
+
+        assert!(ChainStack::new(chains("not a signer uri"))
+            .publishers(undialed_near_client(), Backlog::new())
+            .await
+            .is_err());
+    }
+
     /// A Midnight node that is unreachable at startup must not leave the node without a
     /// Midnight publisher for its lifetime: the publisher registers and connects later.
     #[tokio::test]
@@ -1414,13 +1274,12 @@ mod tests {
             canton: None,
             midnight: Some(MidnightConfig {
                 // Nothing listens on port 1, so the startup dial is refused.
-                node_url: "http://127.0.0.1:1".to_string(),
+                node_url: "http://127.0.0.1:1".parse().unwrap(),
                 central_address: mpc_chain_midnight::MidnightAddress::from_bytes([0xab; 32]),
+                responder_address: mpc_chain_midnight::MidnightAddress::from_bytes([0xcd; 32]),
                 publisher: mpc_chain_midnight::PublisherConfig {
                     funding_seed: "ab".repeat(32).into(),
-                    proof_server_url: "http://127.0.0.1:1".to_string(),
-                    indexer_url: "http://127.0.0.1:1/api/v3/graphql".to_string(),
-                    indexer_ws_url: "ws://127.0.0.1:1/api/v3/graphql/ws".to_string(),
+                    indexer_ws_url: "ws://127.0.0.1:1/api/v3/graphql/ws".parse().unwrap(),
                     ..Default::default()
                 },
                 rpc: Default::default(),
@@ -1431,7 +1290,8 @@ mod tests {
 
         let publishers = ChainStack::new(chains)
             .publishers(undialed_near_client(), Backlog::new())
-            .await;
+            .await
+            .unwrap();
 
         assert!(publishers.contains_key(&Chain::Midnight));
     }
@@ -1459,31 +1319,11 @@ mod tests {
     fn sol_config_with_bogus_rpc() -> SolConfig {
         SolConfig {
             account_sk: mpc_chain_solana::Keypair::new().to_base58_string().into(),
-            rpc_http_url: "http://127.0.0.1:1".into(),
-            program_address: mpc_chain_solana::Pubkey::new_unique().to_string(),
+            rpc_http_url: "http://127.0.0.1:1".parse().unwrap(),
+            program_address: mpc_chain_solana::Pubkey::new_unique(),
             indexer: Default::default(),
         }
     }
-
-    fn near_client_stub() -> NearClient {
-        use near_crypto::{InMemorySigner, KeyType, SecretKey};
-        let account: AccountId = "test.near".parse().unwrap();
-        let signer = match InMemorySigner::from_secret_key(
-            account.clone(),
-            SecretKey::from_seed(KeyType::ED25519, "wiring-test"),
-        ) {
-            near_crypto::Signer::InMemory(s) => s,
-            _ => unreachable!(),
-        };
-        NearClient::new(
-            near_fetch::Client::new("http://127.0.0.1:1"),
-            &account,
-            signer,
-            NearRpcGates::new(SharedBackoff::new()),
-            Arc::new(NoopPublisherTelemetry),
-        )
-    }
-
     #[tokio::test]
     async fn solana_publisher_shares_the_stacks_cooldown_gate() {
         let stack = ChainStack::new(ChainConfigs {
@@ -1495,7 +1335,10 @@ mod tests {
             tron: None,
         });
 
-        let publishers = stack.publishers(near_client_stub(), Backlog::new()).await;
+        let publishers = stack
+            .publishers(undialed_near_client(), Backlog::new())
+            .await
+            .unwrap();
         let publisher = publishers
             .get(&Chain::Solana)
             .expect("solana publisher must be wired when configured");
@@ -1525,179 +1368,124 @@ mod tests {
     }
 
     #[test]
-    fn secrets_redacted_in_cli_debug() {
-        let dummy_account_sk = "ed25519:5M3dD6YxZz8PqS9aW4uL2kR7tY1eX3mN6bV5cT8gH0jF";
-        let dummy_cipher_sk = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
-        let dummy_sign_sk = "ed25519:3kR7tY1eX3mN6bV5cT8gH0jF5M3dD6YxZz8PqS9aW4uL";
-        let dummy_sol_sk = "dummy_solana_secret_key_string_value";
-        let dummy_eth_sk = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
-        let dummy_hydration_uri = "//Alice/dummy/hydration/uri";
-        let dummy_canton_secret = "super_secret_canton_oidc_client_secret";
-        let dummy_midnight_seed =
-            "000102030405060708090a0b0c0d0e0f000102030405060708090a0b0c0d0e0f";
-        let dummy_near_rpc = "https://rpc.example.com/provider-api-key";
-        let dummy_redis_url = "redis://:redis-password@127.0.0.1:6379";
+    fn hide_env_values_configured_on_secret_arguments() {
+        use clap::CommandFactory;
 
-        let cli = Cli::Start {
-            near_rpc: dummy_near_rpc.into(),
-            mpc_contract_id: "dev.near".parse().unwrap(),
-            account_id: "test.near".parse().unwrap(),
-            env: "test".to_string(),
-            account_sk: dummy_account_sk.into(),
-            web_port: 3000,
-            cipher_sk: dummy_cipher_sk.into(),
-            sign_sk: dummy_sign_sk.into(),
-            eth: EthArgs {
-                eth_account_sk: Some(dummy_eth_sk.into()),
-                eth_contract_address: None,
-                eth_execution_rpc_http_url: None,
-                eth_network: "sepolia".to_string(),
-                eth_refresh_finalized_interval: 10000,
-                eth_optimistic_requests: false,
-            },
-            sol: SolArgs {
-                sol_account_sk: Some(dummy_sol_sk.into()),
-                sol_rpc_http_url: None,
-                sol_program_address: None,
-                sol_poll_interval_ms: 1000,
-            },
-            hydration: HydrationArgs {
-                rpc_ws_url: None,
-                signer_uri: Some(dummy_hydration_uri.into()),
-            },
-            canton: CantonArgs {
-                canton_json_api_url: None,
-                canton_json_api_ws_url: None,
-                canton_ledger_api_user: None,
-                canton_oidc_token_url: None,
-                canton_oidc_client_id: None,
-                canton_oidc_client_secret: Some(dummy_canton_secret.into()),
-                canton_oidc_audience: None,
-                canton_oidc_scope: None,
-                canton_party_id: None,
-                canton_signer_contract_id: None,
-                canton_signer_template_id: None,
-            },
-            midnight: MidnightArgs {
-                midnight_node_url: None,
-                midnight_central_address: None,
-                midnight_funding_seed: Some(dummy_midnight_seed.into()),
-                midnight_intent_gen_command: None,
-                midnight_proof_server_url: None,
-                midnight_indexer_url: None,
-                midnight_indexer_ws_url: None,
-                midnight_output_storage_bucket: None,
-                midnight_output_storage_prefix: None,
-                midnight_output_storage_timeout_secs: None,
-                #[cfg(feature = "test-feature")]
-                midnight_output_storage_emulator_endpoint: None,
-            },
-            my_address: None,
-            storage_options: storage::Options {
-                gcp_project_id: "test".to_string(),
-                sk_share_secret_id: None,
-                sk_share_local_path: None,
-                redis_url: dummy_redis_url.into(),
-            },
-            log_options: logs::Options::default(),
-            override_config: None,
-            mesh_options: mesh::Options {
-                ping_interval: 1000,
-            },
-            message_options: node_client::Options {
-                timeout: 1000,
-                state_timeout: 1000,
-                sync_timeout: 60000,
-            },
-        };
-        let debug_str = format!("{cli:?}");
+        let cmd = Cli::command();
+        let start = cmd
+            .find_subcommand("start")
+            .expect("start subcommand must exist");
 
-        for secret in [
-            dummy_account_sk,
-            dummy_cipher_sk,
-            dummy_sign_sk,
-            dummy_sol_sk,
-            dummy_eth_sk,
-            dummy_hydration_uri,
-            dummy_canton_secret,
-            dummy_midnight_seed,
-            dummy_near_rpc,
-            dummy_redis_url,
-        ] {
+        let sensitive_arg_ids = [
+            // Secret keys & credentials
+            "account_sk",
+            "cipher_sk",
+            "sign_sk",
+            "redis_url",
+            "sol_account_sk",
+            "eth_account_sk",
+            "signer_uri",
+            "canton_oidc_client_secret",
+            "midnight_funding_seed",
+            "near_rpc",
+            "otlp_endpoint",
+            "eth_execution_rpc_http_url",
+            "sol_rpc_http_url",
+            "rpc_ws_url",
+            "canton_json_api_url",
+            "canton_json_api_ws_url",
+            "canton_oidc_token_url",
+            "midnight_node_url",
+            "midnight_indexer_ws_url",
+            "tron_endpoint",
+            "tron_api_key",
+        ];
+
+        for arg_id in sensitive_arg_ids {
+            let arg = start
+                .get_arguments()
+                .find(|a| a.get_id() == arg_id)
+                .unwrap_or_else(|| panic!("arg {arg_id} not found"));
             assert!(
-                !debug_str.contains(secret),
-                "debug representation leaked secret: {secret}"
+                arg.is_hide_env_values_set(),
+                "arg {arg_id} must have hide_env_values set"
             );
         }
-        assert!(debug_str.contains("[REDACTED]"));
     }
 
-    /// The CLI boundary is not enough: the chain configs are carried into the
-    /// runtime for the node's lifetime, so they must hold secrets in
-    /// `SecretString` rather than plain `String` fields whose redaction depends
-    /// on a hand-written `Debug`.
+    /// The CLI boundary is not enough: the chain configs live for the node's
+    /// lifetime, so they must hold secrets in `SecretString` rather than a plain
+    /// `String` whose redaction depends on a hand-written `Debug`. Returning
+    /// one field to `String` fails to compile the type assertions below.
     #[test]
     fn chain_configs_carry_secrets_as_secret_strings() {
         let sol_sk = "dummy_solana_payer_secret";
-        let sol = SolArgs {
-            sol_account_sk: Some(sol_sk.into()),
-            sol_rpc_http_url: Some("http://127.0.0.1:8899".to_string()),
-            sol_program_address: Some("11111111111111111111111111111111".to_string()),
-            sol_poll_interval_ms: 1000,
-        }
-        .into_config()
-        .expect("every Solana field is set");
+        let sol = SolConfig {
+            account_sk: sol_sk.into(),
+            rpc_http_url: "http://127.0.0.1:8899".parse().unwrap(),
+            program_address: "11111111111111111111111111111111".parse().unwrap(),
+            indexer: Default::default(),
+        };
         let _: &SecretString = &sol.account_sk;
         assert!(!format!("{sol:?}").contains(sol_sk));
 
         let hydration_uri = "//Alice/dummy/hydration/uri";
-        let hydration = HydrationArgs {
-            rpc_ws_url: Some("ws://127.0.0.1:8000".to_string()),
-            signer_uri: Some(hydration_uri.into()),
-        }
-        .into_config()
-        .expect("every Hydration field is set");
+        let hydration = HydrationConfig {
+            rpc_ws_url: "ws://127.0.0.1:8000".parse().unwrap(),
+            signer_uri: hydration_uri.into(),
+        };
         let _: &SecretString = &hydration.signer_uri;
         assert!(!format!("{hydration:?}").contains(hydration_uri));
 
         let canton_secret = "dummy_canton_oidc_client_secret";
-        let canton = CantonArgs {
-            canton_json_api_url: Some("http://127.0.0.1:7575".to_string()),
-            canton_json_api_ws_url: Some("ws://127.0.0.1:7575".to_string()),
-            canton_ledger_api_user: Some("ledger-user".to_string()),
-            canton_oidc_token_url: Some("http://127.0.0.1:7575/token".to_string()),
-            canton_oidc_client_id: Some("client-id".to_string()),
-            canton_oidc_client_secret: Some(canton_secret.into()),
-            canton_oidc_audience: Some("audience".to_string()),
-            canton_oidc_scope: None,
-            canton_party_id: Some("party".to_string()),
-            canton_signer_contract_id: Some("contract".to_string()),
-            canton_signer_template_id: Some("template".to_string()),
-        }
-        .into_config()
-        .expect("every Canton field is set");
+        let canton = CantonConfig {
+            json_api_url: "http://127.0.0.1:7575".parse().unwrap(),
+            json_api_ws_url: "ws://127.0.0.1:7575".parse().unwrap(),
+            auth: mpc_chain_canton::CantonAuthConfig {
+                token_url: "http://127.0.0.1:7575/token".parse().unwrap(),
+                client_id: "client-id".to_string(),
+                client_secret: canton_secret.into(),
+                audience: "audience".to_string(),
+                scope: None,
+            },
+            ledger_api_user: "ledger-user".to_string(),
+            party_id: "party".to_string(),
+            signer_contract_id: "contract".to_string(),
+            signer_template_id: "template".to_string(),
+        };
         let _: &SecretString = &canton.auth.client_secret;
         assert!(!format!("{canton:?}").contains(canton_secret));
 
         let midnight_seed = "000102030405060708090a0b0c0d0e0f000102030405060708090a0b0c0d0e0f";
-        let midnight = MidnightArgs {
-            midnight_node_url: Some("http://127.0.0.1:9944".to_string()),
-            midnight_central_address: Some("ab".repeat(32)),
-            midnight_funding_seed: Some(midnight_seed.into()),
-            midnight_intent_gen_command: None,
-            midnight_proof_server_url: Some("http://127.0.0.1:6300".to_string()),
-            midnight_indexer_url: Some("http://127.0.0.1:8088/api/v3/graphql".to_string()),
-            midnight_indexer_ws_url: Some("ws://127.0.0.1:8088/api/v3/graphql/ws".to_string()),
-            midnight_output_storage_bucket: None,
-            midnight_output_storage_prefix: None,
-            midnight_output_storage_timeout_secs: None,
-            #[cfg(feature = "test-feature")]
-            midnight_output_storage_emulator_endpoint: None,
-        }
-        .into_config()
-        .expect("the Midnight CLI arguments are well formed")
-        .expect("every Midnight field is set");
+        let midnight = MidnightConfig {
+            node_url: "http://127.0.0.1:9944".parse().unwrap(),
+            central_address: mpc_chain_midnight::MidnightAddress::from_bytes([0xab; 32]),
+            responder_address: mpc_chain_midnight::MidnightAddress::from_bytes([0xcd; 32]),
+            publisher: mpc_chain_midnight::PublisherConfig {
+                funding_seed: midnight_seed.into(),
+                ..Default::default()
+            },
+            rpc: Default::default(),
+            indexer: Default::default(),
+        };
         let _: &SecretString = &midnight.publisher.funding_seed;
         assert!(!format!("{midnight:?}").contains(midnight_seed));
+    }
+
+    #[test]
+    fn storage_options_redact_the_redis_url() {
+        let options = <storage::Options as Parser>::try_parse_from([
+            "test",
+            "--redis-url",
+            "redis://:redis-password@127.0.0.1:6379",
+            "--sk-share-secret-id",
+            "s",
+            "--gcp-project-id",
+            "p",
+        ])
+        .expect("the redis url and one key-share store are a valid set");
+
+        let _: &SecretString = &options.redis_url;
+        assert!(!format!("{options:?}").contains("redis-password"));
     }
 }

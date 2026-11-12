@@ -15,23 +15,8 @@ pub mod connection;
 mod state;
 pub use state::MeshState;
 
-#[derive(Debug, Clone, clap::Parser)]
-#[group(id = "mesh_options")]
-pub struct Options {
-    /// The interval in milliseconds between pings to participants to check their aliveness
-    /// within the MPC network. 1s is normally good enough.
-    #[arg(long, env("MPC_MESH_PING_INTERVAL"), default_value = "1000")]
-    pub ping_interval: u64,
-}
-
-impl Options {
-    pub fn into_str_args(self) -> Vec<String> {
-        vec![
-            "--ping-interval".to_string(),
-            self.ping_interval.to_string(),
-        ]
-    }
-}
+/// Interval between aliveness pings to each participant.
+pub const PING_INTERVAL: Duration = Duration::from_secs(1);
 
 /// Set of connections to participants in the network. Each participant is pinged at regular
 /// intervals to check their aliveness. The connections can be dropped and reconnected at any time.
@@ -48,11 +33,10 @@ pub struct Mesh {
 impl Mesh {
     pub fn new(
         client: &NodeClient,
-        options: Options,
+        ping_interval: Duration,
         my_id: &AccountId,
         sync_report_rx: SyncReportReceiver,
     ) -> Self {
-        let ping_interval = Duration::from_millis(options.ping_interval);
         let (state_tx, state_rx) = watch::channel(MeshState::default());
         let connections = connection::Pool::new(client, my_id, ping_interval, state_tx.clone());
         Self {
@@ -69,10 +53,13 @@ impl Mesh {
         self.state_rx.clone()
     }
 
-    pub async fn run(mut self, mut contract: ContractStateWatcher) {
+    pub async fn run(mut self, mut contract: ContractStateWatcher) -> anyhow::Result<()> {
         loop {
             tokio::select! {
-                Some(contract) = contract.next_state() => {
+                state = contract.next_state() => {
+                    let Some(contract) = state? else {
+                        continue;
+                    };
                     tracing::info!(?contract, "new contract state received");
                     let my_info = self.find_myself(&contract);
                     let previous_me = self.me.take();
@@ -135,12 +122,18 @@ impl Mesh {
     }
 }
 
-pub async fn wait_threshold_active(mesh_state: &mut watch::Receiver<MeshState>, threshold: usize) {
+pub async fn wait_threshold_active(
+    mesh_state: &mut watch::Receiver<MeshState>,
+    threshold: usize,
+) -> anyhow::Result<()> {
     loop {
         if mesh_state.borrow().active().len() >= threshold {
-            return;
+            return Ok(());
         }
-        let _ = mesh_state.changed().await;
+        mesh_state
+            .changed()
+            .await
+            .map_err(|_| anyhow::anyhow!("mesh state channel closed"))?;
     }
 }
 
@@ -232,14 +225,7 @@ mod tests {
         );
 
         let (sync_tx, sync_rx) = mpsc::channel(16);
-        let mesh = Mesh::new(
-            &servers.client(),
-            Options {
-                ping_interval: PING_INTERVAL.as_millis() as u64,
-            },
-            &node_id,
-            sync_rx,
-        );
+        let mesh = Mesh::new(&servers.client(), PING_INTERVAL, &node_id, sync_rx);
 
         let mut mesh_state = mesh.watch();
         let mesh_task = tokio::spawn(mesh.run(contract_watcher));
@@ -389,14 +375,7 @@ mod tests {
         );
 
         let (sync_tx, sync_rx) = mpsc::channel(100);
-        let mesh = Mesh::new(
-            &servers.client(),
-            Options {
-                ping_interval: PING_INTERVAL.as_millis() as u64,
-            },
-            &node_id,
-            sync_rx,
-        );
+        let mesh = Mesh::new(&servers.client(), PING_INTERVAL, &node_id, sync_rx);
         let mesh_state = mesh.watch();
         let mesh_task = tokio::spawn(mesh.run(contract_watcher));
 

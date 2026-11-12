@@ -1,14 +1,20 @@
 //! Tron chain integration for the MPC node. Tron is a bidirectional
-//! execution *target*, not a source chain: this crate assembles and
-//! broadcasts transactions from signed intents and confirms execution by
-//! polling txID receipts on the solidity endpoint.
+//! execution *target*, not a source chain: this crate broadcasts
+//! transactions from signed intents and confirms execution by polling txID
+//! receipts on the solidity endpoint. The transaction wire format itself —
+//! messages, canonical parse, signing derivations, addresses — lives in
+//! [`mpc_tron_wire`].
 
-mod address;
+#[cfg(test)]
+mod test_utils;
+
 mod client;
 mod config;
+mod expiry;
 mod types;
+mod watcher;
 
-pub use address::{parse_hex, ParseTronAddressError, TronAddress, TRON_ADDRESS_PREFIX};
 pub use client::TronHttp;
 pub use config::TronConfig;
-pub use types::{AccountResources, BroadcastOutcome, NowBlock, TronLog, TronReceipt};
+pub use types::{BroadcastOutcome, SolidifiedBlock, TronExecutionResult, TronLog, TronReceipt};
+pub use watcher::TronWatcher;

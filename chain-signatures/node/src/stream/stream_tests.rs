@@ -4,6 +4,7 @@ use crate::backlog::{Backlog, Bidirectional, Executing};
 use crate::mesh::MeshState;
 use crate::node_client::NodeClient;
 use crate::rpc::{ContractStateWatcher, RpcAction};
+use crate::sign_bidirectional::{SDK_ALGO, SDK_DEST, SDK_PARAMS};
 use crate::storage::checkpoint_storage::CheckpointStorage;
 use crate::stream::test_utils::{
     run_stream_with_two_node_mesh, signature_responded_event, test_bidirectional_tx,
@@ -68,6 +69,79 @@ macro_rules! impl_test_indexer {
 impl_test_indexer!(SolanaTestIndexer, Chain::Solana);
 impl_test_indexer!(EthereumTestIndexer, Chain::Ethereum);
 
+/// Through the supervisor's whole recovery: a node restarted with a stored signature publishes
+/// it instead of signing again.
+#[tokio::test]
+async fn a_supervised_restart_publishes_a_stored_signature() {
+    let chain = Chain::Solana;
+    let storage = crate::storage::checkpoint_storage::CheckpointStorage::in_memory();
+    let request = mock_sign_request(SignId::new([1u8; 32]), chain);
+    let (root_pk, output) = crate::backlog::mock::mock_signature_output(&request.args);
+    Backlog::persisted(storage.clone())
+        .insert(Arc::clone(&request))
+        .await
+        .0
+        .advance(
+            root_pk,
+            &output,
+            crate::backlog::mock::mock_participants(),
+            true,
+        )
+        .await
+        .unwrap();
+
+    let indexer = SolanaTestIndexer::new(vec![
+        Some(ChainEvent::SignRequest {
+            request: Arc::clone(&request),
+            block_timestamp: None,
+        }),
+        Some(ChainEvent::CatchupCompleted),
+        None,
+    ]);
+    let (sign_tx, mut sign_rx) = mpsc::channel(4);
+    let (contract_watcher, _tx) = ContractStateWatcher::with_running(
+        &"test.near".parse::<AccountId>().unwrap(),
+        root_pk,
+        0,
+        Default::default(),
+    );
+    let (_mesh_state_tx, mesh_state_rx) = watch::channel(MeshState::default());
+    let (_cp_tx, cp_rx) = watch::channel(None);
+    let (rpc, mut rpc_rx) = test_rpc_channel(4);
+    let restarted = Backlog::persisted(storage.clone());
+
+    run_supervised(
+        indexer,
+        crate::stream::StreamContext::new(
+            restarted.clone(),
+            sign_tx,
+            rpc,
+            contract_watcher,
+            mesh_state_rx,
+            NodeClient::new(),
+            cp_rx,
+        ),
+        mpc_chain_integration_core::NoopChainTelemetry,
+    )
+    .await
+    .expect("supervisor should exit cleanly");
+
+    assert!(sign_rx.try_recv().is_err(), "nothing is signed again");
+    let published = timeout(Duration::from_secs(1), rpc_rx.recv()).await;
+    assert!(
+        matches!(published, Ok(Some(RpcAction::Publish(action)))
+            if action.request.id == request.id),
+        "the proposer publishes it"
+    );
+    assert_eq!(restarted.publishable_requests(chain).await.len(), 1);
+    assert!(storage
+        .load_local(chain)
+        .await
+        .unwrap()
+        .iter()
+        .any(|(id, _)| *id == request.id));
+}
+
 #[tokio::test]
 async fn test_stream_handles_sign_and_respond() {
     let backlog = Backlog::new();
@@ -100,7 +174,7 @@ async fn test_stream_handles_sign_and_respond() {
     );
     let (_mesh_state_tx, mesh_state_rx) = watch::channel(MeshState::default());
     let (_cp_tx, cp_rx) = watch::channel(None);
-    let node_client = NodeClient::new(&Default::default());
+    let node_client = NodeClient::new();
     let (rpc, _rpc_rx) = test_rpc_channel(4);
 
     // Run the indexer
@@ -117,7 +191,8 @@ async fn test_stream_handles_sign_and_respond() {
         ),
         mpc_chain_integration_core::NoopChainTelemetry,
     )
-    .await;
+    .await
+    .expect("supervisor should exit cleanly");
 
     // We should have received the Request then Completion
     let msg1 = timeout(Duration::from_secs(1), sign_rx.recv())
@@ -154,7 +229,7 @@ fn build_solana_to_ethereum_bidirectional_request(
     rlp_s.append(&0u64); // nonce
     rlp_s.append(&0u64); // gasPrice
     rlp_s.append(&0u64); // gasLimit
-    rlp_s.append(&Vec::<u8>::new()); // to
+    rlp_s.append(&vec![0x11u8; 20]); // to
     rlp_s.append(&0u64); // value
     rlp_s.append(&Vec::<u8>::new()); // data
     rlp_s.append(&1u64); // chain_id
@@ -166,12 +241,12 @@ fn build_solana_to_ethereum_bidirectional_request(
         sender: Default::default(),
         serialized_transaction: unsigned_rlp,
         caip2_id: Chain::Ethereum.caip2_chain_id().to_string(),
-        key_version: 0,
+        key_version: 1,
         deposit: 0,
         path: "".to_string(),
-        algo: "".to_string(),
-        dest: Chain::Ethereum.to_string(),
-        params: "".to_string(),
+        algo: SDK_ALGO.to_string(),
+        dest: SDK_DEST.to_string(),
+        params: SDK_PARAMS.to_string(),
         chain: Chain::Solana,
         chain_ctx: Some(Pubkey::new_unique().to_bytes().to_vec()),
         output_deserialization_schema: vec![],
@@ -216,7 +291,7 @@ async fn test_bidirectional_sign_request_enqueues_command() {
     );
     let (_mesh_state_tx, mesh_state_rx) = watch::channel(MeshState::default());
     let (_cp_tx, cp_rx) = watch::channel(None);
-    let node_client = NodeClient::new(&Default::default());
+    let node_client = NodeClient::new();
     let (rpc, _rpc_rx) = test_rpc_channel(8);
 
     run_supervised(
@@ -232,7 +307,8 @@ async fn test_bidirectional_sign_request_enqueues_command() {
         ),
         mpc_chain_integration_core::NoopChainTelemetry,
     )
-    .await;
+    .await
+    .expect("supervisor should exit cleanly");
 
     // A SignCommand::Request should have been emitted for the bidirectional request
     let msg = timeout(Duration::from_secs(1), sign_rx.recv())
@@ -297,7 +373,7 @@ async fn test_respond_event_advances_to_pending_execution() {
     );
     let (_mesh_state_tx, mesh_state_rx) = watch::channel(MeshState::default());
     let (_cp_tx, cp_rx) = watch::channel(None);
-    let node_client = NodeClient::new(&Default::default());
+    let node_client = NodeClient::new();
     let (rpc, _rpc_rx) = test_rpc_channel(8);
 
     run_supervised(
@@ -313,7 +389,8 @@ async fn test_respond_event_advances_to_pending_execution() {
         ),
         mpc_chain_integration_core::NoopChainTelemetry,
     )
-    .await;
+    .await
+    .expect("supervisor should exit cleanly");
 
     // The respond event should have advanced the entry to PendingExecution and
     // registered an execution watcher for the derived bidirectional tx on the
@@ -371,6 +448,8 @@ async fn test_execution_confirmation_advances_to_respond_bidirectional() {
 
     crate::stream::ops::process_execution_confirmed(
         tx_id,
+        tx.sign_id(),
+        tx.source_chain,
         123u64,
         ExecutionOutcome::Success { output: vec![] },
         &ctx,
@@ -543,7 +622,7 @@ async fn test_stream_resumes_pending_publish_after_catchup() {
     );
     let (_mesh_state_tx, mesh_state_rx) = watch::channel(MeshState::default());
     let (_cp_tx, cp_rx) = watch::channel(None);
-    let node_client = NodeClient::new(&Default::default());
+    let node_client = NodeClient::new();
 
     let run_handle = tokio::spawn(async move {
         run_supervised(
@@ -559,7 +638,7 @@ async fn test_stream_resumes_pending_publish_after_catchup() {
             ),
             mpc_chain_integration_core::NoopChainTelemetry,
         )
-        .await;
+        .await
     });
 
     match timeout(Duration::from_millis(100), sign_rx.recv()).await {
@@ -611,7 +690,7 @@ async fn test_stream_does_not_resume_non_proposer_pending_publish_after_catchup(
     );
     let (_mesh_state_tx, mesh_state_rx) = watch::channel(MeshState::default());
     let (_cp_tx, cp_rx) = watch::channel(None);
-    let node_client = NodeClient::new(&Default::default());
+    let node_client = NodeClient::new();
 
     let run_handle = tokio::spawn(async move {
         run_supervised(
@@ -627,7 +706,7 @@ async fn test_stream_does_not_resume_non_proposer_pending_publish_after_catchup(
             ),
             mpc_chain_integration_core::NoopChainTelemetry,
         )
-        .await;
+        .await
     });
 
     let no_publish = timeout(Duration::from_millis(100), rpc_rx.recv()).await;

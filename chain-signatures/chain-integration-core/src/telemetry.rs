@@ -12,16 +12,25 @@ pub trait ChainTelemetry: Send + Sync + Clone + 'static {
     /// Records that a checkpoint was created
     fn checkpoint_created(&self, block_number: u64);
 
-    /// Report that a request was indexed at the given block timestamp (currently used for Ethereum due to ~15 min finality delay)
+    /// Report that a request was indexed at the given block timestamp
+    /// (unix seconds) — Ethereum, Solana, and Midnight. The latency
+    /// population mixes Ethereum's ~15 min finality with indexing lag
+    /// elsewhere: a distribution shift from when it was Ethereum-only.
     fn request_indexed_at(&self, block_timestamp: u64, kind: RequestKind);
 
-    /// Report that a request was indexed without a block timestamp (faster chains, e.g. for Solana, Canton, or Hydration)
+    /// Report that a request was indexed without a block timestamp —
+    /// Canton and Hydration report no chain time, as does a Solana block
+    /// whose `blockTime` estimate is absent.
     fn request_indexed(&self, kind: RequestKind);
 
     /// Records a failed attempt to extract the output of a bidirectional
     /// execution on this chain. Counts *attempts*: a retryable failure on the
     /// same transaction increments once per retry.
     fn bidirectional_extraction_failed(&self, kind: ExtractionFailureKind);
+
+    /// Records an expiry scan deferred by a solidity head-fetch
+    /// failure (Tron), at most once per poll tick.
+    fn expiry_scan_deferred(&self) {}
 }
 
 /// Consensus-safety classification of a bidirectional output extraction
@@ -63,6 +72,13 @@ impl ChainTelemetry for NoopChainTelemetry {
 pub trait PublisherTelemetry: Send + Sync + 'static {
     /// Records metrics related to publishing a signature to the chain.
     fn record_publish_metrics(&self, action: &PublishAction);
+
+    /// Records the spendable balance, in the chain's fee unit, of the wallet the
+    /// publisher pays fees from.
+    fn funding_wallet_observed(&self, _balance: f64) {}
+
+    /// Records a request the chain's publisher answered with an error code.
+    fn publish_refused(&self, _code: &str) {}
 }
 
 /// No-op implementation for tests

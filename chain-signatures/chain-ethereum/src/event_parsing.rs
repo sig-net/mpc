@@ -11,14 +11,14 @@ use k256::{AffinePoint as K256AffinePoint, EncodedPoint, FieldBytes, Scalar};
 use mpc_crypto::{kdf::derive_epsilon_eth, ScalarExt as _};
 use mpc_primitives::{
     Chain, ChainEvent, IndexedSignRequest, SignArgs, SignId, Signature as MpcSignature,
-    SignatureRespondedEvent, LATEST_MPC_KEY_VERSION, MAX_SECP256K1_SCALAR,
+    SignatureRespondedEvent, MAX_SECP256K1_SCALAR,
 };
 use mpc_utils::time::current_unix_timestamp;
 use tokio::sync::mpsc;
 
 /// Whether a transaction's calldata represents a contract call.
 pub fn is_contract_call(input: &Bytes) -> bool {
-    input.len() > 2 && input != &Bytes::from("0x")
+    !input.is_empty()
 }
 
 pub fn parse_filtered_logs(logs: Vec<Log>) -> Vec<IndexedSignRequest> {
@@ -99,11 +99,6 @@ fn sign_id_from_signature_responded_log(log: &Log) -> Option<SignId> {
 fn sign_request_from_filtered_log(log: Log) -> Option<IndexedSignRequest> {
     let event = parse_event(&log)?;
     tracing::debug!("found eth event: {:?}", event);
-    if event.key_version > LATEST_MPC_KEY_VERSION {
-        tracing::warn!("unsupported key version: {}", event.key_version);
-        return None;
-    }
-
     // Create sign request from event
     let Some(payload) = Scalar::from_bytes(event.payload_hash) else {
         tracing::warn!(
@@ -122,7 +117,14 @@ fn sign_request_from_filtered_log(log: Log) -> Option<IndexedSignRequest> {
         event.key_version,
         format!("0x{}", event.requester.encode_hex()).as_str(),
         &event.path,
-    );
+    )
+    .inspect_err(|_| {
+        tracing::info!(
+            key_version = event.key_version,
+            "unsupported key version; dropping sign request"
+        )
+    })
+    .ok()?;
 
     // Use transaction hash as entropy
     let tx_hash = log.transaction_hash.unwrap_or_default();
@@ -262,7 +264,7 @@ mod tests {
     #[test]
     fn is_contract_call_detects_calldata() {
         assert!(!is_contract_call(&Bytes::new()));
-        assert!(!is_contract_call(&Bytes::from(vec![0u8; 2])));
+        assert!(is_contract_call(&Bytes::from(vec![0u8; 2])));
         assert!(is_contract_call(&Bytes::from(vec![
             0xa9, 0x05, 0x9c, 0xbb, 0x00
         ])));

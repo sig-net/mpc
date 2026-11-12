@@ -135,8 +135,8 @@ impl FinalizedHeadTracker {
     pub fn new(eth: &EthConfig) -> Self {
         Self {
             head: watch::channel(None).0,
-            optimistic: eth.optimistic_requests,
-            refresh_interval: Duration::from_millis(eth.refresh_finalized_interval),
+            optimistic: eth.network.is_optimistic(),
+            refresh_interval: eth.indexer.refresh_interval,
             stall_rewarn_secs: eth.indexer.stall_rewarn_secs,
         }
     }
@@ -144,11 +144,11 @@ impl FinalizedHeadTracker {
     /// Construct a finalized-head tracker for unit tests, with a short refresh interval and no optimistic mode.
     #[cfg(test)]
     fn new_for_test() -> Self {
-        let indexer = IndexerConfig::default();
+        let indexer = IndexerConfig::fast_polling();
         Self {
             head: watch::channel(None).0,
             optimistic: false, // existing unit tests assume finalized mode
-            refresh_interval: Duration::from_millis(100),
+            refresh_interval: indexer.refresh_interval,
             stall_rewarn_secs: indexer.stall_rewarn_secs,
         }
     }

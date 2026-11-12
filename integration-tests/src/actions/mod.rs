@@ -103,7 +103,7 @@ pub async fn validate_signature(
 ) -> anyhow::Result<()> {
     let mpc_point = EncodedPoint::from_bytes(mpc_pk_bytes).unwrap();
     let mpc_pk = AffinePoint::from_encoded_point(&mpc_point).unwrap();
-    let epsilon = derive_epsilon_near(LATEST_MPC_KEY_VERSION, account_id, "test");
+    let epsilon = derive_epsilon_near(LATEST_MPC_KEY_VERSION, account_id, "test")?;
     let user_pk = derive_key(mpc_pk, epsilon);
     signature
         .verify(
@@ -158,7 +158,7 @@ pub fn recover_eth_address(
     let verifying_key = VerifyingKey::recover_from_prehash(msg_hash, &signature, recid)
         .expect("failed to recover pubkey");
 
-    public_key_to_address(verifying_key.to_encoded_point(false).as_bytes())
+    public_key_to_address(&verifying_key.to_encoded_point(false))
 }
 
 #[cfg(test)]
@@ -199,10 +199,9 @@ mod tests {
 
         let account_id = account_id.parse().unwrap();
         let derivation_epsilon: k256::Scalar =
-            derive_epsilon_near(LEGACY_MPC_KEY_VERSION_0, &account_id, "test");
+            derive_epsilon_near(LEGACY_MPC_KEY_VERSION_0, &account_id, "test").unwrap();
         let user_pk: AffinePoint = derive_key(mpc_pk, derivation_epsilon);
-        let user_address_from_pk =
-            public_key_to_address(user_pk.to_encoded_point(false).as_bytes());
+        let user_address_from_pk = public_key_to_address(&user_pk.to_encoded_point(false));
 
         // Prepare R ans s signature values
         let big_r = hex::decode(big_r).unwrap();
@@ -217,7 +216,7 @@ mod tests {
 
         let signature = cait_sith::FullSignature::<k256::Secp256k1> { big_r, s };
 
-        let multichain_sig = mpc_crypto::kdf::reconstruct_signature(
+        let reconstructed = mpc_crypto::kdf::reconstruct_signature(
             &user_pk,
             &signature.big_r,
             &signature.s,
@@ -271,7 +270,7 @@ mod tests {
         let recovered_from_signature_address_web3 = recover_eth_address(
             &payload_hash,
             &signature_for_recovery,
-            multichain_sig.recovery_id,
+            reconstructed.recovery_id,
         );
         assert_eq!(user_address_from_pk, recovered_from_signature_address_web3);
     }

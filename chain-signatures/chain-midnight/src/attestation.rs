@@ -19,11 +19,15 @@ pub fn validate_attestation_response(
         metadata.key_version == request.args.key_version,
         "Midnight attestation key version does not match the signing request"
     );
-    let digest = mpc_compact_hashing::compute_attestation_hash(
+    metadata.validate_output(&response.output)?;
+    let serialized_output_length = response.output.len() as u64;
+    let output_hash = mpc_compact_hashing::compute_attested_output_hash(&response.output);
+    let digest = mpc_compact_hashing::compute_attestation_digest(
         &request.id.request_id,
         metadata,
-        &response.output,
-    )?;
+        serialized_output_length,
+        &output_hash,
+    );
     anyhow::ensure!(
         request.args.payload.to_bytes().as_slice() == digest,
         "Midnight attestation digest does not match the signed payload"
@@ -31,7 +35,8 @@ pub fn validate_attestation_response(
     Ok(PublishedAttestation {
         block_height: metadata.block_height,
         outcome_kind: metadata.outcome_kind,
-        serialized_output_length: response.output.len() as u64,
+        serialized_output_length,
+        output_hash,
         digest,
     })
 }

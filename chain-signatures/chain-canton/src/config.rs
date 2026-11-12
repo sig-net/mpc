@@ -1,10 +1,11 @@
 use secrecy::SecretString;
 use std::fmt;
+use url::Url;
 
 /// Canton OIDC client-credentials authentication configuration.
 #[derive(Clone)]
 pub struct CantonAuthConfig {
-    pub token_url: String,
+    pub token_url: Url,
     pub client_id: String,
     /// Carried as a [`SecretString`]: the secret is only exposed when the OIDC
     /// client is built, so deriving `Debug` cannot leak it.
@@ -22,8 +23,8 @@ impl CantonAuthConfig {
 /// Canton JSON Ledger API configuration.
 #[derive(Clone)]
 pub struct CantonConfig {
-    pub json_api_url: String,
-    pub json_api_ws_url: String,
+    pub json_api_url: Url,
+    pub json_api_ws_url: Url,
     pub auth: CantonAuthConfig,
     pub ledger_api_user: String,
     pub party_id: String,

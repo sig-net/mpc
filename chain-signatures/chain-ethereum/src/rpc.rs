@@ -6,6 +6,9 @@ use alloy::rpc::client::{ClientBuilder, RpcClient};
 use alloy::rpc::types::{Block, BlockId, Log, Transaction, TransactionReceipt};
 use serde_json::json;
 
+use anyhow::Context as _;
+use mpc_chain_integration_core::utils::retry::RpcFailure;
+
 #[cfg(feature = "bench")]
 use crate::bench;
 use crate::client::{logs_filter, MaybeBlock};
@@ -53,7 +56,7 @@ impl RpcEthereumClient {
                     .await
             }
         };
-        result.map_err(|err| anyhow::anyhow!("failed to fetch block {block_id:?}: {err}"))
+        result.context(format!("failed to fetch block {block_id:?}"))
     }
 
     pub async fn get_blocks(&self, block_ids: &[BlockId]) -> anyhow::Result<Vec<MaybeBlock>> {
@@ -91,22 +94,20 @@ impl RpcEthereumClient {
                     BlockId::Hash(hash) => batch
                         .add_call::<_, Option<Block>>("eth_getBlockByHash", &(hash.block_hash,)),
                 }
-                .map_err(|err| {
-                    anyhow::anyhow!("failed to queue batch block fetch {block_id:?}: {err}")
-                })?;
+                .context(format!("failed to queue batch block fetch {block_id:?}"))?;
             waiters.push(waiter);
         }
 
         batch
             .send()
             .await
-            .map_err(|err| anyhow::anyhow!("eth_getBlock batch failed: {err}"))?;
+            .context("eth_getBlock batch failed".to_string())?;
 
         let mut blocks = Vec::with_capacity(block_ids.len());
         for (waiter, &block_id) in waiters.into_iter().zip(block_ids) {
-            let block = waiter.await.map_err(|err| {
-                anyhow::anyhow!("eth_getBlock batch member for {block_id:?} failed: {err}")
-            })?;
+            let block = waiter
+                .await
+                .context(format!("eth_getBlock batch member for {block_id:?} failed"))?;
             blocks.push(match block {
                 Some(block) => MaybeBlock::Block(block),
                 None => MaybeBlock::Missing(block_id),
@@ -128,7 +129,7 @@ impl RpcEthereumClient {
         self.client
             .request::<_, Option<TransactionReceipt>>("eth_getTransactionReceipt", (tx_hash,))
             .await
-            .map_err(|err| anyhow::anyhow!("failed to get receipt for {tx_hash:#x}: {err}"))
+            .context(format!("failed to get receipt for {tx_hash:#x}"))
     }
 
     /// Fetch all logs emitted by `address` within `block_id` via a single
@@ -142,9 +143,9 @@ impl RpcEthereumClient {
         self.client
             .request::<_, Vec<Log>>("eth_getLogs", (logs_filter(address, block_id),))
             .await
-            .map_err(|err| {
-                anyhow::anyhow!("failed to get logs for {address:#x} at {block_id:?}: {err}")
-            })
+            .context(format!(
+                "failed to get logs for {address:#x} at {block_id:?}"
+            ))
     }
 
     /// Fetch `eth_getLogs` for multiple blocks in a single JSON-RPC batch POST,
@@ -171,22 +172,20 @@ impl RpcEthereumClient {
         for &block_id in block_ids {
             let waiter = batch
                 .add_call::<_, Option<Vec<Log>>>("eth_getLogs", &(logs_filter(address, block_id),))
-                .map_err(|err| {
-                    anyhow::anyhow!("failed to queue batch logs fetch for {block_id:?}: {err}")
-                })?;
+                .context(format!("failed to queue batch logs fetch for {block_id:?}"))?;
             waiters.push(waiter);
         }
 
         batch
             .send()
             .await
-            .map_err(|err| anyhow::anyhow!("eth_getLogs batch failed: {err}"))?;
+            .context("eth_getLogs batch failed".to_string())?;
 
         let mut results = Vec::with_capacity(block_ids.len());
         for waiter in waiters {
             let logs = waiter
                 .await
-                .map_err(|err| anyhow::anyhow!("eth_getLogs batch member failed: {err}"))?;
+                .context("eth_getLogs batch member failed".to_string())?;
             results.push(logs.unwrap_or_default());
         }
         Ok(results)
@@ -200,10 +199,22 @@ impl RpcEthereumClient {
             .client
             .request("eth_getTransactionCount", (address, block_id))
             .await
-            .map_err(|err| {
-                anyhow::anyhow!("failed to get nonce for {address:#x} at {block_id:?}: {err}")
-            })?;
+            .context(format!(
+                "failed to get nonce for {address:#x} at {block_id:?}"
+            ))?;
         Ok(nonce.to::<u64>())
+    }
+
+    pub async fn get_chain_id(&self) -> anyhow::Result<u64> {
+        #[cfg(feature = "bench")]
+        bench::rpc_inc("eth_chainId");
+
+        let chain_id: alloy::primitives::U64 = self
+            .client
+            .request_noparams("eth_chainId")
+            .await
+            .context("failed to get chain id")?;
+        Ok(chain_id.to::<u64>())
     }
 
     pub async fn get_transaction_by_hash(
@@ -216,7 +227,7 @@ impl RpcEthereumClient {
         self.client
             .request::<_, Option<Transaction>>("eth_getTransactionByHash", (tx_hash,))
             .await
-            .map_err(|err| anyhow::anyhow!("failed to get transaction {tx_hash:#x}: {err}"))
+            .context(format!("failed to get transaction {tx_hash:#x}"))
     }
 
     /// Re-execute `tx_hash` via `debug_traceTransaction` (`callTracer`,
@@ -243,9 +254,7 @@ impl RpcEthereumClient {
                 ),
             )
             .await
-            .map_err(|err| {
-                anyhow::anyhow!("debug_traceTransaction failed for {tx_hash:#x}: {err}")
-            })?;
+            .context(format!("debug_traceTransaction failed for {tx_hash:#x}"))?;
 
         trace_output_to_bytes(tx_hash, &call_frame)
     }
@@ -318,17 +327,18 @@ fn trace_output_to_bytes(
             .and_then(serde_json::Value::as_str)
             .filter(|r| !r.is_empty());
         match revert_reason {
-            Some(reason) => anyhow::bail!(
-                "debug_traceTransaction reports transaction {:#x} reverted: {} ({})",
-                tx_hash,
-                error,
-                reason
-            ),
-            None => anyhow::bail!(
-                "debug_traceTransaction reports transaction {:#x} errored: {}",
-                tx_hash,
-                error
-            ),
+            // tracer-side inconsistency (the receipt succeeded): retryable
+            // verdict matching the watcher's never-resolve-from-one policy
+            Some(reason) => {
+                return Err(anyhow::Error::new(RpcFailure::retryable(format!(
+                    "debug_traceTransaction reports transaction {tx_hash:#x} reverted: {error} ({reason})"
+                ))))
+            }
+            None => {
+                return Err(anyhow::Error::new(RpcFailure::retryable(format!(
+                    "debug_traceTransaction reports transaction {tx_hash:#x} errored: {error}"
+                ))))
+            }
         }
     }
 
@@ -351,6 +361,7 @@ mod tests {
     use alloy::primitives::B256;
     use alloy::rpc::types::BlockId;
     use mockito::{Matcher, Server};
+    use mpc_chain_integration_core::utils::retry::is_retryable;
     use serde_json::json;
 
     #[tokio::test]
@@ -643,6 +654,26 @@ mod tests {
         let msg = format!("{err}");
         assert!(msg.contains("execution reverted"));
         assert!(msg.contains("InsufficientBalance"));
+        // tracer-side inconsistency: retryable by policy
+        assert!(
+            is_retryable(&err),
+            "trace revert must stay retryable: {err:#}"
+        );
+    }
+
+    #[test]
+    fn bails_retryable_on_errored_frame_without_reason() {
+        let frame = json!({
+            "type": "CALL",
+            "error": "out of gas: intrinsic gas too low",
+        });
+        let err = trace_output_to_bytes(B256::ZERO, &frame).expect_err("should bail");
+        let msg = format!("{err}");
+        assert!(msg.contains("out of gas"));
+        assert!(
+            is_retryable(&err),
+            "trace error must stay retryable: {err:#}"
+        );
     }
 
     #[test]

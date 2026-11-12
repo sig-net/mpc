@@ -8,7 +8,7 @@ publish = false
 [dependencies]
 alloy = { workspace = true, features = ["provider-anvil-api"] }
 anyhow.workspace = true
-async-process = "1"
+async-process = "2"
 async-trait = "0.1"
 backon.workspace = true
 bollard = "0.21"
@@ -21,6 +21,7 @@ futures = "0.3"
 hex.workspace = true
 rand.workspace = true
 reqwest.workspace = true
+secrecy = "0.10.3"
 serde.workspace = true
 serde_json.workspace = true
 shell-escape = "0.1.5"
@@ -88,7 +89,7 @@ test-log = { version = "0.2.12", features = ["log", "trace"] }
 
 [build-dependencies]
 anyhow.workspace = true
-async-process = "1"
+async-process = "2"
 tokio.workspace = true
 
 

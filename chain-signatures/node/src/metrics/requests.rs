@@ -59,7 +59,7 @@ impl SignRequestStep {
 static SIGN_REQUEST_LATENCY: LazyLock<HistogramVec> = LazyLock::new(|| {
     try_create_histogram_vec_with_node_and_version(
         "multichain_sign_request_latency_sec",
-        "Latency of multichain sign request processing with step, status and request kind specification.",
+        "Latency of sign request processing with step, status and request kind specification.",
         &["chain", "step", "status", "kind"],
         // Start: 30ms, Factor: 1.4, Count: 42
         // Range: 0.03s -> ~29,300s (8.1 hours)
@@ -98,6 +98,19 @@ pub fn record_request_latency_since(
         .with_label_values(&[chain.as_str(), step.as_str(), status, kind.as_str()])
         .observe(start.elapsed_seconds());
 }
+/// The number of latencies recorded under these labels.
+#[cfg(test)]
+pub(crate) fn request_latency_count(
+    chain: Chain,
+    step: SignRequestStep,
+    status: &str,
+    kind: RequestKind,
+) -> u64 {
+    SIGN_REQUEST_LATENCY
+        .with_label_values(&[chain.as_str(), step.as_str(), status, kind.as_str()])
+        .get_sample_count()
+}
+
 /// Some chains do not provide information about the block time.
 /// For that reason we record indexing step reached with 0.0 latency.
 pub fn record_indexing_step_reached(chain: Chain, kind: RequestKind) {
@@ -128,6 +141,17 @@ pub(crate) static SIGN_REQUEST_LOOPS: LazyLock<CounterVec> = LazyLock::new(|| {
         "multichain_sign_request_loops_total",
         "Number of back-edges to organizing in the sign request state machine, by chain and source phase.",
         &["chain", "from_phase"],
+    )
+    .unwrap()
+});
+
+/// Executions resolved without a wait start — displaced or recovered
+/// watches — excluded from the awaiting-execution latency histogram.
+pub(crate) static EXECUTION_WAIT_UNMEASURED: LazyLock<CounterVec> = LazyLock::new(|| {
+    try_create_counter_vec_with_node_and_version(
+        "multichain_execution_wait_unmeasured_total",
+        "Executions resolved without a wait start, excluded from the awaiting-execution latency histogram, by source chain.",
+        &["chain"],
     )
     .unwrap()
 });

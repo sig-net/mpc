@@ -23,12 +23,19 @@ use tokio::sync::Mutex;
 use crate::cluster::spawner::ClusterSpawner;
 use crate::containers::{start_container_with_network_retry, Container};
 
-const NODE_IMAGE: (&str, &str) = ("midnightntwrk/midnight-node", "2.0.0-rc.4");
-const INDEXER_IMAGE: (&str, &str) = (
-    "midnightntwrk/indexer-standalone",
-    "4.4.0-pre-alpha.16-l91r3-n2r3-bridge-and-events-epics-contract-zswap-16c656df",
-);
-const PROOF_IMAGE: (&str, &str) = ("midnightntwrk/proof-server", "9.0.0-rc.5_experimental");
+const NODE_IMAGE: (&str, &str) = ("midnightntwrk/midnight-node", "2.1.101");
+const INDEXER_IMAGE: (&str, &str) = ("midnightntwrk/indexer-standalone", "4.4.101");
+const PROOF_IMAGE: (&str, &str) = ("midnightntwrk/proof-server", "9.0.1");
+
+/// Set to a deployed network's node RPC URL to run the cases there instead of on a local node
+/// and indexer; the other `MPC_MIDNIGHT_E2E_*` variables then become required.
+const DEPLOYED_NODE_URL_ENV: &str = "MPC_MIDNIGHT_E2E_NODE_URL";
+const DEPLOYED_INDEXER_URL_ENV: &str = "MPC_MIDNIGHT_E2E_INDEXER_URL";
+const DEPLOYED_INDEXER_WS_URL_ENV: &str = "MPC_MIDNIGHT_E2E_INDEXER_WS_URL";
+const DEPLOYED_DEPLOYER_SEED_ENV: &str = "MPC_MIDNIGHT_E2E_DEPLOYER_SEED";
+const DEPLOYED_INVOKER_SEED_ENV: &str = "MPC_MIDNIGHT_E2E_INVOKER_SEED";
+/// Comma-separated, one per MPC node.
+const DEPLOYED_PUBLISHER_SEEDS_ENV: &str = "MPC_MIDNIGHT_E2E_PUBLISHER_SEEDS";
 
 const NODE_PORT: u16 = 9944;
 const INDEXER_PORT: u16 = 8088;
@@ -45,20 +52,191 @@ struct MidnightEndpoints {
 }
 
 struct MidnightStack {
-    _node: Container,
-    _indexer: Container,
+    /// The local node and indexer; none on a deployed network.
+    _chain: Option<(Container, Container)>,
     _proof_server: Container,
     endpoints: MidnightEndpoints,
     network_id: String,
+    /// The role wallets on a deployed network; locally the driver funds its own.
+    role_seeds: Option<RoleSeeds>,
     artifact_dir: PathBuf,
+}
+
+/// A deployed network the cases run against in place of a local node and indexer.
+struct DeployedNetwork {
+    node_http_url: String,
+    indexer_url: String,
+    indexer_ws_url: String,
+    role_seeds: RoleSeeds,
+}
+
+/// Role wallets that already hold NIGHT registered for DUST: NIGHT sent just before a run
+/// has not generated enough DUST to pay for it.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RoleSeeds {
+    deployer: String,
+    invoker: String,
+    publishers: Vec<String>,
+}
+
+impl DeployedNetwork {
+    fn from_env() -> anyhow::Result<Option<Self>> {
+        let Ok(node_http_url) = std::env::var(DEPLOYED_NODE_URL_ENV) else {
+            return Ok(None);
+        };
+        let required = |name: &str| {
+            std::env::var(name)
+                .with_context(|| format!("{name} is required with {DEPLOYED_NODE_URL_ENV}"))
+        };
+        Ok(Some(Self {
+            node_http_url,
+            indexer_url: required(DEPLOYED_INDEXER_URL_ENV)?,
+            indexer_ws_url: required(DEPLOYED_INDEXER_WS_URL_ENV)?,
+            role_seeds: RoleSeeds {
+                deployer: required(DEPLOYED_DEPLOYER_SEED_ENV)?,
+                invoker: required(DEPLOYED_INVOKER_SEED_ENV)?,
+                publishers: required(DEPLOYED_PUBLISHER_SEEDS_ENV)?
+                    .split(',')
+                    .map(|seed| seed.trim().to_owned())
+                    .collect(),
+            },
+        }))
+    }
 }
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct BootstrapResult {
     central_address: String,
+    responder_address: String,
     caller_address: String,
-    publisher_seed: String,
+    /// One funding seed per MPC node, each wallet funded and generating DUST.
+    publisher_seeds: Vec<String>,
+}
+
+/// Where the ledger runs one contract call of a submitted transaction, as the driver read
+/// it from the transaction it built.
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CallPlacement {
+    pub segment: u16,
+    pub action: u32,
+    pub address: String,
+    pub entry_point: String,
+    pub guaranteed: bool,
+    pub fallible: bool,
+    /// Request ids, hex, of the singleton notifications each transcript emits.
+    pub guaranteed_notifications: Vec<String>,
+    pub fallible_notifications: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SubmittedRequest {
+    pub request_id: String,
+    pub placement: Vec<CallPlacement>,
+}
+
+/// Transaction shapes the caller builds to place singleton notifications in guaranteed and
+/// fallible transcripts; see `fallible.ts` in the real-stack driver.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum PlacementScenario {
+    FallibleOnly,
+    GuaranteedTranscriptPair,
+    FallibleTranscriptPair,
+    GuaranteedThenFallibleSegments,
+    FallibleSegmentPair,
+    PartialSuccess,
+    FallibleThenFailing,
+    RolledBackReplay,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlacementOutcome {
+    /// The indexer's status for the transaction: `SucceedEntirely` or `FailFallible`.
+    pub status: String,
+    /// Request ids, hex, in the order of the scenario's calls.
+    pub requests: Vec<String>,
+    /// Notified request ids in ledger application order.
+    pub notifications: Vec<String>,
+    /// Requests the caller's ledger holds after the transaction.
+    pub committed: Vec<String>,
+    pub placement: Vec<CallPlacement>,
+    /// The indexer's per-segment results, `transactionResult.segments`.
+    pub segments: Vec<(u16, String)>,
+    pub block_height: u64,
+    pub tx_hash: String,
+}
+
+/// Partially successful shapes from the partial-success review; see `adversarial.ts` in the
+/// real-stack driver.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum AdversarialScenario {
+    WriteThenRolledBackNotify,
+    SameTxReplay,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdversarialOutcome {
+    pub status: String,
+    pub request_id: String,
+    /// Whether the caller's ledger holds the request after the transaction.
+    pub committed: bool,
+    pub notifications: Vec<String>,
+    pub placement: Vec<CallPlacement>,
+    /// The indexer's per-segment results.
+    pub segments: Vec<(u16, String)>,
+    pub block_height: u64,
+    pub tx_hash: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreparedTwin {
+    pub request_id: String,
+    pub block_height: u64,
+    pub placement: Vec<CallPlacement>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VaultPartialSend {
+    pub vault_address: String,
+    pub request_id: String,
+    pub status: String,
+    pub segments: Vec<(u16, String)>,
+    pub block_height: u64,
+    pub tx_hash: String,
+    pub placement: Vec<CallPlacement>,
+    /// Whether the vault's deposit map holds the request after the transaction.
+    pub committed: bool,
+    /// Whether a later send of the same entry fails with "Request already sent".
+    pub retry_rejected: bool,
+    pub retry_error: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VaultOperation {
+    pub operation: String,
+    pub request_id: String,
+    pub placement: Vec<CallPlacement>,
+    pub evm_transaction: String,
+    pub evm_block_height: u64,
+    pub output: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VaultRunResult {
+    pub vault_address: String,
+    pub targets: serde_json::Value,
+    pub operations: Vec<VaultOperation>,
 }
 
 #[derive(Deserialize)]
@@ -76,6 +254,8 @@ pub struct MidnightContext {
     _stack: MidnightStack,
     pub output_storage: crate::gcs::GcsEmulator,
     pub config: MidnightConfig,
+    /// Funding seeds by node index.
+    pub publisher_seeds: Vec<String>,
     driver: Mutex<MidnightDriver>,
 }
 
@@ -92,9 +272,17 @@ impl MidnightContext {
                 "op": "bootstrap",
                 "config": DriverConfig::new(&stack),
                 "artifactDir": stack.artifact_dir,
+                "publishers": spawner.cfg.nodes,
+                "roleSeeds": stack.role_seeds,
             }))
             .await
             .context("bootstrapping fresh Midnight wallets and contracts")?;
+        anyhow::ensure!(
+            bootstrap.publisher_seeds.len() == spawner.cfg.nodes,
+            "the Midnight driver funded {} publisher wallets for {} nodes",
+            bootstrap.publisher_seeds.len(),
+            spawner.cfg.nodes
+        );
         let caller = bootstrap.caller_address.trim_start_matches("0x");
         let caller_bytes = hex::decode(caller).context("decoding Midnight caller address")?;
         anyhow::ensure!(
@@ -106,7 +294,7 @@ impl MidnightContext {
             mpc_primitives::LATEST_MPC_KEY_VERSION,
             &hex::encode(caller_bytes),
             mpc_node::respond_bidirectional::MIDNIGHT_RESPOND_BIDIRECTIONAL_PATH,
-        );
+        )?;
         let response_public_key = mpc_crypto::derive_key(root_public_key, epsilon);
         let response_public_key = format!(
             "0x{}",
@@ -119,18 +307,19 @@ impl MidnightContext {
             }))
             .await
             .context("initialising the Midnight caller with the MPC response key")?;
-        let publisher_entrypoint = publisher_package_dir()?.join("dist/main.js");
+        let contract_artifacts =
+            devtools_package_dir()?.join("node_modules/@sig-net/midnight-responder/dist/managed");
         anyhow::ensure!(
-            publisher_entrypoint.is_file(),
-            "Midnight publisher entry point {} is missing; run npm run build in {}",
-            publisher_entrypoint.display(),
-            publisher_package_dir()?.display()
+            contract_artifacts.join("keys/respond.prover").is_file(),
+            "Midnight responder artifacts {} are missing; run npm ci in {}",
+            contract_artifacts.display(),
+            devtools_package_dir()?.display()
         );
         let config = responder_config(
             &stack.endpoints,
             &bootstrap,
-            node_executable()?,
-            publisher_entrypoint,
+            contract_artifacts,
+            zk_params_dir()?,
             Some(OutputStorageConfig {
                 bucket: output_storage.bucket.clone(),
                 prefix: format!("integration-tests/{}", uuid::Uuid::new_v4()),
@@ -143,6 +332,7 @@ impl MidnightContext {
             _stack: stack,
             output_storage,
             config,
+            publisher_seeds: bootstrap.publisher_seeds,
             driver: Mutex::new(driver),
         })
     }
@@ -153,9 +343,9 @@ impl MidnightContext {
         target: [u8; 20],
         argument: [u8; 32],
         output_type: &str,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<SubmittedRequest> {
         let mut driver = self.driver.lock().await;
-        let _: serde_json::Value = driver
+        driver
             .request(&serde_json::json!({
                 "op": "submitIsEven",
                 "nonce": nonce.to_string(),
@@ -163,8 +353,152 @@ impl MidnightContext {
                 "argument": hex::encode(argument),
                 "outputType": output_type,
             }))
+            .await
+    }
+
+    /// Submit with raw output schema bytes, which the driver NUL-pads to the caller's
+    /// 64-byte field.
+    pub async fn submit_is_even_with_schema(
+        &self,
+        nonce: u64,
+        target: [u8; 20],
+        argument: [u8; 32],
+        output_schema: &[u8],
+    ) -> anyhow::Result<SubmittedRequest> {
+        let mut driver = self.driver.lock().await;
+        driver
+            .request(&serde_json::json!({
+                "op": "submitIsEven",
+                "nonce": nonce.to_string(),
+                "target": hex::encode(target),
+                "argument": hex::encode(argument),
+                "outputSchema": hex::encode(output_schema),
+            }))
+            .await
+    }
+
+    /// Build, check and submit one placement scenario of Boolean isEven requests, each
+    /// given as its EVM nonce and target.
+    pub async fn submit_placement(
+        &self,
+        scenario: PlacementScenario,
+        calls: &[(u64, [u8; 20])],
+        argument: [u8; 32],
+    ) -> anyhow::Result<PlacementOutcome> {
+        let calls = calls
+            .iter()
+            .map(|(nonce, target)| {
+                serde_json::json!({
+                    "nonce": nonce.to_string(),
+                    "target": hex::encode(target),
+                    "argument": hex::encode(argument),
+                })
+            })
+            .collect::<Vec<_>>();
+        let mut driver = self.driver.lock().await;
+        driver
+            .request(&serde_json::json!({
+                "op": "submitPlacement",
+                "scenario": scenario,
+                "calls": calls,
+            }))
+            .await
+    }
+
+    /// Build and submit one partial-success review shape for a Boolean isEven request.
+    pub async fn submit_adversarial(
+        &self,
+        scenario: AdversarialScenario,
+        call: (u64, [u8; 20]),
+        argument: [u8; 32],
+    ) -> anyhow::Result<AdversarialOutcome> {
+        let mut driver = self.driver.lock().await;
+        driver
+            .request(&serde_json::json!({
+                "op": "submitAdversarial",
+                "scenario": scenario,
+                "call": placement_call(call, argument),
+            }))
+            .await
+    }
+
+    /// File and notify `call`'s request in a guaranteed transcript: a twin's original.
+    pub async fn prepare_twin(
+        &self,
+        call: (u64, [u8; 20]),
+        argument: [u8; 32],
+    ) -> anyhow::Result<PreparedTwin> {
+        let mut driver = self.driver.lock().await;
+        driver
+            .request(&serde_json::json!({
+                "op": "prepareTwin",
+                "call": placement_call(call, argument),
+            }))
+            .await
+    }
+
+    /// Remove the original, `call`'s request, and file its twin with the same id in one
+    /// call, beside a fallible call for `failing` that fails when applied.
+    pub async fn fire_twin(
+        &self,
+        request_id: [u8; 32],
+        call: (u64, [u8; 20]),
+        failing: (u64, [u8; 20]),
+        argument: [u8; 32],
+    ) -> anyhow::Result<AdversarialOutcome> {
+        let mut driver = self.driver.lock().await;
+        driver
+            .request(&serde_json::json!({
+                "op": "fireTwin",
+                "requestId": format!("0x{}", hex::encode(request_id)),
+                "call": placement_call(call, argument),
+                "failing": placement_call(failing, argument),
+            }))
+            .await
+    }
+
+    /// Deploy the ERC20 vault, queue and flush a deposit, then send it in a partially
+    /// successful transaction (CertiK SNA-07's shape).
+    pub async fn run_vault_partial_send(
+        &self,
+        mpc_public_key: &str,
+        evm_rpc_url: &str,
+        evm_funder_key: &str,
+    ) -> anyhow::Result<VaultPartialSend> {
+        let mut driver = self.driver.lock().await;
+        driver
+            .request(&serde_json::json!({
+                "op": "runVaultPartialSend",
+                "mpcPublicKey": mpc_public_key,
+                "evmRpcUrl": evm_rpc_url,
+                "evmFunderKey": evm_funder_key,
+            }))
+            .await
+    }
+
+    /// Deploy the ERC20 vault and its local EVM targets, then run every request kind it
+    /// sends through the MPC and settle each on Midnight.
+    pub async fn run_vault(
+        &self,
+        mpc_public_key: &str,
+        evm_rpc_url: &str,
+        evm_funder_key: &str,
+    ) -> anyhow::Result<VaultRunResult> {
+        let mut driver = self.driver.lock().await;
+        let result: VaultRunResult = driver
+            .request(&serde_json::json!({
+                "op": "runVault",
+                "mpcPublicKey": mpc_public_key,
+                "evmRpcUrl": evm_rpc_url,
+                "evmFunderKey": evm_funder_key,
+            }))
             .await?;
-        Ok(())
+        std::fs::write(
+            self._stack.artifact_dir.join("vault-result.json"),
+            serde_json::to_vec_pretty(&result)?,
+        )
+        .context("saving the vault operation results")?;
+        Ok(result)
     }
 
     /// Have a second caller contract notify the central Signet contract naming the real
@@ -238,6 +572,14 @@ impl MidnightContext {
     }
 }
 
+fn placement_call((nonce, target): (u64, [u8; 20]), argument: [u8; 32]) -> serde_json::Value {
+    serde_json::json!({
+        "nonce": nonce.to_string(),
+        "target": hex::encode(target),
+        "argument": hex::encode(argument),
+    })
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct DriverConfig<'a> {
@@ -263,24 +605,28 @@ impl<'a> DriverConfig<'a> {
 fn responder_config(
     endpoints: &MidnightEndpoints,
     bootstrap: &BootstrapResult,
-    node_executable: String,
-    publisher_entrypoint: PathBuf,
+    contract_artifacts_dir: PathBuf,
+    zk_params_dir: PathBuf,
     output_storage: Option<OutputStorageConfig>,
 ) -> anyhow::Result<MidnightConfig> {
     Ok(MidnightConfig {
-        node_url: endpoints.node_http_url.clone(),
+        node_url: endpoints
+            .node_http_url
+            .parse()
+            .context("parsing the Midnight node URL")?,
         central_address: MidnightAddress::from_hex(&bootstrap.central_address)
             .context("decoding Midnight central address")?,
+        responder_address: MidnightAddress::from_hex(&bootstrap.responder_address)
+            .context("decoding Midnight responder address")?,
         publisher: PublisherConfig {
             output_storage,
-            intent_gen_command: vec![
-                node_executable,
-                publisher_entrypoint.to_string_lossy().into_owned(),
-            ],
-            funding_seed: bootstrap.publisher_seed.clone().into(),
-            proof_server_url: endpoints.proof_server_url.clone(),
-            indexer_url: endpoints.indexer_url.clone(),
-            indexer_ws_url: endpoints.indexer_ws_url.clone(),
+            funding_seed: bootstrap.publisher_seeds[0].clone().into(),
+            indexer_ws_url: endpoints
+                .indexer_ws_url
+                .parse()
+                .context("parsing the Midnight indexer websocket URL")?,
+            contract_artifacts_dir,
+            zk_params_dir,
             ..Default::default()
         },
         rpc: Default::default(),
@@ -288,23 +634,17 @@ fn responder_config(
     })
 }
 
-fn node_executable() -> anyhow::Result<String> {
-    let output = std::process::Command::new("node")
-        .args(["--print", "process.execPath"])
-        .output()
-        .context("resolving the Node executable for the Midnight publisher")?;
-    anyhow::ensure!(
-        output.status.success(),
-        "resolving the Node executable failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let path = String::from_utf8(output.stdout).context("Node's executable path is not UTF-8")?;
-    let path = path.trim();
-    anyhow::ensure!(
-        Path::new(path).is_absolute(),
-        "Node returned a non-absolute executable path: {path}"
-    );
-    Ok(path.to_string())
+/// The ledger's own parameter cache, so runs share what earlier ones fetched; looked
+/// up as `MidnightDataProvider::new` does.
+fn zk_params_dir() -> anyhow::Result<PathBuf> {
+    if let Some(dir) = std::env::var_os("MIDNIGHT_PP") {
+        return Ok(PathBuf::from(dir));
+    }
+    if let Some(cache) = std::env::var_os("XDG_CACHE_HOME") {
+        return Ok(PathBuf::from(cache).join("midnight/zk-params"));
+    }
+    let home = std::env::var_os("HOME").context("HOME is unset, so there is no zk-params cache")?;
+    Ok(PathBuf::from(home).join(".cache/midnight/zk-params"))
 }
 
 struct MidnightDriver {
@@ -315,7 +655,7 @@ struct MidnightDriver {
 
 impl MidnightDriver {
     async fn spawn(artifact_dir: &Path) -> anyhow::Result<Self> {
-        let package_dir = publisher_package_dir()?;
+        let package_dir = devtools_package_dir()?;
         let executable = package_dir.join("node_modules/.bin/tsx");
         let source = package_dir.join("devtools/real-stack/driver.ts");
         anyhow::ensure!(
@@ -378,11 +718,11 @@ impl MidnightDriver {
     }
 }
 
-fn publisher_package_dir() -> anyhow::Result<PathBuf> {
+fn devtools_package_dir() -> anyhow::Result<PathBuf> {
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
     manifest
         .parent()
-        .map(|root| root.join("chain-signatures/midnight-publisher-ts"))
+        .map(|root| root.join("chain-signatures/midnight-devtools"))
         .context("integration-tests manifest has no repository parent")
 }
 
@@ -396,6 +736,77 @@ impl MidnightStack {
             )
         })?;
 
+        let (chain, node_http_url, indexer_url, indexer_ws_url, network_id, role_seeds) =
+            match DeployedNetwork::from_env()? {
+                Some(network) => {
+                    let network_id = wait_for_node(&network.node_http_url).await?;
+                    tracing::info!(%network_id, "running the Midnight cases on a deployed network");
+                    (
+                        None,
+                        network.node_http_url,
+                        network.indexer_url,
+                        network.indexer_ws_url,
+                        network_id,
+                        Some(network.role_seeds),
+                    )
+                }
+                None => {
+                    let (chain, node_http_url, indexer_host_port, network_id) =
+                        Self::start_local_chain(spawner, &artifact_dir).await?;
+                    (
+                        Some(chain),
+                        node_http_url,
+                        format!("http://127.0.0.1:{indexer_host_port}/api/v3/graphql"),
+                        format!("ws://127.0.0.1:{indexer_host_port}/api/v3/graphql/ws"),
+                        network_id,
+                        None,
+                    )
+                }
+            };
+
+        let proof_log = log_consumer(&artifact_dir.join("proof-server.log"));
+        let proof_server = start_container_with_network_retry(
+            || {
+                GenericImage::new(PROOF_IMAGE.0, PROOF_IMAGE.1)
+                    .with_exposed_port(PROOF_PORT.tcp())
+                    .with_wait_for(WaitFor::Nothing)
+                    .with_network(&spawner.network)
+                    .with_log_consumer(proof_log.clone())
+            },
+            &spawner.network,
+        )
+        .await
+        .context("starting Midnight proof-server container")?;
+        let proof_host_port = proof_server
+            .get_host_port_ipv4(PROOF_PORT)
+            .await
+            .context("resolving Midnight proof-server host port")?;
+
+        let endpoints = MidnightEndpoints {
+            node_http_url,
+            indexer_url,
+            indexer_ws_url,
+            proof_server_url: format!("http://127.0.0.1:{proof_host_port}"),
+        };
+        wait_for_indexer(&endpoints.indexer_url).await?;
+        wait_for_http("proof server", &endpoints.proof_server_url).await?;
+
+        Ok(Self {
+            _chain: chain,
+            _proof_server: proof_server,
+            endpoints,
+            network_id,
+            role_seeds,
+            artifact_dir,
+        })
+    }
+
+    /// Starts a local dev node and an indexer following it, returning them with the node's
+    /// HTTP URL, the indexer's host port and the node's network id.
+    async fn start_local_chain(
+        spawner: &ClusterSpawner,
+        artifact_dir: &Path,
+    ) -> anyhow::Result<((Container, Container), String, u16, String)> {
         let node_log = log_consumer(&artifact_dir.join("node.log"));
         let node = start_container_with_network_retry(
             || {
@@ -456,41 +867,12 @@ impl MidnightStack {
             .await
             .context("resolving Midnight indexer host port")?;
 
-        let proof_log = log_consumer(&artifact_dir.join("proof-server.log"));
-        let proof_server = start_container_with_network_retry(
-            || {
-                GenericImage::new(PROOF_IMAGE.0, PROOF_IMAGE.1)
-                    .with_exposed_port(PROOF_PORT.tcp())
-                    .with_wait_for(WaitFor::Nothing)
-                    .with_network(&spawner.network)
-                    .with_log_consumer(proof_log.clone())
-            },
-            &spawner.network,
-        )
-        .await
-        .context("starting Midnight proof-server container")?;
-        let proof_host_port = proof_server
-            .get_host_port_ipv4(PROOF_PORT)
-            .await
-            .context("resolving Midnight proof-server host port")?;
-
-        let endpoints = MidnightEndpoints {
+        Ok((
+            (node, indexer),
             node_http_url,
-            indexer_url: format!("http://127.0.0.1:{indexer_host_port}/api/v3/graphql"),
-            indexer_ws_url: format!("ws://127.0.0.1:{indexer_host_port}/api/v3/graphql/ws"),
-            proof_server_url: format!("http://127.0.0.1:{proof_host_port}"),
-        };
-        wait_for_indexer(&endpoints.indexer_url).await?;
-        wait_for_http("proof server", &endpoints.proof_server_url).await?;
-
-        Ok(Self {
-            _node: node,
-            _indexer: indexer,
-            _proof_server: proof_server,
-            endpoints,
+            indexer_host_port,
             network_id,
-            artifact_dir,
-        })
+        ))
     }
 }
 

@@ -18,7 +18,7 @@ or error: if on-call would gain nothing from reading it, it does not belong at t
 - Log metadata, not payloads: no binaries, contract bytecode, or other bulky data — reference them by
   hash or id instead.
 - Never log secrets, including URLs carrying API keys — log the host only. See
-  `doc/SECRET_MANAGEMENT.md`.
+  `doc/secret-management.md`.
 
 ## Examples
 
@@ -44,14 +44,14 @@ tracing::warn!(?sign_id, "returning presignature to pool due to REJECTs");
 
 ## Outputs
 
-Logging is built from independent layers in `node/src/logs.rs`; each has its own destination and
+Logging is built from independent layers in `chain-signatures/node/src/logs.rs`; each has its own destination and
 filter:
 
 | Output | Destination | Enabled by | Filter |
 |---|---|---|---|
-| FMT | console (stderr), human-readable | always | `RUST_LOG` |
+| FMT | console (stderr), human-readable | `MPC_LOG_FORMAT=plain` / `--log-format plain` (default) | `RUST_LOG` |
 | OTLP | OpenTelemetry collector → tracing backends | `MPC_OPENTELEMETRY_LEVEL` / `--opentelemetry-level` (default `off`); endpoint `MPC_OTLP_ENDPOINT` / `--otlp-endpoint` | `MPC_OPENTELEMETRY_LEVEL` (info/debug/trace) |
-| Stackdriver | GCP Cloud Logging, structured stderr | on GCP unless `MPC_DISABLE_GCP_LOGS` / `--disable-gcp-logs` | `RUST_LOG` |
+| Stackdriver | GCP Cloud Logging, structured stderr | `MPC_LOG_FORMAT=json` / `--log-format json` | `RUST_LOG` |
 
 ### Local OTLP setup
 

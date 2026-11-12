@@ -24,39 +24,29 @@ pub fn env_u64(name: &str, default: Option<u64>) -> anyhow::Result<u64> {
     }
 }
 
-/// Read an environment variable and parse it as a `bool` (`0/1/true/false/yes/no`).
-pub fn env_bool(name: &str, default: bool) -> anyhow::Result<bool> {
-    match std::env::var(name) {
-        Ok(v) => match v.as_str() {
-            "1" | "true" | "yes" => Ok(true),
-            "0" | "false" | "no" => Ok(false),
-            other => Err(anyhow!("invalid {name}: {other:?}, expected 0/1")),
-        },
-        Err(std::env::VarError::NotPresent) => Ok(default),
-        Err(std::env::VarError::NotUnicode(_)) => Err(anyhow!("invalid {name}: not valid UTF-8")),
-    }
-}
-
 /// Build an [`EthConfig`] from the standard set of benchmark env vars
-/// (`RPC_URL`, `CONTRACT_ADDRESS`, `NETWORK`, `OPTIMISTIC`,
-/// `REFRESH_FINALIZED_INTERVAL`).
+/// (`MPC_ETH_EXECUTION_RPC_HTTP_URL`, `MPC_ETH_CONTRACT_ADDRESS`,
+/// `MPC_ETH_NETWORK`). Like the node, the bench waits for finality unless
+/// the network is `anvil`.
 pub fn make_config() -> anyhow::Result<EthConfig> {
+    let network = match std::env::var("MPC_ETH_NETWORK") {
+        Ok(network) => network
+            .parse()
+            .map_err(|e| anyhow!("invalid MPC_ETH_NETWORK: {e}"))?,
+        Err(_) => mpc_chain_ethereum::EthNetwork::Sepolia,
+    };
     Ok(EthConfig {
         // The bench only indexes; the signer is never used.
         account_sk: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
             .parse()
             .unwrap(),
-        execution_rpc_http_url: opt_env("RPC_URL")?
+        execution_rpc_http_url: opt_env("MPC_ETH_EXECUTION_RPC_HTTP_URL")?
             .parse()
-            .map_err(|e| anyhow!("invalid RPC_URL: {e}"))?,
-        contract_address: opt_env("CONTRACT_ADDRESS")?
+            .map_err(|e| anyhow!("invalid MPC_ETH_EXECUTION_RPC_HTTP_URL: {e}"))?,
+        contract_address: opt_env("MPC_ETH_CONTRACT_ADDRESS")?
             .parse()
-            .map_err(|e| anyhow!("invalid CONTRACT_ADDRESS: {e}"))?,
-        network: std::env::var("NETWORK").unwrap_or_else(|_| "sepolia".to_string()),
-        // Production finality-watch cadence; The watcher drives finality in OPTIMISTIC=0 mode.
-        refresh_finalized_interval: env_u64("REFRESH_FINALIZED_INTERVAL", Some(10_000))?,
-        // Default to the production (non-optimistic) path;
-        optimistic_requests: env_bool("OPTIMISTIC", false)?,
+            .map_err(|e| anyhow!("invalid MPC_ETH_CONTRACT_ADDRESS: {e}"))?,
+        network,
         rpc: Default::default(),
         gas: Default::default(),
         publisher: Default::default(),
@@ -89,8 +79,8 @@ pub async fn run_catchup(
         EthereumIndexer::new(config, state, NoopChainTelemetry, SharedBackoff::new()).await?;
     let (events_tx, mut events_rx) = chain_event_channel();
 
-    // Maintain the finalized head the same way `run()` does, so OPTIMISTIC=0
-    // (the default) exercises the production finality-watch path.
+    // Maintain the finalized head the same way `run()` does, so a non-anvil
+    // network exercises the production finality-watch path.
     let cancel = CancellationToken::new();
     let _watcher = indexer.spawn_finalized_head_watcher(cancel.clone());
 

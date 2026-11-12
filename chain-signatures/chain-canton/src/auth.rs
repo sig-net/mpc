@@ -30,8 +30,7 @@ struct CachedToken {
 
 impl CantonAuthProvider {
     pub fn new(config: CantonAuthConfig) -> anyhow::Result<Self> {
-        let token_url =
-            TokenUrl::new(config.token_url.clone()).context("invalid Canton OIDC token URL")?;
+        let token_url = TokenUrl::from_url(config.token_url.clone());
         let oauth_client = BasicClient::new(ClientId::new(config.client_id))
             .set_client_secret(ClientSecret::new(
                 config.client_secret.expose_secret().to_string(),

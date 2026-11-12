@@ -6,7 +6,7 @@ use crate::metrics::requests::{
 };
 use crate::protocol::contract::primitives::intersect_vec;
 use crate::protocol::message::{MessageChannel, PositMessage, PositProtocolId};
-use crate::protocol::posit::{PositAction, PositRejectReason, SinglePositCounter};
+use crate::protocol::posit::{PositAction, PositCounter, PositRejectReason};
 use crate::protocol::presignature::PresignatureId;
 use crate::protocol::signature::{GenerateCtx, SignError, SignGenerator};
 use crate::protocol::sync::{SyncKind, SyncReportSender};
@@ -14,7 +14,7 @@ use crate::protocol::Chain;
 use crate::respond_bidirectional::claims_attestation_key;
 use crate::rpc::{ContractStateWatcher, GovernanceInfo, RpcChannel};
 use crate::storage::presignature_storage::{PresignatureReservation, PresignatureTaken};
-use crate::storage::PresignatureStorage;
+use crate::storage::{Initializing, PresignatureStorage};
 use crate::types::SignCommand;
 
 use mpc_utils::{
@@ -25,7 +25,6 @@ use mpc_utils::{
 use cait_sith::protocol::Participant;
 use enum_map::EnumMap;
 use lru::LruCache;
-use mpc_contract::config::ProtocolConfig;
 use mpc_primitives::{ChainConfig as _, IndexedSignRequest, RequestKind, SignId};
 use std::collections::{BTreeSet, HashMap};
 use std::num::NonZeroUsize;
@@ -180,7 +179,7 @@ struct SignEntry {
 pub struct SignatureSpawner {
     contract: ContractStateWatcher,
     /// Presignature storage that maintains all presignatures.
-    presignatures: PresignatureStorage,
+    presignatures: PresignatureStorage<Initializing>,
     /// Consolidated signature tasks - one per (sign_id, kind), each task is an async task handling complete lifecycle
     tasks: JoinMap<SignTaskKey, Result<(), SignError>>,
     /// Per-(sign, kind) posit mailboxes; also buffer messages that arrive before their
@@ -209,7 +208,7 @@ impl SignatureSpawner {
     pub fn new(
         node_account_id: near_account_id::AccountId,
         contract: ContractStateWatcher,
-        presignatures: PresignatureStorage,
+        presignatures: PresignatureStorage<Initializing>,
         mesh_state: watch::Receiver<MeshState>,
         msg: MessageChannel,
         rpc: RpcChannel,
@@ -242,7 +241,7 @@ impl SignatureSpawner {
         &mut self,
         governance: &GovernanceInfo,
         entry: backlog::SignEntry<Generating>,
-        cfg: ProtocolConfig,
+        signature_timeout: Duration,
     ) {
         let sign_id = entry.sign_id();
         let kind = entry.request().request_kind();
@@ -280,7 +279,7 @@ impl SignatureSpawner {
             tracing::info!(?sign_id, "holding sign request until governance is running");
             return;
         }
-        self.spawn_task(governance, request, cfg);
+        self.spawn_task(governance, request, signature_timeout);
     }
 
     /// Spawn a task incarnation for an already-admitted request.
@@ -288,7 +287,7 @@ impl SignatureSpawner {
         &mut self,
         governance: &GovernanceInfo,
         request: Arc<IndexedSignRequest>,
-        cfg: ProtocolConfig,
+        signature_timeout: Duration,
     ) {
         let sign_id = request.id;
         tracing::info!(?sign_id, "spawning signature task");
@@ -319,10 +318,10 @@ impl SignatureSpawner {
             governance: governance.clone(),
             sign_id,
             kind,
-            presignatures: self.presignatures.clone(),
+            presignatures: self.presignatures.to_ready(governance.me),
             msg: self.msg.clone(),
             rpc: self.rpc.clone(),
-            cfg,
+            signature_timeout,
             is_proposer,
             round,
             limiter: self.limiters[request.chain].clone(),
@@ -340,7 +339,7 @@ impl SignatureSpawner {
     /// Spawn a fresh incarnation for every retained request; the caller must
     /// have aborted previous incarnations. Not a retirement: mailboxes,
     /// watchers, and dedup state survive.
-    fn spawn_tasks(&mut self, governance: &GovernanceInfo, cfg: &ProtocolConfig) {
+    fn spawn_tasks(&mut self, governance: &GovernanceInfo, signature_timeout: Duration) {
         let requests: Vec<Arc<IndexedSignRequest>> = self
             .requests
             .values()
@@ -351,7 +350,7 @@ impl SignatureSpawner {
             "respawning sign tasks under new governance"
         );
         for request in requests {
-            self.spawn_task(governance, request, cfg.clone());
+            self.spawn_task(governance, request, signature_timeout);
         }
     }
 
@@ -500,7 +499,7 @@ impl SignatureSpawner {
         &mut self,
         governance: &GovernanceInfo,
         sign: SignCommand,
-        cfg: &ProtocolConfig,
+        signature_timeout: Duration,
     ) {
         match sign {
             SignCommand::Completion(sign_id) => {
@@ -574,7 +573,7 @@ impl SignatureSpawner {
                     entry.request().unix_timestamp_indexed,
                 );
 
-                self.add_request(governance, entry, cfg.clone());
+                self.add_request(governance, entry, signature_timeout);
             }
         }
 
@@ -586,16 +585,16 @@ impl SignatureSpawner {
     async fn run(
         mut self,
         mut sign_rx: mpsc::Receiver<SignCommand>,
-        mut cfg: watch::Receiver<Config>,
-    ) {
+        cfg: watch::Receiver<Config>,
+    ) -> anyhow::Result<()> {
         let mut posits = self.msg.subscribe_signature_posit().await;
-        let mut protocol = cfg.borrow().protocol.clone();
+        let signature_timeout = cfg.borrow().timeouts.signature_generation;
 
         let mut contract_watcher = self.contract.clone();
 
         // GUARANTEE: contract is in a running state with valid governance info
         // before we start processing any messages
-        let mut governance = contract_watcher.wait_governance().await;
+        let mut governance = contract_watcher.wait_governance().await?;
 
         loop {
             tokio::select! {
@@ -604,7 +603,7 @@ impl SignatureSpawner {
                         tracing::warn!("signature spawner sign_rx closed, terminating");
                         break;
                     };
-                    self.handle_sign(&governance, sign, &protocol);
+                    self.handle_sign(&governance, sign, signature_timeout);
                 }
                 Some((sign_id, kind, presignature_id, round, from, action)) = posits.recv() => {
                     self.handle_posit(sign_id, kind, SignPositMessage { presignature_id, round, from, action });
@@ -612,16 +611,13 @@ impl SignatureSpawner {
                 Some(result) = self.tasks.join_next(), if !self.tasks.is_empty() => {
                     self.handle_task_exit(result);
                 }
-                Ok(()) = cfg.changed() => {
-                    protocol = cfg.borrow().protocol.clone();
-                }
-                Some(new_governance) = contract_watcher.next_governance(governance.clone()) => {
-                    governance = new_governance;
+                new_governance = contract_watcher.next_governance(governance.clone()) => {
+                    governance = new_governance?;
                     // A governance change invalidates every incarnation — even
                     // running -> running: the watch coalesces fast transitions.
                     self.tasks.abort_all();
                     if governance.is_running {
-                        self.spawn_tasks(&governance, &protocol);
+                        self.spawn_tasks(&governance, signature_timeout);
                     } else {
                         // Entries stay in `requests` and respawn once running again.
                         tracing::info!(
@@ -632,6 +628,7 @@ impl SignatureSpawner {
                 }
             }
         }
+        Ok(())
     }
 }
 
@@ -668,7 +665,7 @@ impl Drop for SignatureSpawner {
 }
 
 pub struct SignatureSpawnerTask {
-    handle: JoinHandle<()>,
+    handle: JoinHandle<anyhow::Result<()>>,
 }
 
 impl SignatureSpawnerTask {
@@ -715,7 +712,7 @@ mod tests {
         spawner: SignatureSpawner,
         governance: GovernanceInfo,
         backlog: crate::backlog::Backlog,
-        cfg: ProtocolConfig,
+        signature_timeout: Duration,
     }
 
     impl std::ops::Deref for SpawnerSetup {
@@ -733,7 +730,8 @@ mod tests {
 
     impl SpawnerSetup {
         fn handle_sign(&mut self, cmd: SignCommand) {
-            self.spawner.handle_sign(&self.governance, cmd, &self.cfg);
+            self.spawner
+                .handle_sign(&self.governance, cmd, self.signature_timeout);
         }
 
         fn request(&mut self, entry: backlog::SignEntry<Generating>) {
@@ -742,11 +740,12 @@ mod tests {
 
         fn add_request(&mut self, entry: backlog::SignEntry<Generating>) {
             self.spawner
-                .add_request(&self.governance, entry, self.cfg.clone());
+                .add_request(&self.governance, entry, self.signature_timeout);
         }
 
         fn spawn_tasks(&mut self) {
-            self.spawner.spawn_tasks(&self.governance, &self.cfg);
+            self.spawner
+                .spawn_tasks(&self.governance, self.signature_timeout);
         }
 
         fn leg_completed(&mut self, sign_id: SignId, kind: RequestKind) {
@@ -858,13 +857,13 @@ mod tests {
             sync_report_tx,
         );
         let backlog = crate::backlog::Backlog::new();
-        let cfg = ProtocolConfig::default();
+        let signature_timeout = crate::config::Timeouts::default().signature_generation;
 
         SpawnerSetup {
             spawner,
             governance,
             backlog,
-            cfg,
+            signature_timeout,
         }
     }
 

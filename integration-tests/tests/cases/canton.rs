@@ -19,7 +19,7 @@ use mpc_chain_canton::{
 use mpc_node::respond_bidirectional::CANTON_RESPOND_BIDIRECTIONAL_PATH;
 use mpc_node::sign_bidirectional::{derive_user_address, sign_and_hash_transaction};
 use mpc_node::util::NearPublicKeyExt;
-use mpc_primitives::LATEST_MPC_KEY_VERSION;
+use mpc_primitives::{Chain, LATEST_MPC_KEY_VERSION};
 use serial_test::serial;
 use std::time::Duration;
 use test_log::test;
@@ -131,7 +131,7 @@ async fn run_canton_eth_bidirectional_flow_case(case: EvmType2AnvilCase) -> Resu
         LATEST_MPC_KEY_VERSION,
         &expected_event.sender,
         &canton.requester_party,
-    );
+    )?;
     let expected_sender_addr = derive_user_address(root_pk, sign_epsilon);
 
     anvil
@@ -148,7 +148,8 @@ async fn run_canton_eth_bidirectional_flow_case(case: EvmType2AnvilCase) -> Resu
     let s_bytes: [u8; 32] = mpc_signature.s.to_bytes().into();
     let signed_bytes = encode_signed_eip1559(&evm_params, y_parity, &r_bytes, &s_bytes)?;
     let unsigned_bytes = TxEip1559::try_from(&evm_params)?.encoded_for_signing();
-    let (watched_tx_hash, _) = sign_and_hash_transaction(&unsigned_bytes, mpc_signature)?;
+    let (watched_tx_hash, _) =
+        sign_and_hash_transaction(Chain::Ethereum, &unsigned_bytes, mpc_signature)?;
     let watched_tx_hash = B256::from(watched_tx_hash);
 
     let pending_tx = anvil.send_raw_transaction(&signed_bytes).await?;
@@ -212,7 +213,7 @@ async fn run_canton_eth_bidirectional_flow_case(case: EvmType2AnvilCase) -> Resu
         LATEST_MPC_KEY_VERSION,
         &expected_event.sender,
         CANTON_RESPOND_BIDIRECTIONAL_PATH,
-    );
+    )?;
     let respond_derived_pk = mpc_crypto::derive_key(root_pk, respond_epsilon);
 
     let respond_ecdsa = k256::ecdsa::Signature::from_scalars(
@@ -243,10 +244,10 @@ async fn run_canton_eth_bidirectional_flow_case(case: EvmType2AnvilCase) -> Resu
 async fn test_canton_rejects_unauthenticated_requests() -> Result<()> {
     let sandbox = integration_tests::canton::CantonSandbox::run().await?;
     let http = reqwest::Client::new();
-    let url = format!("{}/v2/state/ledger-end", sandbox.json_api_url);
+    let url = sandbox.json_api_url.join("v2/state/ledger-end")?;
 
     // No Authorization header at all.
-    let status = http.get(&url).send().await?.status();
+    let status = http.get(url.clone()).send().await?.status();
     assert_eq!(
         status, 401,
         "missing OAuth bearer token should be rejected, got {status}"
@@ -254,7 +255,7 @@ async fn test_canton_rejects_unauthenticated_requests() -> Result<()> {
 
     // Malformed Bearer token.
     let status = http
-        .get(&url)
+        .get(url.clone())
         .bearer_auth("not-a-valid-token")
         .send()
         .await?
@@ -282,9 +283,9 @@ async fn test_canton_rejects_token_signed_by_untrusted_jwks_key() -> Result<()> 
     // Canton should reject it because the token signature does not match the
     // configured OAuth/JWKS issuer key.
     let http = reqwest::Client::new();
-    let url = format!("{}/v2/state/ledger-end", sandbox.json_api_url);
+    let url = sandbox.json_api_url.join("v2/state/ledger-end")?;
     let status = http
-        .get(&url)
+        .get(url.clone())
         .bearer_auth(&rogue_token)
         .send()
         .await?

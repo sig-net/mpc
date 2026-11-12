@@ -1,3 +1,4 @@
+use anyhow::Context as _;
 use cait_sith::protocol::Participant;
 use mpc_chain_canton::{CantonAuthConfig, CantonConfig};
 use mpc_chain_solana::SolConfig;
@@ -6,6 +7,7 @@ use mpc_node::protocol::state::NodeKeyInfo;
 use near_account_id::AccountId;
 use near_workspaces::network::Sandbox;
 use near_workspaces::{Account, Worker};
+use solana_sdk::pubkey::Pubkey as SolanaPubkey;
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
@@ -59,8 +61,22 @@ fn thread_network_name(docker: &DockerClient) -> String {
     })
 }
 
-const GCP_PROJECT_ID: &str = "multichain-integration";
-const ENV: &str = "integration-tests";
+const ENV: &str = "test";
+
+/// Stands in for the program address until the contract is deployed. Not the
+/// all-zeros default, which is the System Program.
+fn placeholder_program_address() -> SolanaPubkey {
+    "PLaceho1derProgram1111111111111111111111111"
+        .parse()
+        .expect("a valid literal")
+}
+
+/// Dummy endpoint, replaced once the chain's test container is running.
+fn placeholder_url() -> url::Url {
+    "http://placeholder.invalid"
+        .parse()
+        .expect("a valid literal")
+}
 /// Configuration for pregenerated keys to skip the 20+ second key generation phase.
 ///
 /// When enabled, uses hardcoded key shares from fixture data to start nodes in
@@ -153,7 +169,6 @@ pub struct ClusterSpawner {
     pub docker: DockerClient,
     pub release: bool,
     pub env: String,
-    pub gcp_project_id: String,
     pub network: String,
     pub accounts: Vec<Account>,
     pub participants: Vec<Participant>,
@@ -165,11 +180,13 @@ pub struct ClusterSpawner {
     pub worker: Option<Worker<Sandbox>>,
     pub solana: Option<containers::Solana>,
     pub canton: Option<crate::canton::CantonSandbox>,
-    pub program_address: Option<String>,
+    pub program_address: Option<SolanaPubkey>,
     prestockpile: Option<Prestockpile>,
     pub pregenerated_keys: PregeneratedKeys,
     pub use_ethereum: bool,
     pub use_midnight: bool,
+    /// Midnight funding seeds by node index; see [`Self::node_config`].
+    pub midnight_funding_seeds: Vec<String>,
     /// Tracks which binary source to use for each node index
     pub node_binary_sources: Vec<NodeBinarySource>,
 }
@@ -195,7 +212,6 @@ impl Default for ClusterSpawner {
             docker,
             release: true,
             env: ENV.to_string(),
-            gcp_project_id: GCP_PROJECT_ID.to_string(),
             network,
             accounts: Vec::with_capacity(cfg.nodes),
             participants: Vec::with_capacity(cfg.nodes),
@@ -212,6 +228,7 @@ impl Default for ClusterSpawner {
             pregenerated_keys: PregeneratedKeys::load(nodes, threshold).unwrap(),
             use_ethereum: false,
             use_midnight: false,
+            midnight_funding_seeds: Vec::new(),
             node_binary_sources: vec![NodeBinarySource::CurrentCode; nodes],
         }
     }
@@ -231,20 +248,11 @@ impl ClusterSpawner {
         self
     }
 
-    /// Add mainnet nodes to the cluster using the tagged binary under target/compat/mainnet.
-    pub fn mainnet_nodes(mut self, count: usize) -> Self {
+    /// Add nodes running the latest release binary under target/compat/latest.
+    pub fn latest_release_nodes(mut self, count: usize) -> Self {
         let current_len = self.node_binary_sources.len();
         self.node_binary_sources
-            .extend((0..count).map(|_| NodeBinarySource::Mainnet));
-        self.cfg.nodes = current_len + count;
-        self
-    }
-
-    /// Add testnet nodes to the cluster using the tagged binary under target/compat/testnet.
-    pub fn testnet_nodes(mut self, count: usize) -> Self {
-        let current_len = self.node_binary_sources.len();
-        self.node_binary_sources
-            .extend((0..count).map(|_| NodeBinarySource::Testnet));
+            .extend((0..count).map(|_| NodeBinarySource::LatestRelease));
         self.cfg.nodes = current_len + count;
         self
     }
@@ -279,6 +287,14 @@ impl ClusterSpawner {
         self
     }
 
+    /// The stockpile `host` applies before the contract starts, which it can only
+    /// do with pregenerated keys.
+    pub(crate) fn host_prestockpile(&self) -> Option<&Prestockpile> {
+        self.prestockpile
+            .as_ref()
+            .filter(|_| self.pregenerated_keys.is_enabled())
+    }
+
     fn load_pregenerated_keys(mut self) -> Self {
         if self.pregenerated_keys.is_enabled() && self.pregenerated_keys.len() != self.cfg.nodes {
             self.pregenerated_keys = PregeneratedKeys::load(self.cfg.nodes, self.cfg.threshold)
@@ -294,8 +310,8 @@ impl ClusterSpawner {
         if self.cfg.sol.is_none() {
             self.cfg.sol = Some(SolConfig {
                 account_sk: String::new().into(), // Will be filled in later
-                rpc_http_url: String::new(),      // Will be filled in later
-                program_address: String::new(),   // Will be filled in later
+                rpc_http_url: placeholder_url(),  // Will be filled in later
+                program_address: placeholder_program_address(), // Will be filled in later
                 indexer: Default::default(),
             });
         }
@@ -303,18 +319,13 @@ impl ClusterSpawner {
     }
 
     /// Set the Solana program address to watch for events.
-    pub fn program_address(mut self, address: String) -> Self {
+    pub fn program_address(mut self, address: SolanaPubkey) -> Self {
         self.program_address = Some(address);
         self
     }
 
     pub fn env(mut self, env: &str) -> Self {
         self.env = env.to_string();
-        self
-    }
-
-    pub fn gcp_project_id(mut self, gcp_project_id: &str) -> Self {
-        self.gcp_project_id = gcp_project_id.to_string();
         self
     }
 
@@ -333,13 +344,18 @@ impl ClusterSpawner {
         self
     }
 
+    /// Node `index`'s config; see [`node_config`].
+    pub fn node_config(&self, index: usize) -> anyhow::Result<NodeConfig> {
+        node_config(&self.cfg, &self.midnight_funding_seeds, index)
+    }
+
     pub fn canton(mut self) -> Self {
         if self.cfg.canton.is_none() {
             self.cfg.canton = Some(CantonConfig {
-                json_api_url: String::new(),
-                json_api_ws_url: String::new(),
+                json_api_url: placeholder_url(),
+                json_api_ws_url: placeholder_url(),
                 auth: CantonAuthConfig {
-                    token_url: String::new(),
+                    token_url: placeholder_url(),
                     client_id: String::new(),
                     client_secret: String::new().into(),
                     audience: String::new(),
@@ -440,7 +456,7 @@ impl IntoFuture for ClusterSpawner {
                 let solana = self.spawn_solana().await;
 
                 // Deploy the core contracts and get the program address
-                let program_address = if let Some(addr) = self.program_address.clone() {
+                let program_address = if let Some(addr) = self.program_address {
                     // Use provided program address
                     addr
                 } else {
@@ -471,12 +487,14 @@ impl IntoFuture for ClusterSpawner {
                 let midnight =
                     crate::midnight::MidnightContext::run(&self, root_public_key).await?;
                 self.cfg.midnight = Some(midnight.config.clone());
+                self.midnight_funding_seeds = midnight.publisher_seeds.clone();
                 Some(midnight)
             } else {
                 None
             };
 
             let nodes = self.run().await?;
+            let stockpiled_in_host = self.host_prestockpile().is_some();
             let connector = near_jsonrpc_client::JsonRpcClient::new_client();
             let jsonrpc_client = connector.connect(nodes.ctx().worker.rpc_addr());
             let rpc_client = near_fetch::Client::from_client(jsonrpc_client);
@@ -495,14 +513,41 @@ impl IntoFuture for ClusterSpawner {
             if self.wait_for_running {
                 cluster.wait().running().nodes_running().await?;
 
-                if let Some(prestockpile) = self.prestockpile {
-                    cluster.prestockpile(prestockpile).await;
+                if let Some(prestockpile) = &self.prestockpile {
+                    if !stockpiled_in_host {
+                        cluster.stockpile(prestockpile).await;
+                    }
+                    cluster.wait_stockpiled().await;
                 }
             }
 
             Ok(cluster)
         })
     }
+}
+
+/// `cfg` for node `index`. A Midnight publisher assumes it alone spends its funding wallet's
+/// DUST, so every Midnight node needs its own seed; falling back to the shared one would race
+/// another node's publisher.
+fn node_config(
+    cfg: &NodeConfig,
+    midnight_funding_seeds: &[String],
+    index: usize,
+) -> anyhow::Result<NodeConfig> {
+    let mut cfg = cfg.clone();
+    if let Some(midnight) = cfg.midnight.as_mut() {
+        midnight.publisher.funding_seed = midnight_funding_seeds
+            .get(index)
+            .with_context(|| {
+                format!(
+                    "no Midnight funding seed for node {index} ({} funded)",
+                    midnight_funding_seeds.len()
+                )
+            })?
+            .clone()
+            .into();
+    }
+    Ok(cfg)
 }
 
 /// Spawn a near sandbox with retry logic to handle potential transient failures (i.e., due to CPU contention)
@@ -526,4 +571,54 @@ async fn spawn_sandbox_with_retry() -> anyhow::Result<Worker<Sandbox>> {
         "failed to spawn near sandbox after 5 attempts: {:?}",
         last_err
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use mpc_chain_midnight::{MidnightAddress, MidnightConfig, PublisherConfig};
+
+    use super::node_config;
+    use crate::NodeConfig;
+    use secrecy::ExposeSecret as _;
+
+    fn midnight_cfg() -> NodeConfig {
+        NodeConfig {
+            midnight: Some(MidnightConfig {
+                node_url: "http://127.0.0.1:9944".parse().unwrap(),
+                central_address: MidnightAddress::from_bytes([0; 32]),
+                responder_address: MidnightAddress::from_bytes([1; 32]),
+                publisher: PublisherConfig {
+                    funding_seed: "04".repeat(32).into(),
+                    ..Default::default()
+                },
+                rpc: Default::default(),
+                indexer: Default::default(),
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn each_midnight_node_gets_its_own_funding_seed() {
+        let seeds = ["04", "05", "06"].map(|byte| byte.repeat(32));
+        for (index, seed) in seeds.iter().enumerate() {
+            let cfg = node_config(&midnight_cfg(), &seeds, index).unwrap();
+            assert_eq!(
+                cfg.midnight.unwrap().publisher.funding_seed.expose_secret(),
+                seed.as_str()
+            );
+        }
+    }
+
+    #[test]
+    fn midnight_node_without_funding_seed_is_an_error() {
+        let seeds = ["04", "05"].map(|byte| byte.repeat(32));
+        assert!(node_config(&midnight_cfg(), &seeds, 2).is_err());
+    }
+
+    #[test]
+    fn node_without_midnight_needs_no_funding_seed() {
+        let cfg = node_config(&NodeConfig::default(), &[], 0).unwrap();
+        assert!(cfg.midnight.is_none());
+    }
 }

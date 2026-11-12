@@ -19,11 +19,11 @@ use cait_sith::protocol::Participant;
 use dashmap::{mapref::entry::Entry, DashMap, DashSet};
 use k256::AffinePoint;
 use mpc_chain_integration_core::{
-    utils::retry::{retry_rpc, retry_rpc_gated, RetryConfig, SharedBackoff},
+    utils::retry::{retry_op, retry_rpc, RetryConfig, SharedBackoff},
     ChainPublisher, PublishAction,
 };
 pub use mpc_contract::primitives::{Read, View};
-use mpc_primitives::{CheckpointDigest, SignId, SignKind, Signature};
+use mpc_primitives::{CheckpointDigest, RequestKind, SignId, SignKind, Signature};
 
 use near_account_id::AccountId;
 use std::collections::HashMap;
@@ -98,20 +98,33 @@ impl BacklogAwaiter {
 
 #[async_trait::async_trait]
 impl mpc_chain_midnight::ResponseAwaiter for BacklogAwaiter {
-    async fn still_awaited(&self, action: &PublishAction) -> bool {
+    async fn still_awaited(&self, action: &PublishAction) -> anyhow::Result<bool> {
         publish_still_awaited(&self.0, action).await
     }
 }
 
+/// A second leg waiting for its source chain to catch up: expected, so retried quietly.
+#[derive(Debug, thiserror::Error)]
+#[error("{0} is not caught up")]
+struct SourceNotCaughtUp(Chain);
+
 /// Whether this node's backlog still waits for the response `action` carries.
 /// An entry that left the backlog was answered on chain or pruned by consensus.
-/// Either way there is nothing left to publish.
-async fn publish_still_awaited(backlog: &Backlog, action: &PublishAction) -> bool {
+/// Either way there is nothing left to publish. Errs, for a retry, on a second leg
+/// whose source chain is behind: the backlog may still hold it after it was answered.
+async fn publish_still_awaited(backlog: &Backlog, action: &PublishAction) -> anyhow::Result<bool> {
     let request = &action.request;
-    backlog
+    let awaited = backlog
         .get(request.chain, &request.id)
         .await
-        .is_some_and(|entry| PublishKind::of(&request.kind).awaited_in(entry.status()))
+        .is_some_and(|entry| PublishKind::of(&request.kind).awaited_in(entry.status()));
+    if awaited
+        && request.request_kind() == RequestKind::RespondBidirectional
+        && !backlog.is_caught_up(request.chain)
+    {
+        return Err(SourceNotCaughtUp(request.chain).into());
+    }
+    Ok(awaited)
 }
 
 /// Checkpoint votes admitted by the dispatch loop: each digest maps to the
@@ -339,25 +352,34 @@ impl ContractStateWatcher {
         self.state()?.governance(&self.account_id)
     }
 
-    pub async fn wait_governance(&mut self) -> GovernanceInfo {
+    /// Waits for the next contract state. A closed channel is an error, not something to wait on.
+    pub async fn changed(&mut self) -> anyhow::Result<()> {
+        self.contract_state
+            .changed()
+            .await
+            .map_err(|_| anyhow::anyhow!("contract state channel closed"))
+    }
+
+    pub async fn wait_governance(&mut self) -> anyhow::Result<GovernanceInfo> {
         loop {
             if let Some(governance) = self.governance() {
-                return governance;
+                return Ok(governance);
             }
-            let _ = self.contract_state.changed().await;
+            self.changed().await?;
         }
     }
 
-    pub async fn next_state(&mut self) -> Option<ProtocolState> {
-        let _ = self.contract_state.changed().await;
-        self.contract_state.borrow_and_update().clone()
+    pub async fn next_state(&mut self) -> anyhow::Result<Option<ProtocolState>> {
+        self.changed().await?;
+        Ok(self.contract_state.borrow_and_update().clone())
     }
 
-    pub async fn next_governance(&mut self, current: GovernanceInfo) -> Option<GovernanceInfo> {
+    pub async fn next_governance(
+        &mut self,
+        current: GovernanceInfo,
+    ) -> anyhow::Result<GovernanceInfo> {
         loop {
-            if self.contract_state.changed().await.is_err() {
-                return None;
-            }
+            self.changed().await?;
             let Some(state) = self.contract_state.borrow_and_update().clone() else {
                 continue;
             };
@@ -368,7 +390,7 @@ impl ContractStateWatcher {
             });
             if next != current {
                 tracing::info!(old = ?current, new = ?next, "signing governance changed");
-                return Some(next);
+                return Ok(next);
             }
         }
     }
@@ -404,12 +426,12 @@ impl ContractStateWatcher {
     }
 
     /// Wait until the public key is available and return it
-    pub async fn wait_public_key(&mut self) -> AffinePoint {
+    pub async fn wait_public_key(&mut self) -> anyhow::Result<AffinePoint> {
         loop {
             if let Some(pk) = self.public_key().await {
-                return pk;
+                return Ok(pk);
             }
-            let _ = self.contract_state.changed().await;
+            self.changed().await?;
         }
     }
 
@@ -427,12 +449,12 @@ impl ContractStateWatcher {
         }
     }
 
-    pub async fn wait_info(&mut self) -> (usize, Participant) {
+    pub async fn wait_info(&mut self) -> anyhow::Result<(usize, Participant)> {
         loop {
             if let Some((threshold, participant)) = self.info().await {
-                return (threshold, participant);
+                return Ok((threshold, participant));
             }
-            let _ = self.contract_state.changed().await;
+            self.changed().await?;
         }
     }
 
@@ -502,7 +524,7 @@ impl RpcExecutor {
         contract: watch::Sender<Option<ProtocolState>>,
         config: watch::Sender<Config>,
         checkpoints: EnumMap<Chain, watch::Sender<Option<CheckpointDigest>>>,
-    ) {
+    ) -> anyhow::Result<()> {
         // Checkpoint votes stop once the contract's consensus checkpoint reaches them.
         let consensus = EnumMap::from_fn(|chain| checkpoints[chain].subscribe());
 
@@ -525,6 +547,7 @@ impl RpcExecutor {
             &mut self.action_rx,
         )
         .await;
+        anyhow::bail!("rpc action channel closed")
     }
 
     /// Dispatches incoming RPC actions to the appropriate chain publishers.
@@ -543,7 +566,6 @@ impl RpcExecutor {
         let in_flight: Arc<DashSet<(Chain, SignId, PublishKind)>> = Arc::new(DashSet::new());
         loop {
             let Some(action) = action_rx.recv().await else {
-                tracing::error!("rpc channel closed unexpectedly");
                 return;
             };
 
@@ -639,7 +661,7 @@ async fn update_contract_data(
 
     for view in views {
         match view {
-            View::State(s) => state_view = Some(s),
+            View::State(s) => state_view = Some(*s),
             View::Config(c) => config_view = Some(c),
             View::Checkpoints(cp) => checkpoints_view = Some(cp),
         }
@@ -660,13 +682,7 @@ async fn update_contract_data(
     }
 
     if let Some(contract_config) = config_view {
-        if let Ok(config_val) = serde_json::to_value(contract_config) {
-            if let Ok(node_config) =
-                serde_json::from_value::<crate::config::ContractConfig>(config_val)
-            {
-                config.send_if_modified(|c| c.update(node_config));
-            }
-        }
+        config.send_if_modified(|c| c.update(contract_config));
     }
 
     if let Some(signed_checkpoints) = checkpoints_view {
@@ -721,23 +737,33 @@ pub async fn execute_publish(
         jitter: true,
     };
 
-    let publish_res = retry_rpc!(
+    let publish_res = retry_op!(
         Duration::MAX, // Prevent from timing out
         retry_config,
+        "publish",
         // Log the error and retry attempt
         |attempt, err, sleep| {
-            tracing::warn!(
-                ?sign_id,
-                retry_count = attempt,
-                elapsed = ?action.timestamp.elapsed(),
-                ?chain,
-                "failed to publish ({err}), retrying in {sleep:?}"
-            );
+            if err.chain().any(|cause| cause.is::<SourceNotCaughtUp>()) {
+                tracing::debug!(
+                    ?sign_id,
+                    retry_count = attempt,
+                    ?chain,
+                    "holding publish ({err:#}), retrying in {sleep:?}"
+                );
+            } else {
+                tracing::warn!(
+                    ?sign_id,
+                    retry_count = attempt,
+                    elapsed = ?action.timestamp.elapsed(),
+                    ?chain,
+                    "failed to publish ({err:#}), retrying in {sleep:?}"
+                );
+            }
         },
         // Try to publish the signature
         {
             if let Some(backlog) = &backlog {
-                if !publish_still_awaited(backlog, &action).await {
+                if !publish_still_awaited(backlog, &action).await? {
                     tracing::info!(
                         ?sign_id,
                         ?chain,
@@ -830,10 +856,11 @@ where
     F: Fn() -> Fut + Send + Sync,
     Fut: std::future::Future<Output = anyhow::Result<CheckpointVoteOutcome>> + Send,
 {
-    let result = retry_rpc_gated!(
+    let result = retry_rpc!(
         timeout,
         retry_config,
         gate,
+        "vote checkpoint",
         |attempt, err, sleep| {
             tracing::warn!(
                 ?checkpoint,
@@ -1231,7 +1258,7 @@ mod tests {
 
         // Channel closed.
         drop(tx);
-        assert!(watcher.next_governance(next).await.is_none());
+        assert!(watcher.next_governance(next).await.is_err());
     }
 
     /// A publisher that counts the number of times it has been called.
@@ -1285,9 +1312,9 @@ mod tests {
         let backlog = Backlog::new();
         let sign_id = SignId::new([3u8; 32]);
         let sign = publish_action_for(&mock_sign_request(sign_id, Chain::Solana));
-        assert!(!publish_still_awaited(&backlog, &sign).await);
+        assert!(!publish_still_awaited(&backlog, &sign).await.unwrap());
         backlog.insert_mock_sign(sign_id, Chain::Solana).await;
-        assert!(publish_still_awaited(&backlog, &sign).await);
+        assert!(publish_still_awaited(&backlog, &sign).await.unwrap());
 
         let tx = mock_bidirectional_tx(SignId::new([4u8; 32]), Chain::Midnight);
         let first_leg = publish_action_for(&mock_bidi_request(tx.sign_id(), tx.source_chain));
@@ -1295,23 +1322,29 @@ mod tests {
         backlog
             .insert_mock_bidirectional(tx.sign_id(), tx.source_chain)
             .await;
-        assert!(publish_still_awaited(&backlog, &first_leg).await);
-        assert!(!publish_still_awaited(&backlog, &second_leg).await);
+        assert!(publish_still_awaited(&backlog, &first_leg).await.unwrap());
+        assert!(!publish_still_awaited(&backlog, &second_leg).await.unwrap());
 
         backlog.remove(tx.source_chain, &tx.sign_id()).await;
         let executing = backlog.insert_mock_executing(&tx).await;
-        assert!(!publish_still_awaited(&backlog, &first_leg).await);
-        assert!(!publish_still_awaited(&backlog, &second_leg).await);
+        assert!(!publish_still_awaited(&backlog, &first_leg).await.unwrap());
+        assert!(!publish_still_awaited(&backlog, &second_leg).await.unwrap());
 
         executing.park().await.unwrap();
         assert!(backlog.get(tx.source_chain, &tx.sign_id()).await.is_some());
-        assert!(!publish_still_awaited(&backlog, &first_leg).await);
-        assert!(!publish_still_awaited(&backlog, &second_leg).await);
+        assert!(!publish_still_awaited(&backlog, &first_leg).await.unwrap());
+        assert!(!publish_still_awaited(&backlog, &second_leg).await.unwrap());
 
         backlog.remove(tx.source_chain, &tx.sign_id()).await;
         backlog.insert_mock_final(&tx).await;
-        assert!(!publish_still_awaited(&backlog, &first_leg).await);
-        assert!(publish_still_awaited(&backlog, &second_leg).await);
+        assert!(!publish_still_awaited(&backlog, &first_leg).await.unwrap());
+        // Behind on the source chain, the awaited second leg is retried, not published.
+        let behind = publish_still_awaited(&backlog, &second_leg)
+            .await
+            .unwrap_err();
+        assert!(behind.is::<SourceNotCaughtUp>());
+        backlog.set_caught_up(tx.source_chain, true);
+        assert!(publish_still_awaited(&backlog, &second_leg).await.unwrap());
     }
 
     /// The Midnight publisher's re-check reads the backlog's own answer.
@@ -1325,9 +1358,9 @@ mod tests {
         let awaiter = BacklogAwaiter::new(backlog.clone());
 
         backlog.insert_mock_sign(sign_id, Chain::Midnight).await;
-        assert!(awaiter.still_awaited(&action).await);
+        assert!(awaiter.still_awaited(&action).await.unwrap());
         backlog.remove(Chain::Midnight, &sign_id).await;
-        assert!(!awaiter.still_awaited(&action).await);
+        assert!(!awaiter.still_awaited(&action).await.unwrap());
     }
 
     #[tokio::test(start_paused = true)]
@@ -1403,7 +1436,7 @@ mod tests {
         };
         tx.send(Some(ProtocolState::Running(running))).unwrap();
 
-        let resumed = watcher.wait_governance().await;
+        let resumed = watcher.wait_governance().await.unwrap();
         assert_eq!(resumed.epoch, 1);
         assert_eq!(resumed.threshold, 2);
         assert_eq!(resumed.me, Participant::from(0));

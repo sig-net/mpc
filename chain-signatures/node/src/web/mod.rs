@@ -8,11 +8,13 @@ pub mod debug;
 
 use self::error::Error;
 use crate::backlog::{Backlog, Checkpoint};
+use crate::config::NetworkConfig;
 use crate::metrics::messaging::WEB_ENDPOINT_LATENCY;
 use crate::protocol::state::{NodeStateWatcher, NodeStatus};
-use crate::protocol::sync::SyncChannel;
+use crate::protocol::sync::{self, SyncError};
 use crate::protocol::{Chain, MessageChannel};
-use crate::storage::{PresignatureStorage, TripleStorage};
+use crate::rpc::ContractStateWatcher;
+use crate::storage::{Initializing, PresignatureStorage, TripleStorage};
 use crate::web::cbor::Cbor;
 use crate::web::error::Result;
 
@@ -31,17 +33,34 @@ use prometheus::{Encoder, TextEncoder};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
+use tower_http::timeout::TimeoutLayer;
 use tracing::Instrument;
+
+/// Per-endpoint timeouts. A node waits this long on a peer, and the server cuts
+/// requests at the same values, so a node never serves a request its caller
+/// already gave up on.
+pub const MSG_TIMEOUT: Duration = Duration::from_secs(1);
+pub const STATUS_TIMEOUT: Duration = Duration::from_secs(1);
+pub const SYNC_TIMEOUT: Duration = Duration::from_secs(30);
+pub const CHECKPOINT_TIMEOUT: Duration = Duration::from_secs(5);
+/// Cap for the endpoints no node calls: the health check, metrics and the debug page.
+const DEFAULT_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Answers 408 once a request outlives `timeout`.
+fn timeout(timeout: Duration) -> TimeoutLayer {
+    TimeoutLayer::with_status_code(StatusCode::REQUEST_TIMEOUT, timeout)
+}
 
 struct AxumState {
     node: NodeStateWatcher,
     /// Only used by the debug page.
     #[cfg_attr(not(feature = "debug-page"), allow(dead_code))]
-    triple_storage: TripleStorage,
+    triple_storage: TripleStorage<Initializing>,
     #[cfg_attr(not(feature = "debug-page"), allow(dead_code))]
-    presignature_storage: PresignatureStorage,
-    sync_channel: SyncChannel,
+    presignature_storage: PresignatureStorage<Initializing>,
+    contract: ContractStateWatcher,
+    network: NetworkConfig,
     msg_channel: MessageChannel,
     /// Only used to label the debug page.
     #[cfg_attr(not(feature = "debug-page"), allow(dead_code))]
@@ -54,46 +73,55 @@ pub async fn run(
     port: u16,
     msg_channel: MessageChannel,
     node: NodeStateWatcher,
-    triple_storage: TripleStorage,
-    presignature_storage: PresignatureStorage,
-    sync_channel: SyncChannel,
+    triple_storage: TripleStorage<Initializing>,
+    presignature_storage: PresignatureStorage<Initializing>,
+    contract: ContractStateWatcher,
+    network: NetworkConfig,
     my_account_id: AccountId,
     backlog: Backlog,
-) {
+) -> anyhow::Result<()> {
     tracing::info!("starting web server");
     let axum_state = AxumState {
         msg_channel,
         node,
         triple_storage,
         presignature_storage,
-        sync_channel,
+        contract,
+        network,
         my_account_id,
         backlog,
     };
 
     // Sync can be a large payload, so we set a higher limit for payload.
     let sync = Router::new()
-        .route("/sync", post(sync))
+        .route("/sync", post(sync).layer(timeout(SYNC_TIMEOUT)))
         .layer(DefaultBodyLimit::max(20 * 1024 * 1024));
 
     let mut router = Router::new()
-        // healthcheck endpoint
+        // Liveness: the process serves HTTP. Node state is on `/status`.
         .route(
             "/",
-            get(|| async move {
-                tracing::info!("node is ready to accept connections");
+            get(|| async {
+                tracing::debug!("liveness probe answered");
                 StatusCode::OK
-            }),
+            })
+            .layer(timeout(DEFAULT_TIMEOUT)),
         )
-        .route("/msg", post(msg))
-        .route("/status", get(status))
-        .route("/metrics", get(metrics))
-        .route("/checkpoint", get(checkpoint))
-        .route("/debug", get(debug::page))
+        .route("/msg", post(msg).layer(timeout(MSG_TIMEOUT)))
+        .route("/status", get(status).layer(timeout(STATUS_TIMEOUT)))
+        .route("/metrics", get(metrics).layer(timeout(DEFAULT_TIMEOUT)))
+        .route(
+            "/checkpoint",
+            get(checkpoint).layer(timeout(CHECKPOINT_TIMEOUT)),
+        )
+        .route("/debug", get(debug::page).layer(timeout(DEFAULT_TIMEOUT)))
         .merge(sync);
 
     if cfg!(feature = "bench") {
-        router = router.route("/bench/metrics", get(bench_metrics));
+        router = router.route(
+            "/bench/metrics",
+            get(bench_metrics).layer(timeout(DEFAULT_TIMEOUT)),
+        );
     }
 
     let app = router
@@ -101,18 +129,15 @@ pub async fn run(
         .layer(Extension(Arc::new(axum_state)));
 
     let addr = format!("0.0.0.0:{port}");
-    let listener = match tokio::net::TcpListener::bind(&addr).await {
-        Ok(listener) => listener,
-        Err(err) => {
-            tracing::error!(?addr, ?err, "failed to bind web server");
-            return;
-        }
-    };
+    let listener = tokio::net::TcpListener::bind(&addr)
+        .await
+        .with_context(|| format!("failed to bind web server on {addr}"))?;
 
     tracing::info!(?addr, "starting http server");
-    if let Err(err) = axum::serve(listener, app).await {
-        tracing::error!(?addr, ?err, "web server exited with an error");
-    }
+    axum::serve(listener, app)
+        .await
+        .with_context(|| format!("web server on {addr} exited with an error"))?;
+    anyhow::bail!("web server on {addr} exited")
 }
 
 async fn request_id_middleware(mut req: Request<Body>, next: Next) -> Response {
@@ -220,7 +245,17 @@ async fn sync(
     WithRejection(Cbor(update), _): WithRejection<Cbor<Ciphered>, Error>,
 ) -> Result<Cbor<Ciphered>> {
     let start = Instant::now();
-    let response = state.sync_channel.request_update(update).await?;
+    let me = state.contract.me().await.ok_or(SyncError::NotParticipant)?;
+    let participants = state.contract.participant_map().await;
+    let response = sync::process_sync_update(
+        &update,
+        &state.triple_storage,
+        &state.presignature_storage,
+        me,
+        &state.network,
+        &participants,
+    )
+    .await?;
     WEB_ENDPOINT_LATENCY
         .with_label_values(&["sync"])
         .observe(start.elapsed().as_millis() as f64);
