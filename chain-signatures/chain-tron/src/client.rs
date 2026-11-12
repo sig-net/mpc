@@ -221,8 +221,8 @@ fn decode_hex_ascii(s: &str) -> String {
 pub enum ReceiptError {
     #[error(transparent)]
     Transport(anyhow::Error),
-    #[error("malformed receipt body: {0:#}")]
-    Malformed(#[source] anyhow::Error),
+    #[error(transparent)]
+    Malformed(anyhow::Error),
 }
 
 /// Both classes are node-local retries: a malformed body can still be

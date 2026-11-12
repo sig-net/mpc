@@ -32,8 +32,8 @@ pub fn unexecutable_outcome(source: Chain) -> ExecutionOutcome {
 pub enum ExtractionFailure {
     #[error(transparent)]
     Retryable(anyhow::Error),
-    #[error("{0:#}")]
-    Terminal(#[source] anyhow::Error),
+    #[error(transparent)]
+    Terminal(anyhow::Error),
 }
 
 impl ExtractionFailure {
