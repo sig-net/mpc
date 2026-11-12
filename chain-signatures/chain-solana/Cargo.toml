@@ -13,7 +13,6 @@ anchor-lang.workspace = true
 # TODO: replace with thiserror
 anyhow.workspace = true
 async-trait.workspace = true
-borsh.workspace = true
 futures-util.workspace = true
 hex.workspace = true
 k256.workspace = true
