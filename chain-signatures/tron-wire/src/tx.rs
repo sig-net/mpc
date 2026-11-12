@@ -42,6 +42,17 @@ impl RawTransaction {
         Ok(trigger.owner_address)
     }
 
+    /// The trigger's `data`, for output recovery's `is_contract_call` predicate.
+    pub fn calldata(&self) -> anyhow::Result<Vec<u8>> {
+        let any = self
+            .contract
+            .first()
+            .and_then(|contract| contract.parameter.as_ref())
+            .context("missing TriggerSmartContract parameter")?;
+        let trigger = TriggerSmartContract::decode(any.value.as_slice())?;
+        Ok(trigger.data)
+    }
+
     /// Parses and validates the bytes the multichain API carries for Tron
     /// targets: the bare `raw` message, unsigned by construction. Admission
     /// accepts only what the MPC can faithfully name and sign — canonical
@@ -233,6 +244,29 @@ mod tests {
         assert_eq!(
             trigger.owner_address.as_slice(),
             owner().as_bytes().as_slice()
+        );
+    }
+
+    #[test]
+    fn calldata_reads_the_assembled_trigger_data() {
+        let mut plain = params();
+        let plain_bytes = to_unsigned_tron_tx(&plain, owner()).unwrap();
+        assert!(RawTransaction::parse(&plain_bytes)
+            .unwrap()
+            .calldata()
+            .unwrap()
+            .is_empty());
+
+        plain.calldata.is_some = true;
+        plain.calldata.value.selector = [0xa9, 0x05, 0x9c, 0xbb];
+        plain.calldata.value.no_words = 2;
+        plain.calldata.value.words = vec![[0x11; 32]; 2];
+        let bytes = to_unsigned_tron_tx(&plain, owner()).unwrap();
+        let mut expected = vec![0xa9, 0x05, 0x9c, 0xbb];
+        expected.extend_from_slice(&[0x11; 64]);
+        assert_eq!(
+            RawTransaction::parse(&bytes).unwrap().calldata().unwrap(),
+            expected
         );
     }
 

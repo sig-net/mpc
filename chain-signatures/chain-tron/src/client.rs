@@ -135,6 +135,11 @@ impl TronHttp {
                         result: response.result,
                         res_message: response.res_message.as_deref().map(decode_hex_ascii),
                         receipt_result: response.receipt.result,
+                        contract_result: response
+                            .contract_result
+                            .iter()
+                            .map(|raw| decode_bytes(raw).context("contractResult element"))
+                            .collect::<anyhow::Result<_>>()?,
                         logs: response.log,
                     })),
                     None => Ok(None),
@@ -347,6 +352,8 @@ struct TransactionInfoResponse {
     result: Option<String>,
     #[serde(default, rename = "resMessage")]
     res_message: Option<String>,
+    #[serde(default, rename = "contractResult")]
+    contract_result: Vec<String>,
     #[serde(default)]
     receipt: ReceiptUsage,
     #[serde(default, deserialize_with = "deserialize_logs")]
@@ -732,6 +739,8 @@ mod tests {
         assert_eq!(receipt.result, None);
         assert_eq!(receipt.receipt_result.as_deref(), Some("SUCCESS"));
         assert_eq!(receipt.res_message, None);
+        // ABI `false` — the recorded USDT transfer's return value.
+        assert_eq!(receipt.contract_result, vec![vec![0u8; 32]]);
 
         let usdt = address!("eca9bc828a3005b9a3b909f2cc5c2a54794de05f");
         let holder = "000000000000000000000000bdf81069827deba7d39729eb387eda8827e5525c";

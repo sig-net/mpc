@@ -36,6 +36,9 @@ pub struct TronReceipt {
     /// `receipt.result` — `ResourceReceipt`'s contractResult, printed on
     /// every executed receipt.
     pub receipt_result: Option<String>,
+    /// `contractResult` — each call's return data, top call first
+    /// (core/Tron.proto:467); absent on plain transfer-style triggers.
+    pub contract_result: Vec<Vec<u8>>,
     /// Revert reason, hex-decoded when present.
     pub res_message: Option<String>,
     pub logs: Vec<TronLog>,
@@ -124,6 +127,7 @@ mod tests {
             fee: 0,
             result: result.map(str::to_string),
             receipt_result: receipt_result.map(str::to_string),
+            contract_result: Vec::new(),
             res_message: None,
             logs: vec![],
         }
