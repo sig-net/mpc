@@ -329,6 +329,7 @@ impl<Id: Copy + Hash + Eq + fmt::Debug, S> Posits<Id, S> {
                     return PositInternalAction::None;
                 };
 
+                let was_out_of_reach = counter.enough_rejects(threshold);
                 match counter.process_action(from, action) {
                     None => {
                         tracing::warn!(
@@ -345,16 +346,18 @@ impl<Id: Copy + Hash + Eq + fmt::Debug, S> Posits<Id, S> {
                     }
                 }
 
-                // TODO: broadcast aborting the protocol if we have enough rejections
+                // Out of reach: keep the posit until it expires, so its slot keeps
+                // bounding how often the owner proposes.
                 if counter.enough_rejects(threshold) {
-                    tracing::info!(
-                        ?id,
-                        ?counter.accepts,
-                        ?counter.rejects,
-                        "received enough REJECTs, aborting protocol",
-                    );
-                    entry.remove();
-                    return PositInternalAction::Abort;
+                    if !was_out_of_reach {
+                        tracing::warn!(
+                            ?id,
+                            ?counter.accepts,
+                            ?counter.rejects,
+                            "posit out of reach, holding until expiry",
+                        );
+                    }
+                    return PositInternalAction::None;
                 }
 
                 if !counter.meets_totality() {
@@ -601,7 +604,7 @@ mod tests {
         );
         assert!(matches!(action, PositInternalAction::StartProtocol(_, _)));
 
-        // start: on threshold amount reject, abort the protocol
+        // start: on threshold amount reject, hold the posit until it expires
         posits0.propose(id, (), &participants);
         let action = posits0.act(
             id,
@@ -616,7 +619,10 @@ mod tests {
             threshold,
             &PositAction::RejectWithReason(PositRejectReason::InvalidRequest),
         );
-        assert!(matches!(action, PositInternalAction::Abort));
+        assert!(matches!(action, PositInternalAction::None));
+        assert_eq!(posits0.len_proposed(), 1);
+        let actions = posits0.expire_and_start(threshold, Duration::ZERO, Duration::ZERO);
+        assert!(matches!(actions[..], [(_, PositInternalAction::Abort)]));
     }
 
     #[test]

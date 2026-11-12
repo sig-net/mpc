@@ -405,9 +405,10 @@ the same pair reuses the id.
 
 - **Owner.** Starts once every node it proposed to has replied and at least t
   accepted, or at the first expiry tick after the posit timeout if at least t
-  accepted; otherwise it aborts silently and the pair returns to the pool. To
-  start, it takes the pair from storage (presignatures) and sends `START`
-  listing the nodes that accepted.
+  accepted; otherwise it aborts silently at that tick, even if rejects ruled out
+  t accepts earlier, and the pair returns to the pool. Until then the attempt
+  holds one of its `max_mine_generations` slots. To start, it takes the pair
+  from storage (presignatures) and sends `START` listing the nodes that accepted.
 - **Deliberator.** On `PROPOSE` records an entry and replies `ACCEPT`; a
   repeated `PROPOSE` from the same owner is accepted again and restarts the
   entry's clock. The entry is dropped once the posit timeout plus a margin has
