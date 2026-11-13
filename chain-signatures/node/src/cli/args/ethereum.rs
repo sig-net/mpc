@@ -1,8 +1,9 @@
+use alloy::primitives::Address;
 use anyhow::Context as _;
-use mpc_chain_ethereum::{EthConfig, IndexerConfig};
+use clap::builder::{PossibleValuesParser, TypedValueParser as _};
+use mpc_chain_ethereum::{EthConfig, EthNetwork, IndexerConfig};
 use secrecy::{ExposeSecret, SecretString};
-
-const DEFAULT_ETH_NETWORK: &str = "sepolia";
+use url::Url;
 
 /// The indexer's production cadence, as `mpc-chain-ethereum` defines it.
 #[cfg(not(feature = "test-feature"))]
@@ -40,7 +41,7 @@ pub struct EthArgs {
     pub eth_account_sk: Option<SecretString>,
     /// The contract address to watch, with or without the `0x` prefix
     #[arg(long, env("MPC_ETH_CONTRACT_ADDRESS"), requires = "eth_account_sk")]
-    pub eth_contract_address: Option<String>,
+    pub eth_contract_address: Option<Address>,
 
     // -- RPC endpoints --
     /// Ethereum execution RPC URL
@@ -50,23 +51,22 @@ pub struct EthArgs {
         hide_env_values = true,
         requires = "eth_account_sk"
     )]
-    pub eth_execution_rpc_http_url: Option<String>,
+    pub eth_execution_rpc_http_url: Option<Url>,
 
-    /// The network that the eth indexer is running on: "sepolia"/"mainnet",
-    /// or "anvil" for local dev chains (anvil never reports finalized blocks,
-    /// so requests are emitted without waiting for finality).
+    /// The network the RPC serves. On anvil (local dev chains) requests are
+    /// emitted without waiting for finality: it never reports finalized blocks.
     #[arg(
         long,
         env("MPC_ETH_NETWORK"),
-        default_value = DEFAULT_ETH_NETWORK,
-        value_parser = ["sepolia", "mainnet", "anvil"],
+        default_value_t = EthNetwork::Sepolia,
+        value_parser = PossibleValuesParser::new(EthNetwork::ALL.map(EthNetwork::as_str))
+            .try_map(|name| name.parse::<EthNetwork>()),
     )]
-    pub eth_network: String,
+    pub eth_network: EthNetwork,
 }
 
 impl EthArgs {
     pub fn into_config(self) -> anyhow::Result<Option<EthConfig>> {
-        let network = self.eth_network;
         let Some(account_sk) = self.eth_account_sk else {
             return Ok(None);
         };
@@ -76,21 +76,16 @@ impl EthArgs {
             .context("invalid eth account sk")?;
         let execution_rpc_http_url = self
             .eth_execution_rpc_http_url
-            .context("eth execution rpc http url is required")?
-            .parse()
-            .context("invalid eth execution rpc http url")?;
+            .context("eth execution rpc http url is required")?;
         let contract_address = self
             .eth_contract_address
-            .context("eth contract address is required")?
-            .parse()
-            .context("invalid eth contract address")?;
+            .context("eth contract address is required")?;
 
         Ok(Some(EthConfig {
             account_sk, // this is safe because EthConfig has custom Debug implementation that redacts the account_sk field
             execution_rpc_http_url,
             contract_address,
-            optimistic_requests: EthConfig::is_optimistic_network(&network),
-            network,
+            network: self.eth_network,
             // TODO: currently we only have Ethereum and Sepolia, so defaults
             // are fine. Make these configurable when we add more chains.
             rpc: Default::default(),
@@ -141,8 +136,11 @@ mod tests {
             config.execution_rpc_http_url.as_str(),
             "http://127.0.0.1:8545/"
         );
-        assert_eq!(config.contract_address.to_string().to_lowercase(), CONTRACT);
-        assert_eq!(config.network, "mainnet");
+        assert_eq!(
+            config.contract_address,
+            CONTRACT.parse::<Address>().unwrap()
+        );
+        assert_eq!(config.network, EthNetwork::Mainnet);
         assert_eq!(
             config.indexer.refresh_interval,
             indexer_config().refresh_interval
@@ -157,7 +155,7 @@ mod tests {
                 .into_config()
                 .unwrap()
                 .expect("configured chain");
-            assert_eq!(config.optimistic_requests, optimistic, "{network}");
+            assert_eq!(config.network.is_optimistic(), optimistic, "{network}");
         }
     }
 
@@ -167,8 +165,8 @@ mod tests {
     }
 
     #[test]
-    fn into_config_rejects_an_invalid_rpc_url() {
-        let args = EthArgs::parse_from([
+    fn the_cli_rejects_an_invalid_rpc_url() {
+        assert!(EthArgs::try_parse_from([
             "test",
             "--eth-account-sk",
             ACCOUNT_SK,
@@ -176,8 +174,31 @@ mod tests {
             "not a url",
             "--eth-contract-address",
             CONTRACT,
-        ]);
-        assert!(args.into_config().is_err());
+        ])
+        .is_err());
+    }
+
+    /// The help text promises both spellings.
+    #[test]
+    fn the_contract_address_parses_with_and_without_the_0x_prefix() {
+        let parse = |address| {
+            EthArgs::try_parse_from([
+                "test",
+                "--eth-account-sk",
+                ACCOUNT_SK,
+                "--eth-execution-rpc-http-url",
+                RPC_URL,
+                "--eth-contract-address",
+                address,
+            ])
+            .map(|args| args.eth_contract_address.unwrap())
+        };
+        assert_eq!(parse(CONTRACT).unwrap(), parse(&CONTRACT[2..]).unwrap());
+        let error = parse("0x1234").unwrap_err().to_string();
+        assert!(
+            error.contains("--eth-contract-address"),
+            "unexpected address error: {error}"
+        );
     }
 
     /// The two cadences, pinned: 100ms is also what the Ethereum crate's own

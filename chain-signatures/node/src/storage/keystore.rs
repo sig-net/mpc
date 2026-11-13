@@ -41,7 +41,9 @@ impl Keystore {
     ) -> anyhow::Result<Self> {
         #[cfg(feature = "test-feature")]
         if let Some(base_path) = &opts.sk_share_local_path {
-            let path = PathBuf::from(format!("{base_path}-{account_id}"));
+            let mut path = base_path.as_os_str().to_owned();
+            path.push(format!("-{account_id}"));
+            let path = PathBuf::from(path);
             tracing::info!(path = %path.display(), "keeping the key share in a file");
             return Ok(Self::File(FileKeystore { path }));
         }
@@ -259,7 +261,7 @@ mod tests {
             sk_share_local_path: Some("/tmp/share".into()),
             sk_share_secret_id: None,
             gcp_project_id: None,
-            redis_url: "redis://localhost".to_string(),
+            redis_url: "redis://localhost".parse().unwrap(),
         };
 
         let store = Keystore::init(&opts, &make_test_account_id())
@@ -276,7 +278,7 @@ mod tests {
             #[cfg(feature = "test-feature")]
             sk_share_local_path: None,
             gcp_project_id: Some("test-project".to_string()),
-            redis_url: "redis://localhost".to_string(),
+            redis_url: "redis://localhost".parse().unwrap(),
         };
 
         let store = Keystore::init(&opts, &make_test_account_id())
@@ -295,7 +297,7 @@ mod tests {
             #[cfg(feature = "test-feature")]
             sk_share_local_path: None,
             gcp_project_id: Some("test-project".to_string()),
-            redis_url: "redis://localhost".to_string(),
+            redis_url: "redis://localhost".parse().unwrap(),
         };
 
         let Err(err) = Keystore::init(&opts, &make_test_account_id()).await else {
@@ -315,7 +317,7 @@ mod tests {
             #[cfg(feature = "test-feature")]
             sk_share_local_path: None,
             gcp_project_id: None,
-            redis_url: "redis://localhost".to_string(),
+            redis_url: "redis://localhost".parse().unwrap(),
         };
 
         let Err(err) = Keystore::init(&opts, &make_test_account_id()).await else {

@@ -1,16 +1,18 @@
 pub mod checkpoint_storage;
 pub mod keystore;
-pub mod midnight_wallet_storage;
+pub mod midnight_dust_storage;
 pub mod presignature_storage;
 pub mod protocol_storage;
 pub mod triple_storage;
 
 use cait_sith::protocol::Participant;
 pub use checkpoint_storage::CheckpointStorage;
-pub use midnight_wallet_storage::MidnightWalletStorage;
 pub use presignature_storage::PresignatureStorage;
 pub use protocol_storage::{Initializing, Ready, StorageError};
+#[cfg(feature = "test-feature")]
+use std::path::PathBuf;
 pub use triple_storage::TripleStorage;
+use url::Url;
 
 // Can be used to "clear" redis storage in case of a breaking change
 pub const STORAGE_VERSION: &str = "v12";
@@ -35,9 +37,9 @@ pub struct Options {
     /// Keep the key share in a file at this path, suffixed with the account id.
     #[cfg(feature = "test-feature")]
     #[arg(long, env("MPC_SK_SHARE_LOCAL_PATH"), group = "sk_share")]
-    pub sk_share_local_path: Option<String>,
+    pub sk_share_local_path: Option<PathBuf>,
     #[arg(long, env("MPC_REDIS_URL"), hide_env_values = true)]
-    pub redis_url: String,
+    pub redis_url: Url,
 }
 
 fn owner_key(base: &str, owner: Participant) -> String {
@@ -65,6 +67,14 @@ mod tests {
             "Secret Manager needs a project"
         );
         assert!(parse(&["--sk-share-secret-id", "s", "--gcp-project-id", "p"]).is_ok());
+    }
+
+    /// The file store is a test aid: a release build has no flag for it.
+    #[cfg(not(feature = "test-feature"))]
+    #[test]
+    fn release_builds_reject_the_file_store() {
+        let err = parse(&["--sk-share-local-path", "/tmp/share"]).unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument);
     }
 
     #[cfg(feature = "test-feature")]

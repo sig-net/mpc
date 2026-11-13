@@ -130,7 +130,7 @@ Three caveats remain: (i) organizing waits for the local active set to reach t (
 *Rationale.* L1 assumes a usable presignature is there to consume, so without supply that precondition eventually fails and signing stops while the network is otherwise perfectly healthy.
 
 *Enforcement*: 
-A node re-proposes every 100 ms while it is below its floor (`min_mine_triple_pairs` for triple pairs, `min_mine_presignatures` for presignatures) and runs fewer than `max_mine_generations` generations of its own; concurrency counters free themselves as generation tasks finish and as proposals expire.  
+A node re-proposes every 100 ms while it is below its floor (`min_mine_triple_pairs` for triple pairs, `min_mine_presignatures` for presignatures) and has fewer than `max_mine_generations` open attempts; an attempt closes when its generation finishes or its proposal expires, not on rejects.  
 A deliberator refuses any proposal while the pool holds more than the network's floors need, or while it runs or has accepted more generations than the network's cap (`max_mine_generations` per node) allows, each with a margin for stale counts and both judged from cached counts, so one node cannot push work onto the rest without bound.  
 Generation is skipped entirely while \< t nodes are in the active set, so the failure detector gates supply though never correctness.
 
