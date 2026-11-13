@@ -4,6 +4,8 @@
 //! `Midnight::send_mn_transaction` dispatched in `Phase::Initialization` is outside
 //! this scanner's discovery surface.
 
+#![cfg_attr(test, allow(clippy::disallowed_methods))]
+
 mod attestation;
 mod config;
 mod convert;

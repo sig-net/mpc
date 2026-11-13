@@ -4,6 +4,8 @@
 //! The recorded-response replay runs in CI; live legs are opt-in via
 //! env vars (see README).
 
+#![allow(clippy::disallowed_methods)]
+
 use anyhow::{bail, Context};
 use k256::ecdsa::SigningKey;
 use mpc_chain_integration_core::{ChainIndexer, MockStateManager, StateManager};
