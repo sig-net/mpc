@@ -49,7 +49,7 @@ solana-transaction-status.workspace = true
 bip32 = "0.5.3"
 bip39 = "2.2.0"
 ecdsa = "0.16.9"
-cait-sith = { git = "https://github.com/sig-net/cait-sith", rev = "9f34e8c", features = [
+cait-sith = { git = "https://github.com/sig-net/cait-sith", rev = "5d67c6f", features = [
     "k256",
 ] }
 elliptic-curve = { version = "0.13.5", default-features = false }

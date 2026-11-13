@@ -2,7 +2,7 @@
 
 use integration_tests::mpc_fixture::{mock_stream::MockStream, MpcFixtureBuilder};
 use mpc_node::backlog::consensus::align_backlog_with_consensus;
-use mpc_node::backlog::mock::BacklogTestExt;
+use mpc_node::backlog::mock::{mock_root_pk, BacklogTestExt};
 use mpc_node::backlog::Backlog;
 use mpc_node::mesh::connection::NodeStatus;
 use mpc_node::mesh::MeshState;
@@ -175,6 +175,7 @@ async fn test_consensus_alignment_peer_fetch() {
             &mut mesh_rx,
             &node_client,
             &my_account_id,
+            mock_root_pk(),
         ),
     )
     .await;
@@ -258,6 +259,7 @@ async fn test_consensus_alignment_consensus_changes_while_fetching() {
             &mut mesh_rx,
             &node_client,
             &my_account_id,
+            mock_root_pk(),
         )
         .await
     });
@@ -358,6 +360,7 @@ async fn test_reset_converges_divergent_nodes() {
                 &mut mesh_rx,
                 &node_client,
                 &my_account_id,
+                mock_root_pk(),
             ),
         )
         .await
