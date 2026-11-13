@@ -9,14 +9,13 @@ use alloy::primitives::B256;
 use anyhow::Context;
 use futures_util::stream::{iter, Stream, StreamExt};
 use mpc_chain_integration_core::{
-    ChainIndexer, ChainTelemetry, ExtractionFailure, ExtractionFailureKind, StateManager,
-    WatchedExecution,
+    ChainIndexer, ChainTelemetry, ExtractionFailure, StateManager, WatchedExecution,
 };
 use mpc_primitives::{BidirectionalTxId, Chain, ChainEvent, ExecutionOutcome};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use crate::client::{ReceiptError, TronHttp};
+use crate::client::TronHttp;
 use crate::config::TronConfig;
 use crate::expiry::{
     closed_groups, expired_event, ExpiryVerdict, Group, SolidityCache, SolidityView,
