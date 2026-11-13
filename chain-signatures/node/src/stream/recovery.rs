@@ -21,6 +21,7 @@ pub(crate) async fn recover_backlog(
     mesh_state: &mut watch::Receiver<MeshState>,
     node_client: &NodeClient,
     my_account_id: &AccountId,
+    root_pk: mpc_primitives::PublicKey,
 ) -> Result<(), crate::backlog::CheckpointError> {
     tracing::info!(%chain, load_local, "starting checkpoint recovery or regression");
 
@@ -30,7 +31,7 @@ pub(crate) async fn recover_backlog(
 
     // Hydrate local backlog state from durable storage on initial startup.
     if load_local {
-        match backlog.recover_local(chain).await? {
+        match backlog.recover_local(chain, root_pk).await? {
             Some(checkpoint) => {
                 tracing::info!(
                     ?chain,
@@ -53,6 +54,7 @@ pub(crate) async fn recover_backlog(
         mesh_state,
         node_client,
         my_account_id,
+        root_pk,
     )
     .await
     .is_some()

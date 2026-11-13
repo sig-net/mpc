@@ -1,6 +1,7 @@
 use crate::backlog::{BacklogEntry, Publishing};
+use crate::respond_bidirectional::response_entropy;
 use crate::sign_bidirectional::{BidirectionalProgress, SignProgress, SignStatus};
-use mpc_primitives::{BidirectionalTx, IndexedSignRequest, SignKind};
+use mpc_primitives::{BidirectionalTx, BidirectionalTxId, IndexedSignRequest, SignKind};
 use serde::Deserialize;
 use std::sync::Arc;
 
@@ -31,6 +32,8 @@ pub enum MigratableSignStatus {
 pub struct MigratableBacklogEntry {
     pub request: Arc<IndexedSignRequest>,
     pub status: MigratableSignStatus,
+    #[serde(default)]
+    pub tx_ids: Vec<BidirectionalTxId>,
 }
 
 impl From<MigratableBacklogEntry> for BacklogEntry {
@@ -82,8 +85,51 @@ impl From<MigratableBacklogEntry> for BacklogEntry {
             }
         };
 
-        BacklogEntry::with_status(entry.request, status)
+        let mut tx_ids = entry.tx_ids;
+        if tx_ids.is_empty() {
+            tx_ids.extend(legacy_tx_id(&status));
+        }
+        let status = with_current_entropy(status, &entry.request.args.entropy);
+        BacklogEntry {
+            request: entry.request,
+            status,
+            tx_ids,
+        }
     }
+}
+
+/// The transaction a status from an earlier version names.
+pub(super) fn legacy_tx_id(status: &SignStatus) -> Option<BidirectionalTxId> {
+    match status {
+        SignStatus::Bidirectional(
+            BidirectionalProgress::Executing(tx) | BidirectionalProgress::Parked(tx),
+        ) => Some(tx.id),
+        SignStatus::Bidirectional(BidirectionalProgress::Final {
+            respond_request, ..
+        }) => match &respond_request.kind {
+            SignKind::RespondBidirectional(response) => Some(response.tx_id),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// A response an earlier version stored and has not signed yet: every node derives its entropy
+/// from the first leg and the message now, and one signing the old value would sign alone.
+fn with_current_entropy(status: SignStatus, first_leg_entropy: &[u8; 32]) -> SignStatus {
+    let SignStatus::Bidirectional(BidirectionalProgress::Final {
+        mut respond_request,
+        progress: SignProgress::Generating,
+    }) = status
+    else {
+        return status;
+    };
+    let args = &mut Arc::make_mut(&mut respond_request).args;
+    args.entropy = response_entropy(first_leg_entropy, &args.payload, &args.epsilon);
+    SignStatus::Bidirectional(BidirectionalProgress::Final {
+        respond_request,
+        progress: SignProgress::Generating,
+    })
 }
 
 #[cfg(test)]
@@ -94,6 +140,31 @@ mod tests {
     use mpc_primitives::{
         BidirectionalTxId, Chain, RespondBidirectionalTx, SignArgs, SignId, Signature,
     };
+
+    /// A response an earlier version stored and has not signed moves to today's entropy, so
+    /// that this node signs with the others.
+    #[test]
+    fn a_stored_unsigned_response_gets_the_current_entropy() {
+        let first_leg =
+            crate::backlog::mock::mock_bidi_request(SignId::new([1; 32]), Chain::Solana);
+        let stored = BacklogEntry::with_status(
+            first_leg,
+            SignStatus::Bidirectional(BidirectionalProgress::Final {
+                respond_request: crate::backlog::mock::mock_bidi_response(
+                    &crate::backlog::mock::mock_tx(1),
+                ),
+                progress: SignProgress::Generating,
+            }),
+        );
+        let mut bytes = Vec::new();
+        ciborium::into_writer(&stored, &mut bytes).unwrap();
+        let decoded: BacklogEntry = ciborium::from_reader(bytes.as_slice()).unwrap();
+        let args = &decoded.request().args;
+        assert_eq!(
+            args.entropy,
+            response_entropy(&decoded.request.args.entropy, &args.payload, &args.epsilon)
+        );
+    }
 
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, Deserialize)]
     struct LegacyPublishState {

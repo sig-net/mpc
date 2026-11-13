@@ -46,8 +46,8 @@ Vocabulary, per node per source chain:
   Acting waits for it, so that a node behind the head does not spend presignatures, posit rounds and peer messages on requests the chain has already answered.
 
 * **Backlog**: one *entry* per request admitted and not *finished*, that is, not yet removed by a finalised source-chain event.
-  An entry holds the request id (rid) as its key, the request as the chain gave it, and, for a bidirectional request, `signatures`: the signatures for it published in finalised blocks on the source chain.
-  A plain sign request is finished by its first published signature, so it won't have signatures in its entry.
+  An entry holds the request id (rid) as its key, the request as the chain gave it, and, for a bidirectional request, `tx_ids`, the transaction IDs that signatures for it published in finalised blocks on the source chain give, and `unviable_at`, the height at which a `Response` for another request says its replay protection was used up.
+  A plain sign request is finished by its first published signature, so its entry has neither.
   * Only finalised source-chain events change the backlog: for a bidirectional request, the handlers of [bidirectional-calls.md](bidirectional-calls.md) (Section 4.3); for a plain sign request, its admission and its first published signature.
   * Nothing read from a destination chain changes the backlog, and neither does anything the node produced itself.
   * Everything else a node keeps about a request is *node-local*. A node stores in `local` the signatures and attestations it took part in producing and what it read on the destination chain. A node tries to persist signatures and attestations before publishing them. `local` does not go into checkpoints.
@@ -82,16 +82,17 @@ digest(height, backlog) = H(
     for each entry, in rid order:
         rid
         request
-        signatures
+        tx_ids
+        unviable_at
 )
 ```
 
 The request goes in whole because the rid does not cover all of it, e.g., the schema.
-`signatures` goes in because a node rebased onto a checkpoint never reads the `Signature` events below its height again.
-A peer that served a checkpoint without one of them would leave that node looking for too few executions: each signature fixes one transaction ID to look for, and a request can have several, one per signing round whose signature was published ([bidirectional-calls.md](bidirectional-calls.md), Section 2).
+`tx_ids` and `unviable_at` go in because a node rebased onto a checkpoint never reads the `Signature` and `Response` events below its height again.
+A peer that served a checkpoint without a transaction ID would leave that node looking for too few executions: each signature fixes one transaction ID to look for, and a request can have several, one per signing round whose signature was published ([bidirectional-calls.md](bidirectional-calls.md), Section 2).
 
 The encoding of the entry must be canonical, one byte string per entry; the request has variable-length fields, so each gets its length before it.
-The order must be fixed too: entries go in rid order, and an entry's signatures in the order of their bytes.
+The order must be fixed too: entries go in rid order, and an entry's transaction IDs in the order of their bytes.
 
 ### Governance contract
 
@@ -311,8 +312,8 @@ A rebase lifts both waits.
 
 ### *S4, a settled checkpoint is enough to take part.*
 Each thing a node does for a request reads the entry and nothing older than the checkpoint.
-Signing and joining a round read the request, which gives the key and the bytes to sign, and `signatures`, whose being empty says that no signature is final yet.
-Finding an execution reads `signatures`, which give the transaction IDs, and attesting reads the request's schema.
+Signing and joining a round read the request, which gives the key and the bytes to sign, and `tx_ids`, whose being empty says that no signature is final yet.
+Finding an execution reads `tx_ids`, and attesting reads the request's schema.
 Voting reads the backlog, which the node builds from the checkpoint and the blocks after it (S1).
 Attesting Unviable is the exception: it follows from the execution or the `Response` of another request ([bidirectional-calls.md](bidirectional-calls.md), Section 4.3), and once that request has left the backlog the checkpoint holds no trace of it.
 What the checkpoint cannot give back is node-local: a node that lost its storage has lost the signatures it issued and not yet seen published.
@@ -350,6 +351,9 @@ Where no node can produce a checkpoint at all there is no recovery here (Section
   A faulty node may vote at any height and for any number of digests.
 
 ### Dependencies on features not implemented yet
+
+* The digest covers `tx_ids`, the transaction IDs the published signatures give, since finding an execution needs only those. `unviable_at`, the height at which another request's `Response` says its replay protection was used up, is not stored yet.
+* The body of a checkpoint still carries each entry's progress beside the fields the digest covers, and a node trusts that only from its own storage: adopting a peer's body rebuilds progress from `tx_ids`. Moving it to `local` changes no digest.
 
 * Unviable is attested from another request's execution or answer.
   A node that starts from a checkpoint taken after that answer holds no trace of it and cannot attest.
@@ -398,7 +402,7 @@ Each closes one of the limits above, at a price.
 
 ## 7. Implementation status
 
-The code, checked at `65b8d41b`, differs from the design as listed below, grouped by component.
+The code differs from the design as listed below, grouped by component.
 Each item says what the code does now and what the design asks for instead.
 
 Code under `chain-signatures/`: the contract in `contract/src/lib.rs`; the node in `node/src/`, mainly `backlog/checkpoints.rs`, `backlog/consensus.rs`, `storage/checkpoint_storage.rs`, `stream/supervisor.rs` and `stream/recovery.rs`.
@@ -417,13 +421,12 @@ The interval is `checkpoint_interval`, a per-chain constant with no per-node ove
 ### Node: backlog and digest
 
 3. Entries (§1 Backlog, which [bidirectional-calls.md](bidirectional-calls.md) also needs).
-   Now: an entry is the request and its status, the node's progress and the phases read from either chain, and the whole entry goes into the checkpoint.
+   Now: an entry is the request, `tx_ids` and its status, the node's progress and the phases read from either chain, and the whole entry goes into the checkpoint.
    A node tries to store its signatures and attestations in `local` before publishing them, and applies them on catching up after a restart or a rebase.
-   There is no `signatures` list.
-   Design: an entry holds the rid, the request and `signatures`, and the node's own progress is node-local in `local`, outside checkpoints.
+   Design: an entry holds the rid, the request, `tx_ids` and `unviable_at`, and the node's own progress is node-local in `local`, outside checkpoints.
 4. Digest (§2).
-   Now: the digest covers the rids and one status tag per entry.
-   Design: it also covers each entry's request and `signatures`, in the canonical encoding of Section 2.
+   Now: the digest covers each entry's request and `tx_ids`, in the request's serialized form, so a new field on a request event breaks checkpoints across versions unless it is left out when empty.
+   Design: it covers them in the canonical encoding of Section 2.
 
 ### Node: indexing
 
