@@ -125,7 +125,8 @@ mod tests {
     /// A proposer whose first attempt failed must still land inside the margin.
     #[test]
     fn observe_margin_outlasts_the_first_publish_retry() {
-        assert!(DEFAULT_OBSERVE_MARGIN > crate::rpc::PUBLISH_MIN_DELAY);
+        // Jitter adds up to one more minimum delay.
+        assert!(DEFAULT_OBSERVE_MARGIN > 2 * crate::rpc::PUBLISH_MIN_DELAY);
     }
 
     #[test]

@@ -343,20 +343,13 @@ async fn test_checkpoint_persistence() -> anyhow::Result<()> {
     // 1. Clean storage returns None
     assert!(storage.load_latest(Chain::Solana).await?.is_none());
 
-    fn cumulative_digest(status: [u8; 1]) -> [u8; 32] {
-        use sha3::Digest;
-        let mut hasher = sha3::Sha3_256::new();
-        hasher.update(status);
-        hasher.finalize().into()
-    }
-
     // 2. Persist first checkpoint (simulates consensus confirmation)
     let tx1 = dummy_backlog_entry(1, Chain::Solana);
     let cp1 = Checkpoint {
         chain: Chain::Solana,
         block_height: 10,
         pending_requests: vec![tx1],
-        cumulative_digest: cumulative_digest([0]),
+        legacy_digest: None,
     };
     storage.persist(&cp1).await?;
 
@@ -372,7 +365,7 @@ async fn test_checkpoint_persistence() -> anyhow::Result<()> {
         chain: Chain::Solana,
         block_height: 20,
         pending_requests: vec![tx2],
-        cumulative_digest: cumulative_digest([0]),
+        legacy_digest: None,
     };
     storage.persist(&cp2).await?;
 
@@ -382,6 +375,55 @@ async fn test_checkpoint_persistence() -> anyhow::Result<()> {
     assert_eq!(latest.pending_requests.len(), 1);
     assert_eq!(latest.pending_requests[0].sign_id(), SignId::new([2u8; 32]));
 
+    Ok(())
+}
+
+/// A body from an earlier version keeps hashing as it did through Redis, so it still confirms
+/// the digest settled before the upgrade.
+#[test(tokio::test)]
+async fn test_legacy_checkpoint_keeps_its_digest() -> anyhow::Result<()> {
+    use mpc_node::backlog::Checkpoint;
+    use mpc_node::storage::checkpoint_storage::CheckpointStorage;
+    use mpc_primitives::Chain;
+
+    let spawner = ClusterSpawner::default()
+        .network("test-legacy-checkpoint-digest")
+        .init_network()
+        .await?;
+    let redis_container = containers::Redis::run(&spawner).await;
+    let account_id = "party0.near".parse()?;
+    let storage = CheckpointStorage::Redis(redis_container.pool(), account_id);
+    let current = Checkpoint {
+        chain: Chain::Solana,
+        block_height: 10,
+        pending_requests: vec![dummy_backlog_entry(1, Chain::Solana)],
+        legacy_digest: None,
+    };
+    let legacy = Checkpoint {
+        legacy_digest: Some([7; 32]),
+        ..current.clone()
+    };
+    assert_ne!(legacy.digest(), current.digest());
+
+    storage.persist_pending(&legacy).await?;
+    assert_eq!(
+        storage.load_pending(Chain::Solana).await?,
+        vec![legacy.clone()]
+    );
+    assert_eq!(
+        storage.find(Chain::Solana, legacy.digest()).await?,
+        Some(legacy.clone())
+    );
+
+    assert_eq!(
+        storage
+            .promote_pending(Chain::Solana, legacy.digest())
+            .await?,
+        Some(0)
+    );
+    let latest = storage.load_latest(Chain::Solana).await?.unwrap();
+    assert_eq!(latest, legacy);
+    assert_eq!(latest.digest(), legacy.digest());
     Ok(())
 }
 
@@ -401,7 +443,7 @@ async fn test_pending_checkpoint_persistence() -> anyhow::Result<()> {
         chain: Chain::Solana,
         block_height: height,
         pending_requests: vec![],
-        cumulative_digest: Checkpoint::empty_cumulative_digest(),
+        legacy_digest: None,
     };
 
     // Neither key exists yet.
@@ -438,7 +480,14 @@ async fn test_pending_checkpoint_persistence() -> anyhow::Result<()> {
     );
 
     let mut conflicting = second.clone();
-    conflicting.cumulative_digest[0] = 1;
+    conflicting
+        .pending_requests
+        .push(mpc_node::backlog::BacklogEntry::new(
+            mpc_node::backlog::mock::mock_sign_request(
+                mpc_primitives::SignId::new([9; 32]),
+                conflicting.chain,
+            ),
+        ));
     assert!(restarted.persist_pending(&conflicting).await.is_err());
     assert!(restarted
         .promote_pending(Chain::Solana, [99; 32])

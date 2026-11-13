@@ -392,7 +392,7 @@ never meets a rid from another.
 
 state:
     backlog: RequestId -> Entry
-    Entry = { req, signatures: Set<Signature> }
+    Entry = { req, tx_ids: Set<TxId>, unviable_at: Height? }
     // backlog is a function of the finalised source chain only,
     // the same on every correct node that processed the same height
 
@@ -408,7 +408,7 @@ on SignRequest { rid, req } finalised on the source chain:
         drop
     if rid in backlog or not processable(req):            // M2
         drop
-    backlog[rid] = { req, signatures: {} }
+    backlog[rid] = { req, tx_ids: {}, unviable_at: none }
     signature = threshold_sign(req.tx, derived_key(req.sender, req.key))   // M1
     local[rid].issued.add(signature)       // stored before publishing
     publish_signature(rid, signature)
@@ -443,15 +443,14 @@ on Signature { rid, signature } finalised on the source chain:
     e = backlog[rid] if rid in backlog
     if e and signature verifies over e.req.tx
       under derived_key(e.req.sender, e.req.key):
-        e.signatures.add(signature)
+        e.tx_ids.add(txid(signature, e.req.tx))
 
 on target chain block at height h finalised on chain target:
     for (rid, e) in backlog for target and no local[rid].outcome:
         if txid ignores the signature on target:
             ours = { txid(e.req.tx) }
         else:
-            ours = { txid(s, e.req.tx)
-                     for s in e.signatures + local[rid].issued }
+            ours = e.tx_ids
         if some id in ours has receipt r in a final block at height h':  // M3
             for (rid', e') in backlog for target, other than rid, with e's
               account and e.req.tx's replay protection, unsigned bytes
@@ -482,9 +481,11 @@ on Response { rid, att, sig } finalised on the source chain:
       under attestation_key(e.req.sender, e.req.key.key_version):
         if att.kind is Executed or Failed:        // e.req.tx was included
             for (rid', e') in backlog for e.req.target, other than rid,
-              with e's account and e.req.tx's replay protection, unsigned
-              bytes other than e.req.tx, and no local[rid'].outcome:
-                attest(rid', (att.height, Unviable, empty))     // M4
+              with e's account and e.req.tx's replay protection, and
+              unsigned bytes other than e.req.tx:
+                e'.unviable_at = att.height                     // M4
+                if no local[rid'].outcome:
+                    attest(rid', (att.height, Unviable, empty))
         delete backlog[rid], local[rid]
 ```
 
@@ -494,23 +495,27 @@ not sign, attest or publish while it runs the handlers above: its backlog
 still holds requests the chain has already answered, and it cannot tell
 which of the signatures and attestations it holds are already published.
 Once caught up, it acts on each entry only for what is missing: it does
-not sign an entry that has a published signature or one it holds, and does
-not attest an entry it holds an attestation for.
+not sign an entry that has a published signature, one it holds, or an
+`unviable_at`, attests Unviable for an entry with an `unviable_at` and no
+outcome, and does not attest an entry it holds an attestation for.
 
 The MPC looks for a request's execution by transaction ID, under every
-signature it holds for the request, in any final block, so a node that
-starts looking late still finds it. A node holds the signatures published
-for the request and those it took part in producing. An execution under a
-signature it does not hold is not found (see Section 6 for alternatives),
-except where the transaction ID ignores the signature: there it needs none.
+signature published for the request, in any final block, so a node that
+starts looking late still finds it. A signature a node took part in
+producing is looked for once it is published, which every node reads. An
+execution under a signature that is never published is not found (see
+Section 6 for alternatives), except where the transaction ID ignores the
+signature: there it needs none.
 
 When the transaction of one request is included, every other request
 waiting on the same account and replay protection can never execute, and
-the MPC attests Unviable for each, at that transaction's height. A node
+the MPC attests Unviable for each, at that transaction's height, once it
+has recovered that transaction's output, decodable or not. A node
 learns of it in one of two ways: it finds the execution itself, or it
 reads the `Response` that reports it. The second reaches every node that
-reads the source chain. A node that is behind notes the outcome and
-attests once caught up.
+reads the source chain, and is recorded in the entry, since a node rebased
+onto a checkpoint never reads that `Response`. A node attests on reading
+it, and if it is behind or was rebased, from the entry once caught up.
 
 A repeated attestation has the same content (Section 5) and is dropped
 (C3a).
@@ -1133,11 +1138,10 @@ or forged bytes fail verification.
 Target chains are Ethereum and Tron (`Chain::supports_bidirectional_signing`).
 Source chains are Midnight, Solana, Hydration and Canton.
 
-Checked against `develop` at `1d823c4e`. Still to change:
+Still to change:
 
 * `local` keeps the latest signature and the latest attestation per request.
-* Unviable from another request's response.
-* Finding nonce siblings, and executions under every published signature.
+* Unviable from another request's response, on Solana, Hydration and Canton.
 * Refusing non-canonical request fields, and the reserved paths on every
   source.
 * One key per key version, before a second version.
