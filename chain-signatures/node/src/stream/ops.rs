@@ -718,11 +718,8 @@ pub(crate) async fn process_block_event<T: ChainTelemetry>(
 ) -> anyhow::Result<()> {
     telemetry.block_finalized(block);
 
-    // should not create checkpoint for blocks that are not caught up, as that would
-    // try to create signatures for checkpoints where we are not live.
-    if !ctx.caught_up {
-        return Ok(());
-    }
+    // Runs while catching up too: a node votes at every boundary it passes,
+    // and only acting waits for the head (doc/checkpoints.md, Section 4).
     let Some(checkpoint) = ctx.backlog.set_processed_block(chain, block).await else {
         return Ok(());
     };

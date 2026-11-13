@@ -82,8 +82,23 @@ impl Default for NetworkConfig {
 
 #[cfg(test)]
 mod tests {
-    use super::Config;
+    use super::{Config, Timeouts};
     use mpc_contract::config::ProtocolConfig;
+    use std::time::Duration;
+
+    /// Protocol timeouts, pinned: every node runs the same ones.
+    #[test]
+    fn timeouts_are_pinned() {
+        assert_eq!(
+            Timeouts::default(),
+            Timeouts {
+                message: Duration::from_secs(5 * 60),
+                triple_generation: Duration::from_secs(10 * 60),
+                presignature_generation: Duration::from_secs(45),
+                signature_generation: Duration::from_secs(45),
+            }
+        );
+    }
 
     #[test]
     fn test_update_returns_whether_protocol_changed() {
