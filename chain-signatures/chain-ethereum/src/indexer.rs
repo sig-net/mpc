@@ -656,6 +656,33 @@ mod tests {
         latest_mock.assert_async().await;
     }
 
+    /// Ethereum reads classify via the send table: 409 terminal, where
+    /// solana/midnight reads retry it. Deliberate until reads attach verdicts.
+    #[tokio::test]
+    async fn read_side_409s_stay_terminal_through_process_range() {
+        let mut server = Server::new_async().await;
+
+        let http = server
+            .mock("POST", "/")
+            .with_status(409)
+            .expect(2)
+            .create_async()
+            .await;
+
+        let indexer = test_utils::TestIndexerBuilder::new(server.url())
+            .build()
+            .await;
+        let (events_tx, mut events_rx) = chain_event_channel();
+
+        let err = indexer
+            .process_range(&events_tx, 12, 13, &CancellationToken::new())
+            .await
+            .unwrap_err();
+        assert!(!is_retryable(&err), "{err:#}");
+        assert!(events_rx.try_recv().is_err(), "no events");
+        http.assert_async().await;
+    }
+
     #[tokio::test]
     async fn terminal_failures_hand_process_range_to_the_supervisor() {
         let mut server = Server::new_async().await;
