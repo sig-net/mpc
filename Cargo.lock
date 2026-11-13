@@ -7853,7 +7853,7 @@ dependencies = [
 
 [[package]]
 name = "mpc-evm-common"
-version = "1.22.0"
+version = "1.23.0"
 dependencies = [
  "alloy",
  "anyhow",
