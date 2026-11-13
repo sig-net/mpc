@@ -78,10 +78,14 @@ pub enum Cli {
         /// This node's account ed25519 secret key
         #[arg(long, env("MPC_ACCOUNT_SK"), hide_env_values = true)]
         account_sk: SecretKey,
-        /// The web port for this server
-        /// this is default to 3000 for all nodes now.
-        /// Partners can choose to change the port, but then they also need to make sure they change their load balancer config to match this
-        #[arg(long, env("MPC_WEB_PORT"), default_value = "3000")]
+        /// Port the node's web server listens on. Whatever `--my-address` resolves to
+        /// (load balancer or direct) must forward to this port.
+        #[arg(
+            long,
+            env("MPC_WEB_PORT"),
+            default_value = "3000",
+            value_parser = clap::value_parser!(u16).range(1..)
+        )]
         web_port: u16,
         /// The cipher secret key used to decrypt messages between nodes.
         #[arg(long, env("MPC_CIPHER_SK"), hide_env_values = true)]
