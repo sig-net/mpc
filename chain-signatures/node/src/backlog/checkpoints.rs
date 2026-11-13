@@ -14,13 +14,15 @@ pub struct Checkpoint {
     pub chain: Chain,
     pub block_height: u64,
     pub pending_requests: Vec<BacklogEntry>,
-    /// Commitment to each pending request's checkpoint-consensus phase.
-    ///
-    /// Deliberately not `#[serde(default)]`: a missing digest must fail to
-    /// decode rather than deserialize as all-zeros, which consensus would
-    /// otherwise compare against as if it were a real commitment.
-    #[serde(with = "serde_bytes")]
-    pub cumulative_digest: [u8; 32],
+    /// Present only on a body written before the digest covered source facts. Such a body
+    /// hashes as it did then, over its entries' phases; the value itself is not trusted.
+    #[serde(
+        rename = "cumulative_digest",
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "serde_bytes"
+    )]
+    pub legacy_digest: Option<[u8; 32]>,
 }
 
 impl fmt::Debug for Checkpoint {
@@ -43,7 +45,6 @@ impl fmt::Debug for Checkpoint {
                 "pending_requests",
                 &DebugPendingRequests(&self.pending_requests),
             )
-            .field("cumulative_digest", &self.cumulative_digest)
             .finish()
     }
 }
@@ -61,12 +62,8 @@ impl Checkpoint {
             chain,
             block_height,
             pending_requests: Vec::new(),
-            cumulative_digest: Self::empty_cumulative_digest(),
+            legacy_digest: None,
         }
-    }
-
-    pub fn empty_cumulative_digest() -> [u8; 32] {
-        mpc_primitives::empty_cumulative_digest()
     }
 
     pub fn digest(&self) -> [u8; 32] {
@@ -76,8 +73,42 @@ impl Checkpoint {
             self.pending_requests
                 .iter()
                 .map(|entry| entry.sign_id().request_id),
-            self.cumulative_digest,
+            match self.legacy_digest {
+                Some(_) => self.legacy_entries_digest(),
+                None => self.entries_digest(),
+            },
         )
+    }
+
+    /// The hash earlier versions took over their entries.
+    fn legacy_entries_digest(&self) -> [u8; 32] {
+        let mut hasher = sha3::Sha3_256::new();
+        for entry in &self.pending_requests {
+            hasher.update([entry.status().consensus_tag()]);
+        }
+        hasher.finalize().into()
+    }
+
+    /// The source facts of each entry, which every node that processed the chain holds alike
+    /// (doc/checkpoints.md); a node's own progress stays out of it.
+    fn entries_digest(&self) -> [u8; 32] {
+        let mut hasher = sha3::Sha3_256::new();
+        for entry in &self.pending_requests {
+            hasher.update(entry.digest_bytes());
+        }
+        hasher.finalize().into()
+    }
+
+    /// This checkpoint with each entry's progress rebuilt from its source facts.
+    pub(crate) fn without_progress(&self, root_pk: mpc_primitives::PublicKey) -> Self {
+        Self {
+            pending_requests: self
+                .pending_requests
+                .iter()
+                .map(|entry| entry.without_progress(root_pk))
+                .collect(),
+            ..self.clone()
+        }
     }
 
     pub fn len(&self) -> usize {
@@ -164,16 +195,11 @@ impl Checkpoints {
         let mut pending_requests = requests.requests.values().cloned().collect::<Vec<_>>();
         pending_requests.sort_by_key(|entry| entry.sign_id());
 
-        let mut cumulative = sha3::Sha3_256::new();
-        for entry in &pending_requests {
-            cumulative.update([entry.status().consensus_tag()]);
-        }
-
         Checkpoint {
             chain,
             block_height: requests.processed_block_height.unwrap_or(0),
             pending_requests,
-            cumulative_digest: cumulative.finalize().into(),
+            legacy_digest: None,
         }
     }
 
@@ -548,10 +574,8 @@ mod tests {
     async fn find_finds_confirmed_and_pending_checkpoints() {
         let storage = CheckpointStorage::in_memory();
         let checkpoints = Checkpoints::new(storage.clone());
-        let mut confirmed = checkpoint(1);
-        confirmed.cumulative_digest = [1; 32];
-        let mut pending = checkpoint(2);
-        pending.cumulative_digest = [2; 32];
+        let confirmed = checkpoint(1);
+        let pending = checkpoint(2);
 
         storage.persist(&confirmed).await.unwrap();
         checkpoints.persist_pending(&pending).await.unwrap();
