@@ -120,12 +120,12 @@ where
                 let block_hash = receipt
                     .block_hash
                     .context("sign receipt missing block hash")?;
-                let entropy_block = provider
+                let containing_block = provider
                     .get_block_by_hash(block_hash)
                     .await
                     .context("fetch block containing sign receipt")?
                     .context("block containing sign receipt is unavailable")?;
-                let entropy: [u8; 32] = entropy_block.header.mix_hash.into();
+                let block_hash: [u8; 32] = containing_block.header.hash.into();
                 let filter = Filter::new()
                     .from_block(block)
                     .to_block(block)
@@ -135,7 +135,7 @@ where
                     .get_logs(&filter)
                     .await
                     .context("fetch SignatureRequested logs")?;
-                let parsed = parse_filtered_logs(logs, entropy);
+                let parsed = parse_filtered_logs(logs, block_hash);
                 let expected = SignId::new(request_id.into());
                 anyhow::ensure!(
                     parsed.iter().any(|r| r.id == expected),

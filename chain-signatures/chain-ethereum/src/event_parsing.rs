@@ -21,11 +21,19 @@ pub fn is_contract_call(input: &Bytes) -> bool {
     !input.is_empty()
 }
 
-pub fn parse_filtered_logs(logs: Vec<Log>, entropy: [u8; 32]) -> Vec<IndexedSignRequest> {
+/// Derives request-specific entropy from the finalized containing block and request ID.
+pub(crate) fn derive_request_entropy(block_hash: [u8; 32], request_id: [u8; 32]) -> [u8; 32] {
+    let mut preimage = Vec::with_capacity(64);
+    preimage.extend_from_slice(&block_hash);
+    preimage.extend_from_slice(&request_id);
+    alloy::primitives::keccak256(preimage).into()
+}
+
+pub fn parse_filtered_logs(logs: Vec<Log>, block_hash: [u8; 32]) -> Vec<IndexedSignRequest> {
     let mut indexed_requests = Vec::new();
     for log in logs {
         tracing::debug!("Parsing Ethereum log: {:?}", log);
-        match sign_request_from_filtered_log(log.clone(), entropy) {
+        match sign_request_from_filtered_log(log.clone(), block_hash) {
             Some(request) => indexed_requests.push(request),
             None => tracing::warn!("Failed to parse Ethereum log: {:?}", log),
         }
@@ -96,7 +104,7 @@ fn sign_id_from_signature_responded_log(log: &Log) -> Option<SignId> {
     Some(SignId { request_id })
 }
 
-fn sign_request_from_filtered_log(log: Log, entropy: [u8; 32]) -> Option<IndexedSignRequest> {
+fn sign_request_from_filtered_log(log: Log, block_hash: [u8; 32]) -> Option<IndexedSignRequest> {
     let event = parse_event(&log)?;
     tracing::debug!("found eth event: {:?}", event);
     // Create sign request from event
@@ -138,6 +146,7 @@ fn sign_request_from_filtered_log(log: Log, entropy: [u8; 32]) -> Option<Indexed
         &event.dest,
         &event.params,
     ));
+    let entropy = derive_request_entropy(block_hash, sign_id.request_id);
     tracing::info!(?tx_hash, ?sign_id, "eth signature requested");
 
     Some(IndexedSignRequest::sign(
@@ -260,14 +269,32 @@ mod tests {
     }
 
     #[test]
-    fn parse_filtered_logs_uses_the_containing_block_entropy() {
-        let event = sample_requested_event();
-        let entropy = [0xab; 32];
+    fn parse_filtered_logs_derives_entropy_from_block_hash_and_request_id() {
+        let block_hash = [0xab; 32];
+        let first_event = sample_requested_event();
+        let mut second_event = sample_requested_event();
+        second_event.payload = FixedBytes::from([0x23; 32]);
 
-        let requests = parse_filtered_logs(vec![requested_log(event.encode_data())], entropy);
+        let requests = parse_filtered_logs(
+            vec![
+                requested_log(first_event.encode_data()),
+                requested_log(second_event.encode_data()),
+            ],
+            block_hash,
+        );
 
-        assert_eq!(requests.len(), 1);
-        assert_eq!(requests[0].args.entropy, entropy);
+        assert_eq!(requests.len(), 2);
+        assert_ne!(requests[0].id.request_id, requests[1].id.request_id);
+        for request in &requests {
+            let mut preimage = block_hash.to_vec();
+            preimage.extend_from_slice(&request.id.request_id);
+            let expected: [u8; 32] = alloy::primitives::keccak256(preimage).into();
+            assert_eq!(request.args.entropy, expected);
+        }
+        assert_ne!(
+            requests[0].args.entropy, requests[1].args.entropy,
+            "requests in one block should receive distinct entropy"
+        );
     }
 
     #[test]

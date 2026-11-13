@@ -310,11 +310,11 @@ which is why agreeing on `r` is all the nodes need:
 - proposer of the round: `participants[(entropy[0] + r) % n]` (`organize.rs`)
 - round length: `round_timeout(r)` (§6)
 
-Entropy granularity can correlate proposer schedules across requests. On
-Ethereum, all requests in one block share the block's `PREVRANDAO` value and
-therefore elect the same proposer in each corresponding round. This can
-concentrate work for a batch, but does not merge signing derivations:
-`derive_delta` also binds each request ID.
+On Ethereum, entropy hashes the containing block hash together with the request
+ID, so requests in one block get independently distributed proposer starting
+points. The selector still uses only the first byte modulo the participant
+count, so distinct requests can still happen to elect the same proposer.
+`derive_delta` separately binds each request ID as well.
 
 ## 6. The round timeout
 

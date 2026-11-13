@@ -185,11 +185,11 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
             .filter(|l| l.topic0() == Some(&ChainSignatures::SignatureResponded::SIGNATURE_HASH))
             .cloned()
             .collect();
-        // EIP-4399 assigns the post-Merge PREVRANDAO value to the header's
-        // `mixHash` field. Read it from this finalized block, not from the
-        // requester-known transaction hash.
-        let entropy: [u8; 32] = block.header.mix_hash.into();
-        let sign_requests = parse_filtered_logs(request_logs, entropy);
+        // Derive request-specific entropy from the finalized containing block hash.
+        // Unlike PREVRANDAO, which is known before this block is produced, the block
+        // hash includes its final contents. The request ID gives same-block requests
+        // different proposer seeds without making entropy requester-predictable.
+        let sign_requests = parse_filtered_logs(request_logs, block_hash.into());
 
         // Collect execution confirmations (if any) and emit ExecutionConfirmed events
         let watcher = ExecutionWatcher::new(
@@ -507,6 +507,7 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for EthereumIndexer<S, T> 
 mod tests {
     use crate::abi::ChainSignatures;
     use crate::client::CatchupItem;
+    use crate::event_parsing::derive_request_entropy;
     use crate::test_utils;
     use alloy::eips::BlockNumberOrTag;
     use alloy::primitives::{Address, FixedBytes, Log as PrimitiveLog, U256};
@@ -547,13 +548,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn indexed_request_uses_its_block_prevrandao_as_entropy() {
+    async fn indexed_request_entropy_uses_its_block_hash_and_request_id() {
         let server = Server::new_async().await;
         let item = test_utils::batch_block(1, vec![requested_log()]);
         let CatchupItem::BatchBlock { block, .. } = &item else {
             unreachable!("batch_block returns a BatchBlock")
         };
-        let expected_entropy: [u8; 32] = block.header.mix_hash.into();
+        let block_hash: [u8; 32] = block.header.hash.into();
         let indexer = test_utils::TestIndexerBuilder::new(server.url())
             .build()
             .await;
@@ -567,7 +568,10 @@ mod tests {
         let Some(ChainEvent::SignRequest { request, .. }) = events_rx.recv().await else {
             panic!("expected SignRequest");
         };
-        assert_eq!(request.args.entropy, expected_entropy);
+        assert_eq!(
+            request.args.entropy,
+            derive_request_entropy(block_hash, request.id.request_id)
+        );
     }
 
     #[tokio::test]
