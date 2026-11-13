@@ -11,10 +11,10 @@ use alloy::sol_types::SolEvent;
 use anyhow::Context as _;
 use async_trait::async_trait;
 use futures_util::{Stream, StreamExt};
-use mpc_chain_integration_core::utils::retry::SharedBackoff;
+use mpc_chain_integration_core::utils::retry::{retry_until_ok_or_terminal, SharedBackoff};
 use mpc_chain_integration_core::{ChainIndexer, ChainTelemetry, StateManager};
 use mpc_primitives::{Chain, ChainEvent, IndexedSignRequest};
-use mpc_utils::task::{retry_until_ok, retry_until_some};
+use mpc_utils::task::retry_until_some;
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 use tokio::time::Duration;
@@ -378,13 +378,22 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
                 item = stream.next() => item,
             };
             let Some(item) = item else { break };
-            retry_until_ok(
+            retry_until_ok_or_terminal(
                 cancel,
                 Self::RETRY_DELAY,
                 "ethereum block processing",
-                || async { self.process_catchup_item(events_tx, &item).await },
+                || async {
+                    self.process_catchup_item(events_tx, &item)
+                        .await
+                        .with_context(|| match &item {
+                            CatchupItem::BatchBlock { block, .. } => {
+                                format!("block {}", block.header.number)
+                            }
+                            CatchupItem::Missing(block_id) => format!("{block_id:?}"),
+                        })
+                },
             )
-            .await;
+            .await?;
         }
         Ok(())
     }
@@ -502,6 +511,7 @@ mod tests {
     use alloy::rpc::types::BlockId;
     use futures_util::StreamExt;
     use mockito::{Matcher, Server};
+    use mpc_chain_integration_core::utils::retry::is_retryable;
     use mpc_chain_integration_core::utils::stream::chain_event_channel;
     use mpc_chain_integration_core::{ChainIndexer, StateManager};
     use mpc_primitives::{Chain, ChainEvent};
@@ -607,6 +617,38 @@ mod tests {
             Some(43)
         );
         latest_mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn terminal_failures_hand_process_range_to_the_supervisor() {
+        let mut server = Server::new_async().await;
+
+        // every request 401: the batch degrades to Missing items and the item
+        // refetch is terminal — process_range must not spin on it
+        let http = server
+            .mock("POST", "/")
+            .with_status(401)
+            // one batch get_blocks + one item refetch, then the drain aborts
+            .expect(2)
+            .create_async()
+            .await;
+
+        let indexer = test_utils::TestIndexerBuilder::new(server.url())
+            .build()
+            .await;
+        let (events_tx, mut events_rx) = chain_event_channel();
+        let cancel = CancellationToken::new();
+
+        let err = tokio::time::timeout(
+            Duration::from_secs(30),
+            indexer.process_range(&events_tx, 12, 13, &cancel),
+        )
+        .await
+        .expect("process_range must fail fast instead of retrying at fixed pace")
+        .unwrap_err();
+        assert!(!is_retryable(&err), "{err:#}");
+        assert!(events_rx.try_recv().is_err(), "no events");
+        http.assert_async().await;
     }
 
     #[tokio::test]
