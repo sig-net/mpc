@@ -241,14 +241,15 @@ impl CheckpointStorage {
                 // Atomically inserts a pending checkpoint and its reverse digest index
                 // while checking for height collisions:
                 // - If an entry already exists at `block_height`:
-                //   - If the serialized payload is different, return -1 (conflicting checkpoint).
+                //   - If its digest is different, return -1 (a body can differ in this node's
+                //     progress alone; conflicting checkpoint).
                 //   - If identical, return 0 (idempotent no-op).
                 // - If new, write `height -> body` to pending and `digest -> height` to index,
                 //   and return 1 (successfully inserted).
                 const PERSIST: &str = r#"
                     local existing = redis.call('HGET', KEYS[1], ARGV[1])
                     if existing then
-                        if existing ~= ARGV[2] then
+                        if redis.call('HGET', KEYS[2], ARGV[3]) ~= ARGV[1] then
                             return -1
                         end
                         return 0
@@ -279,7 +280,7 @@ impl CheckpointStorage {
                 let checkpoints = pending.entry(checkpoint.chain).or_default();
                 if let Some(existing) = checkpoints.get(&checkpoint.block_height) {
                     anyhow::ensure!(
-                        existing == checkpoint,
+                        existing.digest() == checkpoint.digest(),
                         "conflicting pending checkpoint at height {}",
                         checkpoint.block_height
                     );
@@ -721,7 +722,7 @@ mod tests {
             chain: Chain::Solana,
             block_height: 10,
             pending_requests: vec![],
-            cumulative_digest: Checkpoint::empty_cumulative_digest(),
+            legacy_digest: None,
         };
         storage.persist(&cp1).await?;
 
@@ -734,7 +735,7 @@ mod tests {
             chain: Chain::Solana,
             block_height: 20,
             pending_requests: vec![],
-            cumulative_digest: Checkpoint::empty_cumulative_digest(),
+            legacy_digest: None,
         };
         storage.persist(&cp2).await?;
 
@@ -753,7 +754,7 @@ mod tests {
             chain,
             block_height,
             pending_requests: vec![],
-            cumulative_digest: Checkpoint::empty_cumulative_digest(),
+            legacy_digest: None,
         };
 
         let first = checkpoint(10);
@@ -794,10 +795,17 @@ mod tests {
             chain: Chain::Solana,
             block_height: 10,
             pending_requests: vec![],
-            cumulative_digest: Checkpoint::empty_cumulative_digest(),
+            legacy_digest: None,
         };
         let mut conflicting = checkpoint.clone();
-        conflicting.cumulative_digest[0] = 1;
+        conflicting
+            .pending_requests
+            .push(crate::backlog::BacklogEntry::new(
+                crate::backlog::mock::mock_sign_request(
+                    mpc_primitives::SignId::new([1; 32]),
+                    conflicting.chain,
+                ),
+            ));
 
         assert!(storage.persist_pending(&checkpoint).await?);
         assert!(!storage.persist_pending(&checkpoint).await?);
@@ -816,7 +824,7 @@ mod tests {
             chain: Chain::Ethereum,
             block_height: 100,
             pending_requests: vec![],
-            cumulative_digest: [42u8; 32],
+            legacy_digest: None,
         };
         let encoded = encode_checkpoint(&checkpoint).unwrap();
         let decoded = decode_checkpoint(&encoded).unwrap();

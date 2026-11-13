@@ -16,24 +16,18 @@ async fn wait_out_round(state: &mut SignState, reason: &str) -> SignPhase {
 }
 
 impl OrganizingPhase {
-    /// Seeded by [`Self::election_seed`] so all nodes pick the same proposer.
+    /// Seeded by request entropy so all nodes pick the same proposer.
     ///
     /// Both operands are reduced before adding: `round` comes from
     /// `highest_seen_round`, which a peer sets, so it can be arbitrarily large.
     fn proposer_per_round(
         round: usize,
         participants: &[Participant],
-        seed: &[u8; 32],
+        entropy: &[u8; 32],
     ) -> Participant {
         let n = participants.len();
-        let index = (seed[0] as usize % n + round % n) % n;
+        let index = (entropy[0] as usize % n + round % n) % n;
         participants[index]
-    }
-
-    /// Requests in one block can share entropy; the request id still gives each
-    /// its own first proposer.
-    fn election_seed(entropy: &[u8; 32], request_id: &[u8; 32]) -> [u8; 32] {
-        alloy::primitives::keccak256([entropy.as_slice(), request_id].concat()).into()
     }
 
     /// Waits for threshold active participants to be present.
@@ -78,10 +72,7 @@ impl OrganizingPhase {
         let sign_id = ctx.sign_id;
         let threshold = ctx.governance.threshold;
         let me = ctx.governance.me;
-        let seed = Self::election_seed(
-            &state.request().args.entropy,
-            &state.request().id.request_id,
-        );
+        let entropy = state.request().args.entropy;
         let participants = ctx
             .governance
             .participants
@@ -100,10 +91,10 @@ impl OrganizingPhase {
                 return state.reorganize("no active participants");
             };
 
-            // Elect from inputs every node shares (round, membership, entropy, request id), no
+            // Elect from inputs every node shares (round, membership, entropy), no
             // local-only information: filtering by the local active set makes nodes
             // elect different proposers and diverge permanently (#907).
-            let proposer = Self::proposer_per_round(state.round(), &participants, &seed);
+            let proposer = Self::proposer_per_round(state.round(), &participants, &entropy);
 
             let is_proposer = proposer == me;
             ctx.is_proposer.store(is_proposer, Ordering::Relaxed);
@@ -248,41 +239,30 @@ impl OrganizingPhase {
 mod tests {
     use super::*;
 
-    /// SHA256 of `0u32` big-endian: the entropy of the integration fixtures' `sign_request(0)`.
-    const FIXTURE_ENTROPY: [u8; 32] = [
-        223, 63, 97, 152, 4, 169, 47, 219, 64, 87, 25, 45, 196, 61, 215, 72, 234, 119, 138, 220,
-        82, 188, 73, 140, 232, 5, 36, 192, 20, 184, 17, 25,
-    ];
-
-    /// Some integration tests rely on this order for `sign_request(0)` (request id
-    /// all zeros). If it changes, you probably also have to update those tests.
+    /// Some integrations tests rely on this. If this changes, you probably also
+    /// have to update the tests.
     #[test]
-    fn proposer_order_for_fixture_request_0() {
+    fn proposer_order_for_seed_0() {
+        // SHA256([0,0,0,0])[0] = 223.
+        // With 3 participants:
+        //   round 0: (223 + 0) % 3 = 1 -> participant 1
+        //   round 1: (223 + 1) % 3 = 2 -> participant 2
+        //   round 2: (223 + 2) % 3 = 0 -> participant 0
         let participants: Vec<Participant> = (0u32..3).map(Participant::from).collect();
-        let seed = OrganizingPhase::election_seed(&FIXTURE_ENTROPY, &[0; 32]);
-        // seed[0] = 249, and 249 % 3 = 0, so round r elects participant r.
-        assert_eq!(seed[0], 249);
-        let order: Vec<_> = (0..3)
-            .map(|r| OrganizingPhase::proposer_per_round(r, &participants, &seed))
-            .collect();
-        assert_eq!(order, participants);
-    }
-
-    /// Requests sharing one entropy value, as all requests in a block do, must not
-    /// all elect the same first proposer.
-    #[test]
-    fn shared_entropy_spreads_first_proposers() {
-        let participants: Vec<Participant> = (0u32..4).map(Participant::from).collect();
-        let first: BTreeSet<Participant> = (0u8..32)
-            .map(|i| {
-                let seed = OrganizingPhase::election_seed(&FIXTURE_ENTROPY, &[i; 32]);
-                OrganizingPhase::proposer_per_round(0, &participants, &seed)
-            })
-            .collect();
+        // entropy[0] = SHA256([0,0,0,0])[0] = 0xdf = 223; only the first byte matters.
+        let mut entropy = [0u8; 32];
+        entropy[0] = 0xdf;
         assert_eq!(
-            first.len(),
-            participants.len(),
-            "first proposers: {first:?}"
+            OrganizingPhase::proposer_per_round(0, &participants, &entropy),
+            Participant::from(1)
+        );
+        assert_eq!(
+            OrganizingPhase::proposer_per_round(1, &participants, &entropy),
+            Participant::from(2)
+        );
+        assert_eq!(
+            OrganizingPhase::proposer_per_round(2, &participants, &entropy),
+            Participant::from(0)
         );
     }
 
@@ -293,9 +273,9 @@ mod tests {
     /// factor with `n`) would silently lose it.
     #[test]
     fn rotation_reaches_live_proposer_within_f_plus_1_rounds() {
-        // Only `seed[0]` selects the offset, so varying the seed is the same
+        // Only `entropy[0]` selects the offset, so varying the seed is the same
         // as varying the starting round, which the loop below already sweeps.
-        let seed = [0u8; 32];
+        let entropy = [0u8; 32];
         for n in [4usize, 5] {
             let participants: Vec<Participant> = (0..n as u32).map(Participant::from).collect();
             // Every down-set except "all down", which has no live proposer.
@@ -307,7 +287,7 @@ mod tests {
                 let budget = down.len() + 1;
                 for start in 0..n {
                     let reached_live = (start..start + budget).any(|r| {
-                        let p = OrganizingPhase::proposer_per_round(r, &participants, &seed);
+                        let p = OrganizingPhase::proposer_per_round(r, &participants, &entropy);
                         !down.contains(&p)
                     });
                     assert!(

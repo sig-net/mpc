@@ -12,7 +12,7 @@ use mpc_node::storage::protocol_storage::{ProtocolArtifact, ProtocolStorage};
 use mpc_node::storage::triple_storage::TriplePair;
 use mpc_node::types::SignCommand;
 use mpc_primitives::Chain;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::sync::Arc;
 use std::time::Duration;
@@ -1097,26 +1097,32 @@ async fn test_triples_message_count() {
 
     // Check there are not too many sent messages.
     //
-    // For finished protocols, there should be message counts as follows:
-    // Participants with a lower id send at most 16 messages to participant with higher ids.
-    // Participants with a higher id send at most 141 messages to participant with lower ids.
-    // In both cases, fewer messages are observed for ongoing protocols that
-    // already started but got interrupted.
+    // Per triple, a pair's multiplication receiver sends at most 16 messages and its sender
+    // at most 141; which node is the sender alternates with the session id.
     //
     // Note: We don't actually care about these specific numbers. But we want to
     // understand what the numbers are and check they do not increase unexpectedly.
-    for (from, to, link_stats) in msg_log.clone_as_message_counter().unwrap().link_stats() {
-        for (key, num) in &link_stats.message_counts {
-            if key.contains("Triple") {
-                if from < to {
-                    // receiver in shared multiplication sends fewer messages
-                    assert!(*num <= 16, "{from:?} -> {to:?} sent {num} messages");
-                } else {
-                    // sender in shared multiplication sends more messages
-                    assert!(*num <= 141, "{from:?} -> {to:?} sent {num} messages");
-                }
-            }
-        }
+    let counter = msg_log.clone_as_message_counter().unwrap();
+    let counts: HashMap<_, u64> = counter
+        .link_stats()
+        .flat_map(|(from, to, link_stats)| {
+            link_stats
+                .message_counts
+                .iter()
+                .filter(|(key, _)| key.contains("Triple"))
+                .map(move |(key, num)| ((from, to, key.clone()), *num))
+        })
+        .collect();
+    for ((from, to, key), num) in &counts {
+        assert!(
+            *num <= 141,
+            "{from:?} -> {to:?} sent {num} messages for {key}"
+        );
+        let back = counts.get(&(*to, *from, key.clone())).copied().unwrap_or(0);
+        assert!(
+            (*num).min(back) <= 16,
+            "{from:?} <-> {to:?} both sent more than 16 messages for {key}"
+        );
     }
 }
 

@@ -11,7 +11,7 @@ pub(crate) fn sign_and_hash_eip1559_from_unsigned(
     r: &[u8],
     s: &[u8],
     y_parity: bool,
-) -> anyhow::Result<([u8; 32], u64)> {
+) -> anyhow::Result<[u8; 32]> {
     // Strip optional type prefix
     let (_, body) = match unsigned.first().copied() {
         Some(0x02) => (true, &unsigned[1..]),
@@ -25,8 +25,6 @@ pub(crate) fn sign_and_hash_eip1559_from_unsigned(
         rlp.item_count()? == 9,
         "unexpected 1559 unsigned field count"
     );
-
-    let nonce: u64 = rlp.val_at::<u64>(1)?;
 
     // Re-encode with signature fields appended
     let mut srlp = EthereumTxRlp::new_list(12);
@@ -44,7 +42,7 @@ pub(crate) fn sign_and_hash_eip1559_from_unsigned(
     signed_bytes.extend_from_slice(srlp_body);
 
     let hash = keccak256(&signed_bytes);
-    Ok((hash.into(), nonce))
+    Ok(hash.into())
 }
 
 pub(crate) fn sign_and_hash_legacy_from_unsigned(
@@ -53,7 +51,7 @@ pub(crate) fn sign_and_hash_legacy_from_unsigned(
     r: &[u8],
     s: &[u8],
     y_parity: bool,
-) -> anyhow::Result<([u8; 32], u64)> {
+) -> anyhow::Result<[u8; 32]> {
     let rlp = Rlp::new(unsigned_rlp);
     anyhow::ensure!(rlp.is_list(), "unsigned legacy must be an RLP list");
     anyhow::ensure!(
@@ -61,7 +59,6 @@ pub(crate) fn sign_and_hash_legacy_from_unsigned(
         "unexpected legacy unsigned field count"
     );
 
-    let nonce: u64 = rlp.val_at::<u64>(0)?;
     let mut out = EthereumTxRlp::new_list(9);
     for i in 0..6 {
         out.append_raw_field(rlp.at(i)?.as_raw());
@@ -80,7 +77,7 @@ pub(crate) fn sign_and_hash_legacy_from_unsigned(
 
     let signed_bytes = out.into_vec();
     let hash = alloy::primitives::keccak256(&signed_bytes);
-    Ok((hash.into(), nonce))
+    Ok(hash.into())
 }
 
 pub(crate) struct EthereumTxRlp {
@@ -203,7 +200,7 @@ mod tests {
         r[31] = 1;
         s[31] = 2;
 
-        let (hash, nonce) = sign_and_hash_eip1559_from_unsigned(&unsigned, &r, &s, true).unwrap();
+        let hash = sign_and_hash_eip1559_from_unsigned(&unsigned, &r, &s, true).unwrap();
 
         let signed = tx
             .into_signed(Signature::from_scalars_and_parity(
@@ -215,6 +212,5 @@ mod tests {
         let expected_hash: [u8; 32] = alloy::primitives::keccak256(&signed).into();
 
         assert_eq!(hash, expected_hash);
-        assert_eq!(nonce, 3);
     }
 }

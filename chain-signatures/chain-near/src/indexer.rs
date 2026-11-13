@@ -9,6 +9,11 @@ use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
+/// Delay between polls of the contract's pending requests. Each poll makes two
+/// RPC calls, the latest block and the pending requests, so a shorter delay
+/// finds a request sooner and loads the RPC more.
+const POLL_INTERVAL: Duration = Duration::from_millis(750);
+
 /// Commands emitted by the NEAR indexer.
 #[derive(Debug, Clone, PartialEq)]
 pub enum SignCommand {
@@ -219,7 +224,7 @@ pub fn run<S: StateManager>(
     Ok(tokio::spawn(async move {
         tracing::info!("starting polling loop for pending requests");
 
-        let mut interval = tokio::time::interval(Duration::from_millis(750));
+        let mut interval = tokio::time::interval(POLL_INTERVAL);
         loop {
             interval.tick().await;
             if let Err(err) = poll_pending_requests(&mut context).await {
