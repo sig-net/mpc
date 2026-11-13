@@ -83,10 +83,12 @@ alias tu := test-unit
 ci: fmt-check lint test-unit
 alias c := ci
 
-# Security audit of dependencies (mirrors CI audit job)
+# Dependency checks (mirrors CI audit job): advisories, licenses, bans, sources, unused dependencies
 audit:
-    @if ! command -v cargo-audit >/dev/null; then cargo install cargo-audit --locked; fi
-    cargo audit
+    @if ! command -v cargo-deny >/dev/null; then cargo install cargo-deny --locked; fi
+    @if ! command -v cargo-machete >/dev/null; then cargo install cargo-machete --locked; fi
+    cargo deny check advisories bans licenses sources -W unmaintained -W unsound --hide-inclusion-graph
+    cargo machete
 
 # Run all tests sequentially (single-threaded)
 # Usage: just ts [filter]

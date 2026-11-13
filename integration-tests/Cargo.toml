@@ -87,11 +87,6 @@ criterion = "0.5.1"
 serial_test = "3"
 test-log = { version = "0.2.12", features = ["log", "trace"] }
 
-[build-dependencies]
-anyhow.workspace = true
-async-process = "2"
-tokio.workspace = true
-
 
 [[bin]]
 name = "integration-tests"
