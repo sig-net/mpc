@@ -1935,6 +1935,96 @@ mod tests {
         // `.expect(1)` pins one batch fetch and one re-fetch.
     }
 
+    /// The time-less block fixture at slot 401: the `slot 401` context
+    /// must read as retryable, not as HTTP 401.
+    #[tokio::test]
+    async fn drain_range_retries_a_time_less_block_at_slot_401() {
+        let mut server = mockito::Server::new_async().await;
+
+        let entries: Vec<_> = [401, 400].into_iter().map(signature_entry).collect();
+        let _signatures = server
+            .mock("POST", "/")
+            .match_body(mockito::Matcher::Regex(
+                "getSignaturesForAddress".to_string(),
+            ))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(signatures_response(&entries))
+            .create_async()
+            .await;
+
+        let indexer = test_indexer(&server.url(), MockStateManager::new());
+        let transaction = event_transaction(
+            indexer.program_id,
+            Signature::new_unique(),
+            sign_bidirectional_ix_data("eip155:1"),
+        );
+        let mut null_time = event_block_response(0, 401, transaction.clone());
+        null_time["result"]["blockTime"] = serde_json::json!(null);
+        let _batch = server
+            .mock("POST", "/")
+            .match_body(mockito::Matcher::Regex(r#"^\["#.to_string()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(serde_json::json!([null_time.clone()]).to_string())
+            .create_async()
+            .await;
+        // one more time-less refetch, so the bail carries `slot 401` into
+        // the loop; then the served block. Mockito answers the first
+        // unmet stub.
+        let null_envelope = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": null_time["result"],
+        })
+        .to_string();
+        let _refetch_null = server
+            .mock("POST", "/")
+            .match_body(mockito::Matcher::Regex(r#"^\{.*getBlock"#.to_string()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(null_envelope)
+            .expect(1)
+            .create_async()
+            .await;
+        let mut served = event_block_response(0, 401, transaction);
+        served["result"]["blockTime"] = serde_json::json!(1_700_000_000);
+        let refetch = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": served["result"],
+        })
+        .to_string();
+        let _refetch = server
+            .mock("POST", "/")
+            .match_body(mockito::Matcher::Regex(r#"^\{.*getBlock"#.to_string()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(refetch)
+            .expect(1)
+            .create_async()
+            .await;
+
+        let (events_tx, mut events_rx) = mpsc::channel(16);
+        indexer
+            .drain_range(&events_tx, 402, 401, &CancellationToken::new())
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            events_rx.recv().await,
+            Some(ChainEvent::SignRequest {
+                block_timestamp: Some(_),
+                ..
+            })
+        ));
+        assert!(matches!(
+            events_rx.recv().await,
+            Some(ChainEvent::Block(401))
+        ));
+        assert!(events_rx.try_recv().is_err());
+    }
+
     #[tokio::test]
     async fn drain_range_emits_gapless_markers_for_inactive_slots() {
         let mut server = mockito::Server::new_async().await;

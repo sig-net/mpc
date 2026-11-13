@@ -9,7 +9,7 @@ pub use crate::{retry_op, retry_rpc};
 
 pub use classify::{
     http_status_read_retryable, http_status_retryable, is_provider_throttled, is_retryable,
-    RpcFailure,
+    is_retryable_typed, RpcFailure,
 };
 pub use gate::{exhausted, run_gated, SharedBackoff};
 
@@ -43,8 +43,8 @@ impl RetryConfig {
 }
 
 /// Retries `process` at a fixed `delay` until it succeeds, `cancel` fires,
-/// or it fails with a terminal error ([`is_retryable`]). Terminal errors are
-/// returned to the caller; cancel resolves to `Ok(())`.
+/// or it fails with a typed terminal verdict ([`is_retryable_typed`]).
+/// Terminal errors are returned to the caller; cancel resolves to `Ok(())`.
 ///
 /// Companion to [`retry_rpc!`] for supervisor loops: `retry_rpc!` retries a
 /// single call, this retries a whole work item (a block, a page).
@@ -63,7 +63,7 @@ where
             _ = cancel.cancelled() => return Ok(()),
             result = process() => match result {
                 Ok(()) => return Ok(()),
-                Err(err) if !is_retryable(&err) => return Err(err),
+                Err(err) if !is_retryable_typed(&err) => return Err(err),
                 Err(err) => tracing::warn!(
                     operation,
                     error = %format_args!("{err:#}"),
@@ -384,6 +384,30 @@ mod tests {
             async move {
                 if calls.fetch_add(1, Ordering::Relaxed) == 0 {
                     Err(anyhow::anyhow!("transient"))
+                } else {
+                    Ok(())
+                }
+            }
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(calls.load(Ordering::Relaxed), 2);
+    }
+
+    /// An untyped error with "slot 401" context is retryable — item
+    /// numbers are not status codes.
+    #[tokio::test]
+    async fn retry_until_ok_or_terminal_retries_untyped_errors_whatever_their_text() {
+        let cancel = CancellationToken::new();
+        let calls = Arc::new(AtomicU32::new(0));
+        let calls_clone = calls.clone();
+
+        retry_until_ok_or_terminal(&cancel, Duration::from_millis(1), "test_op", move || {
+            let calls = calls_clone.clone();
+            async move {
+                if calls.fetch_add(1, Ordering::Relaxed) == 0 {
+                    Err(anyhow::anyhow!("blockTime unavailable").context("slot 401"))
                 } else {
                     Ok(())
                 }
