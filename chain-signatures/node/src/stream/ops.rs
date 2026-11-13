@@ -642,14 +642,41 @@ pub async fn process_execution_confirmed(
         ExecutionOutcome::Failed | ExecutionOutcome::Unviable
     );
 
-    let entry = entry
-        .advance(result, block_height)
-        .await
-        .with_context(|| {
-            format!(
-                "failed to transition pending tx to final response for sign id {sign_id:?}, tx_id {tx_id:?}, source_chain {source_chain}"
-            )
-        })?;
+    let execution_tx = Arc::clone(entry.execution_tx());
+    let entry = match entry.advance(result, block_height).await {
+        Ok(entry) => entry,
+        Err(err) => {
+            // Every failure here is deterministic, so a retry would
+            // re-emit the same failing confirmation forever: park
+            // terminally, like the extraction failure above.
+            tracing::error!(
+                ?sign_id,
+                ?tx_id,
+                ?source_chain,
+                "terminal advance failure; parking without a response: {err:#}"
+            );
+            if let Err(park_err) = ctx
+                .backlog
+                .park_execution(source_chain, &sign_id, &execution_tx)
+                .await
+            {
+                tracing::warn!(?sign_id, "parking failed too: {park_err:#}");
+            }
+            if ctx
+                .sign_tx
+                .send(SignCommand::Completion(sign_id))
+                .await
+                .is_err()
+            {
+                tracing::warn!(?sign_id, "sign command channel closed while parking");
+            }
+            return Err(err).with_context(|| {
+                format!(
+                    "failed to transition pending tx to final response for sign id {sign_id:?}, tx_id {tx_id:?}, source_chain {source_chain}; parked"
+                )
+            });
+        }
+    };
     tracing::info!(
         ?tx_id,
         ?sign_id,
@@ -691,11 +718,8 @@ pub(crate) async fn process_block_event<T: ChainTelemetry>(
 ) -> anyhow::Result<()> {
     telemetry.block_finalized(block);
 
-    // should not create checkpoint for blocks that are not caught up, as that would
-    // try to create signatures for checkpoints where we are not live.
-    if !ctx.caught_up {
-        return Ok(());
-    }
+    // Runs while catching up too: a node votes at every boundary it passes,
+    // and only acting waits for the head (doc/checkpoints.md, Section 4).
     let Some(checkpoint) = ctx.backlog.set_processed_block(chain, block).await else {
         return Ok(());
     };

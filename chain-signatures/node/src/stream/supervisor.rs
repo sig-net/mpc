@@ -202,14 +202,13 @@ async fn run_supervised_with_watchdog<I: ChainIndexer, T: ChainTelemetry>(
     let mut resubmit_votes = true;
     let mut recovery_retry_delay = ERROR_RESTART_DELAY;
     let mut restart_delay = ERROR_RESTART_DELAY;
-    // Highest block dispatched this supervisor instance. The persisted
-    // watermark only advances once caught up, so a persistent per-height
-    // failure replays the same catchup blocks every restart; only a new
-    // high-water mark is real progress.
+    // Highest block dispatched this supervisor instance. A run that keeps
+    // failing at one height resumes below it on every restart and dispatches
+    // the same blocks again; only a new high-water mark is real progress.
     let mut highest_block: u64 = 0;
     loop {
-        // Cleared before recovery, not after: checkpoint creation and publish
-        // failover must not act on a backlog being recovered or replayed into.
+        // Cleared before recovery, not after: publish failover and sign-request
+        // enqueue must not act on a backlog being recovered or replayed into.
         ctx.caught_up = false;
         let recovered = async {
             recover_backlog(
@@ -223,6 +222,13 @@ async fn run_supervised_with_watchdog<I: ChainIndexer, T: ChainTelemetry>(
             )
             .await?;
             load_local = false;
+            // Failing here retries: without its records the node would sign again.
+            ctx.local_records = ctx
+                .backlog
+                .checkpoints()
+                .storage()
+                .load_local(chain)
+                .await?;
 
             if resubmit_votes {
                 resubmit_pending_checkpoint_votes(chain, &ctx).await?;
@@ -234,7 +240,7 @@ async fn run_supervised_with_watchdog<I: ChainIndexer, T: ChainTelemetry>(
         if let Err(err) = recovered {
             tracing::error!(
                 %chain,
-                %err,
+                error = %format_args!("{err:#}"),
                 ?recovery_retry_delay,
                 "failed to recover backlog; retrying"
             );

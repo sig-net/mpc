@@ -85,7 +85,7 @@ pub enum Cli {
         web_port: u16,
         /// The cipher secret key used to decrypt messages between nodes.
         #[arg(long, env("MPC_CIPHER_SK"), hide_env_values = true)]
-        cipher_sk: String,
+        cipher_sk: hpke::SecretKey,
         /// The secret key used to sign messages to be sent between nodes.
         #[arg(long, env("MPC_SIGN_SK"), hide_env_values = true)]
         sign_sk: SecretKey,
@@ -213,8 +213,6 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             // is an orderly exit rather than the OS default.
             let shutdown = shutdown_signal();
             crate::metrics::init_metrics(&account_id);
-
-            let cipher_sk = hpke::SecretKey::try_from_bytes(&hex::decode(cipher_sk)?)?;
 
             let cipher_pk_hex = hex::encode(cipher_sk.public_key().to_bytes());
 
@@ -609,6 +607,7 @@ fn log_startup(
         version = build::VERSION,
         git_commit_hash = build::GIT_COMMIT_HASH,
         build_timestamp = build::BUILD_TIMESTAMP,
+        test_build = build::TEST_BUILD,
         sign_pk = %network.sign_sk.public_key(),
         near_rpc_host = %host_of(near_rpc),
         eth_contract_address = %chains.eth.as_ref().map(|c| c.contract_address.to_string()).unwrap_or_else(|| "None".to_string()),
@@ -619,8 +618,7 @@ fn log_startup(
         hydration_rpc_host = %chains.hydration.as_ref().map_or("None", |c| host_of(&c.rpc_ws_url)),
         hydration_signer_address = %hydration_signer_address.as_deref().unwrap_or("None"),
         canton_json_api_host = %chains.canton.as_ref().map_or("None", |c| host_of(&c.json_api_url)),
-        // Midnight still holds its node URL as a string.
-        midnight_node_host = %chains.midnight.as_ref().map_or("None".to_string(), |c| c.node_url.parse().map_or("invalid".to_string(), |url| host_of(&url).to_string())),
+        midnight_node_host = %chains.midnight.as_ref().map_or("None", |c| host_of(&c.node_url)),
         tron_host = %chains.tron.as_ref().map_or("None", |c| host_of(&c.endpoint)),
         "starting node",
     );
@@ -714,6 +712,9 @@ struct StorageHandles {
     midnight_dust: Arc<dyn DustCheckpointStore>,
 }
 
+/// How long a Redis pool wait, connect, recycle or command may take before it
+/// fails. Without a bound a stalled Redis hangs every caller, including the
+/// chain supervisors and their watchdog.
 const REDIS_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// A Redis pool whose waits, connects and commands all fail after [`REDIS_TIMEOUT`].
@@ -862,7 +863,7 @@ async fn spawn_indexers(
 
     // Every source chain's stream admits bidirectional requests targeting Ethereum.
     // Admission must match across nodes, so they all need the same Ethereum network.
-    let ethereum_chain_id = eth.as_ref().and_then(EthConfig::chain_id);
+    let ethereum_chain_id = eth.as_ref().map(EthConfig::chain_id);
     if ethereum_chain_id.is_none() {
         tracing::warn!(
             "ethereum not configured: Ethereum-targeted requests are admitted without the \
@@ -1250,12 +1251,12 @@ mod tests {
             canton: None,
             midnight: Some(MidnightConfig {
                 // Nothing listens on port 1, so the startup dial is refused.
-                node_url: "http://127.0.0.1:1".to_string(),
+                node_url: "http://127.0.0.1:1".parse().unwrap(),
                 central_address: mpc_chain_midnight::MidnightAddress::from_bytes([0xab; 32]),
                 responder_address: mpc_chain_midnight::MidnightAddress::from_bytes([0xcd; 32]),
                 publisher: mpc_chain_midnight::PublisherConfig {
                     funding_seed: "ab".repeat(32),
-                    indexer_ws_url: "ws://127.0.0.1:1/api/v3/graphql/ws".to_string(),
+                    indexer_ws_url: "ws://127.0.0.1:1/api/v3/graphql/ws".parse().unwrap(),
                     ..Default::default()
                 },
                 rpc: Default::default(),
@@ -1360,14 +1361,14 @@ mod tests {
             "redis_url",
             "sol_account_sk",
             "eth_account_sk",
-            "signer_uri",
+            "hydration_signer_uri",
             "canton_oidc_client_secret",
             "midnight_funding_seed",
             "near_rpc",
             "otlp_endpoint",
             "eth_execution_rpc_http_url",
             "sol_rpc_http_url",
-            "rpc_ws_url",
+            "hydration_rpc_ws_url",
             "canton_json_api_url",
             "canton_json_api_ws_url",
             "canton_oidc_token_url",
@@ -1387,5 +1388,46 @@ mod tests {
                 "arg {arg_id} must have hide_env_values set"
             );
         }
+    }
+
+    /// The parameters a node cannot start without, pinned: a default or an
+    /// `Option` on one of them would let a node start on a guess.
+    #[test]
+    fn required_parameters_are_pinned() {
+        use clap::CommandFactory;
+
+        let cmd = Cli::command();
+        let start = cmd
+            .find_subcommand("start")
+            .expect("start subcommand must exist");
+
+        let mut required: Vec<_> = start
+            .get_arguments()
+            .filter(|arg| arg.is_required_set())
+            .map(|arg| arg.get_id().as_str())
+            .collect();
+        required.sort_unstable();
+        assert_eq!(
+            required,
+            [
+                "account_id",
+                "account_sk",
+                "cipher_sk",
+                "env",
+                "mpc_contract_id",
+                "my_address",
+                "near_rpc",
+                "redis_url",
+                "sign_sk",
+            ]
+        );
+
+        // The key-share store: one of its flags must be given.
+        let required_groups: Vec<_> = start
+            .get_groups()
+            .filter(|group| group.is_required_set())
+            .map(|group| group.get_id().as_str())
+            .collect();
+        assert_eq!(required_groups, ["sk_share"]);
     }
 }

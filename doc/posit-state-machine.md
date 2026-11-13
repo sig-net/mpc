@@ -201,6 +201,9 @@ the presignature but was absent from the active set at reservation time is in
 that position: it would `ACCEPT`, go uncounted, and wait for a `START` that
 never comes.
 
+A member's `REJECT` replaces its earlier `ACCEPT`, and a later `ACCEPT` is
+ignored, as in [§9](#9-triple-and-presignature-posits).
+
 No message carries the outcome of a round, so an excluded member cannot tell
 "round `r` succeeded without me" from "round `r` still running". It keeps
 rotating: it burns the round for every peer still waiting, and in the rounds
@@ -408,9 +411,10 @@ the same pair reuses the id.
 
 - **Owner.** Starts once every node it proposed to has replied and at least t
   accepted, or at the first expiry tick after the posit timeout if at least t
-  accepted; otherwise it aborts silently and the pair returns to the pool. To
-  start, it takes the pair from storage (presignatures) and sends `START`
-  listing the nodes that accepted.
+  accepted; otherwise it aborts silently at that tick, even if rejects ruled out
+  t accepts earlier, and the pair returns to the pool. Until then the attempt
+  holds one of its `max_mine_generations` slots. To start, it takes the pair
+  from storage (presignatures) and sends `START` listing the nodes that accepted.
 - **Deliberator.** On `PROPOSE` records an entry and replies `ACCEPT`; a
   repeated `PROPOSE` from the same owner is accepted again and restarts the
   entry's clock. The entry is dropped once the posit timeout plus a margin has
@@ -422,6 +426,13 @@ the same pair reuses the id.
   load: more generations running or accepted than the network's cap allows, or more in
   the pool than its floors need), with a `REJECT` if one fails. `START` relies on the generation-start refusal below.
   `ACCEPT` and `REJECT` are never answered.
+
+The owner counts each node once: a `REJECT` replaces that node's `ACCEPT`,
+and a later `ACCEPT` is ignored. Otherwise a late `ACCEPT` from an earlier
+attempt on the same presignature id could put a node that refused into
+`START`. Votes do not name their attempt, so a late `ACCEPT` that arrives
+before the node's `REJECT` still counts. A willing node left out only keeps
+its entry until it expires.
 
 Every node listed in `START` must contribute. If one does not, the generation runs
 to its generation timeout (a node constant) and its inputs are consumed. A node

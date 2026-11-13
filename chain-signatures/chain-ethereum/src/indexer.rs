@@ -318,7 +318,7 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
     /// The catchup-live anchor: the first processable head + 1.
     /// Returns `None` on cancellation.
     async fn sample_anchor(&self, cancel: &CancellationToken) -> Option<u64> {
-        let tag = if self.config.optimistic_requests {
+        let tag = if self.config.network.is_optimistic() {
             BlockNumberOrTag::Latest
         } else {
             BlockNumberOrTag::Finalized
@@ -408,22 +408,16 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for EthereumIndexer<S, T> 
         // An endpoint on another network would feed this node that network's
         // requests and receipts, and admission checks transactions against the
         // configured network only.
-        if let Some(expected) = self.config.chain_id() {
-            let Some(actual) = self.sample_chain_id(&cancel).await else {
-                tracing::debug!("ethereum indexer cancelled before the chain id was sampled");
-                return Ok(());
-            };
-            anyhow::ensure!(
-                actual == expected,
-                "ethereum RPC serves chain id {actual}, but network {} has chain id {expected}",
-                self.config.network
-            );
-        } else {
-            tracing::warn!(
-                network = %self.config.network,
-                "unknown ethereum network: the RPC's chain id is not checked"
-            );
-        }
+        let expected = self.config.chain_id();
+        let Some(actual) = self.sample_chain_id(&cancel).await else {
+            tracing::debug!("ethereum indexer cancelled before the chain id was sampled");
+            return Ok(());
+        };
+        anyhow::ensure!(
+            actual == expected,
+            "ethereum RPC serves chain id {actual}, but network {} has chain id {expected}",
+            self.config.network
+        );
 
         // Spawn the finalized head watcher.
         let mut finalized_watcher = self
@@ -507,6 +501,7 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for EthereumIndexer<S, T> 
 mod tests {
     use crate::abi::ChainSignatures;
     use crate::client::CatchupItem;
+    use crate::config::EthNetwork;
     use crate::event_parsing::derive_request_entropy;
     use crate::test_utils;
     use alloy::eips::BlockNumberOrTag;
@@ -623,7 +618,7 @@ mod tests {
                         "error": {"code": -32000, "message": "unavailable"}
                     })
                 } else {
-                    json!({"jsonrpc": "2.0", "id": id, "result": format!("{SEPOLIA_CHAIN_ID:#x}")})
+                    json!({"jsonrpc": "2.0", "id": id, "result": format!("{:#x}", EthNetwork::Sepolia.chain_id())})
                 };
                 reply.to_string().into_bytes()
             })
@@ -641,7 +636,7 @@ mod tests {
         .await
         .expect("the chain id should be sampled once the RPC answers");
 
-        assert_eq!(chain_id, Some(SEPOLIA_CHAIN_ID));
+        assert_eq!(chain_id, Some(EthNetwork::Sepolia.chain_id()));
         chain_id_mock.assert_async().await;
     }
 
@@ -661,7 +656,7 @@ mod tests {
             .create_async()
             .await;
         let mut builder = test_utils::TestIndexerBuilder::new(server.url());
-        builder.eth.optimistic_requests = true;
+        builder.eth.network = crate::config::EthNetwork::Anvil;
         let indexer = builder.build().await;
 
         assert_eq!(
@@ -1069,7 +1064,7 @@ mod tests {
         async fn spawn(processed: u64, finalized: u64) -> Self {
             let mut server = Server::new_async().await;
             let finalized = Arc::new(AtomicU64::new(finalized));
-            mock_chain_id(&mut server, SEPOLIA_CHAIN_ID).await;
+            mock_chain_id(&mut server, EthNetwork::Sepolia.chain_id()).await;
 
             // Anchor sampling + finalized head polling.
             server
@@ -1154,9 +1149,6 @@ mod tests {
                 .expect("run() should exit Ok on cancel");
         }
     }
-
-    /// `TestIndexerBuilder` configures sepolia.
-    const SEPOLIA_CHAIN_ID: u64 = 11_155_111;
 
     #[tokio::test]
     async fn run_refuses_an_rpc_on_another_network() {
