@@ -38,6 +38,8 @@ pub struct Options {
     #[cfg(feature = "test-feature")]
     #[arg(long, env("MPC_SK_SHARE_LOCAL_PATH"), group = "sk_share")]
     pub sk_share_local_path: Option<PathBuf>,
+    /// Redis URL. Redis holds what the node can regenerate: triples,
+    /// presignatures and checkpoints.
     #[arg(long, env("MPC_REDIS_URL"), hide_env_values = true)]
     pub redis_url: Url,
 }

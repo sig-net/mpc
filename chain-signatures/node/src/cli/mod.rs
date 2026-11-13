@@ -78,9 +78,7 @@ pub enum Cli {
         /// This node's account ed25519 secret key
         #[arg(long, env("MPC_ACCOUNT_SK"), hide_env_values = true)]
         account_sk: SecretKey,
-        /// The web port for this server
-        /// this is default to 3000 for all nodes now.
-        /// Partners can choose to change the port, but then they also need to make sure they change their load balancer config to match this
+        /// Port the node's web server listens on.
         #[arg(long, env("MPC_WEB_PORT"), default_value = "3000")]
         web_port: u16,
         /// The cipher secret key used to decrypt messages between nodes.
@@ -1342,6 +1340,23 @@ mod tests {
             "publish must wait out the stack gate's engaged window (base cooldown), took {:?}",
             start.elapsed()
         );
+    }
+
+    /// `--help` is the only list of parameters, so each one explains itself there.
+    #[test]
+    fn every_start_parameter_has_help() {
+        use clap::CommandFactory;
+
+        let cmd = Cli::command();
+        let start = cmd
+            .find_subcommand("start")
+            .expect("start subcommand must exist");
+        let without_help: Vec<_> = start
+            .get_arguments()
+            .filter(|arg| arg.get_help().is_none())
+            .map(|arg| arg.get_id().as_str())
+            .collect();
+        assert!(without_help.is_empty(), "no help text: {without_help:?}");
     }
 
     #[test]
