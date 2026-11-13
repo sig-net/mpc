@@ -483,6 +483,28 @@ impl Backlog {
             .map(|entry| entry.with_respond_observed_at(watch.respond_observed_at))
     }
 
+    /// The watched txs that `taker` leaves unexecutable (M4): same account and nonce, other
+    /// bytes. Unsigned siblings are not watched; answering them changes the checkpoint digest.
+    pub async fn nonce_siblings(&self, taker: &BidirectionalTx) -> Vec<Arc<BidirectionalTx>> {
+        // A Tron transaction ID executes once whatever else runs; expiry answers the rest (M6).
+        if taker.target_chain != Chain::Ethereum {
+            return Vec::new();
+        }
+        let watchers = self.watchers(&taker.target_chain).read().await;
+        watchers
+            .watches
+            .values()
+            .map(|watch| &watch.tx)
+            .filter(|tx| {
+                tx.caip2_id == taker.caip2_id
+                    && tx.from_address == taker.from_address
+                    && tx.nonce == taker.nonce
+                    && tx.serialized_transaction != taker.serialized_transaction
+            })
+            .cloned()
+            .collect()
+    }
+
     /// Parks the entry by key — the confirmation error path, whose
     /// `advance` consumed the handle.
     pub async fn park_execution(

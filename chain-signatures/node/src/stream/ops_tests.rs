@@ -432,6 +432,176 @@ async fn process_execution_confirmed_success_creates_respond_request() {
     }
 }
 
+/// Request `id` from the test account at `path` on `source_chain`: an unsigned legacy
+/// Ethereum transfer at `nonce`, whose `value` sets its bytes apart.
+fn nonce_request(
+    id: u8,
+    source_chain: Chain,
+    path: &str,
+    nonce: u64,
+    value: u64,
+) -> Arc<IndexedSignRequest> {
+    let mut rlp = rlp::RlpStream::new_list(9);
+    rlp.append(&nonce);
+    rlp.append(&0u64); // gasPrice
+    rlp.append(&0u64); // gasLimit
+    rlp.append(&vec![0x11u8; 20]); // to
+    rlp.append(&value);
+    rlp.append(&Vec::<u8>::new()); // data
+    rlp.append(&1u64); // chain id
+    rlp.append(&0u64);
+    rlp.append(&0u64);
+    let event = SignBidirectionalEvent {
+        serialized_transaction: rlp.out().to_vec(),
+        path: path.to_string(),
+        chain: source_chain,
+        ..bidirectional_event(Vec::new())
+    };
+    Arc::new(IndexedSignRequest::sign_bidirectional(
+        SignId::from_u8(id),
+        test_sign_args(id),
+        source_chain,
+        0,
+        event,
+    ))
+}
+
+/// `request`'s transaction under some signature, which gives it a tx id other than the
+/// request id; the path stands in for the account.
+fn signed_tx(request: &IndexedSignRequest, nonce: u64) -> Arc<BidirectionalTx> {
+    let SignKind::SignBidirectional(event) = &request.kind else {
+        panic!("expected a first leg");
+    };
+    Arc::new(BidirectionalTx {
+        id: BidirectionalTxId([request.id.request_id[0].wrapping_add(100); 32]),
+        sender: event.sender,
+        serialized_transaction: event.serialized_transaction.clone(),
+        source_chain: event.chain,
+        target_chain: Chain::Ethereum,
+        caip2_id: event.caip2_id.clone(),
+        key_version: event.key_version,
+        deposit: event.deposit,
+        path: event.path.clone(),
+        algo: event.algo.clone(),
+        dest: event.dest.clone(),
+        params: event.params.clone(),
+        output_deserialization_schema: event.output_deserialization_schema.clone(),
+        respond_serialization_schema: event.respond_serialization_schema.clone(),
+        request_id: request.id.request_id,
+        from_address: [event.path.as_bytes()[0]; 20],
+        nonce,
+    })
+}
+
+/// The sign ids of the requests `sign_rx` holds.
+fn queued_requests(sign_rx: &mut mpsc::Receiver<SignCommand>) -> Vec<SignId> {
+    let mut queued = Vec::new();
+    while let Ok(command) = sign_rx.try_recv() {
+        if let SignCommand::Request(entry) = command {
+            queued.push(entry.sign_id());
+        }
+    }
+    queued
+}
+
+/// An executed transaction answers every watched request at its account and nonce with other
+/// bytes, at its height: Unviable on Midnight, Failed where Unviable is missing, built from the
+/// sibling's own transaction.
+#[tokio::test]
+async fn execution_answers_the_nonce_siblings_of_its_transaction() {
+    for source_chain in [Chain::Midnight, Chain::Solana] {
+        let backlog = Backlog::new();
+        backlog.mark_caught_up(source_chain);
+        let taker = nonce_request(1, source_chain, "p", 7, 1);
+        let taker_tx = signed_tx(&taker, 7);
+        seed_executing_entry(&backlog, taker, Arc::clone(&taker_tx)).await;
+        let sibling = nonce_request(2, source_chain, "p", 7, 2);
+        let sibling_tx = signed_tx(&sibling, 7);
+        seed_executing_entry(&backlog, Arc::clone(&sibling), Arc::clone(&sibling_tx)).await;
+        let unsigned = nonce_request(3, source_chain, "p", 7, 3);
+        backlog.insert_bidirectional(Arc::clone(&unsigned)).await;
+        let untouched = [
+            nonce_request(4, source_chain, "p", 7, 1), // the taker's bytes (M3)
+            nonce_request(5, source_chain, "p", 8, 2),
+            nonce_request(6, source_chain, "q", 7, 2),
+        ];
+        let mut still_watched = Vec::new();
+        for (request, nonce) in untouched.iter().zip([7, 8, 7]) {
+            let tx = signed_tx(request, nonce);
+            still_watched.push(tx.id);
+            seed_executing_entry(&backlog, Arc::clone(request), tx).await;
+        }
+
+        let (sign_tx, mut sign_rx) = mpsc::channel(8);
+        let ctx = make_test_stream_context_with_generator_pk(backlog, sign_tx, true);
+        process_execution_confirmed(
+            taker_tx.id,
+            taker_tx.sign_id(),
+            taker_tx.source_chain,
+            123,
+            ExecutionOutcome::Failed,
+            &ctx,
+            Chain::Ethereum,
+        )
+        .await
+        .unwrap();
+
+        let expected = if source_chain == Chain::Midnight {
+            mpc_primitives::AttestationOutcomeKind::Unviable
+        } else {
+            mpc_primitives::AttestationOutcomeKind::Failed
+        };
+        let entry = ctx.backlog.get(source_chain, &sibling.id).await.unwrap();
+        let SignStatus::Bidirectional(BidirectionalProgress::Final {
+            respond_request,
+            progress: SignProgress::Generating,
+        }) = entry.status()
+        else {
+            panic!("{source_chain}: sibling not answered: {:?}", entry.status());
+        };
+        let SignKind::RespondBidirectional(response) = &respond_request.kind else {
+            panic!("{source_chain}: expected a response");
+        };
+        assert_eq!(response.outcome_kind, Some(expected), "{source_chain}");
+        assert_eq!(response.tx_id, sibling_tx.id, "{source_chain}");
+        assert_eq!(
+            response
+                .attestation
+                .map(|attestation| attestation.block_height),
+            (source_chain == Chain::Midnight).then_some(123),
+            "{source_chain}"
+        );
+
+        let entry = ctx.backlog.get(source_chain, &unsigned.id).await.unwrap();
+        assert_matches!(
+            entry.status(),
+            SignStatus::Bidirectional(BidirectionalProgress::Initial(_))
+        );
+        for request in &untouched {
+            let entry = ctx.backlog.get(source_chain, &request.id).await.unwrap();
+            assert_matches!(
+                entry.status(),
+                SignStatus::Bidirectional(BidirectionalProgress::Executing(_))
+            );
+        }
+        let mut watched = ctx
+            .backlog
+            .get_execution_watchers(Chain::Ethereum)
+            .await
+            .into_keys()
+            .collect::<Vec<_>>();
+        watched.sort_by_key(|id| id.0);
+        assert_eq!(watched, still_watched, "{source_chain}");
+        let mut queued = queued_requests(&mut sign_rx);
+        queued.sort_by_key(|id| id.request_id);
+        assert_eq!(
+            queued,
+            vec![SignId::from_u8(1), sibling.id],
+            "{source_chain}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn process_execution_confirmed_is_idempotent_after_first_processing() {
     let backlog = Backlog::new();
