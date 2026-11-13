@@ -29,6 +29,7 @@ pub fn generate_sign_request(
     record: &SignBidirectionalRecord,
     read_address: &[u8; 32],
     request_id: [u8; 32],
+    block_hash: [u8; 32],
     indexed_ts: u64,
     root_pk: mpc_primitives::PublicKey,
 ) -> anyhow::Result<IndexedSignRequest> {
@@ -93,7 +94,10 @@ pub fn generate_sign_request(
     );
     let payload = bidirectional_payload_scalar(target, &serialized)?;
 
-    let entropy = hash_payload(&request_id);
+    // Mix the unpredictable finalized block hash with request identity so
+    // requests in one block get distinct proposer-election seeds. `derive_delta`
+    // also binds the request ID independently.
+    let entropy = hash_payload(&[block_hash, request_id].concat());
 
     Ok(IndexedSignRequest::sign_bidirectional(
         SignId::new(request_id),
@@ -157,12 +161,13 @@ mod tests {
     use k256::elliptic_curve::bigint::U256;
     use k256::elliptic_curve::ops::Reduce;
     use k256::{FieldBytes, Scalar};
-    use mpc_chain_integration_core::utils::payload::derive_user_address;
+    use mpc_chain_integration_core::utils::{hashing::hash_payload, payload::derive_user_address};
     use mpc_primitives::{Chain, SignKind};
     use mpc_tron_wire::TronAddress;
 
     const READ_ADDRESS: [u8; 32] = [0xab; 32];
     const REQUEST_ID: [u8; 32] = [0x77; 32];
+    const BLOCK_HASH: [u8; 32] = [0x88; 32];
     const INDEXED_TS: u64 = 1_753_000_000;
     fn caller_record() -> SignBidirectionalRecord {
         let mut record = crate::test_utils::sample_record();
@@ -191,6 +196,7 @@ mod tests {
                 &record,
                 &READ_ADDRESS,
                 REQUEST_ID,
+                BLOCK_HASH,
                 INDEXED_TS,
                 test_root_pk(),
             )
@@ -210,6 +216,7 @@ mod tests {
             &record,
             &READ_ADDRESS,
             REQUEST_ID,
+            BLOCK_HASH,
             INDEXED_TS,
             test_root_pk(),
         )
@@ -231,6 +238,15 @@ mod tests {
         // signs the txid itself.
         let expected = <Scalar as Reduce<U256>>::reduce_bytes(&FieldBytes::from(raw.txid()));
         assert_eq!(request.args.payload, expected);
+        assert_eq!(
+            request.args.entropy,
+            hash_payload(&[BLOCK_HASH, REQUEST_ID].concat())
+        );
+        assert_ne!(
+            request.args.entropy,
+            hash_payload(&[BLOCK_HASH, [0x78; 32]].concat()),
+            "request IDs spread entropy for proposer election within one block"
+        );
     }
 
     #[test]
@@ -240,6 +256,7 @@ mod tests {
             &record,
             &READ_ADDRESS,
             REQUEST_ID,
+            BLOCK_HASH,
             INDEXED_TS,
             test_root_pk(),
         )
@@ -287,6 +304,7 @@ mod tests {
             &record,
             &READ_ADDRESS,
             REQUEST_ID,
+            BLOCK_HASH,
             INDEXED_TS,
             test_root_pk(),
         )
@@ -298,6 +316,7 @@ mod tests {
             &record,
             &READ_ADDRESS,
             REQUEST_ID,
+            BLOCK_HASH,
             INDEXED_TS,
             test_root_pk(),
         )
@@ -329,6 +348,7 @@ mod tests {
             &record,
             &READ_ADDRESS,
             request_id_before,
+            BLOCK_HASH,
             INDEXED_TS,
             test_root_pk(),
         )
@@ -364,10 +384,16 @@ mod tests {
         // derived key space follows the requester.
         let record = caller_record();
         let elsewhere = [0xcd; 32];
-        let err =
-            generate_sign_request(&record, &elsewhere, REQUEST_ID, INDEXED_TS, test_root_pk())
-                .expect_err("a sender mismatch must drop the request")
-                .to_string();
+        let err = generate_sign_request(
+            &record,
+            &elsewhere,
+            REQUEST_ID,
+            BLOCK_HASH,
+            INDEXED_TS,
+            test_root_pk(),
+        )
+        .expect_err("a sender mismatch must drop the request")
+        .to_string();
         assert!(
             err.contains(&"ab".repeat(32)) && err.contains(&"cd".repeat(32)),
             "the drop must name both addresses, got: {err}"
@@ -382,6 +408,7 @@ mod tests {
             &record,
             &READ_ADDRESS,
             REQUEST_ID,
+            BLOCK_HASH,
             INDEXED_TS,
             test_root_pk(),
         )
@@ -395,6 +422,7 @@ mod tests {
             &record,
             &READ_ADDRESS,
             REQUEST_ID,
+            BLOCK_HASH,
             INDEXED_TS,
             test_root_pk(),
         )
@@ -412,6 +440,7 @@ mod tests {
             &record,
             &READ_ADDRESS,
             REQUEST_ID,
+            BLOCK_HASH,
             INDEXED_TS,
             test_root_pk(),
         )
@@ -425,6 +454,7 @@ mod tests {
             &record,
             &READ_ADDRESS,
             REQUEST_ID,
+            BLOCK_HASH,
             INDEXED_TS,
             test_root_pk(),
         )
@@ -455,6 +485,7 @@ mod tests {
             &record,
             &READ_ADDRESS,
             REQUEST_ID,
+            BLOCK_HASH,
             INDEXED_TS,
             test_root_pk(),
         )

@@ -313,6 +313,12 @@ which is why agreeing on `r` is all the nodes need:
 - proposer of the round: `participants[(seed[0] + r) % n]` with `seed = keccak(entropy ‖ request_id)`, so requests that share entropy still start at different proposers (`organize.rs`)
 - round length: `round_timeout(r)` (§6)
 
+Entropy granularity can correlate proposer schedules across requests. On
+Midnight, entropy is `Keccak256(block_hash || request_id)`, where `block_hash`
+is the containing finalized block hash. Requests in the same block therefore
+get request-specific proposer schedules, while the block hash supplies the
+unpredictable input. `derive_delta` also binds each request ID.
+
 ## 6. The round timeout
 
 `round_timeout(r)` starts when the round begins: at the round bump

@@ -11,7 +11,7 @@ big_r' = big_r * delta,  k' = k / delta,  sigma' = (sigma + epsilon * k) / delta
 
 ## Requirements
 
-1. **Unpredictability.** `delta` is unpredictable until the request is committed on-chain. Nobody may know which `delta` will apply to a request before the request is posted. `entropy` gives this. It must be a value the requester cannot know or influence before the block containing the request is validated: a validator-chosen field of that block, read from a final block so every node derives the same `delta`. Nothing derived from the transaction or the request qualifies, since the requester computes those before broadcast. A malicious block producer is out of scope.
+1. **Unpredictability.** `delta` is unpredictable until the request is committed on-chain. Nobody may know which `delta` will apply to a request before the request is posted. `entropy` gives this. It must include a value the requester cannot know or influence before the block containing the request is validated, read from a final block so every node derives the same `delta`. Nothing derived solely from the transaction or the request qualifies, since the requester computes those before broadcast. A malicious block producer is out of scope.
 
 2. **Per-request binding.** `delta` is different for every request. Binding `delta` to `request_id`, the hash of the request fields (payload, key, epsilon), gives this, also when requests share `entropy`, such as all requests in one block.
 
@@ -20,3 +20,7 @@ big_r' = big_r * delta,  k' = k / delta,  sigma' = (sigma + epsilon * k) / delta
 Operators choose which presignature they propose and so control `big_r`. That is acceptable: `delta` still depends on the request and on `entropy`, so choosing `big_r` gives no advantage toward forging. `entropy` is not there to counter presignature choice.
 
 Which block field satisfies requirement 1 depends on the chain and is decided per chain.
+On Midnight, `entropy = Keccak256(block_hash || request_id)`, where `block_hash`
+is the finalized block containing the request. Both inputs are 32 bytes. The
+block hash supplies unpredictability; including the request ID gives requests
+in the same block distinct proposer-election seeds.
