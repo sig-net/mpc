@@ -676,9 +676,8 @@ pub(crate) async fn answer_unviable(
     }
 }
 
-/// A verified Midnight Response saying Executed or Failed reports its request's transaction
-/// included: mark what that leaves unexecutable (#1430). The event carries the height only on
-/// Midnight so far (#1429).
+/// Mark what a verified Response saying Executed or Failed leaves unexecutable (#1430).
+/// Only Midnight's Response carries the height so far (#1429), so only Midnight gets here.
 async fn mark_nonce_siblings(
     event: &RespondBidirectionalEvent,
     published: &mpc_primitives::PublishedAttestation,
