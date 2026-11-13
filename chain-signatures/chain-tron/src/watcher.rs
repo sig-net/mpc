@@ -747,9 +747,8 @@ mod tests {
         // A Block certifies the completed pass — seed 1's retries drain
         // within it.
         loop {
-            match run.events.recv().await.expect("watcher channel open") {
-                ChainEvent::Block(_) => break,
-                _ => {}
+            if let ChainEvent::Block(_) = run.events.recv().await.expect("watcher channel open") {
+                break;
             }
         }
         // Counted, as on Ethereum's post-retry fetch failures.
