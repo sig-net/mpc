@@ -313,6 +313,12 @@ which is why agreeing on `r` is all the nodes need:
 - proposer of the round: `participants[(entropy[0] + r) % n]` (`organize.rs`)
 - round length: `round_timeout(r)` (§6)
 
+On Ethereum, entropy hashes the containing block hash together with the request
+ID, so requests in one block get independently distributed proposer starting
+points. The selector still uses only the first byte modulo the participant
+count, so distinct requests can still happen to elect the same proposer.
+`derive_delta` separately binds each request ID as well.
+
 ## 6. The round timeout
 
 `round_timeout(r)` starts when the round begins: at the round bump

@@ -69,6 +69,14 @@ Because existing nodes are still running the previous release when the contract 
   1. **Phase 1 (Release $N$):** Introduce the new schema while keeping the legacy format (or wire emulation) intact and marked `#[deprecated]`. The contract/node accepts and/or emits both formats.
   2. **Phase 2 (Release $N+1$):** Once release $N$ is deployed on testnet and mainnet, release $N+1$'s compatibility test baseline advances to release $N$. The legacy format and its deprecated code can then be safely removed.
 
+*Exception: changes to request entropy are not a normal rolling upgrade.* Nodes on
+different entropy rules can process the same request ID with different signing
+inputs. For such a release, stop new requests, catch all indexers up through the
+last request's finalized block, drain pending requests, and upgrade the full
+node set before resuming submissions; alternatively, use a fixed activation
+height and deploy every node before it. The current checkpoint digest does not
+commit to entropy, so it cannot detect mixed entropy rules.
+
 ## Release flow
 
 Every second Tuesday is a **release day**. On it, in this order:

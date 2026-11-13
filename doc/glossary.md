@@ -135,11 +135,14 @@ A short hash that stands for a larger structure. The docs use two:
 
 ## Entropy
 
-A value from the block that holds a [request](#request). The requester cannot
-know or influence it before that block is validated. Nodes read it from a final
-block, so every node derives the same delta (`SignArgs::entropy`,
+A deterministic value derived from chain-provided data associated with the
+block that holds a [request](#request). Its unpredictability and bias
+resistance depend on the chain and threat model; it is public once the block
+is published, not secret randomness. Nodes derive it from finalized data, so
+every node gets the same `delta` input (`SignArgs::entropy`,
 `chain-signatures/primitives/src/crypto.rs`). It also seeds the
-[proposer](#proposer) election. See
+[proposer](#proposer) election. On Ethereum it is a hash of the containing
+block hash and request ID; see
 [delta-derivation.md](delta-derivation.md).
 
 ## Epoch
