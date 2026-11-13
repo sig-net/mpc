@@ -2494,7 +2494,7 @@ mod tests {
             )
             // production retries node-local absence inside get_block
             // (usize::MAX); the finite budget here pins only the exhausted
-            // handoff — still retryable for retry_until_ok
+            // handoff — still retryable for the catchup loop
             .expect(3)
             .create_async()
             .await;

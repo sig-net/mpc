@@ -32,21 +32,6 @@ impl CancellationTokenExt for CancellationToken {
     }
 }
 
-/// Retries `process` with `delay` backoff until it returns `Ok(())` or `cancel`
-/// fires. Each failure is logged at WARN with `label` identifying the operation.
-pub async fn retry_until_ok<F, Fut>(
-    cancel: &CancellationToken,
-    delay: Duration,
-    label: &str,
-    process: F,
-) where
-    F: Fn() -> Fut,
-    Fut: Future<Output = anyhow::Result<()>>,
-{
-    // `Ok(())` -> `Some(())` (done), `Err` retries with backoff.
-    retry_until_some(cancel, delay, label, || async { process().await.map(Some) }).await;
-}
-
 /// Retries `poll` with `delay` backoff until it returns `Ok(Some(T))` or `cancel`
 /// fires. Each failure is logged at WARN with `label` identifying the operation.
 pub async fn retry_until_some<T, F, Fut>(
@@ -316,47 +301,6 @@ mod tests {
         })
         .await;
         assert!(val.is_none());
-    }
-
-    #[tokio::test]
-    async fn retry_until_ok_retries_on_error_then_succeeds() {
-        let cancel = CancellationToken::new();
-        let count = Arc::new(AtomicU32::new(0));
-        let count_clone = count.clone();
-        retry_until_ok(&cancel, Duration::from_millis(1), "test", move || {
-            let count = count_clone.clone();
-            async move {
-                if count.fetch_add(1, Ordering::Relaxed) == 0 {
-                    Err(anyhow::anyhow!("boom"))
-                } else {
-                    Ok(())
-                }
-            }
-        })
-        .await;
-        assert_eq!(count.load(Ordering::Relaxed), 2);
-    }
-
-    #[tokio::test]
-    async fn retry_until_ok_stops_on_cancel() {
-        let cancel = CancellationToken::new();
-        let cancel_clone = cancel.clone();
-        let count = Arc::new(AtomicU32::new(0));
-        let count_clone = count.clone();
-        tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(20)).await;
-            cancel_clone.cancel();
-        });
-        retry_until_ok(&cancel, Duration::from_millis(50), "test", move || {
-            let count = count_clone.clone();
-            async move {
-                count.fetch_add(1, Ordering::Relaxed);
-                Err::<(), anyhow::Error>(anyhow::anyhow!("always fails"))
-            }
-        })
-        .await;
-        // The task should have been retried at least once before cancellation.
-        assert!(count.load(Ordering::Relaxed) >= 1);
     }
 
     #[tokio::test]
