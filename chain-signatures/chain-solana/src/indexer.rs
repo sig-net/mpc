@@ -9,7 +9,7 @@ use async_trait::async_trait;
 use futures_util::stream::{self, StreamExt};
 use futures_util::Stream;
 use mpc_chain_integration_core::{
-    utils::retry::{is_retryable, retry_until_ok_or_terminal, SharedBackoff},
+    utils::retry::{is_retryable_typed, retry_until_ok_or_terminal, SharedBackoff},
     ChainIndexer, ChainTelemetry, NoopPublisherTelemetry, StateManager,
 };
 use mpc_primitives::{Chain, ChainConfig as _, ChainEvent};
@@ -421,7 +421,9 @@ impl<S: StateManager, T: ChainTelemetry> SolanaIndexer<S, T> {
         // (a transient fault like a served-null `blockTime` may heal).
         match self.process_catchup_item(events_tx, slot, block).await {
             Ok(()) => return Ok(()),
-            Err(err) if !is_retryable(&err) => return Err(err),
+            Err(err) if !is_retryable_typed(&err) => {
+                return Err(err.context(format!("slot {slot}")))
+            }
             Err(_) => {}
         }
         retry_until_ok_or_terminal(
@@ -1969,9 +1971,8 @@ mod tests {
             .with_body(serde_json::json!([null_time.clone()]).to_string())
             .create_async()
             .await;
-        // one more time-less refetch, so the bail carries `slot 401` into
-        // the loop; then the served block. Mockito answers the first
-        // unmet stub.
+        // refetch time-less once so the `slot 401` bail reaches the loop,
+        // then served; mockito answers the first unmet stub
         let null_envelope = serde_json::json!({
             "jsonrpc": "2.0",
             "id": 1,
@@ -2280,7 +2281,71 @@ mod tests {
         .expect("drain must fail fast instead of retrying at fixed pace")
         .unwrap_err();
         assert!(!is_retryable(&err), "{err:#}");
+        assert!(format!("{err:#}").contains("slot 10"), "{err:#}");
         assert!(events_rx.try_recv().is_err(), "no marker for slot 10");
+        refetch.assert_async().await;
+    }
+
+    /// Retry-arm terminal exit: retryable first attempt, terminal refetch.
+    #[tokio::test]
+    async fn a_terminal_refetch_on_the_retry_arm_hands_the_drain_to_the_supervisor() {
+        let mut server = mockito::Server::new_async().await;
+
+        let entries: Vec<_> = [10, 9].into_iter().map(signature_entry).collect();
+        let _signatures = server
+            .mock("POST", "/")
+            .match_body(mockito::Matcher::Regex(
+                "getSignaturesForAddress".to_string(),
+            ))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(signatures_response(&entries))
+            .expect(1)
+            .create_async()
+            .await;
+
+        // time-less block: first attempt fails retryable, refetch is terminal
+        let indexer = test_indexer(&server.url(), MockStateManager::new());
+        let transaction = event_transaction(
+            indexer.program_id,
+            Signature::new_unique(),
+            sign_bidirectional_ix_data("eip155:1"),
+        );
+        let mut null_time = event_block_response(0, 10, transaction);
+        null_time["result"]["blockTime"] = serde_json::json!(null);
+        let _batch = server
+            .mock("POST", "/")
+            .match_body(mockito::Matcher::Regex(r"^\[\{.*getBlock".to_string()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(serde_json::json!([null_time]).to_string())
+            .expect(1)
+            .create_async()
+            .await;
+
+        let refetch = server
+            .mock("POST", "/")
+            .match_body(mockito::Matcher::Regex(
+                r#"^\{.*"params":\[10,"#.to_string(),
+            ))
+            .with_status(401)
+            .expect(1)
+            .create_async()
+            .await;
+
+        let (events_tx, mut events_rx) = mpsc::channel(16);
+        let cancel = CancellationToken::new();
+
+        let err = tokio::time::timeout(
+            Duration::from_secs(30),
+            indexer.drain_range(&events_tx, 11, 10, &cancel),
+        )
+        .await
+        .expect("drain must fail fast instead of retrying at fixed pace")
+        .unwrap_err();
+        assert!(!is_retryable(&err), "{err:#}");
+        assert!(format!("{err:#}").contains("slot 10"), "{err:#}");
+        assert!(events_rx.try_recv().is_err(), "no events");
         refetch.assert_async().await;
     }
 
