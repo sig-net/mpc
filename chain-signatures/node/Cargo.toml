@@ -17,7 +17,7 @@ backon.workspace = true
 chrono = "0.4.24"
 base64 = "0.22"
 dashmap = "6.1"
-google-cloud-auth = { version = "1.16", default-features = false, features = ["default-rustls-provider"] }
+google-cloud-auth = { workspace = true, features = ["default-rustls-provider"] }
 http.workspace = true
 lru = "0.18"
 mime = "0.3.17"
@@ -90,8 +90,8 @@ secrecy = "0.10.3"
 
 [dev-dependencies]
 mockito.workspace = true
-tempfile = "3.27.0"
-test-log = { version = "0.2.12", features = ["log", "trace"] }
+tempfile.workspace = true
+test-log.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 
 [package.metadata.cargo-machete]

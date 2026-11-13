@@ -20,7 +20,7 @@ sha3.workspace = true
 thiserror.workspace = true
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-getrandom = { version = "0.2.12", features = ["custom"] }
+getrandom.workspace = true
 
 [package.metadata.cargo-machete]
 ignored = ["serde_bytes"]

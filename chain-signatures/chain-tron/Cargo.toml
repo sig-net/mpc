@@ -24,6 +24,6 @@ url.workspace = true
 
 [dev-dependencies]
 k256.workspace = true
-prost-types = "0.14.4"
-sha2 = "0.11.0"
+prost-types.workspace = true
+sha2.workspace = true
 mockito.workspace = true

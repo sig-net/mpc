@@ -33,15 +33,21 @@ alloy = { version = "=1.0.38", features = ["contract", "json"] }
 anyhow = { version = "1.0.95", features = ["backtrace"] }
 async-trait = "0.1"
 backon = "0.4"
+bip32 = { version = "0.5.3", default-features = false }
 borsh = { version = "1.6.1", features = ["derive"] }
+bs58 = "0.5.1"
 enum-map = "2.7.3"
 http = "1.5"
-cait-sith = { git = "https://github.com/sig-net/cait-sith", rev = "5d67c6f", features = ["k256"] }
+cait-sith = { git = "https://github.com/sig-net/cait-sith", rev = "5d67c6f5835780bee4db3778623b087136c5866a", features = ["k256"] }
 ciborium = "0.2.2"
 clap = { version = "4.5.4", features = ["derive", "env"] }
 deadpool-redis = "0.18.0"
+ecdsa = "0.16.9"
+getrandom = { version = "0.2.12", features = ["custom"] }
+google-cloud-auth = { version = "1.16", default-features = false }
 hex = "0.4.3"
 hkdf = "0.12.4"
+jsonrpsee = "0.24.10"
 k256 = { version = "0.13.1", features = [
     "sha256",
     "ecdsa",
@@ -50,6 +56,7 @@ k256 = { version = "0.13.1", features = [
     "expose-field",
 ] }
 mockito = "1.7.0"
+prost-types = "0.14.4"
 rand = "0.8.5"
 reqwest = { version = "0.12", default-features = false, features = [
     "blocking",
@@ -60,10 +67,14 @@ semver = "1.0.23"
 serde = { version = "1", features = ["derive", "rc"] }
 serde_bytes = "0.11.15"
 serde_json = "1"
+sha2 = "0.11.0"
 sha3 = "0.10.8"
 subxt = { version = "0.44", default-features = false }
+tempfile = "3.27.0"
+test-log = { version = "0.2.12", features = ["log", "trace"] }
 thiserror = "1"
 tokio = { version = "1.45.1", features = ["full"] }
+tokio-tungstenite = { version = "0.29", features = ["rustls-tls-webpki-roots"] }
 tokio-util = { version = "0.7.16", default-features = false }
 tracing = "0.1.35"
 tracing-subscriber = { version = "0.3.20", default-features = false, features = [
