@@ -186,7 +186,7 @@ impl TronHttp {
         let url = self
             .endpoint
             .join(path)
-            .with_context(|| format!("joining {path} onto {}", self.endpoint))?;
+            .with_context(|| format!("joining {path} onto the tron endpoint"))?;
 
         let mut request = self.http.post(url).json(body);
 
@@ -194,7 +194,12 @@ impl TronHttp {
             request = request.header("TRON-PRO-API-KEY", api_key);
         }
 
-        let response = request.send().await.context("sending tron request")?;
+        // The URL can carry the provider's key, and this error is logged.
+        let response = request
+            .send()
+            .await
+            .map_err(reqwest::Error::without_url)
+            .context("sending tron request")?;
         let status = response.status();
         let text = response.text().await.context("reading tron response")?;
 
@@ -684,6 +689,20 @@ mod tests {
             "unexpected error: {err}"
         );
         mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn a_failed_request_does_not_name_the_endpoint() {
+        // Nothing listens on port 1; the path stands in for a provider key.
+        let client = TronHttp::new(&TronConfig {
+            endpoint: Url::parse("http://127.0.0.1:1/provider-key/").unwrap(),
+            retry: once_retry(),
+            ..TronConfig::default()
+        })
+        .unwrap();
+
+        let err = client.get_now_block().await.unwrap_err();
+        assert!(!format!("{err:#}").contains("provider-key"), "{err:#}");
     }
 
     #[tokio::test]

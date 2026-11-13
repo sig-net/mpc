@@ -151,7 +151,13 @@ impl CantonClient {
             self.shared_backoff,
             "fetch_ledger_end",
             {
-                let resp = self.auth_get("/v2/state/ledger-end").await?.send().await?;
+                // the URL stays out of the error, which is logged
+                let resp = self
+                    .auth_get("/v2/state/ledger-end")
+                    .await?
+                    .send()
+                    .await
+                    .map_err(reqwest::Error::without_url)?;
                 let resp = check_response(resp, "ledger-end").await?;
                 let body: LedgerEndResponse = resp.json().await?;
                 Ok(body.offset)
@@ -205,7 +211,8 @@ impl CantonClient {
                     .await?
                     .json(&req)
                     .send()
-                    .await?;
+                    .await
+                    .map_err(reqwest::Error::without_url)?;
                 let resp = check_response(resp, "active-contracts query").await?;
                 Ok::<Vec<ActiveContractEntry>, anyhow::Error>(resp.json().await?)
             }
@@ -255,7 +262,8 @@ impl CantonClient {
                         commands: commands.clone(),
                     })
                     .send()
-                    .await?;
+                    .await
+                    .map_err(reqwest::Error::without_url)?;
                 let status = resp.status();
                 if !status.is_success() {
                     let body = resp.text().await.unwrap_or_default();
@@ -1187,5 +1195,27 @@ mod tests {
         assert!(!is_retryable(&err), "read 404 must fail fast: {err:#}");
         assert_eq!(gate.remaining(), Duration::ZERO);
         not_found.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn a_failed_request_does_not_name_the_url() {
+        // The token endpoint answers. Nothing listens on the JSON API's port,
+        // and its path stands in for a provider key.
+        let server = setup_mock_server_with_auth().await;
+        let config = CantonConfig {
+            json_api_url: "http://127.0.0.1:1/provider-key".parse().unwrap(),
+            ..mock_canton_config(&server.url())
+        };
+        let client = CantonClient::new(
+            &config,
+            Arc::new(NoopPublisherTelemetry),
+            SharedBackoff::new(),
+        )
+        .await
+        .unwrap()
+        .with_retry_strategy(fast_retry_strategy());
+
+        let err = client.fetch_ledger_end().await.unwrap_err();
+        assert!(!format!("{err:#}").contains("provider-key"), "{err:#}");
     }
 }
