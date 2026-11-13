@@ -31,7 +31,7 @@ use std::time::{Duration, Instant};
 /// messages.
 pub type TripleId = u64;
 
-/// Triple pokes running at once per node, so the other tokio workers stay free for messaging.
+/// Triple pokes running at once per node, which bounds the CPU they take from messaging.
 const MAX_CONCURRENT_TRIPLE_POKES: usize = 2;
 
 /// A completed triple.
@@ -156,6 +156,7 @@ impl TripleGenerator {
             let poke_start_time = Instant::now();
             // Hands this worker's other tasks to another thread while the poke runs.
             let poke_result = tokio::task::block_in_place(|| self.protocol.poke());
+            let poke_end_time = Instant::now();
             drop(permit);
             // Lets an abort requested during the poke take effect before its action runs.
             tokio::task::yield_now().await;
@@ -179,9 +180,9 @@ impl TripleGenerator {
 
             total_wait += poke_start_time - poke_last_time;
             total_pokes += 1;
-            poke_last_time = Instant::now();
+            poke_last_time = poke_end_time;
             crate::metrics::protocols::TRIPLE_POKE_CPU_TIME
-                .observe(poke_start_time.elapsed().as_millis() as f64);
+                .observe((poke_end_time - poke_start_time).as_millis() as f64);
             #[cfg(feature = "debug-page")]
             self.render_debug(total_pokes);
 
