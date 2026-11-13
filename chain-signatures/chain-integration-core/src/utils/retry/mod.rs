@@ -42,12 +42,46 @@ impl RetryConfig {
     }
 }
 
-/// Retries `process` at a fixed `delay` until it succeeds, `cancel` fires,
-/// or it fails with a typed terminal verdict ([`is_retryable_typed`]).
-/// Terminal errors are returned to the caller; cancel resolves to `Ok(())`.
+/// Retries `poll` at a fixed `delay` until it returns `Ok(Some(T))`,
+/// `cancel` fires, or it fails with a typed terminal verdict
+/// ([`is_retryable_typed`]). Terminal errors are returned to the caller;
+/// cancel resolves to `Ok(None)`.
 ///
-/// Companion to [`retry_rpc!`] for supervisor loops: `retry_rpc!` retries a
-/// single call, this retries a whole work item (a block, a page).
+/// Companion to [`retry_rpc!`] for supervisor loops: one work item (a
+/// block, a page) instead of a single call. Identify the item in the warn
+/// via error context, e.g. `.with_context(|| format!("slot {slot}"))`.
+pub async fn retry_until_some_or_terminal<T, F, Fut>(
+    cancel: &CancellationToken,
+    delay: Duration,
+    operation: &'static str,
+    poll: F,
+) -> anyhow::Result<Option<T>>
+where
+    F: Fn() -> Fut,
+    Fut: Future<Output = anyhow::Result<Option<T>>>,
+{
+    loop {
+        tokio::select! {
+            _ = cancel.cancelled() => return Ok(None),
+            result = poll() => match result {
+                Ok(Some(value)) => return Ok(Some(value)),
+                Ok(None) => {},
+                Err(err) if !is_retryable_typed(&err) => return Err(err),
+                Err(err) => tracing::warn!(
+                    operation,
+                    error = %format_args!("{err:#}"),
+                    "retrying after failure"
+                ),
+            },
+        }
+        tokio::select! {
+            _ = cancel.cancelled() => return Ok(None),
+            _ = tokio::time::sleep(delay) => {}
+        }
+    }
+}
+
+/// Unit-shaped [`retry_until_some_or_terminal`].
 pub async fn retry_until_ok_or_terminal<F, Fut>(
     cancel: &CancellationToken,
     delay: Duration,
@@ -58,24 +92,11 @@ where
     F: Fn() -> Fut,
     Fut: Future<Output = anyhow::Result<()>>,
 {
-    loop {
-        tokio::select! {
-            _ = cancel.cancelled() => return Ok(()),
-            result = process() => match result {
-                Ok(()) => return Ok(()),
-                Err(err) if !is_retryable_typed(&err) => return Err(err),
-                Err(err) => tracing::warn!(
-                    operation,
-                    error = %format_args!("{err:#}"),
-                    "retrying after failure"
-                ),
-            },
-        }
-        tokio::select! {
-            _ = cancel.cancelled() => return Ok(()),
-            _ = tokio::time::sleep(delay) => {}
-        }
-    }
+    retry_until_some_or_terminal(cancel, delay, operation, || async {
+        process().await.map(Some)
+    })
+    .await
+    .map(|_| ())
 }
 
 /// Wraps an async call with a timeout and [`backon`] exponential-backoff retry strategy.
@@ -371,6 +392,30 @@ mod tests {
         assert_eq!(calls.load(Ordering::Relaxed), 2);
         // The retry had to wait out the cooldown window set by the first attempt.
         assert!(start.elapsed() >= Duration::from_millis(50));
+    }
+
+    #[tokio::test]
+    async fn retry_until_some_or_terminal_retries_none_then_yields_the_value() {
+        let cancel = CancellationToken::new();
+        let calls = Arc::new(AtomicU32::new(0));
+        let calls_clone = calls.clone();
+
+        let val =
+            retry_until_some_or_terminal(&cancel, Duration::from_millis(1), "test_op", move || {
+                let calls = calls_clone.clone();
+                async move {
+                    if calls.fetch_add(1, Ordering::Relaxed) == 0 {
+                        Ok(None)
+                    } else {
+                        Ok(Some(7u64))
+                    }
+                }
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(val, Some(7));
+        assert_eq!(calls.load(Ordering::Relaxed), 2);
     }
 
     #[tokio::test]
