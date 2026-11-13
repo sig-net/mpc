@@ -14,6 +14,8 @@ use std::fmt;
 use std::fmt::{Display, Formatter};
 use std::time::{Duration, Instant};
 
+/// Delay between repeats of this node's Ready broadcast while a resharing
+/// waits for every participant. The repeats cover lost messages.
 pub const RESHARING_READY_BROADCAST_INTERVAL: Duration = Duration::from_secs(10);
 
 #[derive(Clone, Serialize, Deserialize, PartialEq)]

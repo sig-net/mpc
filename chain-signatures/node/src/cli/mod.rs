@@ -712,6 +712,9 @@ struct StorageHandles {
     midnight_dust: Arc<dyn DustCheckpointStore>,
 }
 
+/// How long a Redis pool wait, connect, recycle or command may take before it
+/// fails. Without a bound a stalled Redis hangs every caller, including the
+/// chain supervisors and their watchdog.
 const REDIS_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// A Redis pool whose waits, connects and commands all fail after [`REDIS_TIMEOUT`].
