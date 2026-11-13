@@ -20,6 +20,7 @@ SOLANA_VERSION="2.3.9"
 ANCHOR_VERSION="0.30.1"
 CANTON_SDK="3.5.1"
 COMPACTC_VERSION="0.36.0"
+CARGO_NEAR_VERSION="0.22.0"
 
 MODE="${1:-}"
 SCOPE="${2:-}"
@@ -57,7 +58,7 @@ check_core() {
     if rustup component list --toolchain "$RUST_VERSION" 2>/dev/null | grep -q "clippy.*(installed)"; then ok "clippy ${RUST_VERSION}"; else miss "clippy ${RUST_VERSION}"; hint "rustup component add --toolchain ${RUST_VERSION} clippy"; fi
     if rustup component list --toolchain "$RUST_VERSION" 2>/dev/null | grep -q "rustfmt.*(installed)"; then ok "rustfmt ${RUST_VERSION}"; else miss "rustfmt ${RUST_VERSION}"; hint "rustup component add --toolchain ${RUST_VERSION} rustfmt"; fi
     if rustup target list --toolchain "$RUST_VERSION" 2>/dev/null | grep -q "${WASM_TARGET} (installed)"; then ok "${WASM_TARGET} target"; else miss "${WASM_TARGET} target"; hint "rustup target add --toolchain ${RUST_VERSION} ${WASM_TARGET}"; fi
-    if have cargo-near; then ok "cargo-near $(cargo-near --version 2>/dev/null | head -n 1)"; else miss "cargo-near"; hint "curl --proto '=https' --tlsv1.2 -LsSf https://github.com/near/cargo-near/releases/latest/download/cargo-near-installer.sh | sh"; fi
+    if have cargo-near; then ok "cargo-near $(cargo-near --version 2>/dev/null | head -n 1)"; else miss "cargo-near"; hint "curl --proto '=https' --tlsv1.2 -LsSf https://github.com/near/cargo-near/releases/download/cargo-near-v${CARGO_NEAR_VERSION}/cargo-near-installer.sh | sh"; fi
     if have cargo-nextest; then ok "cargo-nextest $(cargo-nextest --version 2>/dev/null | head -n 1)"; else miss "cargo-nextest"; hint "curl -LsSf https://get.nexte.st/latest/linux | tar zxf - -C ~/.cargo/bin (macos: .../latest/mac)"; fi
     if have cargo-audit; then ok "cargo-audit $(cargo-audit --version 2>/dev/null | head -n 1)"; else miss "cargo-audit"; hint "cargo install cargo-audit --locked"; fi
     if have just; then ok "just $(just --version)"; else miss "just"; hint "curl --proto '=https' --tlsv1.2 -sSf https://just.systems/install.sh | bash -s -- --to ~/.cargo/bin"; fi
@@ -132,7 +133,7 @@ ensure_nextest() {
 
 ensure_cargo_near() {
     have cargo-near && return 0
-    curl --proto '=https' --tlsv1.2 -LsSf https://github.com/near/cargo-near/releases/latest/download/cargo-near-installer.sh | sh
+    curl --proto '=https' --tlsv1.2 -LsSf "https://github.com/near/cargo-near/releases/download/cargo-near-v${CARGO_NEAR_VERSION}/cargo-near-installer.sh" | sh
 }
 
 ensure_cargo_audit() {

@@ -97,8 +97,8 @@ jobs:
 
       - name: Install cargo-near
         run: |
-          if ! command -v cargo-near >/dev/null; then
-            curl --proto '=https' --tlsv1.2 -LsSf https://github.com/near/cargo-near/releases/latest/download/cargo-near-installer.sh | sh
+          if ! cargo near --version 2>/dev/null | grep -qF 0.22.0; then
+            curl --proto '=https' --tlsv1.2 -LsSf https://github.com/near/cargo-near/releases/download/cargo-near-v0.22.0/cargo-near-installer.sh | sh
           fi
 
       - name: Build Chain-Signatures Integration Tests
@@ -209,8 +209,8 @@ jobs:
 
       - name: Install cargo-near
         run: |
-          if ! command -v cargo-near >/dev/null; then
-            curl --proto '=https' --tlsv1.2 -LsSf https://github.com/near/cargo-near/releases/latest/download/cargo-near-installer.sh | sh
+          if ! cargo near --version 2>/dev/null | grep -qF 0.22.0; then
+            curl --proto '=https' --tlsv1.2 -LsSf https://github.com/near/cargo-near/releases/download/cargo-near-v0.22.0/cargo-near-installer.sh | sh
           fi
 
       - name: Build eth contract
