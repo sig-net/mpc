@@ -6,7 +6,7 @@ use anchor_client::anchor_lang::AnchorDeserialize;
 use anchor_lang::Discriminator;
 use k256::elliptic_curve::sec1::FromEncodedPoint;
 use k256::{AffinePoint, Scalar};
-use mpc_chain_integration_core::utils::hashing::compute_request_id;
+use mpc_chain_integration_core::utils::hashing::{compute_request_id, hash_payload};
 use mpc_chain_integration_core::utils::payload::bidirectional_payload_scalar;
 use mpc_crypto::kdf::derive_epsilon_sol;
 use mpc_crypto::ScalarExt as _;
@@ -62,8 +62,13 @@ impl SolanaSignEvent {
         }
     }
 
-    pub fn generate_sign_request(&self, entropy: [u8; 32]) -> Option<IndexedSignRequest> {
-        let sign_id = SignId::new(self.generate_request_id());
+    pub fn generate_sign_request(&self, block_entropy: [u8; 32]) -> Option<IndexedSignRequest> {
+        let request_id = self.generate_request_id();
+        let sign_id = SignId::new(request_id);
+        // Requests in one block share block entropy. Bind the request ID here
+        // so the existing entropy-based proposer election still spreads them
+        // across different starting proposers.
+        let entropy = hash_payload(&[block_entropy, request_id].concat());
 
         match self {
             SolanaSignEvent::SignatureRequested(ev) => {
@@ -152,12 +157,6 @@ impl SolanaSignEvent {
                 ))
             }
         }
-    }
-
-    fn build_sign_request(self, tx_sig: &[u8]) -> Option<IndexedSignRequest> {
-        let mut entropy = [0u8; 32];
-        entropy.copy_from_slice(&tx_sig[..32]);
-        self.generate_sign_request(entropy)
     }
 }
 
@@ -248,6 +247,7 @@ pub async fn emit_events(
     events_tx: &mpsc::Sender<ChainEvent>,
     program_id: &str,
     block_time: Option<u64>,
+    block_entropy: [u8; 32],
     tx: &EncodedTransactionWithStatusMeta,
 ) -> anyhow::Result<()> {
     let events = parse_cpi_events(tx, program_id);
@@ -258,7 +258,7 @@ pub async fn emit_events(
     for event in events {
         let event = match event {
             CpiEvent::Sign(ev) => {
-                let Some(request) = ev.build_sign_request(signature.as_ref()) else {
+                let Some(request) = ev.generate_sign_request(block_entropy) else {
                     continue;
                 };
                 let bidirectional = matches!(request.kind, SignKind::SignBidirectional(_));

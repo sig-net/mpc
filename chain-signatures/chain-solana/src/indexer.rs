@@ -13,7 +13,7 @@ use mpc_chain_integration_core::{
 };
 use mpc_primitives::{Chain, ChainConfig as _, ChainEvent};
 use mpc_utils::task::retry_until_ok;
-use solana_sdk::{pubkey::Pubkey, signature::Signature};
+use solana_sdk::{hash::Hash, pubkey::Pubkey, signature::Signature};
 use solana_transaction_status::{EncodedTransactionWithStatusMeta, UiConfirmedBlock};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -525,10 +525,15 @@ impl<S: StateManager, T: ChainTelemetry> SolanaIndexer<S, T> {
         let started_at = Instant::now();
 
         if let Some(transactions) = &block.transactions {
+            // Use the finalized containing block's hash, not the transaction's
+            // recentBlockhash (which the requester chooses before broadcast).
+            let block_entropy = Hash::from_str(&block.blockhash)
+                .with_context(|| format!("invalid blockhash for finalized Solana slot {height}"))?
+                .to_bytes();
             let program_id = self.program_id.to_string();
             let block_time = block.block_time.and_then(|t| u64::try_from(t).ok());
             for tx in transactions {
-                process_transaction(events_tx, &program_id, block_time, tx).await?;
+                process_transaction(events_tx, &program_id, block_time, block_entropy, tx).await?;
             }
         }
 
@@ -556,6 +561,7 @@ async fn process_transaction(
     events_tx: &mpsc::Sender<ChainEvent>,
     program_id: &str,
     block_time: Option<u64>,
+    block_entropy: [u8; 32],
     tx: &EncodedTransactionWithStatusMeta,
 ) -> anyhow::Result<()> {
     let Some(meta) = tx.meta.as_ref() else {
@@ -564,7 +570,7 @@ async fn process_transaction(
     if meta.err.is_some() {
         return Ok(());
     }
-    emit_events(events_tx, program_id, block_time, tx).await
+    emit_events(events_tx, program_id, block_time, block_entropy, tx).await
 }
 
 #[async_trait]
@@ -633,7 +639,10 @@ mod tests {
     use crate::test_utils::sign_bidirectional_ix_data;
     use anchor_lang::{AnchorSerialize, Discriminator};
     use mpc_chain_integration_core::{
-        utils::retry::{is_retryable, SharedBackoff},
+        utils::{
+            hashing::hash_payload,
+            retry::{is_retryable, SharedBackoff},
+        },
         MockStateManager, NoopChainTelemetry,
     };
     use mpc_primitives::SignId;
@@ -1322,6 +1331,101 @@ mod tests {
             Some(ChainEvent::Respond(event)) if event.request_id == request_id
         ));
         assert!(matches!(events_rx.recv().await, Some(ChainEvent::Block(7))));
+    }
+
+    #[tokio::test]
+    async fn request_entropy_uses_finalized_blockhash_and_request_id() {
+        let indexer = test_indexer("http://localhost:1", MockStateManager::new());
+        let request = SignatureRequestedEvent {
+            sender: Pubkey::new_unique(),
+            payload: [1; 32],
+            key_version: 0,
+            deposit: 1,
+            chain_id: "solana".to_string(),
+            path: "test".to_string(),
+            algo: "secp256k1".to_string(),
+            dest: "test".to_string(),
+            params: String::new(),
+            fee_payer: None,
+        };
+        let transaction = event_transaction(
+            indexer.program_id,
+            Signature::new_unique(),
+            cpi_event_instruction(&request),
+        );
+        let mut second_request = request.clone();
+        second_request.payload = [2; 32];
+        let second_transaction = event_transaction(
+            indexer.program_id,
+            Signature::new_unique(),
+            cpi_event_instruction(&second_request),
+        );
+        let blockhash = Hash::new_from_array([0x42; 32]);
+        let mut response = event_block_response(0, 7, transaction);
+        response["result"]["transactions"]
+            .as_array_mut()
+            .unwrap()
+            .push(second_transaction);
+        response["result"]["blockhash"] = serde_json::json!(blockhash.to_string());
+        let block: UiConfirmedBlock = serde_json::from_value(response["result"].clone()).unwrap();
+        let (events_tx, mut events_rx) = mpsc::channel(8);
+
+        indexer.process_block(&events_tx, 7, &block).await.unwrap();
+
+        let Some(ChainEvent::SignRequest { request: first, .. }) = events_rx.recv().await else {
+            panic!("expected first sign request event");
+        };
+        let Some(ChainEvent::SignRequest {
+            request: second, ..
+        }) = events_rx.recv().await
+        else {
+            panic!("expected second sign request event");
+        };
+
+        assert_ne!(first.id.request_id, second.id.request_id);
+        assert_eq!(
+            first.args.entropy,
+            hash_payload(&[blockhash.to_bytes(), first.id.request_id].concat())
+        );
+        assert_eq!(
+            second.args.entropy,
+            hash_payload(&[blockhash.to_bytes(), second.id.request_id].concat())
+        );
+        assert_ne!(first.args.entropy, second.args.entropy);
+    }
+
+    #[tokio::test]
+    async fn invalid_finalized_blockhash_fails_request_processing() {
+        let indexer = test_indexer("http://localhost:1", MockStateManager::new());
+        let request = SignatureRequestedEvent {
+            sender: Pubkey::new_unique(),
+            payload: [1; 32],
+            key_version: 0,
+            deposit: 1,
+            chain_id: "solana".to_string(),
+            path: "test".to_string(),
+            algo: "secp256k1".to_string(),
+            dest: "test".to_string(),
+            params: String::new(),
+            fee_payer: None,
+        };
+        let transaction = event_transaction(
+            indexer.program_id,
+            Signature::new_unique(),
+            cpi_event_instruction(&request),
+        );
+        let mut response = event_block_response(0, 7, transaction);
+        response["result"]["blockhash"] = serde_json::json!("invalid");
+        let block: UiConfirmedBlock = serde_json::from_value(response["result"].clone()).unwrap();
+        let (events_tx, mut events_rx) = mpsc::channel(8);
+
+        let err = indexer
+            .process_block(&events_tx, 7, &block)
+            .await
+            .unwrap_err();
+
+        assert!(format!("{err:#}").contains("invalid blockhash for finalized Solana slot 7"));
+        assert!(events_rx.try_recv().is_err());
     }
 
     #[tokio::test]
