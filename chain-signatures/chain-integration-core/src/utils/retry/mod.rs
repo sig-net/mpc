@@ -11,12 +11,13 @@ pub use classify::{
     http_status_read_retryable, http_status_retryable, is_provider_throttled, is_retryable,
     RpcFailure,
 };
-pub use gate::exhausted;
-pub use gate::{run_gated, SharedBackoff};
+pub use gate::{exhausted, run_gated, SharedBackoff};
 
+use std::future::Future;
 use std::time::Duration;
 
 use backon::ExponentialBuilder;
+use tokio_util::sync::CancellationToken;
 
 /// Configuration for retrying RPC calls with exponential backoff.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -38,6 +39,42 @@ impl RetryConfig {
             b = b.with_jitter();
         }
         b
+    }
+}
+
+/// Retries `process` at a fixed `delay` until it succeeds, `cancel` fires,
+/// or it fails with a terminal error ([`is_retryable`]). Terminal errors are
+/// returned to the caller; cancel resolves to `Ok(())`.
+///
+/// Companion to [`retry_rpc!`] for supervisor loops: `retry_rpc!` retries a
+/// single call, this retries a whole work item (a block, a page).
+pub async fn retry_until_ok_or_terminal<F, Fut>(
+    cancel: &CancellationToken,
+    delay: Duration,
+    operation: &'static str,
+    process: F,
+) -> anyhow::Result<()>
+where
+    F: Fn() -> Fut,
+    Fut: Future<Output = anyhow::Result<()>>,
+{
+    loop {
+        tokio::select! {
+            _ = cancel.cancelled() => return Ok(()),
+            result = process() => match result {
+                Ok(()) => return Ok(()),
+                Err(err) if !is_retryable(&err) => return Err(err),
+                Err(err) => tracing::warn!(
+                    operation,
+                    error = %format_args!("{err:#}"),
+                    "retrying after failure"
+                ),
+            },
+        }
+        tokio::select! {
+            _ = cancel.cancelled() => return Ok(()),
+            _ = tokio::time::sleep(delay) => {}
+        }
     }
 }
 
@@ -202,6 +239,8 @@ macro_rules! retry_rpc {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::utils::retry::RpcFailure;
+    use http::StatusCode;
     use std::sync::atomic::{AtomicU32, Ordering};
     use std::sync::Arc;
 
@@ -332,5 +371,63 @@ mod tests {
         assert_eq!(calls.load(Ordering::Relaxed), 2);
         // The retry had to wait out the cooldown window set by the first attempt.
         assert!(start.elapsed() >= Duration::from_millis(50));
+    }
+
+    #[tokio::test]
+    async fn retry_until_ok_or_terminal_retries_transient_then_succeeds() {
+        let cancel = CancellationToken::new();
+        let calls = Arc::new(AtomicU32::new(0));
+        let calls_clone = calls.clone();
+
+        retry_until_ok_or_terminal(&cancel, Duration::from_millis(1), "test_op", move || {
+            let calls = calls_clone.clone();
+            async move {
+                if calls.fetch_add(1, Ordering::Relaxed) == 0 {
+                    Err(anyhow::anyhow!("transient"))
+                } else {
+                    Ok(())
+                }
+            }
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(calls.load(Ordering::Relaxed), 2);
+    }
+
+    #[tokio::test]
+    async fn retry_until_ok_or_terminal_returns_a_terminal_error_immediately() {
+        let cancel = CancellationToken::new();
+        let calls = Arc::new(AtomicU32::new(0));
+        let calls_clone = calls.clone();
+
+        let err =
+            retry_until_ok_or_terminal(&cancel, Duration::from_millis(1), "test_op", move || {
+                let calls = calls_clone.clone();
+                async move {
+                    calls.fetch_add(1, Ordering::Relaxed);
+                    Err(anyhow::Error::new(RpcFailure::send_status(
+                        StatusCode::CONFLICT,
+                        "terminal send rejection".to_string(),
+                    )))
+                }
+            })
+            .await
+            .unwrap_err();
+
+        assert!(!is_retryable(&err), "{err:#}");
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn retry_until_ok_or_terminal_resolves_ok_on_cancel() {
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+
+        retry_until_ok_or_terminal(&cancel, Duration::from_millis(1), "test_op", || async {
+            Err::<(), anyhow::Error>(anyhow::anyhow!("transient"))
+        })
+        .await
+        .unwrap();
     }
 }
