@@ -24,10 +24,13 @@ Which block field satisfies requirement 1 depends on the chain and is decided pe
 ## Solana
 
 Use the containing finalized block's `blockhash` from the `getBlock` response,
-decoded from base58 to 32 bytes. Do not use the transaction signature or the
-transaction message's `recentBlockhash`: the requester knows both before
-broadcast, chooses the `recentBlockhash`, and can vary the signature by
-changing the signed transaction. The indexer already fetches the containing
+decoded from base58 to 32 bytes. Set `entropy` to
+`Keccak256(block_hash || request_id)` (both inputs are 32 bytes). The block hash
+supplies the unpredictable input; including the request ID gives requests in
+the same block distinct proposer-election seeds. Do not use the transaction
+signature or the transaction message's `recentBlockhash`: the requester knows
+both before broadcast, chooses the `recentBlockhash`, and can vary the signature
+by changing the signed transaction. The indexer already fetches the containing
 block to process its transactions, so this requires no additional RPC call or
 delay to a later slot.
 
@@ -43,11 +46,3 @@ predict/grind the finalized blockhash in advance. Historical values exposed
 through `recentBlockhash` or `SlotHashes` are not a stronger source of fresh
 entropy.
 
-### Deployment compatibility
-
-Changing this source changes the `SignArgs::entropy` for Solana requests. Mixed-
-version nodes can derive different deltas and proposer schedules for the same
-request. Coordinate the rollout so no request is signed under mixed rules:
-pause new Solana requests, drain pending requests and align the finalized
-indexer cutoff, then deploy to all nodes before resuming. Alternatively, gate
-the change at a fixed slot and retain the old derivation below that slot.

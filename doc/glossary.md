@@ -135,13 +135,15 @@ A short hash that stands for a larger structure. The docs use two:
 
 ## Entropy
 
-A chain-provided value from the block that holds a [request](#request). Under
-the chain's threat model, the requester cannot freely choose or reliably
-predict it before publication. It is public afterward, and its resistance to
-producer influence depends on the chain. Nodes read it from a final block, so
-every node derives the same delta (`SignArgs::entropy`,
-`chain-signatures/primitives/src/crypto.rs`). It also seeds the
-[proposer](#proposer) election. See
+A chain-specific shared input to delta derivation and [proposer](#proposer)
+election. Under the chain's threat model, the requester cannot freely choose or
+reliably predict it before publication. It is public afterward, and producer
+influence is chain-specific. On Solana, nodes derive it as
+`Keccak256(block_hash || request_id)`, where `block_hash` is the finalized block
+containing the request. The block hash supplies the unpredictable input, while
+the request ID spreads proposer election across requests in the same block.
+Every node reads the same finalized hash and derives the same entropy
+(`SignArgs::entropy`, `chain-signatures/primitives/src/crypto.rs`). See
 [delta-derivation.md](delta-derivation.md) for chain-specific sources and
 caveats.
 
