@@ -138,7 +138,8 @@ A short hash that stands for a larger structure. The docs use two:
 A value from the block that holds a [request](#request). The requester cannot
 know or influence it before that block is validated. Nodes read it from a final
 block, so every node derives the same delta (`SignArgs::entropy`,
-`chain-signatures/primitives/src/crypto.rs`). It also seeds the
+`chain-signatures/primitives/src/crypto.rs`). A response has no such block: its
+entropy hashes the first leg's with the message it signs and its key. It also seeds the
 [proposer](#proposer) election. See
 [delta-derivation.md](delta-derivation.md).
 
@@ -230,10 +231,8 @@ transaction, one of three kinds:
 
 See [bidirectional-calls.md §2](bidirectional-calls.md#2-vocabulary).
 
-*Code today:* Unviable is attested only for requests from Midnight, and even
-there not when only another request's response shows it
-([#1429](https://github.com/sig-net/mpc/issues/1429),
-[#1430](https://github.com/sig-net/mpc/issues/1430)).
+*Code today:* Unviable is attested only for requests from Midnight
+([#1429](https://github.com/sig-net/mpc/issues/1429)).
 
 ## Owner
 

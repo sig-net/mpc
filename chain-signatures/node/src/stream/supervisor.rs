@@ -219,6 +219,7 @@ async fn run_supervised_with_watchdog<I: ChainIndexer, T: ChainTelemetry>(
                 &mut ctx.mesh_state,
                 &ctx.node_client,
                 &my_account_id,
+                root_pk,
             )
             .await?;
             load_local = false;
@@ -438,6 +439,7 @@ mod tests {
                 &mut mesh,
                 &client,
                 &me,
+                ProjectivePoint::GENERATOR.to_affine(),
             )
             .await
             .unwrap();
