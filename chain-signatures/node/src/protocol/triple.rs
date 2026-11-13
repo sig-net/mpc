@@ -137,11 +137,28 @@ impl TripleGenerator {
             // Let tasks this one woke (outbox, next permit holder) run before the next poke.
             tokio::task::yield_now().await;
             // Held only while poking, never while waiting for a peer's message.
-            let permit = self.pokes.acquire().await.expect("never closed");
+            let Ok(Ok(permit)) = tokio::time::timeout(
+                self.timeout.saturating_sub(self.created.elapsed()),
+                self.pokes.acquire(),
+            )
+            .await
+            else {
+                crate::metrics::protocols::TRIPLE_GENERATOR_FAILURES.inc();
+                if self.owner == self.me {
+                    crate::metrics::protocols::TRIPLE_GENERATOR_OWNED_FAILURES.inc();
+                }
+                tracing::warn!(
+                    id = self.id,
+                    "triple generation timeout waiting for a poke permit"
+                );
+                break;
+            };
             let poke_start_time = Instant::now();
             // Hands this worker's other tasks to another thread while the poke runs.
             let poke_result = tokio::task::block_in_place(|| self.protocol.poke());
             drop(permit);
+            // Lets an abort requested during the poke take effect before its action runs.
+            tokio::task::yield_now().await;
 
             let action = match poke_result {
                 Ok(action) => action,
