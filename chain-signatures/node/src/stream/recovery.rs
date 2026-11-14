@@ -45,8 +45,6 @@ pub(crate) async fn recover_backlog(
         }
     }
 
-    // Returns None when no alignment is needed (the normal case); Some(height) when
-    // the backlog was regressed.
     let rebased = consensus::align_backlog_with_consensus(
         chain,
         backlog,
@@ -58,9 +56,6 @@ pub(crate) async fn recover_backlog(
     )
     .await
     .is_some();
-    if rebased {
-        tracing::warn!(%chain, "backlog regressed via consensus checkpoint");
-    }
 
     Ok(rebased)
 }
