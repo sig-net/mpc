@@ -390,7 +390,9 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
                             CatchupItem::BatchBlock { block, .. } => {
                                 format!("block {}", block.header.number)
                             }
-                            CatchupItem::Missing(block_id) => format!("{block_id:?}"),
+                            CatchupItem::Missing(block_id) => block_id
+                                .as_u64()
+                                .map_or_else(|| format!("{block_id:?}"), |n| format!("block {n}")),
                         })
                 },
             )
@@ -679,8 +681,62 @@ mod tests {
             .await
             .unwrap_err();
         assert!(!is_retryable(&err), "{err:#}");
+        assert!(format!("{err:#}").contains("block 12"), "{err:#}");
         assert!(events_rx.try_recv().is_err(), "no events");
         http.assert_async().await;
+    }
+
+    /// A retryable batch fault is retried, not escalated — even at block
+    /// 401, where the item context renders the number.
+    #[tokio::test]
+    async fn process_range_retries_transient_batch_faults_at_block_401() {
+        let mut server = Server::new_async().await;
+
+        // first batch attempt fails; created first so its unmet expect wins
+        let fault = server
+            .mock("POST", "/")
+            .match_body(Matcher::Regex(r"^\[".to_string()))
+            .with_status(500)
+            .expect(1)
+            .create_async()
+            .await;
+        let served = server
+            .mock("POST", "/")
+            .match_body(Matcher::Regex(r"^\[".to_string()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body_from_request(|req| {
+                let body: serde_json::Value =
+                    serde_json::from_slice(req.body().expect("request body")).expect("json body");
+                let id = body[0]["id"].as_u64().expect("request id");
+                json!([test_utils::block_response(id, 401)])
+                    .to_string()
+                    .into_bytes()
+            })
+            .expect(1)
+            .create_async()
+            .await;
+
+        let indexer = test_utils::TestIndexerBuilder::new(server.url())
+            .build()
+            .await;
+        let (events_tx, mut events_rx) = chain_event_channel();
+
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            indexer.process_range(&events_tx, 401, 402, &CancellationToken::new()),
+        )
+        .await;
+        fault.assert_async().await;
+        served.assert_async().await;
+        result
+            .expect("transient batch failure should retry promptly")
+            .unwrap();
+
+        assert!(matches!(
+            events_rx.recv().await,
+            Some(ChainEvent::Block(401))
+        ));
     }
 
     #[tokio::test]
@@ -1266,6 +1322,52 @@ mod tests {
         );
 
         f.cancel_and_join().await;
+    }
+
+    /// The live tail hands terminal errors to the supervisor too: after
+    /// CatchupCompleted, a 401 exits run() instead of spinning at 500 ms.
+    #[tokio::test]
+    async fn run_exits_on_a_terminal_live_tail_failure() {
+        // catchup consumes the fixture's batch mock first, so the live-tail
+        // batch request falls through to the 401 mock below
+        let mut f = RunFixture::spawn(9, 11).await;
+        assert!(matches!(f.next_event().await, ChainEvent::Block(10)));
+        assert!(matches!(f.next_event().await, ChainEvent::Block(11)));
+        assert!(matches!(f.next_event().await, ChainEvent::CatchupCompleted));
+
+        // batch 401 degrades block 12 to Missing; the refetch 401s
+        let batch = f
+            ._server
+            .mock("POST", "/")
+            .match_body(Matcher::Regex(r"^\[".to_string()))
+            .with_status(401)
+            .expect(1)
+            .create_async()
+            .await;
+        let refetch = f
+            ._server
+            .mock("POST", "/")
+            .match_body(Matcher::PartialJson(json!({
+                "method": "eth_getBlockByNumber",
+                "params": ["0xc", false]
+            })))
+            .with_status(401)
+            .expect(1)
+            .create_async()
+            .await;
+
+        f.finalized.store(12, Ordering::Relaxed);
+
+        let err = tokio::time::timeout(Duration::from_secs(30), &mut f.run_handle)
+            .await
+            .expect("run() must exit on a terminal live-tail failure")
+            .expect("run task panicked")
+            .expect_err("a terminal live-tail error must exit run()");
+        assert!(!is_retryable(&err), "{err:#}");
+        assert!(format!("{err:#}").contains("block 12"), "{err:#}");
+        assert!(f.events_rx.try_recv().is_err(), "no events");
+        batch.assert_async().await;
+        refetch.assert_async().await;
     }
 
     #[tokio::test]
