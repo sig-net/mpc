@@ -60,8 +60,8 @@ its [digest](#digest). See [bidirectional-calls.md
 
 Each node keeps one backlog per [source chain](#source-chain), with one entry
 per [admitted](#admitted-request) [request](#request) that is not finished. An
-entry holds the [request id](#request-id), the request, the contract that made
-it and, for a [bidirectional request](#bidirectional-request), the signatures
+entry holds the [request id](#request-id), the request and, for a
+[bidirectional request](#bidirectional-request), the signatures
 for it [published](#publish) in final source chain blocks. Only final source
 chain events change it; anything else a node keeps about a request stays out of
 it (`Backlog`, `backlog/`). See [checkpoints.md
@@ -138,7 +138,8 @@ A short hash that stands for a larger structure. The docs use two:
 A value from the block that holds a [request](#request). The requester cannot
 know or influence it before that block is validated. Nodes read it from a final
 block, so every node derives the same delta (`SignArgs::entropy`,
-`chain-signatures/primitives/src/crypto.rs`). It also seeds the
+`chain-signatures/primitives/src/crypto.rs`). A response has no such block: its
+entropy hashes the first leg's with the message it signs and its key. It also seeds the
 [proposer](#proposer) election. See
 [delta-derivation.md](delta-derivation.md).
 
@@ -230,10 +231,8 @@ transaction, one of three kinds:
 
 See [bidirectional-calls.md §2](bidirectional-calls.md#2-vocabulary).
 
-*Code today:* Unviable is attested only for requests from Midnight, and even
-there not when only another request's response shows it
-([#1429](https://github.com/sig-net/mpc/issues/1429),
-[#1430](https://github.com/sig-net/mpc/issues/1430)).
+*Code today:* Unviable is attested only for requests from Midnight
+([#1429](https://github.com/sig-net/mpc/issues/1429)).
 
 ## Owner
 
@@ -303,10 +302,13 @@ chain](#source-chain). See
 ## Request
 
 What a contract asks the network to sign. A [bidirectional
-request](#bidirectional-request) is the tuple (transaction, target, key,
-schema), made when the contract passes it to `sign_bidirectional` and that
-call accepts it (`IndexedSignRequest`, `SignKind`,
-`chain-signatures/primitives/src/requests.rs`). See
+request](#bidirectional-request) is the tuple (sender, transaction, target,
+key, schema), where the sender is the requesting contract. It is made when
+the contract calls `sign_bidirectional` with the other four fields, which
+sets the sender to the calling contract and accepts the call
+(`IndexedSignRequest`, `SignKind`,
+`chain-signatures/primitives/src/requests.rs`; `SignBidirectionalEvent`,
+`chain-signatures/primitives/src/bidirectional.rs`). See
 [bidirectional-calls.md §2](bidirectional-calls.md#2-vocabulary).
 
 ## Request id

@@ -36,9 +36,13 @@ const MAX_CONCURRENT_RPC_REQUESTS: usize = 1024;
 /// The update interval to fetch and update the contract's state
 const UPDATE_INTERVAL: Duration = Duration::from_secs(10);
 
-// Publish retry constants
+/// First delay of the backoff between attempts to publish a response or vote
+/// for a checkpoint. Jitter can double it. A proposer's first retry must land
+/// inside `DEFAULT_OBSERVE_MARGIN`, which a test in `publish_failover` checks.
 pub(crate) const PUBLISH_MIN_DELAY: Duration = Duration::from_secs(5);
-const PUBLISH_MAX_DELAY: Duration = Duration::from_secs(60); // Cap to 1 min so backoff doesn't get too long for infinite retries
+/// Cap of that backoff. Both retry without limit, so the delay must stop
+/// growing.
+const PUBLISH_MAX_DELAY: Duration = Duration::from_secs(60);
 
 /// The maximum time to wait for a checkpoint vote to complete before retrying
 const VOTE_CHECKPOINT_TIMEOUT: Duration = Duration::from_secs(30);

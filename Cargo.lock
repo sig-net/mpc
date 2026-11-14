@@ -2647,7 +2647,7 @@ dependencies = [
 [[package]]
 name = "cait-sith"
 version = "0.8.0"
-source = "git+https://github.com/sig-net/cait-sith?rev=9f34e8c#9f34e8c7141cdef58078347fcdd07e5469e2c6e6"
+source = "git+https://github.com/sig-net/cait-sith?rev=5d67c6f#5d67c6f5835780bee4db3778623b087136c5866a"
 dependencies = [
  "auto_ops",
  "ck-meow",
@@ -7562,7 +7562,7 @@ dependencies = [
 
 [[package]]
 name = "mpc-chain-canton"
-version = "1.22.0"
+version = "1.23.0"
 dependencies = [
  "alloy",
  "anyhow",
@@ -7590,7 +7590,7 @@ dependencies = [
 
 [[package]]
 name = "mpc-chain-ethereum"
-version = "1.22.0"
+version = "1.23.0"
 dependencies = [
  "alloy",
  "anyhow",
@@ -7617,7 +7617,7 @@ dependencies = [
 
 [[package]]
 name = "mpc-chain-hydration"
-version = "1.22.0"
+version = "1.23.0"
 dependencies = [
  "alloy",
  "anyhow",
@@ -7643,7 +7643,7 @@ dependencies = [
 
 [[package]]
 name = "mpc-chain-integration-core"
-version = "1.22.0"
+version = "1.23.0"
 dependencies = [
  "alloy",
  "anyhow",
@@ -7666,7 +7666,7 @@ dependencies = [
 
 [[package]]
 name = "mpc-chain-midnight"
-version = "1.22.0"
+version = "1.23.0"
 dependencies = [
  "alloy",
  "anyhow",
@@ -7719,7 +7719,7 @@ dependencies = [
 
 [[package]]
 name = "mpc-chain-near"
-version = "1.22.0"
+version = "1.23.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -7741,7 +7741,7 @@ dependencies = [
 
 [[package]]
 name = "mpc-chain-solana"
-version = "1.22.0"
+version = "1.23.0"
 dependencies = [
  "alloy",
  "anchor-client",
@@ -7775,7 +7775,7 @@ dependencies = [
 
 [[package]]
 name = "mpc-chain-tron"
-version = "1.22.0"
+version = "1.23.0"
 dependencies = [
  "alloy",
  "anyhow",
@@ -7801,7 +7801,7 @@ dependencies = [
 
 [[package]]
 name = "mpc-compact-hashing"
-version = "1.22.0"
+version = "1.23.0"
 dependencies = [
  "hex",
  "midnight-transient-crypto 3.0.1",
@@ -7811,7 +7811,7 @@ dependencies = [
 
 [[package]]
 name = "mpc-contract"
-version = "1.22.0"
+version = "1.23.0"
 dependencies = [
  "anyhow",
  "borsh",
@@ -7836,7 +7836,7 @@ dependencies = [
 
 [[package]]
 name = "mpc-crypto"
-version = "1.22.0"
+version = "1.23.0"
 dependencies = [
  "alloy",
  "anyhow",
@@ -7853,7 +7853,7 @@ dependencies = [
 
 [[package]]
 name = "mpc-keys"
-version = "1.22.0"
+version = "1.23.0"
 dependencies = [
  "hex",
  "hpke",
@@ -7863,7 +7863,7 @@ dependencies = [
 
 [[package]]
 name = "mpc-midnight-respond-codec"
-version = "1.22.0"
+version = "1.23.0"
 dependencies = [
  "alloy",
  "anyhow",
@@ -7875,7 +7875,7 @@ dependencies = [
 
 [[package]]
 name = "mpc-node"
-version = "1.22.0"
+version = "1.23.0"
 dependencies = [
  "alloy",
  "anyhow",
@@ -7953,7 +7953,7 @@ dependencies = [
 
 [[package]]
 name = "mpc-primitives"
-version = "1.22.0"
+version = "1.23.0"
 dependencies = [
  "borsh",
  "ciborium",
@@ -7968,7 +7968,7 @@ dependencies = [
 
 [[package]]
 name = "mpc-tron-wire"
-version = "1.22.0"
+version = "1.23.0"
 dependencies = [
  "alloy",
  "anyhow",
@@ -7985,7 +7985,7 @@ dependencies = [
 
 [[package]]
 name = "mpc-utils"
-version = "1.22.0"
+version = "1.23.0"
 dependencies = [
  "anyhow",
  "tokio",
@@ -10114,16 +10114,16 @@ dependencies = [
 
 [[package]]
 name = "quinn-udp"
-version = "0.5.11"
+version = "0.5.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "541d0f57c6ec747a90738a52741d3221f7960e8ac2f0ff4b1a63680e033b4ab5"
+checksum = "af66907df18639dcf4db56ca65490cabc4b27a97dbadd96f2926cca73298f016"
 dependencies = [
  "cfg_aliases",
  "libc",
  "once_cell",
- "socket2 0.5.10",
+ "socket2 0.6.4",
  "tracing",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -11655,7 +11655,7 @@ dependencies = [
 
 [[package]]
 name = "signet-crypto"
-version = "1.22.0"
+version = "1.23.0"
 dependencies = [
  "getrandom 0.2.16",
  "hex",
@@ -11676,7 +11676,7 @@ dependencies = [
 
 [[package]]
 name = "signet-primitives"
-version = "1.22.0"
+version = "1.23.0"
 dependencies = [
  "borsh",
  "enum-map",

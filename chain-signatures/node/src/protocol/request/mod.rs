@@ -1134,6 +1134,18 @@ mod tests {
         assert!(!spawner.test_requests_contains(&sign_id));
     }
 
+    /// Round timing every node must share, pinned for both build flavours.
+    #[test]
+    fn round_timeouts_are_pinned() {
+        let (organize_posit, ceiling) = if cfg!(feature = "test-feature") {
+            (5, 30)
+        } else {
+            (20, 600)
+        };
+        assert_eq!(ORGANIZE_POSIT_TIMEOUT, Duration::from_secs(organize_posit));
+        assert_eq!(ROUND_TIMEOUT_CEILING, Duration::from_secs(ceiling));
+    }
+
     #[test]
     fn round_timeout_schedule() {
         // Every round must outlast a propose broadcast (<1s) plus accept
