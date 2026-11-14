@@ -324,7 +324,7 @@ They are not lost to the network where another correct node was in the round, wh
 Correct nodes agree (S1), so what is left is how many are up:
 
 * t votes out of the n - f correct nodes leaves n - f - t of them free to be down, none at t = n - f.
-* Votes persist until the height settles, so nodes need not be up together.
+* Votes persist until the height settles or their node leaves the committee, so nodes need not be up together.
 * A node catching up votes at every boundary it passes rather than waiting for the head.
 * A vote is retried until the contract has it, and after a restart the node casts its votes for `pending` again.
 
@@ -430,11 +430,7 @@ The interval is `checkpoint_interval`, a per-chain constant with no per-node ove
    It loses the events of a block it cannot fetch or verify, and of the blocks between its stored height and the head on every restart or reconnect.
    It reports catching up as done before it processes any block.
    Design: every indexer processes every finalised block in order from its processed height.
-6. Catching up (§4, §5 L1).
-   Now: while catching up, a node does not move its processed height, creates no checkpoints and casts no new votes.
-   Once caught up, it creates one checkpoint at the height it reached, so the cap does not stop it while it catches up.
-   Design: a node catching up indexes as usual and creates and votes for a checkpoint each time it passes a boundary, up to the cap; only acting waits until it is caught up.
-7. At the cap (§4).
+6. At the cap (§4).
    Now: the indexer makes no progress at the cap, so the stall watchdog restarts it again and again, and each restart makes the node not caught up.
    Until a settlement takes it below the cap, the node holds second-leg publishes and queues no second-leg sign requests.
    Design: at the cap the node keeps its caught-up state and keeps acting on the requests it holds.
