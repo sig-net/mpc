@@ -1,5 +1,5 @@
-//! Retry macros and strategy configuration for RPC calls, plus the shared
-//! cooldown gate and typed error classification they rely on.
+//! Retry macros, strategy configuration, and terminal-aware supervisor loops,
+//! plus the shared cooldown gate and typed error classification they rely on.
 
 mod classify;
 mod gate;
