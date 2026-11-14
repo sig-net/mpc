@@ -683,7 +683,13 @@ pub async fn wait_for_respond_bidirectional(
     timeout: Duration,
 ) -> anyhow::Result<SolRespondBidirectionalOutcome> {
     let program_id = solana.program_keypair.pubkey();
-    let rpc = RpcClient::new(solana.rpc_address.to_string());
+    // Scan at `confirmed`, like the rest of this file: the default is
+    // `finalized`, which trails by 32 slots and on a slow CI validator can
+    // exceed the whole timeout.
+    let rpc = RpcClient::new_with_commitment(
+        solana.rpc_address.to_string(),
+        CommitmentConfig::confirmed(),
+    );
 
     tracing::info!(
         request_id = %hex::encode(expected_request_id),

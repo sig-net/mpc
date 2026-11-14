@@ -676,9 +676,8 @@ pub(crate) async fn answer_unviable(
     }
 }
 
-/// A verified Midnight Response saying Executed or Failed reports its request's transaction
-/// included: mark what that leaves unexecutable (#1430). The event carries the height only on
-/// Midnight so far (#1429).
+/// Mark what a verified Response saying Executed or Failed leaves unexecutable (#1430).
+/// Only Midnight's Response carries the height so far (#1429), so only Midnight gets here.
 async fn mark_nonce_siblings(
     event: &RespondBidirectionalEvent,
     published: &mpc_primitives::PublishedAttestation,
@@ -743,19 +742,45 @@ async fn answer_execution(
         ExecutionOutcome::Failed | ExecutionOutcome::Unviable
     );
 
-    let advanced = entry.advance(result, block_height).await;
-    if let Some(BacklogError::AlreadyAnswered) =
-        advanced.as_ref().err().and_then(|err| err.downcast_ref())
-    {
-        tracing::info!(?sign_id, ?tx_id, "request was answered by another path");
-        return Ok(());
-    }
-    let entry = advanced
-        .with_context(|| {
-            format!(
-                "failed to transition pending tx to final response for sign id {sign_id:?}, tx_id {tx_id:?}, source_chain {source_chain}"
-            )
-        })?;
+    let execution_tx = Arc::clone(entry.execution_tx());
+    let entry = match entry.advance(result, block_height).await {
+        Ok(entry) => entry,
+        Err(err) if matches!(err.downcast_ref(), Some(BacklogError::AlreadyAnswered)) => {
+            tracing::info!(?sign_id, ?tx_id, "request was answered by another path");
+            return Ok(());
+        }
+        Err(err) => {
+            // Every failure here is deterministic, so a retry would
+            // re-emit the same failing confirmation forever: park
+            // terminally, like the extraction failure above.
+            tracing::error!(
+                ?sign_id,
+                ?tx_id,
+                ?source_chain,
+                "terminal advance failure; parking without a response: {err:#}"
+            );
+            if let Err(park_err) = ctx
+                .backlog
+                .park_execution(source_chain, &sign_id, &execution_tx)
+                .await
+            {
+                tracing::warn!(?sign_id, "parking failed too: {park_err:#}");
+            }
+            if ctx
+                .sign_tx
+                .send(SignCommand::Completion(sign_id))
+                .await
+                .is_err()
+            {
+                tracing::warn!(?sign_id, "sign command channel closed while parking");
+            }
+            return Err(err).with_context(|| {
+                format!(
+                    "failed to transition pending tx to final response for sign id {sign_id:?}, tx_id {tx_id:?}, source_chain {source_chain}; parked"
+                )
+            });
+        }
+    };
     tracing::info!(
         ?tx_id,
         ?sign_id,

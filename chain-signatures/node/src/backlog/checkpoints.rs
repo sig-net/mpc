@@ -359,8 +359,7 @@ impl Checkpoints {
         self.storage.find(chain, digest).await.ok().flatten()
     }
 
-    #[cfg(test)]
-    /// Returns the backing storage for tests that need to seed checkpoint state.
+    /// Returns the backing storage.
     pub(crate) fn storage(&self) -> &CheckpointStorage {
         &self.storage
     }
