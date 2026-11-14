@@ -22,6 +22,7 @@ pub async fn align_backlog_with_consensus(
     mesh_state: &mut watch::Receiver<MeshState>,
     node_client: &NodeClient,
     my_account_id: &AccountId,
+    root_pk: mpc_primitives::PublicKey,
 ) -> Option<u64> {
     let checkpoint_digest = *checkpoints_rx.borrow_and_update().as_ref()?;
 
@@ -89,7 +90,7 @@ pub async fn align_backlog_with_consensus(
         .await?
     };
 
-    if let Err(err) = backlog.regress(&fetched_checkpoint).await {
+    if let Err(err) = backlog.regress(&fetched_checkpoint, root_pk).await {
         tracing::error!(error = %format_args!("{err:#}"), %chain, "failed to regress backlog to checkpoint");
         return None;
     }
@@ -282,6 +283,7 @@ mod tests {
                 &mut self.mesh_rx,
                 &self.node_client,
                 &self.my_account_id,
+                k256::AffinePoint::GENERATOR,
             )
             .await
         }
@@ -430,7 +432,7 @@ mod tests {
                     chain,
                     block_height: case.peer_checkpoint_height,
                     pending_requests,
-                    cumulative_digest: Checkpoint::empty_cumulative_digest(),
+                    legacy_digest: None,
                 };
                 peer_digest = peer_checkpoint.digest();
 
@@ -730,6 +732,7 @@ mod tests {
                 &mut mesh_rx_clone,
                 &node_client_clone,
                 &my_account_id_clone,
+                k256::AffinePoint::GENERATOR,
             )
             .await
         });
