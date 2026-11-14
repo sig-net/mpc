@@ -236,6 +236,7 @@ mod tests {
     use crate::mesh::MeshState;
     use crate::node_client::NodeClient;
     use crate::protocol::ParticipantInfo;
+    use crate::util::cadence::Cadence;
     use cait_sith::protocol::Participant;
     use mpc_chain_integration_core::StateManager;
     use mpc_primitives::{Chain, CheckpointDigest, SignId};
@@ -258,7 +259,7 @@ mod tests {
     impl AlignFixture {
         fn new(digest: Option<CheckpointDigest>) -> Self {
             let chain = Chain::Ethereum;
-            let backlog = Backlog::new();
+            let backlog = Backlog::new(Cadence::default());
             let (checkpoints_tx, checkpoints_rx) = watch::channel(digest);
             let (mesh_tx, mesh_rx) = watch::channel(MeshState::default());
             let node_client = NodeClient::new();

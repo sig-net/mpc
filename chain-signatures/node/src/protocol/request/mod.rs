@@ -47,18 +47,11 @@ use delay_monitor::DelayMonitor;
 use limiter::SignLimiter;
 use task::SignTask;
 
+use crate::util::cadence::Cadence;
 pub(crate) use mailbox::{PositMailbox, SignPositMessage};
 
 /// Max number of concurrent proposers, with unlimited deliberators.
 const MAX_CONCURRENT_PROPOSERS: usize = 4;
-
-/// Timeout budget for the organizing and posit phases of round 0 (shorter under
-/// test for speed). Later rounds follow [`round_timeout`], which may exceed this.
-const ORGANIZE_POSIT_TIMEOUT: Duration = Duration::from_secs(if cfg!(feature = "test-feature") {
-    5
-} else {
-    20
-});
 
 /// A proposer tries to include all eligible deliberators but will go ahead with
 /// a subset after this timeout, if above the minimum threshold.
@@ -84,34 +77,24 @@ const ROUND_TIMEOUT_FLOOR: Duration = ACCEPT_POSIT_TIMEOUT
 const ROUND_TIMEOUT_GROWTH_NUM: u32 = 23;
 const ROUND_TIMEOUT_GROWTH_DEN: u32 = 20;
 
-/// Longest a round may be. High enough that any plausible indexing skew is
-/// crossed, low enough that a wedged request keeps rotating visibly instead of
-/// disappearing into a multi-hour round.
-/// tolerable skew < ROUND_TIMEOUT_CEILING - ROUND_TIMEOUT_FLOOR
-const ROUND_TIMEOUT_CEILING: Duration = Duration::from_secs(if cfg!(feature = "test-feature") {
-    30
-} else {
-    600
-});
-
-/// Timeout for round `r`: round 0 gets [`ORGANIZE_POSIT_TIMEOUT`], later rounds
+/// Timeout for round `r`: round 0 gets `cadence.organize_posit_timeout()`, later rounds
 /// start at [`ROUND_TIMEOUT_FLOOR`] and grow geometrically to
-/// [`ROUND_TIMEOUT_CEILING`]. Depends only on `r`, so peers that agree on the
-/// round agree on the deadline.
-fn round_timeout(round: usize) -> Duration {
+/// `cadence.round_timeout_ceiling()`. Peers that agree on the round and the cadence
+/// agree on the deadline.
+fn round_timeout(round: usize, cadence: &Cadence) -> Duration {
     if round == 0 {
-        return ORGANIZE_POSIT_TIMEOUT;
+        return cadence.organize_posit_timeout();
     }
     // Saturates at the ceiling within ~41 iterations, which bounds the loop:
     // `round` derives from `highest_seen_round`, so a peer can make it huge.
     let mut timeout = ROUND_TIMEOUT_FLOOR;
     for _ in 1..round {
-        if timeout >= ROUND_TIMEOUT_CEILING {
-            return ROUND_TIMEOUT_CEILING;
+        if timeout >= cadence.round_timeout_ceiling() {
+            return cadence.round_timeout_ceiling();
         }
         timeout = timeout * ROUND_TIMEOUT_GROWTH_NUM / ROUND_TIMEOUT_GROWTH_DEN;
     }
-    timeout.min(ROUND_TIMEOUT_CEILING)
+    timeout.min(cadence.round_timeout_ceiling())
 }
 
 /// Upper bound on the number of recently-completed/aborted sign IDs we remember
@@ -202,9 +185,12 @@ pub struct SignatureSpawner {
     /// Reports a peer as out-of-sync to the mesh, so state sync runs against it
     /// before we use it again. Cloned into each spawned sign task.
     sync_report_tx: SyncReportSender,
+    /// Shared cadence. Read-only, cloned into each sign task by `Arc`.
+    cadence: Arc<Cadence>,
 }
 
 impl SignatureSpawner {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         node_account_id: near_account_id::AccountId,
         contract: ContractStateWatcher,
@@ -213,6 +199,7 @@ impl SignatureSpawner {
         msg: MessageChannel,
         rpc: RpcChannel,
         sync_report_tx: SyncReportSender,
+        cadence: impl Into<Arc<Cadence>>,
     ) -> Self {
         Self {
             contract,
@@ -228,6 +215,7 @@ impl SignatureSpawner {
             rpc,
             node_account_id,
             sync_report_tx,
+            cadence: cadence.into(),
         }
     }
 
@@ -332,7 +320,12 @@ impl SignatureSpawner {
         // Spawn the async task with organizing loop
         self.tasks.spawn(
             (sign_id, kind),
-            task.run(entry, self.mesh_state.clone(), mailbox),
+            task.run(
+                entry,
+                self.mesh_state.clone(),
+                mailbox,
+                self.cadence.clone(),
+            ),
         );
     }
 
@@ -693,16 +686,12 @@ impl Drop for SignatureSpawnerTask {
     }
 }
 
-#[cfg(feature = "test-feature")]
-pub fn organize_posit_timeout() -> Duration {
-    ORGANIZE_POSIT_TIMEOUT
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::protocol::contract::primitives::{ParticipantInfo, Participants};
     use crate::protocol::presignature::Presignature;
+    use crate::util::cadence::Cadence;
 
     use cait_sith::protocol::Participant;
     use deadpool_redis::Runtime;
@@ -855,8 +844,9 @@ mod tests {
             msg_channel,
             RpcChannel { tx: rpc_tx },
             sync_report_tx,
+            Cadence::default(),
         );
-        let backlog = crate::backlog::Backlog::new();
+        let backlog = crate::backlog::Backlog::new(Cadence::default());
         let signature_timeout = crate::config::Timeouts::default().signature_generation;
 
         SpawnerSetup {
@@ -1137,23 +1127,41 @@ mod tests {
     /// Round timing every node must share, pinned for both build flavours.
     #[test]
     fn round_timeouts_are_pinned() {
-        let (organize_posit, ceiling) = if cfg!(feature = "test-feature") {
-            (5, 30)
-        } else {
-            (20, 600)
-        };
-        assert_eq!(ORGANIZE_POSIT_TIMEOUT, Duration::from_secs(organize_posit));
-        assert_eq!(ROUND_TIMEOUT_CEILING, Duration::from_secs(ceiling));
+        let test_cadence = Cadence::test();
+        let prod_cadence = Cadence::default();
+
+        let (test_organize_posit, test_ceiling) = (5, 30);
+        let (prod_organize_posit, prod_ceiling) = (20, 600);
+
+        assert_eq!(
+            test_cadence.organize_posit_timeout(),
+            Duration::from_secs(test_organize_posit)
+        );
+        assert_eq!(
+            test_cadence.round_timeout_ceiling(),
+            Duration::from_secs(test_ceiling)
+        );
+
+        assert_eq!(
+            prod_cadence.organize_posit_timeout(),
+            Duration::from_secs(prod_organize_posit)
+        );
+        assert_eq!(
+            prod_cadence.round_timeout_ceiling(),
+            Duration::from_secs(prod_ceiling)
+        );
     }
 
     #[test]
     fn round_timeout_schedule() {
+        let cadence = Cadence::default();
+
         // Every round must outlast a propose broadcast (<1s) plus accept
         // gathering inside.  For r >= 1 this holds by construction today;
         // the test serves as a guard so the code can't silently drift.
         for r in 0..64usize {
             assert!(
-                round_timeout(r) >= ROUND_TIMEOUT_FLOOR,
+                round_timeout(r, &cadence) >= ROUND_TIMEOUT_FLOOR,
                 "round {r} is too short to complete"
             );
         }
@@ -1162,7 +1170,7 @@ mod tests {
         // more time rather than retrying forever on equally short rounds.
         for r in 1..64usize {
             assert!(
-                round_timeout(r + 1) >= round_timeout(r),
+                round_timeout(r + 1, &cadence) >= round_timeout(r, &cadence),
                 "round {r} is longer than round {}",
                 r + 1
             );
@@ -1175,13 +1183,13 @@ mod tests {
         // Propose broadcast plus accept gathering inside (`ROUND_TIMEOUT_FLOOR`).
         let settling_overlap = |skew: Duration| {
             (1..1024usize)
-                .map(round_timeout)
+                .map(|r| round_timeout(r, &cadence))
                 .find(|&t| t.saturating_sub(skew) > ROUND_TIMEOUT_FLOOR)
                 .map(|t| t - skew)
                 .expect("schedule must clear the skew by a full round")
         };
 
-        let skew = ORGANIZE_POSIT_TIMEOUT;
+        let skew = cadence.organize_posit_timeout();
         let wider = 4 * skew;
 
         // The shared window has to scale with the skew
@@ -1190,7 +1198,7 @@ mod tests {
         // ROUND_TIMEOUT_FLOOR. No round exceeds the ceiling, so that's only
         // reachable while the skew leaves enough room under it.
         assert!(
-            wider < ROUND_TIMEOUT_CEILING - ROUND_TIMEOUT_FLOOR,
+            wider < cadence.round_timeout_ceiling() - ROUND_TIMEOUT_FLOOR,
             "the skews compared here must leave a full round of room under the ceiling"
         );
         assert!(
@@ -1201,8 +1209,14 @@ mod tests {
         // A wedged request keeps rotating rather than vanishing into an
         // unbounded round. `round` derives from a peer-supplied value, so it
         // may be arbitrary.
-        assert_eq!(round_timeout(1024), ROUND_TIMEOUT_CEILING);
-        assert_eq!(round_timeout(usize::MAX), ROUND_TIMEOUT_CEILING);
+        assert_eq!(
+            round_timeout(1024, &cadence),
+            cadence.round_timeout_ceiling()
+        );
+        assert_eq!(
+            round_timeout(usize::MAX, &cadence),
+            cadence.round_timeout_ceiling()
+        );
     }
 
     #[tokio::test]

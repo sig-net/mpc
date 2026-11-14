@@ -11,6 +11,7 @@ use mpc_node::protocol::ProtocolState;
 use mpc_node::storage::protocol_storage::{ProtocolArtifact, ProtocolStorage};
 use mpc_node::storage::triple_storage::TriplePair;
 use mpc_node::types::SignCommand;
+use mpc_node::util::cadence::Cadence;
 use mpc_primitives::Chain;
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
@@ -206,7 +207,10 @@ async fn test_sign_request_during_resharing() {
 
 fn sign_request(seed: u32) -> SignCommand {
     let req = Arc::new(super::helpers::sign_request(seed, Chain::NEAR));
-    SignCommand::Request(SignEntry::generating(req, &Backlog::new()))
+    SignCommand::Request(SignEntry::generating(
+        req,
+        &Backlog::new(Cadence::default()),
+    ))
 }
 
 /// Drive the network through a threshold-change resharing via the real

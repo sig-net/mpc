@@ -2,7 +2,7 @@
 //! input and output.
 
 use integration_tests::mpc_fixture::{mock_stream::MockStream, MpcFixtureBuilder};
-use mpc_node::protocol::IndexedSignRequest;
+use mpc_node::{protocol::IndexedSignRequest, util::cadence::Cadence};
 use mpc_primitives::{Chain, SignId};
 use std::time::Duration;
 use test_log::test;
@@ -235,7 +235,7 @@ async fn test_channel_contention_multiple_blocks_at_once() {
 async fn test_channel_contention_multiple_blocks_at_once_delayed() {
     // Half the organize/posit timeout, so no node reaches its round deadline
     // before the last one has observed the block.
-    let delay = mpc_node::protocol::request::organize_posit_timeout() / 2;
+    let delay = Cadence::test().organize_posit_timeout() / 2;
     check_channel_contention(5, 10, 50, Some(delay)).await;
 }
 

@@ -22,6 +22,7 @@ use crate::stream::test_utils::{
     test_canton_sign_bidirectional_request, test_sign_args,
 };
 use crate::types::SignCommand;
+use crate::util::cadence::Cadence;
 use alloy::primitives::B256;
 use cait_sith::protocol::Participant;
 use k256::{ProjectivePoint, Scalar};
@@ -99,7 +100,7 @@ fn signature_respond_event_conversion() {
 async fn recover_backlog_requeues_pending_signs() {
     // Prepare backlog with a single pending sign request on a chain that
     // should be marked for requeue during recovery.
-    let backlog = Backlog::new();
+    let backlog = Backlog::new(Cadence::default());
     let sign_id = SignId::new([9u8; 32]);
     let entry = backlog.insert_mock_sign(sign_id, Chain::Solana).await;
     let expected_args = entry.request().args.clone();
@@ -143,7 +144,7 @@ async fn recover_backlog_requeues_pending_signs() {
 
 #[tokio::test]
 async fn recovered_midnight_requests_require_current_attestation_semantics_before_signing() {
-    let backlog = Backlog::new();
+    let backlog = Backlog::new(Cadence::default());
     let initial = mock_bidi_request(SignId::new([41; 32]), Chain::Midnight);
     let legacy_final = mock_bidi_response_request(
         SignId::new([42; 32]),
@@ -185,7 +186,7 @@ async fn recovered_midnight_requests_require_current_attestation_semantics_befor
     let mut encoded = Vec::new();
     ciborium::into_writer(&checkpoint, &mut encoded).unwrap();
     let before = ciborium::from_reader(encoded.as_slice()).unwrap();
-    let recovered = Backlog::new();
+    let recovered = Backlog::new(Cadence::default());
     recovered.recover_by_checkpoint(&before).await;
     let (sign_tx, mut sign_rx) = mpsc::channel(4);
     let ctx = make_test_stream_context_with_generator_pk(recovered, sign_tx, false);
@@ -255,7 +256,7 @@ async fn seed_executing_entry(
 /// A deterministic advance failure parks the entry — a retry could never clear it.
 #[tokio::test]
 async fn process_execution_confirmed_failed_advance_parks_the_entry() {
-    let backlog = Backlog::new();
+    let backlog = Backlog::new(Cadence::test());
     // Solana does not encode Unviable, so the transition fails.
     let tx = test_bidirectional_tx(10, Chain::Solana, Chain::Ethereum);
     let entry = backlog.insert_mock_executing(&tx).await;
@@ -296,7 +297,7 @@ async fn process_execution_confirmed_failed_advance_parks_the_entry() {
 
 #[tokio::test]
 async fn process_execution_confirmed_resolves_a_displaced_watch_by_sign_id() {
-    let backlog = Backlog::new();
+    let backlog = Backlog::new(Cadence::default());
     let tx = test_bidirectional_tx(9, Chain::Midnight, Chain::Tron);
     backlog.insert_mock_executing(&tx).await;
     // A flat Tron id: an earlier confirmation consumed this entry's watch
@@ -351,7 +352,7 @@ async fn process_execution_confirmed_resolves_a_displaced_watch_by_sign_id() {
 
 #[tokio::test]
 async fn process_execution_confirmed_without_an_entry_warns_and_succeeds() {
-    let backlog = Backlog::new();
+    let backlog = Backlog::new(Cadence::default());
     let (sign_tx, mut sign_rx) = mpsc::channel(4);
     let ctx = make_test_stream_context_with_generator_pk(backlog, sign_tx, true);
     let tx = test_bidirectional_tx(3, Chain::Solana, Chain::Ethereum);
@@ -386,7 +387,7 @@ async fn confirm_execution(
 
 #[tokio::test]
 async fn process_execution_confirmed_success_creates_respond_request() {
-    let backlog = Backlog::new();
+    let backlog = Backlog::new(Cadence::default());
     let tx = test_bidirectional_tx(1, Chain::Solana, Chain::Ethereum);
     let sign_id = tx.sign_id();
     backlog.insert_mock_executing(&tx).await;
@@ -508,7 +509,7 @@ fn queued_requests(sign_rx: &mut mpsc::Receiver<SignCommand>) -> Vec<SignId> {
 #[tokio::test]
 async fn execution_answers_the_nonce_siblings_of_its_transaction() {
     for source_chain in [Chain::Midnight, Chain::Solana] {
-        let backlog = Backlog::new();
+        let backlog = Backlog::new(Cadence::test());
         backlog.mark_caught_up(source_chain);
         let taker = nonce_request(1, source_chain, "p", 7, 1);
         let taker_tx = signed_tx(&taker, 7);
@@ -651,7 +652,7 @@ fn midnight_response(
 /// checkpoints carry it, and each is answered Unviable at once.
 #[tokio::test]
 async fn a_response_answers_the_requests_it_left_unexecutable() {
-    let backlog = Backlog::new();
+    let backlog = Backlog::new(Cadence::test());
     backlog.mark_caught_up(Chain::Midnight);
     let taker = nonce_request(1, Chain::Midnight, "p", 7, 1);
     seed_executing_entry(&backlog, Arc::clone(&taker), signed_tx(&taker, 7)).await;
@@ -679,7 +680,7 @@ async fn a_response_answers_the_requests_it_left_unexecutable() {
         assert_eq!(entry.unviable_at, marked.then_some(500), "{:?}", request.id);
     }
     let checkpoint = ctx.backlog.checkpoint(Chain::Midnight).await.unwrap();
-    let recovered = Backlog::new();
+    let recovered = Backlog::new(Cadence::test());
     recovered.recover_by_checkpoint(&checkpoint).await;
     let entry = recovered
         .entry(Chain::Midnight, &unsigned.id)
@@ -730,7 +731,7 @@ fn a_nonce_sibling_shares_the_derived_account_and_nonce() {
 /// another node may have answered it as a sibling.
 #[tokio::test]
 async fn a_response_removes_an_entry_without_a_signature() {
-    let backlog = Backlog::new();
+    let backlog = Backlog::new(Cadence::test());
     let request = nonce_request(1, Chain::Midnight, "p", 7, 1);
     backlog.insert_bidirectional(Arc::clone(&request)).await;
     let (sign_tx, _sign_rx) = mpsc::channel(8);
@@ -749,7 +750,7 @@ async fn a_response_removes_an_entry_without_a_signature() {
 /// A signed sibling keeps the time this node started waiting on it, for the latency sample.
 #[tokio::test]
 async fn a_signed_sibling_keeps_its_observation_time() {
-    let backlog = Backlog::new();
+    let backlog = Backlog::new(Cadence::test());
     let taker = nonce_request(1, Chain::Midnight, "p", 7, 1);
     let sibling = nonce_request(2, Chain::Midnight, "p", 7, 2);
     seed_executing_entry(&backlog, Arc::clone(&sibling), signed_tx(&sibling, 7)).await;
@@ -768,7 +769,7 @@ async fn a_signed_sibling_keeps_its_observation_time() {
 /// leaves the first's progress alone.
 #[tokio::test]
 async fn a_second_answer_changes_nothing() {
-    let backlog = Backlog::new();
+    let backlog = Backlog::new(Cadence::test());
     backlog.mark_caught_up(Chain::Midnight);
     let taker = nonce_request(1, Chain::Midnight, "p", 7, 1);
     let taker_tx = signed_tx(&taker, 7);
@@ -811,7 +812,7 @@ async fn a_second_answer_changes_nothing() {
 /// at catchup, and does not sign the request's own transaction first.
 #[tokio::test]
 async fn a_marked_request_is_answered_at_catchup() {
-    let backlog = Backlog::new();
+    let backlog = Backlog::new(Cadence::test());
     let taker = nonce_request(1, Chain::Midnight, "p", 7, 1);
     seed_executing_entry(&backlog, Arc::clone(&taker), signed_tx(&taker, 7)).await;
     let sibling = nonce_request(2, Chain::Midnight, "p", 7, 2);
@@ -851,7 +852,7 @@ async fn a_marked_request_is_answered_at_catchup() {
 #[tokio::test]
 async fn both_paths_answer_a_sibling_alike() {
     let answer = |from_execution: bool| async move {
-        let backlog = Backlog::new();
+        let backlog = Backlog::new(Cadence::test());
         let taker = nonce_request(1, Chain::Midnight, "p", 7, 1);
         let taker_tx = signed_tx(&taker, 7);
         seed_executing_entry(&backlog, Arc::clone(&taker), Arc::clone(&taker_tx)).await;
@@ -902,7 +903,7 @@ async fn a_signature_after_a_sibling_answer() {
     let root_sk = k256::SecretKey::from_slice(&[1; 32]).unwrap();
     let taker = nonce_request(1, Chain::Solana, "p", 7, 1);
     let taker_tx = signed_tx(&taker, 7);
-    let backlog = Backlog::new();
+    let backlog = Backlog::new(Cadence::test());
     seed_executing_entry(&backlog, Arc::clone(&taker), Arc::clone(&taker_tx)).await;
     let late = nonce_request(2, Chain::Solana, "p", 7, 2);
     backlog.insert_bidirectional(Arc::clone(&late)).await;
@@ -957,7 +958,7 @@ async fn a_signature_after_a_sibling_answer() {
 /// A later signature's transaction is watched too; finding either ends the wait on both.
 #[tokio::test]
 async fn an_execution_under_a_later_signature_is_found() {
-    let backlog = Backlog::new();
+    let backlog = Backlog::new(Cadence::test());
     let request = nonce_request(1, Chain::Solana, "p", 7, 1);
     let first = signed_tx(&request, 7);
     seed_executing_entry(&backlog, Arc::clone(&request), Arc::clone(&first)).await;
@@ -1001,7 +1002,7 @@ async fn an_execution_under_a_later_signature_is_found() {
 async fn a_repeated_signature_leaves_the_digest_alone() {
     let root_sk = k256::SecretKey::from_slice(&[1; 32]).unwrap();
     let request = nonce_request(1, Chain::Solana, "p", 7, 1);
-    let backlog = Backlog::new();
+    let backlog = Backlog::new(Cadence::test());
     backlog.insert_bidirectional(Arc::clone(&request)).await;
     let (sign_tx, _sign_rx) = mpsc::channel(8);
     let ctx = make_test_stream_context_with_generator_pk(backlog, sign_tx, true);
@@ -1028,7 +1029,7 @@ async fn a_repeated_signature_leaves_the_digest_alone() {
 /// The response names the transaction that executed, not the one in the entry's status.
 #[tokio::test]
 async fn a_response_names_the_later_transaction_it_found() {
-    let backlog = Backlog::new();
+    let backlog = Backlog::new(Cadence::test());
     backlog.mark_caught_up(Chain::Solana);
     let request = nonce_request(1, Chain::Solana, "p", 7, 1);
     let first = signed_tx(&request, 7);
@@ -1069,7 +1070,7 @@ async fn a_later_signature_past_execution_only_records_its_id() {
     for parked in [false, true] {
         let request = nonce_request(1, Chain::Solana, "p", 7, 1);
         let tx = signed_tx(&request, 7);
-        let backlog = Backlog::new();
+        let backlog = Backlog::new(Cadence::test());
         backlog.mark_caught_up(Chain::Solana);
         seed_executing_entry(&backlog, Arc::clone(&request), Arc::clone(&tx)).await;
         let (sign_tx, mut sign_rx) = mpsc::channel(8);
@@ -1165,7 +1166,7 @@ async fn a_later_signature_past_execution_only_records_its_id() {
 async fn a_response_entropy_moves_with_the_first_leg_entropy() {
     let mut entropies = Vec::new();
     for first_leg_entropy in [[1; 32], [2; 32]] {
-        let backlog = Backlog::new();
+        let backlog = Backlog::new(Cadence::test());
         backlog.mark_caught_up(Chain::Solana);
         let mut request = (*nonce_request(1, Chain::Solana, "p", 7, 1)).clone();
         request.args.entropy = first_leg_entropy;
@@ -1198,11 +1199,11 @@ async fn a_response_entropy_moves_with_the_first_leg_entropy() {
 /// adopting one looks for the execution again, under the transactions the digest does cover.
 #[tokio::test]
 async fn adopting_a_body_ignores_its_progress() {
-    let peer = Backlog::new();
+    let peer = Backlog::new(Cadence::test());
     let request = nonce_request(1, Chain::Solana, "p", 7, 1);
     let tx = signed_tx(&request, 7);
     seed_executing_entry(&peer, Arc::clone(&request), Arc::clone(&tx)).await;
-    let unanswered = Backlog::new();
+    let unanswered = Backlog::new(Cadence::test());
     seed_executing_entry(&unanswered, Arc::clone(&request), Arc::clone(&tx)).await;
     let executing = unanswered.checkpoint(Chain::Solana).await.unwrap();
     let (sign_tx, _sign_rx) = mpsc::channel(8);
@@ -1222,7 +1223,7 @@ async fn adopting_a_body_ignores_its_progress() {
     let answered = ctx.backlog.checkpoint(Chain::Solana).await.unwrap();
     assert_eq!(answered.digest(), executing.digest());
 
-    let adopter = Backlog::new();
+    let adopter = Backlog::new(Cadence::test());
     adopter.regress(&answered, test_root_pk()).await.unwrap();
 
     let entry = adopter.get(Chain::Solana, &request.id).await.unwrap();
@@ -1238,7 +1239,7 @@ async fn adopting_a_body_ignores_its_progress() {
 
 #[tokio::test]
 async fn process_execution_confirmed_is_idempotent_after_first_processing() {
-    let backlog = Backlog::new();
+    let backlog = Backlog::new(Cadence::default());
     let tx = test_bidirectional_tx(7, Chain::Solana, Chain::Ethereum);
     backlog.insert_mock_executing(&tx).await;
 
@@ -1287,7 +1288,7 @@ async fn process_execution_confirmed_is_idempotent_after_first_processing() {
 #[tokio::test]
 async fn process_execution_confirmed_recovery_requeues_final_respond_after_send_failure() {
     let storage = CheckpointStorage::in_memory();
-    let backlog = Backlog::persisted(storage.clone());
+    let backlog = Backlog::persisted(storage.clone(), Cadence::default());
     let tx = test_bidirectional_tx(9, Chain::Solana, Chain::Ethereum);
     let sign_id = tx.sign_id();
     backlog.insert_mock_executing(&tx).await;
@@ -1326,7 +1327,7 @@ async fn process_execution_confirmed_recovery_requeues_final_respond_after_send_
         .await
         .unwrap();
     let (sign_tx, mut sign_rx) = mpsc::channel(4);
-    let recovered = Backlog::persisted(storage.clone());
+    let recovered = Backlog::persisted(storage.clone(), Cadence::default());
 
     let checkpoint = recovered
         .checkpoints()
@@ -1357,7 +1358,7 @@ async fn process_execution_confirmed_recovery_requeues_final_respond_after_send_
 
 #[tokio::test]
 async fn process_respond_event_quarantines_invalid_bidirectional_target_chain() {
-    let backlog = Backlog::new();
+    let backlog = Backlog::new(Cadence::default());
     let sign_id = SignId::new([11u8; 32]);
     let args = SignArgs {
         entropy: [11u8; 32],
@@ -1432,7 +1433,7 @@ async fn process_respond_event_quarantines_invalid_bidirectional_target_chain() 
 
 #[tokio::test]
 async fn process_sign_request_rejects_respond_bidirectional_kind() {
-    let backlog = Backlog::new();
+    let backlog = Backlog::new(Cadence::default());
     let sign_id = SignId::new([12u8; 32]);
     let tx_id = BidirectionalTxId(B256::from([12u8; 32]).0);
     let request = mock_bidi_response_request(sign_id, tx_id, Chain::Solana);
@@ -1451,7 +1452,7 @@ async fn process_sign_request_rejects_respond_bidirectional_kind() {
 /// parks in pending-publish forever with every node publishing it.
 #[tokio::test]
 async fn process_respond_event_quarantines_a_bidirectional_entry_that_cannot_advance() {
-    let backlog = Backlog::new();
+    let backlog = Backlog::new(Cadence::default());
     let sign_id = SignId::new([23u8; 32]);
     let req = undecodable_bidi_request(sign_id);
 
@@ -1504,7 +1505,7 @@ fn bidirectional_event(serialized_transaction: Vec<u8>) -> SignBidirectionalEven
 /// Off-spec fields only warn until the applications send the SDK fields.
 #[tokio::test]
 async fn process_sign_request_admits_off_spec_fields_for_now() {
-    let backlog = Backlog::new();
+    let backlog = Backlog::new(Cadence::default());
     let (sign_tx, _sign_rx) = mpsc::channel(4);
     let ctx = make_test_stream_context_with_generator_pk(backlog.clone(), sign_tx, true);
     let root_pk = test_root_pk();
@@ -1535,7 +1536,7 @@ async fn process_sign_request_admits_off_spec_fields_for_now() {
 /// only warn there as well: the entry advances instead of being quarantined.
 #[tokio::test]
 async fn process_respond_event_keeps_an_off_spec_bidirectional_entry() {
-    let backlog = Backlog::new();
+    let backlog = Backlog::new(Cadence::default());
     let sign_id = SignId::new([25u8; 32]);
     let args = test_sign_args(25);
     backlog
@@ -1589,7 +1590,7 @@ fn tron_bidirectional_event(serialized_transaction: Vec<u8>) -> SignBidirectiona
 /// silently replaces the first's and neither request can resolve cleanly.
 #[tokio::test]
 async fn process_sign_request_rejects_a_duplicate_tron_destination_id() {
-    let backlog = Backlog::new();
+    let backlog = Backlog::new(Cadence::default());
     let (sign_tx, _sign_rx) = mpsc::channel(4);
     let ctx = make_test_stream_context_with_generator_pk(backlog.clone(), sign_tx, true);
 
@@ -1671,7 +1672,7 @@ async fn process_sign_request_admits_a_window_within_the_cap() {
         SOURCE_BLOCK_S * 1000 + 1,
         SOURCE_BLOCK_S * 1000 + MAX_EXPIRATION_SPAN_MS,
     ] {
-        let backlog = Backlog::new();
+        let backlog = Backlog::new(Cadence::test());
         admit_tron_request_with_expiry(expiration_ms as i64, Some(SOURCE_BLOCK_S), backlog.clone())
             .await
             .expect("open window, within the cap");
@@ -1681,7 +1682,7 @@ async fn process_sign_request_admits_a_window_within_the_cap() {
 
 #[tokio::test]
 async fn process_sign_request_rejects_a_window_closed_at_the_source_block() {
-    let backlog = Backlog::new();
+    let backlog = Backlog::new(Cadence::test());
     let err = admit_tron_request_with_expiry(
         (SOURCE_BLOCK_S * 1000) as i64,
         Some(SOURCE_BLOCK_S),
@@ -1703,7 +1704,7 @@ async fn process_sign_request_rejects_a_window_closed_at_the_source_block() {
 
 #[tokio::test]
 async fn process_sign_request_rejects_a_window_beyond_the_cap() {
-    let backlog = Backlog::new();
+    let backlog = Backlog::new(Cadence::test());
     let err = admit_tron_request_with_expiry(
         (SOURCE_BLOCK_S * 1000 + MAX_EXPIRATION_SPAN_MS + 1) as i64,
         Some(SOURCE_BLOCK_S),
@@ -1723,7 +1724,7 @@ async fn process_sign_request_rejects_a_window_beyond_the_cap() {
 /// the window.
 #[tokio::test]
 async fn process_sign_request_skips_the_expiry_bound_without_a_source_block_time() {
-    let backlog = Backlog::new();
+    let backlog = Backlog::new(Cadence::test());
     admit_tron_request_with_expiry(
         (SOURCE_BLOCK_S * 1000 + MAX_EXPIRATION_SPAN_MS * 10) as i64,
         None,
@@ -1737,7 +1738,7 @@ async fn process_sign_request_skips_the_expiry_bound_without_a_source_block_time
 /// The block time from the event is forwarded to the bound, ensuring that the expiration window is correctly enforced.
 #[tokio::test]
 async fn handle_chain_event_forwards_the_block_time_to_the_bound() {
-    let backlog = Backlog::new();
+    let backlog = Backlog::new(Cadence::test());
     let (sign_tx, _sign_rx) = mpsc::channel(4);
     let mut ctx = make_test_stream_context_with_generator_pk(backlog.clone(), sign_tx, true);
     let root_pk = test_root_pk();
@@ -1780,7 +1781,7 @@ async fn handle_chain_event_forwards_the_block_time_to_the_bound() {
 /// An Ethereum target carries no expiry; block time is ignored.
 #[tokio::test]
 async fn process_sign_request_ignores_block_time_for_targets_without_an_expiry() {
-    let backlog = Backlog::new();
+    let backlog = Backlog::new(Cadence::test());
     let (sign_tx, _sign_rx) = mpsc::channel(4);
     let ctx = make_test_stream_context_with_generator_pk(backlog.clone(), sign_tx, true);
     let request = Arc::new(IndexedSignRequest::sign_bidirectional(
@@ -1805,7 +1806,7 @@ async fn process_sign_request_ignores_block_time_for_targets_without_an_expiry()
 /// pending transaction.
 #[tokio::test]
 async fn process_sign_request_rejects_unowned_tron_bytes() {
-    let backlog = Backlog::new();
+    let backlog = Backlog::new(Cadence::default());
     let (sign_tx, _sign_rx) = mpsc::channel(4);
     let ctx = make_test_stream_context_with_generator_pk(backlog.clone(), sign_tx, true);
     let root_pk = test_root_pk();
@@ -1882,7 +1883,7 @@ fn legacy_contract_call_on<E: rlp::Encodable>(chain_id: &E) -> Vec<u8> {
 /// executed, and only then fails as `ExtractionFailed`.
 #[tokio::test]
 async fn process_sign_request_rejects_an_unprocessable_output_schema() {
-    let backlog = Backlog::new();
+    let backlog = Backlog::new(Cadence::default());
     let (sign_tx, _sign_rx) = mpsc::channel(4);
     let ctx = make_test_stream_context_with_generator_pk(backlog.clone(), sign_tx, true);
     let request = |seed: u8, output_schema: &[u8]| {
@@ -1919,7 +1920,7 @@ const WIDE_CHAIN_ID: [u8; 9] = [1, 0, 0, 0, 0, 0, 0, 0, 0];
 /// decides where it executes: signed for another network, it never executes here.
 #[tokio::test]
 async fn process_sign_request_rejects_another_networks_chain_id() {
-    let backlog = Backlog::new();
+    let backlog = Backlog::new(Cadence::default());
     let (sign_tx, _sign_rx) = mpsc::channel(4);
     let mut ctx = make_test_stream_context_with_generator_pk(backlog.clone(), sign_tx, true);
     let request = |seed: u8, chain_id: u64| {
@@ -1980,7 +1981,7 @@ async fn process_sign_request_rejects_another_networks_chain_id() {
 /// nothing ends. Admission runs the same derivations respond processing will need.
 #[tokio::test]
 async fn process_sign_request_rejects_undecodable_bidirectional_transaction() {
-    let backlog = Backlog::new();
+    let backlog = Backlog::new(Cadence::default());
     let sign_id = SignId::new([14u8; 32]);
     let request = undecodable_bidi_request(sign_id);
 
@@ -1998,7 +1999,7 @@ async fn process_sign_request_rejects_undecodable_bidirectional_transaction() {
 
 #[tokio::test]
 async fn process_sign_request_rejects_empty_bidirectional_serialized_transaction() {
-    let backlog = Backlog::new();
+    let backlog = Backlog::new(Cadence::default());
     let sign_id = SignId::new([13u8; 32]);
 
     // A bidirectional request with an empty `serialized_transaction`. If accepted
@@ -2032,7 +2033,7 @@ async fn process_sign_request_rejects_empty_bidirectional_serialized_transaction
 /// of keccak(request_id || output) and gets a valid attestation for any outcome.
 #[tokio::test]
 async fn process_sign_request_rejects_the_reserved_attestation_path() {
-    let backlog = Backlog::new();
+    let backlog = Backlog::new(Cadence::default());
     let (sign_tx, _sign_rx) = mpsc::channel(4);
     let ctx = make_test_stream_context_with_generator_pk(backlog.clone(), sign_tx, false);
 
@@ -2062,7 +2063,7 @@ async fn process_sign_request_rejects_the_reserved_attestation_path() {
 
 #[tokio::test]
 async fn process_sign_request_duplicate_is_idempotent() {
-    let backlog = Backlog::new();
+    let backlog = Backlog::new(Cadence::default());
     let sign_id = SignId::new([9u8; 32]);
     let request = mock_sign_request(sign_id, Chain::Ethereum);
 
@@ -2146,7 +2147,7 @@ async fn process_sign_request_duplicate_is_idempotent() {
 
 #[tokio::test]
 async fn process_sign_request_replay_keeps_an_advanced_entry() {
-    let backlog = Backlog::new();
+    let backlog = Backlog::new(Cadence::default());
     let sign_id = SignId::new([21u8; 32]);
     let request = mock_sign_request(sign_id, Chain::Ethereum);
     let (pk, output) = mock_signature_output(&request.args);
@@ -2186,7 +2187,7 @@ async fn process_sign_request_replay_keeps_an_advanced_entry() {
 
 #[tokio::test]
 async fn process_respond_event_rejects_invalid_signature() {
-    let backlog = Backlog::new();
+    let backlog = Backlog::new(Cadence::default());
     let sign_id = SignId::new([15u8; 32]);
     let entry = backlog.insert_mock_sign(sign_id, Chain::Ethereum).await;
 
@@ -2217,7 +2218,7 @@ async fn process_respond_event_rejects_invalid_signature() {
 
 #[tokio::test]
 async fn process_respond_bidirectional_event_duplicate_is_idempotent() {
-    let backlog = Backlog::new();
+    let backlog = Backlog::new(Cadence::default());
     let tx = test_bidirectional_tx(13, Chain::Solana, Chain::Ethereum);
     let sign_id = tx.sign_id();
     let entry = backlog.insert_mock_final(&tx).await;
@@ -2259,7 +2260,7 @@ async fn process_respond_bidirectional_event_duplicate_is_idempotent() {
 
 #[tokio::test]
 async fn process_respond_bidirectional_event_rejects_invalid_signature() {
-    let backlog = Backlog::new();
+    let backlog = Backlog::new(Cadence::default());
     let tx = test_bidirectional_tx(16, Chain::Solana, Chain::Ethereum);
     let sign_id = tx.sign_id();
     let entry = backlog.insert_mock_final(&tx).await;
@@ -2287,7 +2288,7 @@ async fn process_respond_bidirectional_event_rejects_invalid_signature() {
 
 #[tokio::test]
 async fn process_respond_event_duplicate_ethereum_is_idempotent() {
-    let backlog = Backlog::new();
+    let backlog = Backlog::new(Cadence::default());
     let sign_id = SignId::new([3u8; 32]);
     let entry = backlog.insert_mock_sign(sign_id, Chain::Ethereum).await;
 
@@ -2338,7 +2339,7 @@ async fn process_respond_event_duplicate_ethereum_is_idempotent() {
 
 #[tokio::test]
 async fn process_respond_event_advances_bidirectional_from_pending_publish() {
-    let backlog = Backlog::new();
+    let backlog = Backlog::new(Cadence::default());
     let tx = test_bidirectional_tx(14, Chain::Ethereum, Chain::Ethereum);
     let sign_id = tx.sign_id();
     let args = test_sign_args(14);
@@ -2437,7 +2438,7 @@ async fn process_respond_event_advances_bidirectional_from_pending_publish() {
 
 #[tokio::test]
 async fn process_execution_confirmed_failed_creates_error_respond_request() {
-    let backlog = Backlog::new();
+    let backlog = Backlog::new(Cadence::default());
 
     let tx = test_bidirectional_tx(2, Chain::Solana, Chain::Ethereum);
     let sign_id = tx.sign_id();
@@ -2485,7 +2486,7 @@ async fn process_execution_confirmed_failed_creates_error_respond_request() {
 
 #[tokio::test]
 async fn process_execution_confirmed_waits_for_source_catchup() {
-    let backlog = Backlog::new();
+    let backlog = Backlog::new(Cadence::default());
 
     let tx = test_bidirectional_tx(4, Chain::Solana, Chain::Ethereum);
     backlog.insert_mock_executing(&tx).await;
@@ -2530,7 +2531,7 @@ async fn process_execution_confirmed_waits_for_source_catchup() {
 
 #[tokio::test]
 async fn process_execution_confirmed_carries_canton_chain_ctx_to_final_request() {
-    let backlog = Backlog::new();
+    let backlog = Backlog::new(Cadence::default());
     let mut tx = test_bidirectional_tx(24, Chain::Canton, Chain::Ethereum);
     tx.sender = [7u8; 32];
     let sign_id = tx.sign_id();
@@ -2602,7 +2603,7 @@ async fn process_execution_confirmed_carries_canton_chain_ctx_to_final_request()
 
 #[tokio::test]
 async fn requeue_pending_sign_requests_is_chain_scoped() {
-    let backlog = Backlog::new();
+    let backlog = Backlog::new(Cadence::default());
     let solana_sign_id = SignId::new([7u8; 32]);
     let ethereum_sign_id = SignId::new([8u8; 32]);
 
@@ -2642,12 +2643,12 @@ async fn catchup_blocks_vote_for_checkpoints() {
     let (sign_tx, _sign_rx) = mpsc::channel(4);
     let telemetry = NoopChainTelemetry;
     let (mut ctx, mut rpc_rx) = make_test_stream_context_with_rpc(
-        Backlog::new(),
+        Backlog::new(Cadence::test()),
         sign_tx,
         false,
         ProjectivePoint::GENERATOR.to_affine(),
     );
-    let interval = crate::backlog::checkpoint_interval(chain).unwrap();
+    let interval = Cadence::test().checkpoint_interval(chain).unwrap();
 
     process_block_event(chain, interval, &ctx, &telemetry)
         .await
@@ -2680,7 +2681,7 @@ async fn catchup_blocks_vote_for_checkpoints() {
 #[tokio::test]
 async fn live_block_votes_for_checkpoint() {
     let chain = Chain::Ethereum;
-    let backlog = Backlog::new();
+    let backlog = Backlog::new(Cadence::default());
     let (sign_tx, mut sign_rx) = mpsc::channel(4);
     let telemetry = NoopChainTelemetry;
     let (ctx, mut rpc_rx) = make_test_stream_context_with_rpc(
@@ -2689,7 +2690,7 @@ async fn live_block_votes_for_checkpoint() {
         true,
         ProjectivePoint::GENERATOR.to_affine(),
     );
-    let interval = crate::backlog::checkpoint_interval(chain).unwrap();
+    let interval = Cadence::default().checkpoint_interval(chain).unwrap();
 
     process_block_event(chain, interval, &ctx, &telemetry)
         .await
@@ -2717,7 +2718,7 @@ async fn live_block_votes_for_checkpoint() {
 /// leg 2.
 #[tokio::test]
 async fn publish_failover_fires_once_per_leg() {
-    let backlog = Backlog::new();
+    let backlog = Backlog::new(Cadence::default());
     let tx = mock_tx(21);
     let sign_id = tx.sign_id();
 
@@ -2785,7 +2786,7 @@ async fn next_publish(rx: &mut mpsc::Receiver<RpcAction>) -> Option<RpcAction> {
 /// put a second copy of the same response on chain.
 #[tokio::test]
 async fn catchup_resume_suppresses_the_sweep_for_the_same_entry() {
-    let backlog = Backlog::new();
+    let backlog = Backlog::new(Cadence::default());
     let sign_id = mpc_primitives::SignId::new([22u8; 32]);
 
     let sign = backlog.insert_mock_sign(sign_id, Chain::Solana).await;
@@ -2830,7 +2831,7 @@ async fn insert_publishable(backlog: &Backlog, seed: u8) {
 /// reading its chain, so it holds fire rather than guessing.
 #[tokio::test]
 async fn publish_failover_needs_catchup() {
-    let backlog = Backlog::new();
+    let backlog = Backlog::new(Cadence::default());
     insert_publishable(&backlog, 23).await;
 
     let (sign_tx, _sign_rx) = mpsc::channel(4);
@@ -2861,7 +2862,7 @@ async fn publish_failover_needs_catchup() {
 /// completion dropped during replay would leave that task running.
 #[tokio::test]
 async fn process_respond_bidirectional_event_sends_completion_before_catchup() {
-    let backlog = Backlog::new();
+    let backlog = Backlog::new(Cadence::default());
     let tx = test_bidirectional_tx(82, Chain::Solana, Chain::Ethereum);
     let sign_id = tx.sign_id();
     let entry = backlog.insert_mock_final(&tx).await;
@@ -2905,7 +2906,7 @@ async fn midnight_execution_response_binds_receipt_height_and_outcome() {
             vec![],
         ),
     ] {
-        let backlog = Backlog::new();
+        let backlog = Backlog::new(Cadence::default());
         let tx = test_bidirectional_tx(92, Chain::Midnight, Chain::Ethereum);
         backlog.insert_mock_executing(&tx).await;
         let (sign_tx, mut sign_rx) = mpsc::channel(4);
@@ -2939,7 +2940,7 @@ async fn midnight_execution_response_binds_receipt_height_and_outcome() {
 #[tokio::test]
 async fn midnight_completion_requires_the_published_metadata_to_match_the_signature() {
     for case in 0..9 {
-        let backlog = Backlog::new();
+        let backlog = Backlog::new(Cadence::default());
         let tx = test_bidirectional_tx(94, Chain::Midnight, Chain::Ethereum);
         let entry = backlog.insert_mock_final(&tx).await;
         let SignKind::RespondBidirectional(response) = &entry.request().kind else {
@@ -3024,7 +3025,7 @@ async fn midnight_completion_requires_the_published_metadata_to_match_the_signat
 #[tokio::test]
 async fn recovered_midnight_final_publication_requires_canonical_metadata() {
     for compatible in [false, true] {
-        let backlog = Backlog::new();
+        let backlog = Backlog::new(Cadence::default());
         let tx = test_bidirectional_tx(96, Chain::Midnight, Chain::Ethereum);
         let request = if compatible {
             backlog.insert_mock_final(&tx).await.request().clone()
@@ -3041,7 +3042,7 @@ async fn recovered_midnight_final_publication_requires_canonical_metadata() {
             .await
             .unwrap();
         let before = backlog.checkpoint(Chain::Midnight).await.unwrap();
-        let restored = Backlog::new();
+        let restored = Backlog::new(Cadence::default());
         restored.recover_by_checkpoint(&before).await;
         let (sign_tx, _sign_rx) = mpsc::channel(4);
         let (ctx, mut rpc_rx) = make_test_stream_context_with_rpc(restored, sign_tx, true, pk);
@@ -3072,14 +3073,14 @@ async fn decode_failure_parks_request_and_preserves_source_checkpoint() {
         Chain::Hydration,
     ] {
         for caught_up in [false, true] {
-            let backlog = Backlog::new();
+            let backlog = Backlog::new(Cadence::default());
             let tx = test_bidirectional_tx(97, source_chain, Chain::Ethereum);
             backlog.insert_mock_executing(&tx).await;
             backlog
                 .set_processed_block_interval(source_chain, 40, 0)
                 .await;
             let before = backlog.checkpoint(source_chain).await.unwrap();
-            let observer = Backlog::new();
+            let observer = Backlog::new(Cadence::default());
             observer.recover_by_checkpoint(&before).await;
             let (sign_tx, mut sign_rx) = mpsc::channel(4);
             let ctx = make_test_stream_context_with_generator_pk(observer, sign_tx, caught_up);
@@ -3127,7 +3128,7 @@ async fn decode_failure_parks_request_and_preserves_source_checkpoint() {
             let checkpoint: crate::backlog::Checkpoint =
                 ciborium::from_reader(encoded.as_slice()).unwrap();
             assert_eq!(after, checkpoint);
-            let restored = Backlog::new();
+            let restored = Backlog::new(Cadence::default());
             restored.recover_by_checkpoint(&checkpoint).await;
             assert_eq!(
                 restored.get_execution_watchers(Chain::Ethereum).await.len(),
@@ -3184,7 +3185,7 @@ async fn published_midnight_response(
     height: u64,
     root_sk: &k256::SecretKey,
 ) -> (Backlog, RespondBidirectionalEvent) {
-    let backlog = Backlog::new();
+    let backlog = Backlog::new(Cadence::default());
     backlog.insert_mock_executing(tx).await;
     backlog
         .set_processed_block_interval(Chain::Midnight, 40, 0)
@@ -3235,7 +3236,7 @@ async fn midnight_response_settles_entries_that_missed_the_outcome() {
         let (disagreeing, _) =
             published_midnight_response(&tx, ExecutionOutcome::Failed, 7124, &root_sk).await;
 
-        let lagging = Backlog::new();
+        let lagging = Backlog::new(Cadence::default());
         lagging.insert_mock_executing(&tx).await;
         if parked {
             lagging
@@ -3347,7 +3348,7 @@ async fn midnight_unobserved_entries_keep_responses_they_cannot_bind() {
                 (pending.clone(), event)
             }
         };
-        let backlog = Backlog::new();
+        let backlog = Backlog::new(Cadence::default());
         backlog.insert_mock_executing(&tx).await;
         let (sign_tx, mut sign_rx) = mpsc::channel(4);
         let ctx = make_test_stream_context_with_generator_pk(backlog, sign_tx, true);
@@ -3414,7 +3415,7 @@ async fn duplicate_destination_keys_on_the_flat_id() {
     let second = tron_bidirectional_event(hex::decode(TRON_RAW_HEX).unwrap());
     let other = tron_bidirectional_event(different);
 
-    let backlog = Backlog::new();
+    let backlog = Backlog::new(Cadence::default());
     assert_eq!(
         duplicate_destination(&first, SignId::new([9; 32]), &backlog).await,
         None,
@@ -3487,7 +3488,7 @@ async fn unobserved_response_settles_when_it_verifies() {
         let case = format!("{source_chain} {outcome:?}, parked: {parked}, output: {published}");
         let tx = test_bidirectional_tx(105, source_chain, Chain::Ethereum);
 
-        let attested = Backlog::new();
+        let attested = Backlog::new(Cadence::default());
         attested.insert_mock_executing(&tx).await;
         let (sign_tx, mut sign_rx) = mpsc::channel(4);
         let ctx = make_test_stream_context_with_generator_pk(attested, sign_tx, true);
@@ -3512,7 +3513,7 @@ async fn unobserved_response_settles_when_it_verifies() {
             chain: source_chain,
         };
 
-        let lagging = Backlog::new();
+        let lagging = Backlog::new(Cadence::default());
         lagging.insert_mock_executing(&tx).await;
         if parked {
             lagging
@@ -3576,7 +3577,7 @@ async fn final_response_latency_follows_the_recorded_outcome() {
         (108, ExecutionOutcome::Failed, "execution_failed"),
     ] {
         let tx = test_bidirectional_tx(seed, Chain::Hydration, Chain::Ethereum);
-        let backlog = Backlog::new();
+        let backlog = Backlog::new(Cadence::default());
         backlog.insert_mock_executing(&tx).await;
         let (sign_tx, mut sign_rx) = mpsc::channel(4);
         let ctx = make_test_stream_context_with_generator_pk(backlog, sign_tx, true);
@@ -3613,7 +3614,7 @@ async fn final_response_settles_on_the_published_output() {
     let root_sk = k256::SecretKey::from_slice(&[1; 32]).unwrap();
     for (published, settles) in [("same", true), ("signed", true), ("unsigned", false)] {
         let tx = test_bidirectional_tx(106, Chain::Solana, Chain::Ethereum);
-        let backlog = Backlog::new();
+        let backlog = Backlog::new(Cadence::default());
         backlog.insert_mock_executing(&tx).await;
         let (sign_tx, mut sign_rx) = mpsc::channel(4);
         let ctx = make_test_stream_context_with_generator_pk(backlog, sign_tx, true);
@@ -3668,7 +3669,7 @@ async fn final_response_settles_on_the_published_output() {
 async fn catching_up_deletes_records_without_an_entry() {
     let chain = Chain::Solana;
     let storage = CheckpointStorage::in_memory();
-    let backlog = Backlog::persisted(storage.clone());
+    let backlog = Backlog::persisted(storage.clone(), Cadence::test());
     let kept = mock_sign_request(SignId::new([1; 32]), chain);
     backlog.insert(Arc::clone(&kept)).await;
     let record = SignStatus::Sign(SignProgress::Publishing(

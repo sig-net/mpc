@@ -373,6 +373,7 @@ mod tests {
     use crate::storage::checkpoint_storage::CheckpointStorage;
     use crate::stream::test_utils::make_test_stream_context;
     use crate::types::SignCommand;
+    use crate::util::cadence::Cadence;
 
     use k256::ProjectivePoint;
     use mpc_chain_integration_core::{NoopChainTelemetry, StateManager};
@@ -418,7 +419,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_empty_digest_returns_false() {
-        let backlog = Backlog::new();
+        let backlog = Backlog::new(Cadence::default());
         let chain = Chain::Ethereum;
         let (_tx, mut rx) = watch::channel(None);
 
@@ -428,7 +429,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_matching_consensus_confirms_and_returns_false() {
-        let backlog = Backlog::new();
+        let backlog = Backlog::new(Cadence::default());
         let chain = Chain::Ethereum;
 
         backlog.set_processed_block(chain, 100).await.unwrap();
@@ -455,7 +456,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_ahead_with_pending_match_confirms() {
-        let backlog = Backlog::new();
+        let backlog = Backlog::new(Cadence::default());
         let chain = Chain::Ethereum;
 
         backlog.set_processed_block(chain, 100).await.unwrap();
@@ -481,7 +482,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_mismatch_triggers_regression() {
-        let backlog = Backlog::new();
+        let backlog = Backlog::new(Cadence::default());
         let chain = Chain::Ethereum;
 
         backlog.set_processed_block(chain, 100).await.unwrap();
@@ -496,7 +497,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_no_local_returns_false() {
-        let backlog = Backlog::new();
+        let backlog = Backlog::new(Cadence::default());
         let chain = Chain::Ethereum;
 
         let digest = [0x42u8; 32];
@@ -508,7 +509,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_reset_detected_without_a_local_checkpoint() {
-        let backlog = Backlog::new();
+        let backlog = Backlog::new(Cadence::default());
         let chain = Chain::Ethereum;
 
         // "I hold no checkpoint" is not evidence there is nothing to do.
@@ -526,7 +527,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_applied_reset_is_not_a_regression() {
-        let backlog = Backlog::new();
+        let backlog = Backlog::new(Cadence::default());
         let chain = Chain::Ethereum;
 
         // The state a node is left in once it has applied the reset: an empty
@@ -557,7 +558,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_wait_detects_regression_after_consumed() {
-        let backlog = Backlog::new();
+        let backlog = Backlog::new(Cadence::default());
         let chain = Chain::Ethereum;
 
         backlog.set_processed_block(chain, 100).await.unwrap();
@@ -581,7 +582,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_wait_detects_regression_after_change() {
-        let backlog = Backlog::new();
+        let backlog = Backlog::new(Cadence::default());
         let chain = Chain::Ethereum;
 
         backlog.set_processed_block(chain, 100).await.unwrap();
@@ -656,7 +657,7 @@ mod tests {
     #[tokio::test]
     async fn startup_resubmits_pending_checkpoint_votes_once() {
         let chain = Chain::Ethereum;
-        let backlog = Backlog::new();
+        let backlog = Backlog::new(Cadence::default());
         let mut expected = Vec::new();
         for height in [100, 200] {
             let checkpoint = backlog.set_processed_block(chain, height).await.unwrap();
@@ -726,7 +727,7 @@ mod tests {
 
         let chain = Chain::Ethereum;
         let storage = CheckpointStorage::in_memory();
-        let backlog = Backlog::persisted(storage.clone());
+        let backlog = Backlog::persisted(storage.clone(), Cadence::default());
         let checkpoint = backlog.set_processed_block(chain, 100).await.unwrap();
         let expected = CheckpointDigest {
             chain,
@@ -768,7 +769,7 @@ mod tests {
 
     #[tokio::test]
     async fn dispatches_events_and_shuts_down_when_run_exits() {
-        let backlog = Backlog::new();
+        let backlog = Backlog::new(Cadence::default());
         let (sign_tx, _sign_rx) = mpsc::channel(8);
         let (ctx, _cp_tx, _mesh_tx, _rpc_rx) = test_ctx(backlog.clone(), sign_tx);
 
@@ -800,7 +801,7 @@ mod tests {
             first_cancel: first_cancel.clone(),
         };
         let (sign_tx, _sign_rx) = mpsc::channel(8);
-        let (ctx, _cp_tx, _mesh_tx, _rpc_rx) = test_ctx(Backlog::new(), sign_tx);
+        let (ctx, _cp_tx, _mesh_tx, _rpc_rx) = test_ctx(Backlog::new(Cadence::default()), sign_tx);
 
         tokio::time::timeout(
             Duration::from_secs(5),
@@ -854,7 +855,7 @@ mod tests {
             }
         }
 
-        let backlog = Backlog::new();
+        let backlog = Backlog::new(Cadence::default());
         let attempts = Arc::new(AtomicUsize::new(0));
         let rerun_saw_caught_up = Arc::new(Mutex::new(None));
         let indexer = CatchupThenStallIndexer {
@@ -910,7 +911,7 @@ mod tests {
             }
         }
 
-        let backlog = Backlog::new();
+        let backlog = Backlog::new(Cadence::default());
         let (sign_tx, _sign_rx) = mpsc::channel(8);
         let (ctx, _cp_tx, _mesh_tx, _rpc_rx) = test_ctx(backlog.clone(), sign_tx);
         let task = tokio::spawn(run_supervised_with_watchdog(
@@ -936,7 +937,7 @@ mod tests {
     #[tokio::test]
     async fn regression_cancels_and_restarts_run() {
         let chain = Chain::Ethereum;
-        let backlog = Backlog::new();
+        let backlog = Backlog::new(Cadence::default());
         backlog.set_processed_block(chain, 100).await.unwrap();
         backlog.checkpoint(chain).await.unwrap();
 
@@ -1006,7 +1007,7 @@ mod tests {
     #[tokio::test]
     async fn reset_cancels_restarts_and_settles_without_peers() {
         let chain = Chain::Ethereum;
-        let backlog = Backlog::new();
+        let backlog = Backlog::new(Cadence::default());
         backlog.set_processed_block(chain, 100).await.unwrap();
         let stale = backlog.checkpoint(chain).await.unwrap();
         assert!(backlog
@@ -1111,7 +1112,7 @@ mod tests {
             attempts: attempts.clone(),
         };
         let (sign_tx, _sign_rx) = mpsc::channel(8);
-        let (ctx, _cp_tx, _mesh_tx, _rpc_rx) = test_ctx(Backlog::new(), sign_tx);
+        let (ctx, _cp_tx, _mesh_tx, _rpc_rx) = test_ctx(Backlog::new(Cadence::default()), sign_tx);
 
         tokio::time::timeout(
             Duration::from_secs(5),
@@ -1132,7 +1133,7 @@ mod tests {
     #[tokio::test]
     async fn full_checkpoint_cap_pauses_exit_and_watchdog_restarts() {
         let chain = Chain::Ethereum;
-        let backlog = Backlog::new();
+        let backlog = Backlog::new(Cadence::default());
 
         let attempts = Arc::new(AtomicUsize::new(0));
         let indexer = StalledRunIndexer {
@@ -1153,7 +1154,7 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
         // Fill the pending-checkpoint cap so `has_checkpoint_slot` returns false.
-        let interval = crate::backlog::checkpoint_interval(chain).unwrap();
+        let interval = Cadence::default().checkpoint_interval(chain).unwrap();
         for i in 1..=crate::backlog::MAX_PENDING_CHECKPOINTS {
             let h = (i as u64) * interval;
             assert!(backlog.set_processed_block(chain, h).await.is_some());
@@ -1225,7 +1226,7 @@ mod tests {
             started: started.clone(),
         };
         let (sign_tx, _sign_rx) = mpsc::channel(8);
-        let (ctx, _cp_tx, _mesh_tx, _rpc_rx) = test_ctx(Backlog::new(), sign_tx);
+        let (ctx, _cp_tx, _mesh_tx, _rpc_rx) = test_ctx(Backlog::new(Cadence::default()), sign_tx);
 
         let task = tokio::spawn(run_supervised_with_watchdog(
             indexer,
@@ -1277,7 +1278,7 @@ mod tests {
             started: started.clone(),
         };
         let (sign_tx, _sign_rx) = mpsc::channel(8);
-        let (ctx, _cp_tx, _mesh_tx, _rpc_rx) = test_ctx(Backlog::new(), sign_tx);
+        let (ctx, _cp_tx, _mesh_tx, _rpc_rx) = test_ctx(Backlog::new(Cadence::default()), sign_tx);
 
         let task = tokio::spawn(run_supervised_with_watchdog(
             indexer,
@@ -1331,7 +1332,7 @@ mod tests {
             started: started.clone(),
         };
         let (sign_tx, _sign_rx) = mpsc::channel(8);
-        let (ctx, _cp_tx, _mesh_tx, _rpc_rx) = test_ctx(Backlog::new(), sign_tx);
+        let (ctx, _cp_tx, _mesh_tx, _rpc_rx) = test_ctx(Backlog::new(Cadence::default()), sign_tx);
 
         let task = tokio::spawn(run_supervised_with_watchdog(
             indexer,

@@ -25,13 +25,12 @@ use crate::storage::Initializing;
 use crate::stream::{supervisor::run_supervised, StreamContext};
 use crate::types::SignCommand;
 use crate::{logs, storage, web};
-#[cfg(feature = "test-feature")]
-pub use args::ethereum::mock_indexer_config;
 pub use args::{
     canton::CantonArgs, ethereum::EthArgs, hydration::HydrationArgs, midnight::MidnightArgs,
     solana::SolArgs, tron::TronArgs,
 };
 
+use crate::util::cadence::Cadence;
 use anyhow::Context as _;
 use clap::Parser;
 use deadpool_redis::{Hook, Runtime};
@@ -116,6 +115,10 @@ pub enum Cli {
         /// Logging options
         #[command(flatten)]
         log_options: logs::Options,
+        /// test cadence flag, if true cadence is faster for test
+        #[cfg(feature = "test-feature")]
+        #[arg(long)]
+        test_cadence: bool,
     },
 }
 
@@ -206,6 +209,8 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             my_address,
             storage_options,
             log_options,
+            #[cfg(feature = "test-feature")]
+            test_cadence,
         } => {
             let _guard = logs::setup(env, account_id.as_str(), &log_options).await;
             let _span = tracing::trace_span!("cli").entered();
@@ -213,6 +218,15 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             // is an orderly exit rather than the OS default.
             let shutdown = shutdown_signal();
             crate::metrics::init_metrics(&account_id);
+
+            #[cfg(feature = "test-feature")]
+            let cadence = Arc::new(if test_cadence {
+                Cadence::test()
+            } else {
+                Cadence::default()
+            });
+            #[cfg(not(feature = "test-feature"))]
+            let cadence = Arc::new(Cadence::default());
 
             let cipher_pk_hex = hex::encode(cipher_sk.public_key().to_bytes());
 
@@ -226,7 +240,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 presignature_storage,
                 backlog,
                 midnight_dust,
-            } = StorageHandles::new(&account_id, &storage_options).await?;
+            } = StorageHandles::new(&account_id, &storage_options, Arc::clone(&cadence)).await?;
 
             // NEAR as a source chain exists for the integration tests only, and the
             // test harness builds this binary with `test-feature`.
@@ -252,7 +266,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             } = MeshHandles::new(&account_id);
 
             let stack = ChainStack::new(ChainConfigs::from_args(
-                eth, sol, hydration, canton, midnight, tron,
+                eth, sol, hydration, canton, midnight, tron, &cadence,
             )?)
             .with_midnight_dust(midnight_dust);
             let network = NetworkConfig { cipher_sk, sign_sk };
@@ -318,6 +332,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 mesh_state.clone(),
                 rpc_channel.clone(),
                 sync_report_tx,
+                Arc::clone(&cadence),
             )
             .await;
 
@@ -456,9 +471,10 @@ impl ChainConfigs {
         canton: CantonArgs,
         midnight: MidnightArgs,
         tron: TronArgs,
+        cadence: &Cadence,
     ) -> anyhow::Result<Self> {
         Ok(Self {
-            eth: eth.into_config()?,
+            eth: eth.into_config(cadence.eth_refresh())?,
             sol: sol.into_config(),
             hydration: hydration.into_config(),
             canton: canton.into_config(),
@@ -736,15 +752,16 @@ impl StorageHandles {
     async fn new(
         account_id: &AccountId,
         storage_options: &storage::Options,
+        cadence: Arc<Cadence>,
     ) -> anyhow::Result<Self> {
         let keystore = Keystore::init(storage_options, account_id).await?;
         let redis_pool = redis_pool(storage_options.redis_url.clone())?;
         let triple_storage = TriplePair::storage(&redis_pool, account_id);
         let presignature_storage = Presignature::storage(&redis_pool, account_id);
-        let backlog = Backlog::persisted(CheckpointStorage::Redis(
-            redis_pool.clone(),
-            account_id.clone(),
-        ));
+        let backlog = Backlog::persisted(
+            CheckpointStorage::Redis(redis_pool.clone(), account_id.clone()),
+            cadence,
+        );
         let midnight_dust = Arc::new(MidnightDustStorage::new(redis_pool, account_id));
         Ok(Self {
             keystore,
@@ -780,6 +797,7 @@ impl ProtocolHandles {
         mesh_state: watch::Receiver<MeshState>,
         rpc_channel: RpcChannel,
         sync_report_tx: SyncReportSender,
+        cadence: Arc<Cadence>,
     ) -> Self {
         let (config_tx, config_rx) = Config::channel();
         let (checkpoints_tx, checkpoints_rx) = checkpoint_watchers();
@@ -801,6 +819,7 @@ impl ProtocolHandles {
             message_channel.clone(),
             rpc_channel,
             sync_report_tx,
+            cadence,
         );
         let sign_task = SignatureSpawnerTask::run(spawner, sign_rx, config_rx.clone());
         let protocol = MpcSignProtocol {
@@ -1054,6 +1073,7 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
+    use crate::util::cadence::Cadence;
 
     /// No error echoes what the operator typed: every flag meets every way a
     /// secret can land in the input.
@@ -1163,6 +1183,7 @@ mod tests {
             CantonArgs::parse_from(["test"]),
             MidnightArgs::parse_from(["test"]),
             TronArgs::parse_from(["test"]),
+            &Cadence::default(),
         )
         .unwrap();
 
@@ -1176,7 +1197,7 @@ mod tests {
         );
 
         let publishers = ChainStack::new(chains)
-            .publishers(undialed_near_client(), Backlog::new())
+            .publishers(undialed_near_client(), Backlog::new(Cadence::default()))
             .await
             .unwrap();
 
@@ -1202,6 +1223,7 @@ mod tests {
             CantonArgs::parse_from(["test"]),
             MidnightArgs::parse_from(["test"]),
             TronArgs::parse_from(["test", "--tron-endpoint", "https://api.trongrid.io"]),
+            &Cadence::default(),
         )
         .unwrap();
 
@@ -1229,13 +1251,13 @@ mod tests {
         };
 
         let publishers = ChainStack::new(chains("//Alice"))
-            .publishers(undialed_near_client(), Backlog::new())
+            .publishers(undialed_near_client(), Backlog::new(Cadence::default()))
             .await
             .unwrap();
         assert!(publishers.contains_key(&Chain::Hydration));
 
         assert!(ChainStack::new(chains("not a signer uri"))
-            .publishers(undialed_near_client(), Backlog::new())
+            .publishers(undialed_near_client(), Backlog::new(Cadence::default()))
             .await
             .is_err());
     }
@@ -1266,7 +1288,7 @@ mod tests {
         };
 
         let publishers = ChainStack::new(chains)
-            .publishers(undialed_near_client(), Backlog::new())
+            .publishers(undialed_near_client(), Backlog::new(Cadence::default()))
             .await
             .unwrap();
 
@@ -1313,7 +1335,7 @@ mod tests {
         });
 
         let publishers = stack
-            .publishers(undialed_near_client(), Backlog::new())
+            .publishers(undialed_near_client(), Backlog::new(Cadence::default()))
             .await
             .unwrap();
         let publisher = publishers
@@ -1342,6 +1364,80 @@ mod tests {
             "publish must wait out the stack gate's engaged window (base cooldown), took {:?}",
             start.elapsed()
         );
+    }
+
+    fn start_argv(extra: &[&str]) -> Vec<String> {
+        let sk = SecretKey::from_seed(near_crypto::KeyType::ED25519, "test").to_string();
+        let mut argv = vec![
+            "mpc-node".to_string(),
+            "start".to_string(),
+            "--near-rpc".to_string(),
+            "http://127.0.0.1:3030".to_string(),
+            "--mpc-contract-id".to_string(),
+            "mpc.near".to_string(),
+            "--account-id".to_string(),
+            "node.near".to_string(),
+            "--env".to_string(),
+            "dev".to_string(),
+            "--account-sk".to_string(),
+            sk.clone(),
+            "--cipher-sk".to_string(),
+            "aa".to_string(),
+            "--sign-sk".to_string(),
+            sk,
+            "--my-address".to_string(),
+            "http://127.0.0.1:3000".to_string(),
+            "--redis-url".to_string(),
+            "redis://127.0.0.1/".to_string(),
+            "--gcp-project-id".to_string(),
+            "p".to_string(),
+            "--sk-share-secret-id".to_string(),
+            "s".to_string(),
+        ];
+        argv.extend(extra.iter().map(|arg| (*arg).to_string()));
+        argv
+    }
+
+    fn start_offers_test_cadence() -> bool {
+        use clap::CommandFactory;
+        Cli::command()
+            .find_subcommand("start")
+            .expect("start subcommand must exist")
+            .get_arguments()
+            .any(|arg| arg.get_long() == Some("test-cadence"))
+    }
+
+    /// A release binary has no `--test-cadence` flag, so clap rejects it.
+    #[cfg(not(feature = "test-feature"))]
+    #[test]
+    fn release_build_rejects_test_cadence() {
+        use clap::Parser as _;
+        assert!(
+            !start_offers_test_cadence(),
+            "a release build must not offer --test-cadence"
+        );
+        let err = Cli::try_parse_from(start_argv(&["--test-cadence"])).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("unexpected argument '--test-cadence'"),
+            "{err}"
+        );
+    }
+
+    /// A binary with test-features accepts  `--test-cadence`.
+    #[cfg(feature = "test-feature")]
+    #[test]
+    fn test_build_accepts_test_cadence() {
+        use clap::Parser as _;
+        assert!(
+            start_offers_test_cadence(),
+            "a test build must offer --test-cadence"
+        );
+        let Cli::Start { test_cadence, .. } = Cli::try_parse_from(start_argv(&[])).unwrap();
+        assert!(!test_cadence);
+        let Cli::Start { test_cadence, .. } =
+            Cli::try_parse_from(start_argv(&["--test-cadence"])).unwrap();
+        assert!(test_cadence);
     }
 
     #[test]

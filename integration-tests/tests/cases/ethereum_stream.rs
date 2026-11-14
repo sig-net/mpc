@@ -10,7 +10,7 @@ use integration_tests::eth;
 use k256::elliptic_curve::sec1::ToEncodedPoint as _;
 use mpc_chain_ethereum::abi::ChainSignatures::{self, SignRequest};
 use mpc_chain_ethereum::utils::test::deploy_chain_signatures;
-use mpc_chain_ethereum::{EthConfig, EthereumIndexer};
+use mpc_chain_ethereum::{EthConfig, EthereumIndexer, IndexerConfig};
 use mpc_chain_integration_core::{
     utils::{retry::SharedBackoff, test::ChainIndexerStream},
     NoopChainTelemetry, StateManager,
@@ -22,6 +22,7 @@ use mpc_node::mesh::{connection::NodeStatus, MeshState};
 use mpc_node::node_client::NodeClient;
 use mpc_node::protocol::ParticipantInfo;
 use mpc_node::rpc::{ContractStateWatcher, RpcChannel};
+use mpc_node::util::cadence::Cadence;
 
 use mpc_node::storage::checkpoint_storage::CheckpointStorage;
 use mpc_node::stream::{supervisor::run_supervised, StreamContext};
@@ -189,14 +190,17 @@ impl EthereumTestEnvironment {
             network: mpc_chain_ethereum::EthNetwork::Anvil,
             gas: Default::default(),
             // The indexer runs in-process here, so poll as fast as a test node.
-            indexer: mpc_node::cli::mock_indexer_config(),
+            indexer: IndexerConfig {
+                refresh_interval: Cadence::test().eth_refresh(),
+                ..Default::default()
+            },
             publisher: Default::default(),
             rpc: Default::default(),
         }
     }
 
     fn backlog(&self) -> Backlog {
-        Backlog::new()
+        Backlog::new(Cadence::default())
     }
 
     fn contract(&self) -> ChainSignatures::ChainSignaturesInstance<eth::SandboxMiddleware> {
@@ -360,7 +364,7 @@ async fn stream_ethereum(
 async fn test_ethereum_stream_resume_starts_after_checkpoint_height() -> Result<()> {
     let ctx = EthereumTestEnvironment::new().await?;
     let storage = CheckpointStorage::in_memory();
-    let seeded_backlog = Backlog::persisted(storage.clone());
+    let seeded_backlog = Backlog::persisted(storage.clone(), Cadence::default());
 
     let replayed_payload = [0x31; 32];
     let (_, processed_height) =
@@ -389,7 +393,7 @@ async fn test_ethereum_stream_resume_starts_after_checkpoint_height() -> Result<
         expected_payload[0] = expected_payload[0].saturating_add(1);
     }
 
-    let backlog = Backlog::persisted(storage);
+    let backlog = Backlog::persisted(storage, Cadence::default());
     let indexer = EthereumIndexer::new(
         ctx.config(),
         backlog.clone(),
@@ -479,7 +483,7 @@ async fn test_ethereum_stream_linear_catchup_from_checkpoint() -> Result<()> {
     let checkpoint_nonce = ctx.signer.get_transaction_count(ctx.wallet).await?;
 
     let storage = CheckpointStorage::in_memory();
-    let seeded_backlog = Backlog::persisted(storage.clone());
+    let seeded_backlog = Backlog::persisted(storage.clone(), Cadence::default());
 
     let resolved_sign_id = SignId::new([0x11; 32]);
     let requeued_sign_id = SignId::new([0x22; 32]);
@@ -511,7 +515,7 @@ async fn test_ethereum_stream_linear_catchup_from_checkpoint() -> Result<()> {
         Ok(true)
     ));
 
-    let backlog = Backlog::persisted(storage.clone());
+    let backlog = Backlog::persisted(storage.clone(), Cadence::default());
 
     let responder_contract = ChainSignatures::new(ctx.contract_address, responder_signer.clone());
 
