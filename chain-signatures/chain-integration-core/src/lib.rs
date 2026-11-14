@@ -6,7 +6,7 @@ mod state;
 mod telemetry;
 pub mod utils;
 
-pub use indexer::{unexecutable_outcome, ChainIndexer};
+pub use indexer::{unexecutable_outcome, ChainIndexer, ExtractionFailure};
 pub use publish::{ChainPublisher, GatedPublisher, PublishAction};
 pub use state::{MockStateManager, StateManager, WatchKey, WatchedExecution};
 pub use telemetry::{

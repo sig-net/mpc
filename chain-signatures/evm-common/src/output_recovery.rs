@@ -7,10 +7,14 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::io::Write;
 
-use crate::event_parsing::is_contract_call;
-
 // Use Abi as this is what we are using for ethereum
 const OUTPUT_DESERIALIZATION_FORMAT: SerDeserFormat = SerDeserFormat::Abi;
+
+/// Whether a transaction's calldata represents a contract call: the
+/// same predicate on every EVM-family target.
+pub fn is_contract_call(input: &[u8]) -> bool {
+    !input.is_empty()
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 struct AbiField {
@@ -193,7 +197,7 @@ pub fn validate_schemas(
     respond_serialization_format: SerDeserFormat,
     respond_serialization_schema: &[u8],
 ) -> anyhow::Result<()> {
-    let is_contract_call = is_contract_call(&Bytes::copy_from_slice(calldata));
+    let is_contract_call = is_contract_call(calldata);
     if respond_serialization_format == SerDeserFormat::Fab {
         return validate_output_schema(is_contract_call, output_deserialization_schema);
     }
@@ -438,6 +442,15 @@ mod tests {
 
     const UINT256_SCHEMA: &[u8] = br#"[{"name":"amount","type":"uint256"}]"#;
 
+    #[test]
+    fn is_contract_call_detects_calldata() {
+        assert!(!is_contract_call(&Bytes::new()));
+        assert!(is_contract_call(&Bytes::from(vec![0u8; 2])));
+        assert!(is_contract_call(&Bytes::from(vec![
+            0xa9, 0x05, 0x9c, 0xbb, 0x00
+        ])));
+    }
+
     /// ABI-encoded `uint256` (32-byte big-endian).
     fn abi_uint256(value: u64) -> Bytes {
         let mut buf = [0u8; 32];
@@ -501,7 +514,7 @@ mod tests {
         ];
         for (calldata, output, format, respond, trace, accepted) in cases {
             let case = format!("{format:?} {calldata:?} {output:?} {respond:?}");
-            let is_contract_call = is_contract_call(&Bytes::copy_from_slice(calldata));
+            let is_contract_call = is_contract_call(calldata);
             let extracted =
                 build_serialized_output(is_contract_call, output, trace, format, respond);
             assert_eq!(extracted.is_ok(), accepted, "{case}: {extracted:?}");
@@ -740,7 +753,7 @@ mod tests {
         for calldata in [&[0xa9][..], &[0xa9, 0x05]] {
             // Not the plain-transfer default `true`.
             let out = build_serialized_output(
-                is_contract_call(&Bytes::copy_from_slice(calldata)),
+                is_contract_call(calldata),
                 bool_schema,
                 TraceOutput::Output(abi_bool(false)),
                 SerDeserFormat::Abi,
