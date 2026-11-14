@@ -262,11 +262,28 @@ async fn run_supervised_with_watchdog<I: ChainIndexer, T: ChainTelemetry>(
         let mut last_block_event = Instant::now();
         let mut run_finished = false;
 
+        let mut cap_wait_since = None;
         let exit = loop {
+            // At the cap the node is not caught up and discards events until a settlement
+            // (doc/checkpoints.md, Section 4); the restart after the wait reads them again.
+            let at_cap = !ctx.backlog.checkpoints().has_slot(chain);
+            match (at_cap, cap_wait_since) {
+                (true, None) => {
+                    tracing::warn!(%chain, "at the checkpoint cap; waiting for a settlement");
+                    cap_wait_since = Some(Instant::now());
+                    ctx.caught_up = false;
+                    ctx.backlog.set_caught_up(chain, false);
+                }
+                (false, Some(since)) => {
+                    // One restart reads the blocks published during the wait, as a catch-up.
+                    tracing::info!(%chain, waited = ?since.elapsed(), "a settlement ended the wait at the checkpoint cap; catching up");
+                    restart_delay = ERROR_RESTART_DELAY;
+                    break Exit::Restart;
+                }
+                _ => {}
+            }
             tokio::select! {
-                // Gate dispatch on checkpoint capacity: when the cap is full the
-                // channel backs up and pauses the chain's `send().await`.
-                event = events_rx.recv(), if ctx.backlog.checkpoints().has_slot(chain) => {
+                event = events_rx.recv() => {
                     let Some(event) = event else {
                         run_finished = true;
                         // `run()` exited on its own: Ok shuts the chain down; an anyhow
@@ -295,6 +312,9 @@ async fn run_supervised_with_watchdog<I: ChainIndexer, T: ChainTelemetry>(
                             restart_delay = ERROR_RESTART_DELAY;
                         }
                         last_block_event = Instant::now();
+                    }
+                    if cap_wait_since.is_some() {
+                        continue;
                     }
                     if let Err(err) =
                         handle_chain_event(event, &mut ctx, &telemetry, root_pk, chain).await
@@ -367,12 +387,15 @@ async fn run_supervised_with_watchdog<I: ChainIndexer, T: ChainTelemetry>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::backlog::mock::mock_sign_request;
     use crate::backlog::Backlog;
+    use crate::backlog::MAX_PENDING_CHECKPOINTS;
     use crate::mesh::MeshState;
     use crate::rpc::RpcAction;
     use crate::storage::checkpoint_storage::CheckpointStorage;
     use crate::stream::test_utils::make_test_stream_context;
     use crate::types::SignCommand;
+    use mpc_primitives::SignId;
 
     use k256::ProjectivePoint;
     use mpc_chain_integration_core::{NoopChainTelemetry, StateManager};
@@ -1129,56 +1152,116 @@ mod tests {
         assert_eq!(attempts.load(Ordering::SeqCst), 1);
     }
 
-    #[tokio::test]
-    async fn full_checkpoint_cap_pauses_exit_and_watchdog_restarts() {
+    /// Catches up and runs into the cap, then keeps producing blocks until a restart.
+    struct RunIntoCapIndexer {
+        attempts: Arc<AtomicUsize>,
+    }
+
+    const TEST_BLOCK_TIME: Duration = Duration::from_secs(10);
+
+    #[async_trait::async_trait]
+    impl ChainIndexer for RunIntoCapIndexer {
+        const CHAIN: Chain = Chain::Ethereum;
+
+        async fn run(
+            &self,
+            events_tx: mpsc::Sender<ChainEvent>,
+            cancel: CancellationToken,
+        ) -> anyhow::Result<()> {
+            let restarted = self.attempts.fetch_add(1, Ordering::SeqCst) > 0;
+            events_tx.send(ChainEvent::CatchupCompleted).await?;
+            let interval = crate::backlog::checkpoint_interval(Self::CHAIN).unwrap();
+            let last = MAX_PENDING_CHECKPOINTS as u64 + 1;
+            if restarted {
+                // A restart resumes after the processed height.
+                events_tx.send(ChainEvent::Block(last * interval)).await?;
+                cancel.cancelled().await;
+                return Ok(());
+            }
+            for i in 1.. {
+                if i == last + 1 {
+                    let request = mock_sign_request(SignId::new([9; 32]), Self::CHAIN);
+                    let block_timestamp = None;
+                    events_tx
+                        .send(ChainEvent::SignRequest {
+                            request,
+                            block_timestamp,
+                        })
+                        .await?;
+                }
+                events_tx.send(ChainEvent::Block(i * interval)).await?;
+                if i >= last {
+                    tokio::select! {
+                        _ = cancel.cancelled() => return Ok(()),
+                        _ = tokio::time::sleep(TEST_BLOCK_TIME) => {}
+                    }
+                }
+            }
+            Ok(())
+        }
+    }
+
+    const TEST_WATCHDOG: Duration = Duration::from_secs(60);
+
+    #[tokio::test(start_paused = true)]
+    async fn a_wait_at_the_cap_ends_in_one_catch_up() {
         let chain = Chain::Ethereum;
         let backlog = Backlog::new();
-
         let attempts = Arc::new(AtomicUsize::new(0));
-        let indexer = StalledRunIndexer {
+        let indexer = RunIntoCapIndexer {
             attempts: attempts.clone(),
-            first_cancel: Arc::new(Notify::new()),
         };
-        let (sign_tx, _sign_rx) = mpsc::channel(8);
-        let (ctx, _cp_tx, _mesh_tx, _rpc_rx) = test_ctx(backlog.clone(), sign_tx);
-
+        let (sign_tx, sign_rx) = mpsc::channel(8);
+        let (ctx, cp_tx, mesh_tx, mut rpc_rx) = test_ctx(backlog.clone(), sign_tx);
+        tokio::spawn(async move {
+            let _channels_stay_open = (sign_rx, cp_tx, mesh_tx);
+            while rpc_rx.recv().await.is_some() {}
+        });
         let task = tokio::spawn(run_supervised_with_watchdog(
             indexer,
             ctx,
             NoopChainTelemetry,
-            Duration::from_millis(50),
+            TEST_WATCHDOG,
         ));
-
-        while attempts.load(Ordering::SeqCst) == 0 {
-            tokio::time::sleep(Duration::from_millis(5)).await;
+        while backlog.checkpoints().has_slot(chain) {
+            tokio::time::sleep(Duration::from_millis(1)).await;
         }
-        // Fill the pending-checkpoint cap so `has_checkpoint_slot` returns false.
+
+        tokio::time::sleep(TEST_WATCHDOG * 4).await;
+        assert_eq!(
+            attempts.load(Ordering::SeqCst),
+            1,
+            "blocks keep the watchdog quiet"
+        );
+        assert!(!backlog.is_caught_up(chain), "behind at the cap");
         let interval = crate::backlog::checkpoint_interval(chain).unwrap();
-        for i in 1..=crate::backlog::MAX_PENDING_CHECKPOINTS {
-            let h = (i as u64) * interval;
-            assert!(backlog.set_processed_block(chain, h).await.is_some());
-        }
-        assert!(!backlog.checkpoints().has_slot(chain));
+        assert_eq!(
+            backlog.get_processed_block(chain).await,
+            Some(MAX_PENDING_CHECKPOINTS as u64 * interval),
+            "no progress at the cap"
+        );
+        let indexed_at_cap = backlog.get(chain, &SignId::new([9; 32])).await;
+        assert!(indexed_at_cap.is_none(), "discards events at the cap");
 
-        // The first (stalled) run is restarted by the watchdog; afterwards the
-        // instant-Ok exits cannot be observed while the cap is full, so the
-        // supervisor must keep restarting instead of shutting down. The first
-        // restart waits out the 1s backoff base.
-        tokio::time::timeout(Duration::from_secs(5), async {
-            while attempts.load(Ordering::SeqCst) < 2 {
-                tokio::time::sleep(Duration::from_millis(25)).await;
-            }
-        })
-        .await
-        .expect("watchdog should have restarted run() after the 1s backoff");
-        assert!(
-            !task.is_finished(),
-            "supervisor must not shut down while the checkpoint cap is full"
+        // Frees the slot without a settlement notice; a block ends the wait.
+        let newest = backlog.checkpoints().latest(chain).await.unwrap().unwrap();
+        assert!(backlog
+            .checkpoints()
+            .confirm(chain, newest.digest())
+            .await
+            .unwrap());
+        tokio::time::sleep(TEST_BLOCK_TIME * 2 + ERROR_RESTART_DELAY).await;
+
+        assert_eq!(
+            attempts.load(Ordering::SeqCst),
+            2,
+            "one restart ends the wait"
         );
-        assert!(
-            attempts.load(Ordering::SeqCst) >= 2,
-            "watchdog should have restarted run()"
+        assert_eq!(
+            backlog.get_processed_block(chain).await,
+            Some((MAX_PENDING_CHECKPOINTS as u64 + 1) * interval)
         );
+        assert!(backlog.is_caught_up(chain));
         task.abort();
     }
 
