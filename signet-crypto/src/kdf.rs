@@ -1,7 +1,11 @@
 use crate::{Address, KeyVersion, Path, Purpose};
-use k256::{elliptic_curve::CurveArithmetic, Scalar, Secp256k1};
+use k256::{
+    ecdsa::{RecoveryId, VerifyingKey},
+    elliptic_curve::{point::AffineCoordinates, sec1::ToEncodedPoint, CurveArithmetic},
+    Scalar, Secp256k1,
+};
 use sha3::{Digest, Keccak256, Sha3_256};
-use signet_primitives::{Chain, PublicKey, ScalarExt, LATEST_MPC_KEY_VERSION};
+use signet_primitives::{Chain, PublicKey, ScalarExt, Signature, LATEST_MPC_KEY_VERSION};
 
 // Constant prefix that ensures epsilon derivation values are used specifically for
 // Sig.Network with key derivation protocol vX.Y.Z.
@@ -186,9 +190,140 @@ pub fn derive_key(public_key: PublicKey, epsilon: Scalar) -> PublicKey {
     (<Secp256k1 as CurveArithmetic>::ProjectivePoint::GENERATOR * epsilon + public_key).to_affine()
 }
 
+/// x coordinate of `point`, reduced to a scalar.
+pub fn x_coordinate(point: &PublicKey) -> Scalar {
+    <<Secp256k1 as CurveArithmetic>::Scalar as k256::elliptic_curve::ops::Reduce<
+        <k256::Secp256k1 as k256::elliptic_curve::Curve>::Uint,
+    >>::reduce_bytes(&point.x())
+}
+
+/// Reconstructs a signature from its components, returning `None` unless it
+/// verifies against `public_key` for one of the two recovery ids.
+pub fn reconstruct_signature(
+    public_key: &PublicKey,
+    big_r: &PublicKey,
+    s: &Scalar,
+    msg_hash: Scalar,
+) -> Option<Signature> {
+    let public_key = public_key.to_encoded_point(false);
+    let signature = k256::ecdsa::Signature::from_scalars(x_coordinate(big_r), s).ok()?;
+    for recovery_id in [0, 1] {
+        let recovery_id =
+            RecoveryId::try_from(recovery_id).expect("0 and 1 are valid recovery ids");
+        let Ok(verifying) =
+            VerifyingKey::recover_from_prehash(&msg_hash.to_bytes()[..], &signature, recovery_id)
+        else {
+            // One id may select an R that fails to recover while the other succeeds.
+            continue;
+        };
+        if public_key == verifying.to_encoded_point(false) {
+            return Some(Signature::new(*big_r, *s, recovery_id.to_byte()));
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use k256::ecdsa::signature::hazmat::PrehashSigner;
+    use k256::elliptic_curve::point::DecompressPoint;
+    use k256::{AffinePoint, ProjectivePoint, SecretKey};
+
+    fn sign_with(sk: &SecretKey, msg_hash: &Scalar) -> (AffinePoint, Scalar, u8) {
+        let (ecdsa_sig, rec_id): (k256::ecdsa::Signature, _) = k256::ecdsa::SigningKey::from(sk)
+            .sign_prehash(&msg_hash.to_bytes())
+            .unwrap();
+        let (r_bytes, _) = ecdsa_sig.split_bytes();
+        let big_r =
+            AffinePoint::decompress(&r_bytes, k256::elliptic_curve::subtle::Choice::from(0))
+                .unwrap();
+        (big_r, *ecdsa_sig.s().as_ref(), rec_id.to_byte())
+    }
+
+    #[test]
+    fn test_reconstruct_signature_success() {
+        let sk = SecretKey::from_bytes((&[0x11; 32]).into()).unwrap();
+        let public_key: PublicKey = sk.public_key().into();
+        let msg_hash = Scalar::from_bytes([0x22; 32]).unwrap();
+        let (big_r, s, expected_rec_id) = sign_with(&sk, &msg_hash);
+
+        let sig = reconstruct_signature(&public_key, &big_r, &s, msg_hash).unwrap();
+        assert_eq!(sig.big_r, big_r);
+        assert_eq!(sig.s, s);
+        assert_eq!(sig.recovery_id, expected_rec_id);
+    }
+
+    #[test]
+    fn test_reconstruct_signature_wrong_public_key() {
+        let sk = SecretKey::from_bytes((&[0x11; 32]).into()).unwrap();
+        let wrong_sk = SecretKey::from_bytes((&[0x99; 32]).into()).unwrap();
+        let wrong_public_key: PublicKey = wrong_sk.public_key().into();
+        let msg_hash = Scalar::from_bytes([0x22; 32]).unwrap();
+        let (big_r, s, _) = sign_with(&sk, &msg_hash);
+
+        assert!(reconstruct_signature(&wrong_public_key, &big_r, &s, msg_hash).is_none());
+    }
+
+    #[test]
+    fn test_reconstruct_signature_wrong_payload() {
+        let sk = SecretKey::from_bytes((&[0x11; 32]).into()).unwrap();
+        let public_key: PublicKey = sk.public_key().into();
+        let msg_hash = Scalar::from_bytes([0x22; 32]).unwrap();
+        let wrong_msg_hash = Scalar::from_bytes([0x33; 32]).unwrap();
+        let (big_r, s, _) = sign_with(&sk, &msg_hash);
+
+        assert!(reconstruct_signature(&public_key, &big_r, &s, wrong_msg_hash).is_none());
+    }
+
+    #[test]
+    fn test_reconstruct_signature_invalid_s_scalar() {
+        let sk = SecretKey::from_bytes((&[0x11; 32]).into()).unwrap();
+        let public_key: PublicKey = sk.public_key().into();
+        let msg_hash = Scalar::from_bytes([0x22; 32]).unwrap();
+
+        assert!(reconstruct_signature(&public_key, &public_key, &Scalar::ZERO, msg_hash).is_none());
+    }
+
+    #[test]
+    fn test_reconstruct_signature_accepts_both_recovery_ids() {
+        // Fixed vectors: one signature recovering under each ordinary recovery id.
+        for ((sk_seed, msg_seed), expected_id) in [((0x11u8, 0x22u8), 0u8), ((0x49, 0x8a), 1)] {
+            let sk = SecretKey::from_bytes((&[sk_seed; 32]).into()).unwrap();
+            let public_key: PublicKey = sk.public_key().into();
+            let msg_hash = Scalar::from_bytes([msg_seed; 32]).unwrap();
+            let (big_r, s, _) = sign_with(&sk, &msg_hash);
+
+            let sig = reconstruct_signature(&public_key, &big_r, &s, msg_hash).unwrap();
+            assert_eq!(sig.recovery_id, expected_id, "sk seed {sk_seed:#x}");
+        }
+    }
+
+    #[test]
+    fn test_reconstruct_signature_uses_second_id_when_first_fails_recovery() {
+        let one = Scalar::from(1u32);
+        let r = x_coordinate(&AffinePoint::GENERATOR);
+        // For (R = -G, s = 1, e = 1): id 0 selects R = G and recovery hits the point at
+        // infinity; id 1 selects R = -G and recovers -(2/x(G))·G.
+        let expected_pk =
+            (ProjectivePoint::GENERATOR * -(Scalar::from(2u32) * r.invert().unwrap())).to_affine();
+        let neg_g = (-ProjectivePoint::GENERATOR).to_affine();
+
+        let sig = reconstruct_signature(&expected_pk, &neg_g, &one, one).unwrap();
+        assert_eq!(sig.recovery_id, 1);
+    }
+
+    #[test]
+    fn test_x_coordinate_of_generator() {
+        let expected = Scalar::from_bytes(
+            hex::decode("79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798")
+                .unwrap()
+                .try_into()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(x_coordinate(&PublicKey::GENERATOR), expected);
+    }
 
     #[test]
     fn test_derivation_path_stays_the_same() {

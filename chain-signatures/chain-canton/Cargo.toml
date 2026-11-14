@@ -15,8 +15,8 @@ futures-util.workspace = true
 hex.workspace = true
 k256.workspace = true
 mpc-chain-integration-core.workspace = true
-mpc-crypto.workspace = true
 mpc-primitives.workspace = true
+signet-crypto.workspace = true
 mpc-utils.workspace = true
 oauth2 = { version = "5.0.0", default-features = false, features = ["reqwest", "rustls-tls"] }
 reqwest.workspace = true

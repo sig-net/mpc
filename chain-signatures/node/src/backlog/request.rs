@@ -7,12 +7,12 @@ use anyhow::Context as _;
 use cait_sith::protocol::Participant;
 use cait_sith::FullSignature;
 use k256::Secp256k1;
-use mpc_crypto::{derive_key, reconstruct_signature};
 use mpc_primitives::{
     BidirectionalTx, Chain, ExecutionOutcome, IndexedSignRequest, PublicKey,
     SignBidirectionalEvent, SignId, SignKind, Signature,
 };
 use serde::{Deserialize, Serialize};
+use signet_crypto::{derive_key, reconstruct_signature};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -306,7 +306,7 @@ impl SignEntry<Generating> {
             &output.s,
             self.request.args.payload,
         )
-        .map_err(|_| BacklogError::InvalidSignature)?;
+        .ok_or(BacklogError::InvalidSignature)?;
 
         let publish = Publishing::new(signature, participants, is_proposer);
         // Stored before the entry shows it, since anything that publishes reads the entry. A store

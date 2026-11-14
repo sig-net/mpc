@@ -1,7 +1,8 @@
 # signet-crypto
 
-Key-derivation primitives for the SigNet network: epsilon derivation and
-derived-key computation.
+Key-derivation primitives for the SigNet network: epsilon derivation,
+derived-key computation, and signature reconstruction from secp256k1
+components (`reconstruct_signature`, `x_coordinate`).
 
 These are the exact algorithms the MPC network uses, so a client compiling
 against this crate derives keys and request identifiers that match the network

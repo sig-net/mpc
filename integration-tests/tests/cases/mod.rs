@@ -5,14 +5,13 @@ use integration_tests::utils;
 use k256::elliptic_curve::sec1::ToEncodedPoint as _;
 use mpc_contract::config::ProtocolConfig;
 use mpc_contract::update::ProposeUpdateArgs;
-use mpc_crypto::{
-    self, derive_epsilon_near, derive_key, reconstruct_signature, x_coordinate, ScalarExt,
-};
+use mpc_crypto::derive_epsilon_near;
 use mpc_node::protocol::cryptography::set_resharing_running_timeout;
 use mpc_node::protocol::state::{NodeStatus, ResharingStatus};
 use mpc_node::sign_bidirectional::public_key_to_address;
 use mpc_node::util::NearPublicKeyExt as _;
 use mpc_primitives::LATEST_MPC_KEY_VERSION;
+use signet_crypto::{derive_key, reconstruct_signature, x_coordinate, ScalarExt};
 use std::time::{Duration, Instant};
 use test_log::test;
 

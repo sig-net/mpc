@@ -216,7 +216,7 @@ mod tests {
 
         let signature = cait_sith::FullSignature::<k256::Secp256k1> { big_r, s };
 
-        let reconstructed = mpc_crypto::kdf::reconstruct_signature(
+        let reconstructed = signet_crypto::reconstruct_signature(
             &user_pk,
             &signature.big_r,
             &signature.s,

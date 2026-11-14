@@ -9,12 +9,12 @@ use mpc_chain_integration_core::{
     utils::hashing::compute_request_id, utils::payload::bidirectional_payload_scalar, ChainIndexer,
     ChainTelemetry,
 };
-use mpc_crypto::ScalarExt as _;
 use mpc_primitives::{
     Chain, ChainEvent, IndexedSignRequest, RespondBidirectionalEvent, SignArgs,
     SignBidirectionalEvent, SignId, Signature, SignatureRespondedEvent, MAX_SECP256K1_SCALAR,
 };
 use mpc_utils::time::current_unix_timestamp;
+use signet_crypto::{derive_epsilon_hydration, ScalarExt as _};
 use sp_core::crypto::{AccountId32 as SpAccountId32, Ss58AddressFormatRegistry, Ss58Codec};
 use sp_core::{twox_128, H256};
 use sp_runtime::traits::BlakeTwo256;
@@ -75,18 +75,14 @@ impl HydrationSignatureRequestedEvent {
             return None;
         }
 
-        let epsilon = mpc_crypto::kdf::derive_epsilon_hydration(
-            self.key_version,
-            &self.sender_string(),
-            &self.path,
-        )
-        .inspect_err(|_| {
-            tracing::info!(
-                key_version = self.key_version,
-                "unsupported key version; dropping sign request"
-            )
-        })
-        .ok()?;
+        let epsilon = derive_epsilon_hydration(self.key_version, &self.sender_string(), &self.path)
+            .inspect_err(|_| {
+                tracing::info!(
+                    key_version = self.key_version,
+                    "unsupported key version; dropping sign request"
+                )
+            })
+            .ok()?;
 
         let sign_id = SignId::new(self.generate_request_id());
         tracing::info!(?sign_id, "hydration signature requested");
@@ -183,18 +179,14 @@ impl HydrationSignBidirectionalRequestedEvent {
 
         let request_id = self.generate_request_id();
 
-        let epsilon = mpc_crypto::kdf::derive_epsilon_hydration(
-            self.key_version,
-            &self.sender_string(),
-            &self.path,
-        )
-        .inspect_err(|_| {
-            tracing::info!(
-                key_version = self.key_version,
-                "unsupported key version; dropping sign request"
-            )
-        })
-        .ok()?;
+        let epsilon = derive_epsilon_hydration(self.key_version, &self.sender_string(), &self.path)
+            .inspect_err(|_| {
+                tracing::info!(
+                    key_version = self.key_version,
+                    "unsupported key version; dropping sign request"
+                )
+            })
+            .ok()?;
 
         let sign_id = SignId::new(request_id);
         tracing::info!(?sign_id, "hydration signature requested");
