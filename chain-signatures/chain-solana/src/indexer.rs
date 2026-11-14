@@ -9,10 +9,10 @@ use async_trait::async_trait;
 use futures_util::stream::{self, StreamExt};
 use futures_util::Stream;
 use mpc_chain_integration_core::{
-    utils::retry::SharedBackoff, ChainIndexer, ChainTelemetry, NoopPublisherTelemetry, StateManager,
+    utils::retry::{is_retryable_typed, retry_until_ok_or_terminal, SharedBackoff},
+    ChainIndexer, ChainTelemetry, NoopPublisherTelemetry, StateManager,
 };
 use mpc_primitives::{Chain, ChainConfig as _, ChainEvent};
-use mpc_utils::task::retry_until_ok;
 use solana_sdk::{pubkey::Pubkey, signature::Signature};
 use solana_transaction_status::{EncodedTransactionWithStatusMeta, UiConfirmedBlock};
 use tokio::sync::mpsc;
@@ -408,35 +408,35 @@ impl<S: StateManager, T: ChainTelemetry> SolanaIndexer<S, T> {
         }
     }
 
-    /// Retries `process_catchup_item` with `RETRY_DELAY` backoff until it
-    /// succeeds or `cancel` fires.
+    /// Retries `process_catchup_item` at fixed `RETRY_DELAY` intervals until it
+    /// succeeds, `cancel` fires, or a terminal error is returned to the caller.
     async fn process_catchup_retrying(
         &self,
         events_tx: &mpsc::Sender<ChainEvent>,
         slot: u64,
         block: &SolanaCatchupBlock,
         cancel: &CancellationToken,
-    ) {
-        // The first attempt uses the captured block. If it fails, it may be due to
-        // transient RPC faults (e.g., a served-null `blockTime`), so retries will
-        // re-fetch live data.
-        if self
-            .process_catchup_item(events_tx, slot, block)
-            .await
-            .is_ok()
-        {
-            return;
+    ) -> anyhow::Result<()> {
+        // The first attempt uses the captured block; retries re-fetch live data
+        // (a transient fault like a served-null `blockTime` may heal).
+        match self.process_catchup_item(events_tx, slot, block).await {
+            Ok(()) => return Ok(()),
+            Err(err) if !is_retryable_typed(&err) => {
+                return Err(err.context(format!("slot {slot}")))
+            }
+            Err(_) => {}
         }
-        retry_until_ok(
+        retry_until_ok_or_terminal(
             cancel,
             Self::RETRY_DELAY,
-            &format!("solana catchup block processing (slot {slot})"),
+            "solana catchup block processing",
             || async {
                 self.process_catchup_item(events_tx, slot, &SolanaCatchupBlock::Missing)
                     .await
+                    .with_context(|| format!("slot {slot}"))
             },
         )
-        .await;
+        .await
     }
 
     /// Drain `[start_slot, anchor)`: process active slots in order and emit a
@@ -486,7 +486,7 @@ impl<S: StateManager, T: ChainTelemetry> SolanaIndexer<S, T> {
             crate::bench::add_marker_time(marker_started_at.elapsed());
             let Some(block) = block else { break };
             self.process_catchup_retrying(events_tx, landmark, &block, cancel)
-                .await;
+                .await?;
             next_marker = landmark + 1;
         }
         Ok(())
@@ -1145,7 +1145,8 @@ mod tests {
             let (slot, block) = res.unwrap();
             indexer
                 .process_catchup_retrying(&events_tx, slot, &block, &cancel)
-                .await;
+                .await
+                .unwrap();
         }
 
         // Verify that the events were emitted in order
@@ -1936,6 +1937,95 @@ mod tests {
         // `.expect(1)` pins one batch fetch and one re-fetch.
     }
 
+    /// The time-less block fixture at slot 401: the `slot 401` context
+    /// must read as retryable, not as HTTP 401.
+    #[tokio::test]
+    async fn drain_range_retries_a_time_less_block_at_slot_401() {
+        let mut server = mockito::Server::new_async().await;
+
+        let entries: Vec<_> = [401, 400].into_iter().map(signature_entry).collect();
+        let _signatures = server
+            .mock("POST", "/")
+            .match_body(mockito::Matcher::Regex(
+                "getSignaturesForAddress".to_string(),
+            ))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(signatures_response(&entries))
+            .create_async()
+            .await;
+
+        let indexer = test_indexer(&server.url(), MockStateManager::new());
+        let transaction = event_transaction(
+            indexer.program_id,
+            Signature::new_unique(),
+            sign_bidirectional_ix_data("eip155:1"),
+        );
+        let mut null_time = event_block_response(0, 401, transaction.clone());
+        null_time["result"]["blockTime"] = serde_json::json!(null);
+        let _batch = server
+            .mock("POST", "/")
+            .match_body(mockito::Matcher::Regex(r#"^\["#.to_string()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(serde_json::json!([null_time.clone()]).to_string())
+            .create_async()
+            .await;
+        // refetch time-less once so the `slot 401` bail reaches the loop,
+        // then served; mockito answers the first unmet stub
+        let null_envelope = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": null_time["result"],
+        })
+        .to_string();
+        let _refetch_null = server
+            .mock("POST", "/")
+            .match_body(mockito::Matcher::Regex(r#"^\{.*getBlock"#.to_string()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(null_envelope)
+            .expect(1)
+            .create_async()
+            .await;
+        let mut served = event_block_response(0, 401, transaction);
+        served["result"]["blockTime"] = serde_json::json!(1_700_000_000);
+        let refetch = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": served["result"],
+        })
+        .to_string();
+        let _refetch = server
+            .mock("POST", "/")
+            .match_body(mockito::Matcher::Regex(r#"^\{.*getBlock"#.to_string()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(refetch)
+            .expect(1)
+            .create_async()
+            .await;
+
+        let (events_tx, mut events_rx) = mpsc::channel(16);
+        indexer
+            .drain_range(&events_tx, 402, 401, &CancellationToken::new())
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            events_rx.recv().await,
+            Some(ChainEvent::SignRequest {
+                block_timestamp: Some(_),
+                ..
+            })
+        ));
+        assert!(matches!(
+            events_rx.recv().await,
+            Some(ChainEvent::Block(401))
+        ));
+        assert!(events_rx.try_recv().is_err());
+    }
+
     #[tokio::test]
     async fn drain_range_emits_gapless_markers_for_inactive_slots() {
         let mut server = mockito::Server::new_async().await;
@@ -2140,6 +2230,126 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn terminal_refetch_errors_hand_the_drain_to_the_supervisor() {
+        let mut server = mockito::Server::new_async().await;
+
+        // walk claims slot 10; slot 9 ends pagination
+        let entries: Vec<_> = [10, 9].into_iter().map(signature_entry).collect();
+        let _signatures = server
+            .mock("POST", "/")
+            .match_body(mockito::Matcher::Regex(
+                "getSignaturesForAddress".to_string(),
+            ))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(signatures_response(&entries))
+            .expect(1)
+            .create_async()
+            .await;
+
+        // the batch serves slot 10 as a legal null → Missing → single-slot refetch
+        let _batch = server
+            .mock("POST", "/")
+            .match_body(mockito::Matcher::Regex(r"^\[\{.*getBlock".to_string()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(serde_json::json!([{ "id": 0, "result": null }]).to_string())
+            .expect(1)
+            .create_async()
+            .await;
+
+        // 401 refetch: terminal after one attempt, must not spin the outer loop
+        let refetch = server
+            .mock("POST", "/")
+            .match_body(mockito::Matcher::Regex(
+                r#"^\{.*"params":\[10,"#.to_string(),
+            ))
+            .with_status(401)
+            .expect(1)
+            .create_async()
+            .await;
+
+        let indexer = test_indexer(&server.url(), MockStateManager::new());
+        let (events_tx, mut events_rx) = mpsc::channel(16);
+        let cancel = CancellationToken::new();
+
+        let err = tokio::time::timeout(
+            Duration::from_secs(30),
+            indexer.drain_range(&events_tx, 11, 10, &cancel),
+        )
+        .await
+        .expect("drain must fail fast instead of retrying at fixed pace")
+        .unwrap_err();
+        assert!(!is_retryable(&err), "{err:#}");
+        assert!(format!("{err:#}").contains("slot 10"), "{err:#}");
+        assert!(events_rx.try_recv().is_err(), "no marker for slot 10");
+        refetch.assert_async().await;
+    }
+
+    /// Retry-arm terminal exit: retryable first attempt, terminal refetch.
+    #[tokio::test]
+    async fn a_terminal_refetch_on_the_retry_arm_hands_the_drain_to_the_supervisor() {
+        let mut server = mockito::Server::new_async().await;
+
+        let entries: Vec<_> = [10, 9].into_iter().map(signature_entry).collect();
+        let _signatures = server
+            .mock("POST", "/")
+            .match_body(mockito::Matcher::Regex(
+                "getSignaturesForAddress".to_string(),
+            ))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(signatures_response(&entries))
+            .expect(1)
+            .create_async()
+            .await;
+
+        // time-less block: first attempt fails retryable, refetch is terminal
+        let indexer = test_indexer(&server.url(), MockStateManager::new());
+        let transaction = event_transaction(
+            indexer.program_id,
+            Signature::new_unique(),
+            sign_bidirectional_ix_data("eip155:1"),
+        );
+        let mut null_time = event_block_response(0, 10, transaction);
+        null_time["result"]["blockTime"] = serde_json::json!(null);
+        let _batch = server
+            .mock("POST", "/")
+            .match_body(mockito::Matcher::Regex(r"^\[\{.*getBlock".to_string()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(serde_json::json!([null_time]).to_string())
+            .expect(1)
+            .create_async()
+            .await;
+
+        let refetch = server
+            .mock("POST", "/")
+            .match_body(mockito::Matcher::Regex(
+                r#"^\{.*"params":\[10,"#.to_string(),
+            ))
+            .with_status(401)
+            .expect(1)
+            .create_async()
+            .await;
+
+        let (events_tx, mut events_rx) = mpsc::channel(16);
+        let cancel = CancellationToken::new();
+
+        let err = tokio::time::timeout(
+            Duration::from_secs(30),
+            indexer.drain_range(&events_tx, 11, 10, &cancel),
+        )
+        .await
+        .expect("drain must fail fast instead of retrying at fixed pace")
+        .unwrap_err();
+        assert!(!is_retryable(&err), "{err:#}");
+        assert!(format!("{err:#}").contains("slot 10"), "{err:#}");
+        assert!(events_rx.try_recv().is_err(), "no events");
+        refetch.assert_async().await;
+    }
+
+    #[tokio::test]
     async fn run_block_sequence_is_poll_phase_invariant() {
         // Identical chain content drained under different tick phases must
         // emit identical Block heights. Activity at 10 and 12 leaves an
@@ -2284,7 +2494,7 @@ mod tests {
             )
             // production retries node-local absence inside get_block
             // (usize::MAX); the finite budget here pins only the exhausted
-            // handoff — still retryable for retry_until_ok
+            // handoff — still retryable for the catchup loop
             .expect(3)
             .create_async()
             .await;
@@ -2319,6 +2529,7 @@ mod tests {
             indexer.process_catchup_retrying(&events_tx, 7, &SolanaCatchupBlock::Missing, &cancel),
         )
         .await
-        .expect("process_catchup_retrying should stop promptly on cancel");
+        .expect("process_catchup_retrying should stop promptly on cancel")
+        .unwrap();
     }
 }

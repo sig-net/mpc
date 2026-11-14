@@ -7987,10 +7987,8 @@ dependencies = [
 name = "mpc-utils"
 version = "1.23.0"
 dependencies = [
- "anyhow",
  "tokio",
  "tokio-util",
- "tracing",
 ]
 
 [[package]]

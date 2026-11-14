@@ -11,10 +11,11 @@ use alloy::sol_types::SolEvent;
 use anyhow::Context as _;
 use async_trait::async_trait;
 use futures_util::{Stream, StreamExt};
-use mpc_chain_integration_core::utils::retry::SharedBackoff;
+use mpc_chain_integration_core::utils::retry::{
+    retry_until_ok_or_terminal, retry_until_some_or_terminal, SharedBackoff,
+};
 use mpc_chain_integration_core::{ChainIndexer, ChainTelemetry, StateManager};
 use mpc_primitives::{Chain, ChainEvent, IndexedSignRequest};
-use mpc_utils::task::{retry_until_ok, retry_until_some};
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 use tokio::time::Duration;
@@ -313,25 +314,25 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
 
     /// The catchup-live anchor: the first processable head + 1.
     /// Returns `None` on cancellation.
-    async fn sample_anchor(&self, cancel: &CancellationToken) -> Option<u64> {
+    async fn sample_anchor(&self, cancel: &CancellationToken) -> anyhow::Result<Option<u64>> {
         let tag = if self.config.network.is_optimistic() {
             BlockNumberOrTag::Latest
         } else {
             BlockNumberOrTag::Finalized
         };
-        retry_until_some(
+        let block = retry_until_some_or_terminal(
             cancel,
             Self::RETRY_DELAY,
             "ethereum startup head sampling",
             || async { self.client.get_block(BlockId::Number(tag)).await },
         )
-        .await
-        .map(|block| block.header.number.saturating_add(1))
+        .await?;
+        Ok(block.map(|block| block.header.number.saturating_add(1)))
     }
 
     /// The chain id the RPC endpoint serves. Returns `None` on cancellation.
-    async fn sample_chain_id(&self, cancel: &CancellationToken) -> Option<u64> {
-        retry_until_some(
+    async fn sample_chain_id(&self, cancel: &CancellationToken) -> anyhow::Result<Option<u64>> {
+        retry_until_some_or_terminal(
             cancel,
             Self::RETRY_DELAY,
             "ethereum startup chain id sampling",
@@ -378,13 +379,24 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
                 item = stream.next() => item,
             };
             let Some(item) = item else { break };
-            retry_until_ok(
+            retry_until_ok_or_terminal(
                 cancel,
                 Self::RETRY_DELAY,
                 "ethereum block processing",
-                || async { self.process_catchup_item(events_tx, &item).await },
+                || async {
+                    self.process_catchup_item(events_tx, &item)
+                        .await
+                        .with_context(|| match &item {
+                            CatchupItem::BatchBlock { block, .. } => {
+                                format!("block {}", block.header.number)
+                            }
+                            CatchupItem::Missing(block_id) => block_id
+                                .as_u64()
+                                .map_or_else(|| format!("{block_id:?}"), |n| format!("block {n}")),
+                        })
+                },
             )
-            .await;
+            .await?;
         }
         Ok(())
     }
@@ -405,7 +417,7 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for EthereumIndexer<S, T> 
         // requests and receipts, and admission checks transactions against the
         // configured network only.
         let expected = self.config.chain_id();
-        let Some(actual) = self.sample_chain_id(&cancel).await else {
+        let Some(actual) = self.sample_chain_id(&cancel).await? else {
             tracing::debug!("ethereum indexer cancelled before the chain id was sampled");
             return Ok(());
         };
@@ -421,7 +433,7 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for EthereumIndexer<S, T> 
             .spawn_watcher(self.client.clone(), cancel.clone());
 
         // Anchor = tip-at-startup + 1: the catchup-live boundary.
-        let Some(anchor) = self.sample_anchor(&cancel).await else {
+        let Some(anchor) = self.sample_anchor(&cancel).await? else {
             tracing::debug!("ethereum indexer cancelled before the startup tip was sampled");
             return Ok(());
         };
@@ -502,6 +514,7 @@ mod tests {
     use alloy::rpc::types::BlockId;
     use futures_util::StreamExt;
     use mockito::{Matcher, Server};
+    use mpc_chain_integration_core::utils::retry::is_retryable;
     use mpc_chain_integration_core::utils::stream::chain_event_channel;
     use mpc_chain_integration_core::{ChainIndexer, StateManager};
     use mpc_primitives::{Chain, ChainEvent};
@@ -532,13 +545,45 @@ mod tests {
             .await;
 
         assert_eq!(
-            indexer.sample_anchor(&CancellationToken::new()).await,
+            indexer
+                .sample_anchor(&CancellationToken::new())
+                .await
+                .unwrap(),
             Some(43)
         );
         finalized_mock.assert_async().await;
     }
 
     /// An RPC that keeps failing past the client's own retries is retried, not refused.
+    /// A persistent 401 fails run() promptly instead of parking in the polls.
+    #[tokio::test]
+    async fn startup_polls_hand_terminal_errors_to_the_supervisor() {
+        let mut server = Server::new_async().await;
+
+        let http = server
+            .mock("POST", "/")
+            .with_status(401)
+            .expect(1)
+            .create_async()
+            .await;
+
+        let indexer = test_utils::TestIndexerBuilder::new(server.url())
+            .build()
+            .await;
+        let (events_tx, mut events_rx) = chain_event_channel();
+
+        let err = tokio::time::timeout(
+            Duration::from_secs(30),
+            indexer.run(events_tx, CancellationToken::new()),
+        )
+        .await
+        .expect("run() must fail fast instead of parking in the polls")
+        .unwrap_err();
+        assert!(!is_retryable(&err), "{err:#}");
+        assert!(events_rx.try_recv().is_err(), "no events");
+        http.assert_async().await;
+    }
+
     #[tokio::test]
     async fn sample_chain_id_retries_until_the_rpc_answers() {
         // The test client makes 3 attempts per call, so this takes 4 sampling rounds.
@@ -577,7 +622,8 @@ mod tests {
             indexer.sample_chain_id(&CancellationToken::new()),
         )
         .await
-        .expect("the chain id should be sampled once the RPC answers");
+        .expect("the chain id should be sampled once the RPC answers")
+        .unwrap();
 
         assert_eq!(chain_id, Some(EthNetwork::Sepolia.chain_id()));
         chain_id_mock.assert_async().await;
@@ -603,10 +649,126 @@ mod tests {
         let indexer = builder.build().await;
 
         assert_eq!(
-            indexer.sample_anchor(&CancellationToken::new()).await,
+            indexer
+                .sample_anchor(&CancellationToken::new())
+                .await
+                .unwrap(),
             Some(43)
         );
         latest_mock.assert_async().await;
+    }
+
+    /// Ethereum reads classify via the send table: 409 terminal, where
+    /// solana/midnight reads retry it. Deliberate until reads attach verdicts.
+    #[tokio::test]
+    async fn read_side_409s_stay_terminal_through_process_range() {
+        let mut server = Server::new_async().await;
+
+        let http = server
+            .mock("POST", "/")
+            .with_status(409)
+            .expect(2)
+            .create_async()
+            .await;
+
+        let indexer = test_utils::TestIndexerBuilder::new(server.url())
+            .build()
+            .await;
+        let (events_tx, mut events_rx) = chain_event_channel();
+
+        let err = indexer
+            .process_range(&events_tx, 12, 13, &CancellationToken::new())
+            .await
+            .unwrap_err();
+        assert!(!is_retryable(&err), "{err:#}");
+        assert!(format!("{err:#}").contains("block 12"), "{err:#}");
+        assert!(events_rx.try_recv().is_err(), "no events");
+        http.assert_async().await;
+    }
+
+    /// A retryable batch fault is retried, not escalated — even at block
+    /// 401, where the item context renders the number.
+    #[tokio::test]
+    async fn process_range_retries_transient_batch_faults_at_block_401() {
+        let mut server = Server::new_async().await;
+
+        // first batch attempt fails; created first so its unmet expect wins
+        let fault = server
+            .mock("POST", "/")
+            .match_body(Matcher::Regex(r"^\[".to_string()))
+            .with_status(500)
+            .expect(1)
+            .create_async()
+            .await;
+        let served = server
+            .mock("POST", "/")
+            .match_body(Matcher::Regex(r"^\[".to_string()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body_from_request(|req| {
+                let body: serde_json::Value =
+                    serde_json::from_slice(req.body().expect("request body")).expect("json body");
+                let id = body[0]["id"].as_u64().expect("request id");
+                json!([test_utils::block_response(id, 401)])
+                    .to_string()
+                    .into_bytes()
+            })
+            .expect(1)
+            .create_async()
+            .await;
+
+        let indexer = test_utils::TestIndexerBuilder::new(server.url())
+            .build()
+            .await;
+        let (events_tx, mut events_rx) = chain_event_channel();
+
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            indexer.process_range(&events_tx, 401, 402, &CancellationToken::new()),
+        )
+        .await;
+        fault.assert_async().await;
+        served.assert_async().await;
+        result
+            .expect("transient batch failure should retry promptly")
+            .unwrap();
+
+        assert!(matches!(
+            events_rx.recv().await,
+            Some(ChainEvent::Block(401))
+        ));
+    }
+
+    #[tokio::test]
+    async fn terminal_failures_hand_process_range_to_the_supervisor() {
+        let mut server = Server::new_async().await;
+
+        // every request 401: the batch degrades to Missing items and the item
+        // refetch is terminal — process_range must not spin on it
+        let http = server
+            .mock("POST", "/")
+            .with_status(401)
+            // one batch get_blocks + one item refetch, then the drain aborts
+            .expect(2)
+            .create_async()
+            .await;
+
+        let indexer = test_utils::TestIndexerBuilder::new(server.url())
+            .build()
+            .await;
+        let (events_tx, mut events_rx) = chain_event_channel();
+        let cancel = CancellationToken::new();
+
+        let err = tokio::time::timeout(
+            Duration::from_secs(30),
+            indexer.process_range(&events_tx, 12, 13, &cancel),
+        )
+        .await
+        .expect("process_range must fail fast instead of retrying at fixed pace")
+        .unwrap_err();
+        assert!(!is_retryable(&err), "{err:#}");
+        assert!(events_rx.try_recv().is_err(), "no events");
+        http.assert_async().await;
     }
 
     #[tokio::test]
@@ -1160,6 +1322,52 @@ mod tests {
         );
 
         f.cancel_and_join().await;
+    }
+
+    /// The live tail hands terminal errors to the supervisor too: after
+    /// CatchupCompleted, a 401 exits run() instead of spinning at 500 ms.
+    #[tokio::test]
+    async fn run_exits_on_a_terminal_live_tail_failure() {
+        // catchup consumes the fixture's batch mock first, so the live-tail
+        // batch request falls through to the 401 mock below
+        let mut f = RunFixture::spawn(9, 11).await;
+        assert!(matches!(f.next_event().await, ChainEvent::Block(10)));
+        assert!(matches!(f.next_event().await, ChainEvent::Block(11)));
+        assert!(matches!(f.next_event().await, ChainEvent::CatchupCompleted));
+
+        // batch 401 degrades block 12 to Missing; the refetch 401s
+        let batch = f
+            ._server
+            .mock("POST", "/")
+            .match_body(Matcher::Regex(r"^\[".to_string()))
+            .with_status(401)
+            .expect(1)
+            .create_async()
+            .await;
+        let refetch = f
+            ._server
+            .mock("POST", "/")
+            .match_body(Matcher::PartialJson(json!({
+                "method": "eth_getBlockByNumber",
+                "params": ["0xc", false]
+            })))
+            .with_status(401)
+            .expect(1)
+            .create_async()
+            .await;
+
+        f.finalized.store(12, Ordering::Relaxed);
+
+        let err = tokio::time::timeout(Duration::from_secs(30), &mut f.run_handle)
+            .await
+            .expect("run() must exit on a terminal live-tail failure")
+            .expect("run task panicked")
+            .expect_err("a terminal live-tail error must exit run()");
+        assert!(!is_retryable(&err), "{err:#}");
+        assert!(format!("{err:#}").contains("block 12"), "{err:#}");
+        assert!(f.events_rx.try_recv().is_err(), "no events");
+        batch.assert_async().await;
+        refetch.assert_async().await;
     }
 
     #[tokio::test]

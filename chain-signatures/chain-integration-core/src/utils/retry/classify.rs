@@ -241,6 +241,20 @@ fn contains_status_code(s: &str, code: &str) -> bool {
     false
 }
 
+/// [`is_retryable`] without the text fallback: an untyped error is
+/// retryable. Use where error contexts carry item numbers ("slot 401")
+/// the fallback would read as status codes.
+pub fn is_retryable_typed(e: &anyhow::Error) -> bool {
+    let (failure, status) = typed_signals(e);
+    if let Some(failure) = failure {
+        return !failure.terminal;
+    }
+    if let Some(status) = status {
+        return http_status_retryable(status);
+    }
+    true
+}
+
 /// Helper to identify whether an RPC error should be retried.
 /// Protects against endlessly retrying terminal client errors (4xx).
 pub fn is_retryable(e: &anyhow::Error) -> bool {

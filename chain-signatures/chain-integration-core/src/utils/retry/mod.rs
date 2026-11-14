@@ -1,5 +1,5 @@
-//! Retry macros and strategy configuration for RPC calls, plus the shared
-//! cooldown gate and typed error classification they rely on.
+//! Retry macros, strategy configuration, and terminal-aware supervisor loops,
+//! plus the shared cooldown gate and typed error classification they rely on.
 
 mod classify;
 mod gate;
@@ -9,14 +9,15 @@ pub use crate::{retry_op, retry_rpc};
 
 pub use classify::{
     http_status_read_retryable, http_status_retryable, is_provider_throttled, is_retryable,
-    RpcFailure,
+    is_retryable_typed, RpcFailure,
 };
-pub use gate::exhausted;
-pub use gate::{run_gated, SharedBackoff};
+pub use gate::{exhausted, run_gated, SharedBackoff};
 
+use std::future::Future;
 use std::time::Duration;
 
 use backon::ExponentialBuilder;
+use tokio_util::sync::CancellationToken;
 
 /// Configuration for retrying RPC calls with exponential backoff.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -39,6 +40,63 @@ impl RetryConfig {
         }
         b
     }
+}
+
+/// Retries `poll` at a fixed `delay` until it returns `Ok(Some(T))`,
+/// `cancel` fires, or it fails with a typed terminal verdict
+/// ([`is_retryable_typed`]). Terminal errors are returned to the caller;
+/// cancel resolves to `Ok(None)`.
+///
+/// Companion to [`retry_rpc!`] for supervisor loops: one work item (a
+/// block, a page) instead of a single call. Identify the item in the warn
+/// via error context, e.g. `.with_context(|| format!("slot {slot}"))`.
+pub async fn retry_until_some_or_terminal<T, F, Fut>(
+    cancel: &CancellationToken,
+    delay: Duration,
+    operation: &str,
+    poll: F,
+) -> anyhow::Result<Option<T>>
+where
+    F: Fn() -> Fut,
+    Fut: Future<Output = anyhow::Result<Option<T>>>,
+{
+    loop {
+        tokio::select! {
+            _ = cancel.cancelled() => return Ok(None),
+            result = poll() => match result {
+                Ok(Some(value)) => return Ok(Some(value)),
+                Ok(None) => {},
+                Err(err) if !is_retryable_typed(&err) => return Err(err),
+                Err(err) => tracing::warn!(
+                    operation,
+                    error = %format_args!("{err:#}"),
+                    "retrying after failure"
+                ),
+            },
+        }
+        tokio::select! {
+            _ = cancel.cancelled() => return Ok(None),
+            _ = tokio::time::sleep(delay) => {}
+        }
+    }
+}
+
+/// Unit-shaped [`retry_until_some_or_terminal`].
+pub async fn retry_until_ok_or_terminal<F, Fut>(
+    cancel: &CancellationToken,
+    delay: Duration,
+    operation: &str,
+    process: F,
+) -> anyhow::Result<()>
+where
+    F: Fn() -> Fut,
+    Fut: Future<Output = anyhow::Result<()>>,
+{
+    retry_until_some_or_terminal(cancel, delay, operation, || async {
+        process().await.map(Some)
+    })
+    .await
+    .map(|_| ())
 }
 
 /// Wraps an async call with a timeout and [`backon`] exponential-backoff retry strategy.
@@ -202,6 +260,8 @@ macro_rules! retry_rpc {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::utils::retry::RpcFailure;
+    use http::StatusCode;
     use std::sync::atomic::{AtomicU32, Ordering};
     use std::sync::Arc;
 
@@ -332,5 +392,139 @@ mod tests {
         assert_eq!(calls.load(Ordering::Relaxed), 2);
         // The retry had to wait out the cooldown window set by the first attempt.
         assert!(start.elapsed() >= Duration::from_millis(50));
+    }
+
+    #[tokio::test]
+    async fn retry_until_some_or_terminal_retries_none_then_yields_the_value() {
+        let cancel = CancellationToken::new();
+        let calls = Arc::new(AtomicU32::new(0));
+        let calls_clone = calls.clone();
+
+        let val =
+            retry_until_some_or_terminal(&cancel, Duration::from_millis(1), "test_op", move || {
+                let calls = calls_clone.clone();
+                async move {
+                    if calls.fetch_add(1, Ordering::Relaxed) == 0 {
+                        Ok(None)
+                    } else {
+                        Ok(Some(7u64))
+                    }
+                }
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(val, Some(7));
+        assert_eq!(calls.load(Ordering::Relaxed), 2);
+    }
+
+    #[tokio::test]
+    async fn retry_until_ok_or_terminal_retries_transient_then_succeeds() {
+        let cancel = CancellationToken::new();
+        let calls = Arc::new(AtomicU32::new(0));
+        let calls_clone = calls.clone();
+
+        retry_until_ok_or_terminal(&cancel, Duration::from_millis(1), "test_op", move || {
+            let calls = calls_clone.clone();
+            async move {
+                if calls.fetch_add(1, Ordering::Relaxed) == 0 {
+                    Err(anyhow::anyhow!("transient"))
+                } else {
+                    Ok(())
+                }
+            }
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(calls.load(Ordering::Relaxed), 2);
+    }
+
+    /// An untyped error with "slot 401" context is retryable — item
+    /// numbers are not status codes.
+    #[tokio::test]
+    async fn retry_until_ok_or_terminal_retries_untyped_errors_whatever_their_text() {
+        let cancel = CancellationToken::new();
+        let calls = Arc::new(AtomicU32::new(0));
+        let calls_clone = calls.clone();
+        let operation = "slot 401".to_string();
+
+        retry_until_ok_or_terminal(&cancel, Duration::from_millis(1), &operation, move || {
+            let calls = calls_clone.clone();
+            async move {
+                if calls.fetch_add(1, Ordering::Relaxed) == 0 {
+                    Err(anyhow::anyhow!("blockTime unavailable").context("slot 401"))
+                } else {
+                    Ok(())
+                }
+            }
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(calls.load(Ordering::Relaxed), 2);
+    }
+
+    #[tokio::test]
+    async fn retry_until_ok_or_terminal_returns_a_terminal_error_immediately() {
+        let cancel = CancellationToken::new();
+        let calls = Arc::new(AtomicU32::new(0));
+        let calls_clone = calls.clone();
+
+        let err =
+            retry_until_ok_or_terminal(&cancel, Duration::from_millis(1), "test_op", move || {
+                let calls = calls_clone.clone();
+                async move {
+                    calls.fetch_add(1, Ordering::Relaxed);
+                    Err(anyhow::Error::new(RpcFailure::read_status(
+                        StatusCode::UNAUTHORIZED,
+                        "terminal read rejection".to_string(),
+                    )))
+                }
+            })
+            .await
+            .unwrap_err();
+
+        assert!(!is_retryable(&err), "{err:#}");
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn retry_until_ok_or_terminal_returns_terminal_after_a_retryable_attempt() {
+        let cancel = CancellationToken::new();
+        let calls = Arc::new(AtomicU32::new(0));
+        let calls_clone = calls.clone();
+
+        let err =
+            retry_until_ok_or_terminal(&cancel, Duration::from_millis(1), "test_op", move || {
+                let calls = calls_clone.clone();
+                async move {
+                    if calls.fetch_add(1, Ordering::Relaxed) == 0 {
+                        Err(anyhow::anyhow!("transient"))
+                    } else {
+                        Err(anyhow::Error::new(RpcFailure::read_status(
+                            StatusCode::UNAUTHORIZED,
+                            "terminal read rejection".to_string(),
+                        )))
+                    }
+                }
+            })
+            .await
+            .unwrap_err();
+
+        assert!(!is_retryable(&err), "{err:#}");
+        assert_eq!(calls.load(Ordering::Relaxed), 2);
+    }
+
+    #[tokio::test]
+    async fn retry_until_ok_or_terminal_resolves_ok_on_cancel() {
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+
+        retry_until_ok_or_terminal(&cancel, Duration::from_millis(1), "test_op", || async {
+            Err::<(), anyhow::Error>(anyhow::anyhow!("transient"))
+        })
+        .await
+        .unwrap();
     }
 }
