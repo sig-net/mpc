@@ -6,7 +6,7 @@ use k256::elliptic_curve::{
     bigint::U256, ops::Reduce, sec1::FromEncodedPoint, sec1::ToEncodedPoint,
 };
 use k256::{FieldBytes, Scalar};
-use mpc_crypto::derive_key;
+use signet_crypto::derive_key;
 use mpc_primitives::{Chain, ScalarExt};
 use sha2::{Digest, Sha256};
 
@@ -22,7 +22,7 @@ pub fn public_key_to_address(public_key: &k256::EncodedPoint) -> Address {
     Address::from_slice(&hash[12..])
 }
 
-pub fn derive_user_address(mpc_pk: mpc_crypto::PublicKey, derivation_epsilon: Scalar) -> Address {
+pub fn derive_user_address(mpc_pk: signet_crypto::PublicKey, derivation_epsilon: Scalar) -> Address {
     let user_pk = derive_key(mpc_pk, derivation_epsilon);
 
     public_key_to_address(&user_pk.to_encoded_point(false))

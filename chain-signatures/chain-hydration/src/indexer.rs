@@ -9,7 +9,7 @@ use mpc_chain_integration_core::{
     utils::hashing::compute_request_id, utils::payload::bidirectional_payload_scalar, ChainIndexer,
     ChainTelemetry,
 };
-use mpc_crypto::ScalarExt as _;
+use signet_crypto::{derive_epsilon_hydration, ScalarExt as _};
 use mpc_primitives::{
     Chain, ChainEvent, IndexedSignRequest, RespondBidirectionalEvent, SignArgs,
     SignBidirectionalEvent, SignId, Signature, SignatureRespondedEvent, MAX_SECP256K1_SCALAR,
@@ -75,7 +75,7 @@ impl HydrationSignatureRequestedEvent {
             return None;
         }
 
-        let epsilon = mpc_crypto::kdf::derive_epsilon_hydration(
+        let epsilon = derive_epsilon_hydration(
             self.key_version,
             &self.sender_string(),
             &self.path,
@@ -183,7 +183,7 @@ impl HydrationSignBidirectionalRequestedEvent {
 
         let request_id = self.generate_request_id();
 
-        let epsilon = mpc_crypto::kdf::derive_epsilon_hydration(
+        let epsilon = derive_epsilon_hydration(
             self.key_version,
             &self.sender_string(),
             &self.path,

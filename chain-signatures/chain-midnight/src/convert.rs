@@ -75,7 +75,7 @@ pub fn generate_sign_request(
 
     // The one render of the requester.
     let requester = hex::encode(read_address);
-    let epsilon = mpc_crypto::kdf::derive_epsilon_midnight(key_version, &requester, &path)?;
+    let epsilon = signet_crypto::derive_epsilon_midnight(key_version, &requester, &path)?;
 
     let serialized = serialized_transaction(record, root_pk, epsilon)?;
     // The wire choice above and the hash choice here read the same discriminant,
@@ -222,7 +222,7 @@ mod tests {
         // `owned_by_requester` recomputes the owner from the same public
         // inputs; pinning it here keeps the two crates on one formula.
         let epsilon =
-            mpc_crypto::kdf::derive_epsilon_midnight(1, &hex::encode(READ_ADDRESS), &event.path)
+            signet_crypto::derive_epsilon_midnight(1, &hex::encode(READ_ADDRESS), &event.path)
                 .unwrap();
         let owner = TronAddress::from_evm(derive_user_address(test_root_pk(), epsilon));
         assert_eq!(raw.owner_address().unwrap(), owner.as_bytes().to_vec());
@@ -306,7 +306,7 @@ mod tests {
         assert_ne!(request.args.path, reserved);
         assert_ne!(
             request.args.epsilon,
-            mpc_crypto::kdf::derive_epsilon_midnight(
+            signet_crypto::derive_epsilon_midnight(
                 request.args.key_version,
                 &hex::encode(READ_ADDRESS),
                 reserved,

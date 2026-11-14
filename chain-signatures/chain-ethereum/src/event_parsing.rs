@@ -8,7 +8,7 @@ use alloy::rpc::types::Log;
 use alloy::sol_types::SolEvent;
 use k256::elliptic_curve::sec1::FromEncodedPoint;
 use k256::{AffinePoint as K256AffinePoint, EncodedPoint, FieldBytes, Scalar};
-use mpc_crypto::{kdf::derive_epsilon_eth, ScalarExt as _};
+use signet_crypto::{derive_epsilon_eth, ScalarExt as _};
 use mpc_primitives::{
     Chain, ChainEvent, IndexedSignRequest, SignArgs, SignId, Signature as MpcSignature,
     SignatureRespondedEvent, MAX_SECP256K1_SCALAR,
