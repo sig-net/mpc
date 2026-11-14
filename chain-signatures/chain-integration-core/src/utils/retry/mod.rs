@@ -475,9 +475,9 @@ mod tests {
                 let calls = calls_clone.clone();
                 async move {
                     calls.fetch_add(1, Ordering::Relaxed);
-                    Err(anyhow::Error::new(RpcFailure::send_status(
-                        StatusCode::CONFLICT,
-                        "terminal send rejection".to_string(),
+                    Err(anyhow::Error::new(RpcFailure::read_status(
+                        StatusCode::UNAUTHORIZED,
+                        "terminal read rejection".to_string(),
                     )))
                 }
             })
@@ -486,6 +486,33 @@ mod tests {
 
         assert!(!is_retryable(&err), "{err:#}");
         assert_eq!(calls.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn retry_until_ok_or_terminal_returns_terminal_after_a_retryable_attempt() {
+        let cancel = CancellationToken::new();
+        let calls = Arc::new(AtomicU32::new(0));
+        let calls_clone = calls.clone();
+
+        let err =
+            retry_until_ok_or_terminal(&cancel, Duration::from_millis(1), "test_op", move || {
+                let calls = calls_clone.clone();
+                async move {
+                    if calls.fetch_add(1, Ordering::Relaxed) == 0 {
+                        Err(anyhow::anyhow!("transient"))
+                    } else {
+                        Err(anyhow::Error::new(RpcFailure::read_status(
+                            StatusCode::UNAUTHORIZED,
+                            "terminal read rejection".to_string(),
+                        )))
+                    }
+                }
+            })
+            .await
+            .unwrap_err();
+
+        assert!(!is_retryable(&err), "{err:#}");
+        assert_eq!(calls.load(Ordering::Relaxed), 2);
     }
 
     #[tokio::test]
