@@ -9,6 +9,7 @@ use mpc_primitives::{
     SignKind,
 };
 use mpc_utils::time::current_unix_timestamp;
+use sha3::{Digest as _, Sha3_256};
 use std::sync::Arc;
 
 const MAGIC_ERROR_PREFIX: [u8; 4] = [0xde, 0xad, 0xbe, 0xef];
@@ -105,11 +106,27 @@ pub(crate) fn published_midnight_payload(
         .ok_or_else(|| anyhow::anyhow!("Midnight attestation digest is not a scalar"))
 }
 
+/// The entropy of a response: `delta` then moves with the first leg's entropy, the message signed
+/// and the key's tweak, and every node signing that message under that key derives the same value.
+pub(crate) fn response_entropy(
+    first_leg_entropy: &[u8; 32],
+    payload: &Scalar,
+    epsilon: &Scalar,
+) -> [u8; 32] {
+    Sha3_256::new()
+        .chain_update(first_leg_entropy)
+        .chain_update(payload.to_bytes())
+        .chain_update(epsilon.to_bytes())
+        .finalize()
+        .into()
+}
+
 pub struct CompletedTx {
     tx: Arc<BidirectionalTx>,
     chain_ctx: Option<Vec<u8>>,
     origin_indexed_at: Option<u64>,
     block_height: u64,
+    first_leg_entropy: [u8; 32],
 }
 
 impl CompletedTx {
@@ -118,12 +135,14 @@ impl CompletedTx {
         chain_ctx: Option<Vec<u8>>,
         origin_indexed_at: Option<u64>,
         block_height: u64,
+        first_leg_entropy: [u8; 32],
     ) -> Self {
         Self {
             tx,
             chain_ctx,
             origin_indexed_at,
             block_height,
+            first_leg_entropy,
         }
     }
 
@@ -133,8 +152,8 @@ impl CompletedTx {
 
     pub(crate) fn create_unviable_sign_request(&self) -> anyhow::Result<IndexedSignRequest> {
         anyhow::ensure!(
-            self.tx.source_chain == Chain::Midnight,
-            "unviable attestations are only supported for Midnight"
+            self.tx.source_chain.encodes_unviable(),
+            "unviable attestations are only supported for sources that encode them"
         );
         self.create_respond_bidirectional_sign_request(Vec::new(), AttestationOutcomeKind::Unviable)
     }
@@ -213,7 +232,7 @@ impl CompletedTx {
         );
         let (path, epsilon) = response_key(&self.tx)?;
         let path = path.to_string();
-        let entropy = self.tx.id.0;
+        let entropy = response_entropy(&self.first_leg_entropy, &payload, &epsilon);
         Ok(IndexedSignRequest::respond_bidirectional(
             SignId::new(request_id_bytes),
             SignArgs {
@@ -363,6 +382,7 @@ mod tests {
             None,
             Some(100),
             456,
+            [0; 32],
         )
         .create_failed_sign_request()
         .await
@@ -378,6 +398,7 @@ mod tests {
             None,
             Some(100),
             456,
+            [0; 32],
         )
         .create_failed_sign_request()
         .await
@@ -396,6 +417,7 @@ mod tests {
             None,
             Some(100),
             456,
+            [0; 32],
         )
         .create_failed_sign_request()
         .await
@@ -419,7 +441,7 @@ mod tests {
         let tx = sample_bidirectional_tx(Chain::Solana, [0x22; 32]);
         let output = vec![1, 2, 3, 4];
         let chain_ctx = Some(vec![9, 9]);
-        let completed = CompletedTx::new(tx.clone(), chain_ctx.clone(), Some(100), 456);
+        let completed = CompletedTx::new(tx.clone(), chain_ctx.clone(), Some(100), 456, [0; 32]);
 
         let req = completed
             .create_sign_request_from_serialized_output(output.clone())
@@ -445,6 +467,7 @@ mod tests {
             None,
             Some(100),
             456,
+            [0; 32],
         )
         .create_failed_sign_request()
         .await
@@ -459,6 +482,7 @@ mod tests {
             None,
             Some(100),
             456,
+            [0; 32],
         )
         .create_sign_request_from_serialized_output(vec![1, 2, 3, 4, 5])
         .unwrap();
@@ -468,16 +492,31 @@ mod tests {
         assert!(!is_failed_execution_response(&succeeded));
     }
 
+    #[test]
+    fn a_response_entropy_moves_with_the_first_leg_the_message_and_the_key() {
+        let (message, other_message) = (Scalar::from(1u64), Scalar::from(2u64));
+        let (key, other_key) = (Scalar::from(3u64), Scalar::from(4u64));
+        let leg = [1; 32];
+        let entropy = response_entropy(&leg, &message, &key);
+        assert_eq!(entropy, response_entropy(&leg, &message, &key));
+        assert_ne!(entropy, response_entropy(&[2; 32], &message, &key));
+        assert_ne!(entropy, response_entropy(&leg, &other_message, &key));
+        assert_ne!(entropy, response_entropy(&leg, &message, &other_key));
+    }
+
     /// A successful output may itself begin with the error prefix.
     #[test]
     fn success_with_error_prefix_remains_success() {
         for chain in [Chain::Solana, Chain::Canton, Chain::Hydration] {
-            let request =
-                CompletedTx::new(sample_bidirectional_tx(chain, [0x33; 32]), None, None, 0)
-                    .create_sign_request_from_serialized_output(
-                        [&MAGIC_ERROR_PREFIX[..], &[1]].concat(),
-                    )
-                    .unwrap();
+            let request = CompletedTx::new(
+                sample_bidirectional_tx(chain, [0x33; 32]),
+                None,
+                None,
+                0,
+                [0; 32],
+            )
+            .create_sign_request_from_serialized_output([&MAGIC_ERROR_PREFIX[..], &[1]].concat())
+            .unwrap();
             let SignKind::RespondBidirectional(response) = request.kind else {
                 panic!("expected RespondBidirectional");
             };
@@ -581,6 +620,7 @@ mod tests {
             None,
             None,
             456,
+            [0; 32],
         )
         .create_sign_request_from_serialized_output(MAGIC_ERROR_PREFIX.to_vec())
         .unwrap();
@@ -605,6 +645,7 @@ mod tests {
             None,
             Some(100),
             456,
+            [0; 32],
         );
         let failure = completed.create_failed_sign_request().await.unwrap();
         let SignKind::RespondBidirectional(response) = &failure.kind else {
@@ -639,6 +680,7 @@ mod tests {
                 None,
                 None,
                 456,
+                [0; 32],
             )
             .create_sign_request_from_serialized_output(serialized_output.clone())
             .unwrap();
@@ -699,7 +741,7 @@ mod tests {
         let tx = sample_bidirectional_tx(Chain::Midnight, request_id);
         assert_eq!(tx.target_chain, Chain::Ethereum);
 
-        let request = CompletedTx::new(tx, None, Some(100), 456)
+        let request = CompletedTx::new(tx, None, Some(100), 456, [0; 32])
             .create_sign_request_from_serialized_output(serialized_output)
             .unwrap();
         let expected_payload = Scalar::from_bytes(
@@ -725,7 +767,7 @@ mod tests {
     async fn midnight_unviable_binds_replacement_height_and_empty_output() {
         let request_id = [0x2f; 32];
         let tx = sample_bidirectional_tx(Chain::Midnight, request_id);
-        let completed = CompletedTx::new(tx, None, Some(100), 456);
+        let completed = CompletedTx::new(tx, None, Some(100), 456, [0; 32]);
         let request = completed.create_unviable_sign_request().unwrap();
         let SignKind::RespondBidirectional(response) = &request.kind else {
             panic!("expected a response");
@@ -767,9 +809,15 @@ mod tests {
 
         for chain in [Chain::Solana, Chain::Canton, Chain::Hydration] {
             assert!(
-                CompletedTx::new(sample_bidirectional_tx(chain, request_id), None, None, 456)
-                    .create_unviable_sign_request()
-                    .is_err(),
+                CompletedTx::new(
+                    sample_bidirectional_tx(chain, request_id),
+                    None,
+                    None,
+                    456,
+                    [0; 32]
+                )
+                .create_unviable_sign_request()
+                .is_err(),
                 "{chain}"
             );
         }
@@ -780,7 +828,7 @@ mod tests {
     #[tokio::test]
     async fn published_midnight_signing_args_match_the_signed_response() {
         let tx = sample_bidirectional_tx(Chain::Midnight, [0x2f; 32]);
-        let completed = CompletedTx::new(Arc::clone(&tx), None, None, 456);
+        let completed = CompletedTx::new(Arc::clone(&tx), None, None, 456, [0; 32]);
         for request in [
             completed
                 .create_sign_request_from_serialized_output((1..=32).collect())
@@ -801,7 +849,7 @@ mod tests {
     #[test]
     fn published_midnight_signing_args_reject_a_digest_for_another_response() {
         let tx = sample_bidirectional_tx(Chain::Midnight, [0x2f; 32]);
-        let request = CompletedTx::new(Arc::clone(&tx), None, None, 456)
+        let request = CompletedTx::new(Arc::clone(&tx), None, None, 456, [0; 32])
             .create_sign_request_from_serialized_output((1..=32).collect())
             .unwrap();
         let published = mpc_chain_midnight::validate_attestation_response(&request).unwrap();
@@ -870,7 +918,7 @@ mod tests {
     #[test]
     fn claims_attestation_key_separates_the_attack_from_leg_two() {
         let tx = sample_bidirectional_tx(Chain::Solana, [0x30; 32]);
-        let leg_two = CompletedTx::new(tx, None, None, 456)
+        let leg_two = CompletedTx::new(tx, None, None, 456, [0; 32])
             .create_sign_request_from_serialized_output(vec![1; 32])
             .unwrap();
         assert!(!claims_attestation_key(&leg_two));

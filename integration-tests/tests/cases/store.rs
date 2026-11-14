@@ -2,14 +2,18 @@ use cait_sith::protocol::Participant;
 use integration_tests::cluster::spawner::ClusterSpawner;
 use integration_tests::containers;
 use mpc_crypto::PublicKey;
+use mpc_node::backlog::Checkpoint;
 use mpc_node::protocol::presignature::PresignatureSpawner;
 use mpc_node::protocol::triple::TripleSpawner;
 use mpc_node::protocol::MessageChannel;
+use mpc_node::storage::checkpoint_storage::CheckpointStorage;
 use mpc_node::types::SecretKeyShare;
 use test_log::test;
 
-use super::helpers::{dummy_backlog_entry, dummy_pair, dummy_presignature};
-use mpc_primitives::SignId;
+use super::helpers::{
+    dummy_backlog_entry, dummy_indexed_sign_request, dummy_pair, dummy_presignature,
+};
+use mpc_primitives::{Chain, SignId};
 
 #[test(tokio::test)]
 async fn test_triple_persistence() -> anyhow::Result<()> {
@@ -323,9 +327,6 @@ async fn test_presignature_persistence() -> anyhow::Result<()> {
 
 #[test(tokio::test)]
 async fn test_checkpoint_persistence() -> anyhow::Result<()> {
-    use mpc_node::backlog::Checkpoint;
-    use mpc_node::storage::checkpoint_storage::CheckpointStorage;
-    use mpc_primitives::Chain;
     use near_account_id::AccountId;
 
     let spawner = ClusterSpawner::default()
@@ -342,20 +343,13 @@ async fn test_checkpoint_persistence() -> anyhow::Result<()> {
     // 1. Clean storage returns None
     assert!(storage.load_latest(Chain::Solana).await?.is_none());
 
-    fn cumulative_digest(status: [u8; 1]) -> [u8; 32] {
-        use sha3::Digest;
-        let mut hasher = sha3::Sha3_256::new();
-        hasher.update(status);
-        hasher.finalize().into()
-    }
-
     // 2. Persist first checkpoint (simulates consensus confirmation)
     let tx1 = dummy_backlog_entry(1, Chain::Solana);
     let cp1 = Checkpoint {
         chain: Chain::Solana,
         block_height: 10,
         pending_requests: vec![tx1],
-        cumulative_digest: cumulative_digest([0]),
+        legacy_digest: None,
     };
     storage.persist(&cp1).await?;
 
@@ -371,7 +365,7 @@ async fn test_checkpoint_persistence() -> anyhow::Result<()> {
         chain: Chain::Solana,
         block_height: 20,
         pending_requests: vec![tx2],
-        cumulative_digest: cumulative_digest([0]),
+        legacy_digest: None,
     };
     storage.persist(&cp2).await?;
 
@@ -384,12 +378,58 @@ async fn test_checkpoint_persistence() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// A body from an earlier version keeps hashing as it did through Redis, so it still confirms
+/// the digest settled before the upgrade.
 #[test(tokio::test)]
-async fn test_pending_checkpoint_persistence() -> anyhow::Result<()> {
-    use deadpool_redis::redis;
+async fn test_legacy_checkpoint_keeps_its_digest() -> anyhow::Result<()> {
     use mpc_node::backlog::Checkpoint;
     use mpc_node::storage::checkpoint_storage::CheckpointStorage;
     use mpc_primitives::Chain;
+
+    let spawner = ClusterSpawner::default()
+        .network("test-legacy-checkpoint-digest")
+        .init_network()
+        .await?;
+    let redis_container = containers::Redis::run(&spawner).await;
+    let account_id = "party0.near".parse()?;
+    let storage = CheckpointStorage::Redis(redis_container.pool(), account_id);
+    let current = Checkpoint {
+        chain: Chain::Solana,
+        block_height: 10,
+        pending_requests: vec![dummy_backlog_entry(1, Chain::Solana)],
+        legacy_digest: None,
+    };
+    let legacy = Checkpoint {
+        legacy_digest: Some([7; 32]),
+        ..current.clone()
+    };
+    assert_ne!(legacy.digest(), current.digest());
+
+    storage.persist_pending(&legacy).await?;
+    assert_eq!(
+        storage.load_pending(Chain::Solana).await?,
+        vec![legacy.clone()]
+    );
+    assert_eq!(
+        storage.find(Chain::Solana, legacy.digest()).await?,
+        Some(legacy.clone())
+    );
+
+    assert_eq!(
+        storage
+            .promote_pending(Chain::Solana, legacy.digest())
+            .await?,
+        Some(0)
+    );
+    let latest = storage.load_latest(Chain::Solana).await?.unwrap();
+    assert_eq!(latest, legacy);
+    assert_eq!(latest.digest(), legacy.digest());
+    Ok(())
+}
+
+#[test(tokio::test)]
+async fn test_pending_checkpoint_persistence() -> anyhow::Result<()> {
+    use deadpool_redis::redis;
 
     let spawner = ClusterSpawner::default()
         .network("test-pending-checkpoint-persistence")
@@ -403,7 +443,7 @@ async fn test_pending_checkpoint_persistence() -> anyhow::Result<()> {
         chain: Chain::Solana,
         block_height: height,
         pending_requests: vec![],
-        cumulative_digest: Checkpoint::empty_cumulative_digest(),
+        legacy_digest: None,
     };
 
     // Neither key exists yet.
@@ -440,7 +480,14 @@ async fn test_pending_checkpoint_persistence() -> anyhow::Result<()> {
     );
 
     let mut conflicting = second.clone();
-    conflicting.cumulative_digest[0] = 1;
+    conflicting
+        .pending_requests
+        .push(mpc_node::backlog::BacklogEntry::new(
+            mpc_node::backlog::mock::mock_sign_request(
+                mpc_primitives::SignId::new([9; 32]),
+                conflicting.chain,
+            ),
+        ));
     assert!(restarted.persist_pending(&conflicting).await.is_err());
     assert!(restarted
         .promote_pending(Chain::Solana, [99; 32])
@@ -538,5 +585,73 @@ async fn test_clear_clears_pending_reservations() -> anyhow::Result<()> {
     let peeked = triple_storage.peek_mine(&[]).await;
     assert!(peeked.is_some(), "artifact must be peekable after clear()");
 
+    Ok(())
+}
+
+#[test(tokio::test)]
+async fn test_clear_removes_more_artifacts_than_one_unpack_allows() -> anyhow::Result<()> {
+    use deadpool_redis::redis;
+
+    let spawner = ClusterSpawner::default()
+        .network("test-clear-many")
+        .init_network()
+        .await?;
+
+    let node0 = Participant::from(0);
+    let node0_id = "party0.near".parse().unwrap();
+    let redis_container = containers::Redis::run(&spawner).await;
+    let triple_storage = redis_container.triple_storage(&node0_id, node0);
+
+    // Lua's unpack in Redis 7.4 fails somewhere above 8000 entries.
+    let artifact_key = triple_storage.artifact_key();
+    let mut pipe = redis::pipe();
+    for id in 1..=10_000u64 {
+        pipe.hset(artifact_key, id, "x")
+            .sadd(format!("{artifact_key}:holders:{id}"), 1)
+            .ignore();
+    }
+    let mut conn = redis_container.pool().get().await?;
+    let _: () = pipe.query_async(&mut conn).await?;
+
+    assert!(triple_storage.clear().await);
+    let remaining: u64 = redis::cmd("DBSIZE").query_async(&mut conn).await?;
+    assert_eq!(remaining, 0);
+
+    Ok(())
+}
+
+#[test(tokio::test)]
+async fn test_local_records_persist() -> anyhow::Result<()> {
+    use mpc_node::backlog::mock::mock_publishing;
+    use mpc_node::sign_bidirectional::{BidirectionalProgress, SignProgress, SignStatus};
+
+    let spawner = ClusterSpawner::default()
+        .network("test-local-records")
+        .init_network()
+        .await?;
+    let redis_container = containers::Redis::run(&spawner).await;
+    let account_id = "party0.near".parse()?;
+    let storage = CheckpointStorage::Redis(redis_container.pool(), account_id);
+    let id = dummy_backlog_entry(1, Chain::Solana).sign_id();
+    let sign_id = dummy_backlog_entry(3, Chain::Solana).sign_id();
+    let publishing = || SignProgress::Publishing(mock_publishing());
+    let status = SignStatus::Bidirectional(BidirectionalProgress::Initial(publishing()));
+    let attestation = SignStatus::Bidirectional(BidirectionalProgress::Final {
+        respond_request: dummy_indexed_sign_request(2, Chain::Solana),
+        progress: publishing(),
+    });
+    let sign = SignStatus::Sign(publishing());
+
+    storage.put_local(Chain::Solana, id, &status).await?;
+    storage.put_local(Chain::Solana, id, &attestation).await?;
+    storage.put_local(Chain::Solana, sign_id, &sign).await?;
+    let records = storage.load_local(Chain::Solana).await?;
+    assert_eq!(records.len(), 3);
+    assert!(records.contains(&(id, status)) && records.contains(&(id, attestation)));
+    assert!(records.contains(&(sign_id, sign)));
+    assert!(storage.load_local(Chain::Canton).await?.is_empty());
+
+    storage.remove_local(Chain::Solana, &[id, sign_id]).await?;
+    assert!(storage.load_local(Chain::Solana).await?.is_empty());
     Ok(())
 }

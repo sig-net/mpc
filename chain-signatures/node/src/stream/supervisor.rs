@@ -152,7 +152,7 @@ pub async fn run_supervised<I: ChainIndexer, T: ChainTelemetry>(
     indexer: I,
     ctx: StreamContext,
     telemetry: T,
-) {
+) -> anyhow::Result<()> {
     run_supervised_with_watchdog(
         indexer,
         ctx,
@@ -179,7 +179,7 @@ async fn run_supervised_with_watchdog<I: ChainIndexer, T: ChainTelemetry>(
     mut ctx: StreamContext,
     telemetry: T,
     watchdog_timeout: Duration,
-) {
+) -> anyhow::Result<()> {
     let chain = I::CHAIN;
     tracing::info!(%chain, "starting supervised chain indexer");
     let _clear_caught_up = ClearCaughtUp {
@@ -188,7 +188,7 @@ async fn run_supervised_with_watchdog<I: ChainIndexer, T: ChainTelemetry>(
     };
 
     let my_account_id = ctx.contract_watcher.account_id().clone();
-    let root_pk = ctx.contract_watcher.wait_public_key().await;
+    let root_pk = ctx.contract_watcher.wait_public_key().await?;
     let indexer = Arc::new(indexer);
 
     enum Exit {
@@ -202,14 +202,13 @@ async fn run_supervised_with_watchdog<I: ChainIndexer, T: ChainTelemetry>(
     let mut resubmit_votes = true;
     let mut recovery_retry_delay = ERROR_RESTART_DELAY;
     let mut restart_delay = ERROR_RESTART_DELAY;
-    // Highest block dispatched this supervisor instance. The persisted
-    // watermark only advances once caught up, so a persistent per-height
-    // failure replays the same catchup blocks every restart; only a new
-    // high-water mark is real progress.
+    // Highest block dispatched this supervisor instance. A run that keeps
+    // failing at one height resumes below it on every restart and dispatches
+    // the same blocks again; only a new high-water mark is real progress.
     let mut highest_block: u64 = 0;
     loop {
-        // Cleared before recovery, not after: checkpoint creation and publish
-        // failover must not act on a backlog being recovered or replayed into.
+        // Cleared before recovery, not after: publish failover and sign-request
+        // enqueue must not act on a backlog being recovered or replayed into.
         ctx.caught_up = false;
         let recovered = async {
             recover_backlog(
@@ -220,9 +219,17 @@ async fn run_supervised_with_watchdog<I: ChainIndexer, T: ChainTelemetry>(
                 &mut ctx.mesh_state,
                 &ctx.node_client,
                 &my_account_id,
+                root_pk,
             )
             .await?;
             load_local = false;
+            // Failing here retries: without its records the node would sign again.
+            ctx.local_records = ctx
+                .backlog
+                .checkpoints()
+                .storage()
+                .load_local(chain)
+                .await?;
 
             if resubmit_votes {
                 resubmit_pending_checkpoint_votes(chain, &ctx).await?;
@@ -234,7 +241,7 @@ async fn run_supervised_with_watchdog<I: ChainIndexer, T: ChainTelemetry>(
         if let Err(err) = recovered {
             tracing::error!(
                 %chain,
-                %err,
+                error = %format_args!("{err:#}"),
                 ?recovery_retry_delay,
                 "failed to recover backlog; retrying"
             );
@@ -352,7 +359,7 @@ async fn run_supervised_with_watchdog<I: ChainIndexer, T: ChainTelemetry>(
 
         if matches!(exit, Exit::Shutdown) {
             tracing::warn!(%chain, "supervised chain indexer shutting down");
-            return;
+            return Ok(());
         }
     }
 }
@@ -680,7 +687,8 @@ mod tests {
             ),
         )
         .await
-        .expect("supervisor should shut down after the restarted run() exits");
+        .expect("supervisor should shut down after the restarted run() exits")
+        .expect("supervisor should exit cleanly");
         assert!(attempts.load(Ordering::SeqCst) >= 2, "run() was restarted");
 
         let mut voted = Vec::new();
@@ -739,7 +747,8 @@ mod tests {
             run_supervised_with_watchdog(indexer, ctx, NoopChainTelemetry, Duration::from_secs(60)),
         )
         .await
-        .expect("supervisor should shut down after run() exits");
+        .expect("supervisor should shut down after run() exits")
+        .expect("supervisor should exit cleanly");
         assert_eq!(
             attempts.load(Ordering::SeqCst),
             1,
@@ -773,7 +782,8 @@ mod tests {
             ),
         )
         .await
-        .expect("supervisor should shut down after run() exits");
+        .expect("supervisor should shut down after run() exits")
+        .expect("supervisor should exit cleanly");
 
         assert_eq!(
             backlog.get_processed_block(Chain::Ethereum).await,
@@ -802,7 +812,8 @@ mod tests {
             ),
         )
         .await
-        .expect("supervisor should shut down after second run() exits");
+        .expect("supervisor should shut down after second run() exits")
+        .expect("supervisor should exit cleanly");
 
         first_cancel.notified().await;
         assert_eq!(attempts.load(Ordering::SeqCst), 2);
@@ -864,7 +875,8 @@ mod tests {
             ),
         )
         .await
-        .expect("supervisor should shut down after the rerun exits");
+        .expect("supervisor should shut down after the rerun exits")
+        .expect("supervisor should exit cleanly");
 
         assert_eq!(attempts.load(Ordering::SeqCst), 2, "run() was restarted");
         assert_eq!(
@@ -983,7 +995,8 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(10), task)
             .await
             .expect("supervisor should shut down after second run() exits")
-            .expect("supervisor task should not panic");
+            .expect("supervisor task should not panic")
+            .expect("supervisor should exit cleanly");
         assert_eq!(attempts.load(Ordering::SeqCst), 2);
     }
 
@@ -1050,7 +1063,8 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(10), task)
             .await
             .expect("recovery must not wait on peers for a reset")
-            .expect("supervisor task should not panic");
+            .expect("supervisor task should not panic")
+            .expect("supervisor should exit cleanly");
 
         assert_eq!(
             backlog.get_processed_block(chain).await,
@@ -1109,7 +1123,8 @@ mod tests {
             ),
         )
         .await
-        .expect("supervisor should shut down after run() exits");
+        .expect("supervisor should shut down after run() exits")
+        .expect("supervisor should exit cleanly");
 
         assert_eq!(attempts.load(Ordering::SeqCst), 1);
     }
@@ -1138,7 +1153,7 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
         // Fill the pending-checkpoint cap so `has_checkpoint_slot` returns false.
-        let interval = chain.checkpoint_interval().unwrap();
+        let interval = crate::backlog::checkpoint_interval(chain).unwrap();
         for i in 1..=crate::backlog::MAX_PENDING_CHECKPOINTS {
             let h = (i as u64) * interval;
             assert!(backlog.set_processed_block(chain, h).await.is_some());

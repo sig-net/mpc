@@ -59,7 +59,7 @@ impl SignRequestStep {
 static SIGN_REQUEST_LATENCY: LazyLock<HistogramVec> = LazyLock::new(|| {
     try_create_histogram_vec_with_node_and_version(
         "multichain_sign_request_latency_sec",
-        "Latency of multichain sign request processing with step, status and request kind specification.",
+        "Latency of sign request processing with step, status and request kind specification.",
         &["chain", "step", "status", "kind"],
         // Start: 30ms, Factor: 1.4, Count: 42
         // Range: 0.03s -> ~29,300s (8.1 hours)
@@ -141,6 +141,17 @@ pub(crate) static SIGN_REQUEST_LOOPS: LazyLock<CounterVec> = LazyLock::new(|| {
         "multichain_sign_request_loops_total",
         "Number of back-edges to organizing in the sign request state machine, by chain and source phase.",
         &["chain", "from_phase"],
+    )
+    .unwrap()
+});
+
+/// Executions resolved without a wait start — displaced or recovered
+/// watches — excluded from the awaiting-execution latency histogram.
+pub(crate) static EXECUTION_WAIT_UNMEASURED: LazyLock<CounterVec> = LazyLock::new(|| {
+    try_create_counter_vec_with_node_and_version(
+        "multichain_execution_wait_unmeasured_total",
+        "Executions resolved without a wait start, excluded from the awaiting-execution latency histogram, by source chain.",
+        &["chain"],
     )
     .unwrap()
 });

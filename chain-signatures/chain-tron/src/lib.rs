@@ -5,10 +5,16 @@
 //! messages, canonical parse, signing derivations, addresses — lives in
 //! [`mpc_tron_wire`].
 
+#[cfg(test)]
+mod test_utils;
+
 mod client;
 mod config;
+mod expiry;
 mod types;
+mod watcher;
 
 pub use client::TronHttp;
 pub use config::TronConfig;
-pub use types::{BroadcastOutcome, TronLog, TronReceipt};
+pub use types::{BroadcastOutcome, SolidifiedBlock, TronExecutionResult, TronLog, TronReceipt};
+pub use watcher::TronWatcher;

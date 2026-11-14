@@ -13,8 +13,7 @@ the tracking issue where there is one.
 A node's local, unreliable guess at which [committee](#committee) members are
 reachable, report the `Running` state and have finished a [state
 sync](#state-sync) with the node. No two nodes need the same guess
-(`MeshState::active`, `mesh/state.rs`). See [protocol-properties.md
-§2](protocol-properties.md#2-system-model).
+(`MeshState::active`, `mesh/state.rs`). See [system-model.md](system-model.md).
 
 ## Admitted request
 
@@ -61,8 +60,8 @@ its [digest](#digest). See [bidirectional-calls.md
 
 Each node keeps one backlog per [source chain](#source-chain), with one entry
 per [admitted](#admitted-request) [request](#request) that is not finished. An
-entry holds the [request id](#request-id), the request, the contract that made
-it and, for a [bidirectional request](#bidirectional-request), the signatures
+entry holds the [request id](#request-id), the request and, for a
+[bidirectional request](#bidirectional-request), the signatures
 for it [published](#publish) in final source chain blocks. Only final source
 chain events change it; anything else a node keeps about a request stays out of
 it (`Backlog`, `backlog/`). See [checkpoints.md
@@ -105,15 +104,14 @@ contract](#governance-contract) (`Checkpoint`, `backlog/checkpoints.rs`). See
 Membership, [threshold](#threshold) t and [epoch](#epoch) as fixed by the
 [governance contract](#governance-contract); each node holds its own snapshot
 (`GovernanceInfo`, `rpc/mod.rs`). Committee is contract-scoped; compare
-[participant](#participant). See [protocol-properties.md
-§2](protocol-properties.md#2-system-model).
+[participant](#participant). See [system-model.md](system-model.md).
 
 ## Correct node
 
 A node that follows the protocol, apart from crashing and restarting with its
 durable storage intact. Its RPC provider tells it the truth, and it indexes
 faster than the chains produce blocks. Compare [faulty node](#faulty-node).
-See [protocol-properties.md §2](protocol-properties.md#2-system-model) and
+See [system-model.md](system-model.md) and
 [checkpoints.md §1](checkpoints.md#1-background).
 
 ## Deliberator
@@ -140,7 +138,8 @@ A short hash that stands for a larger structure. The docs use two:
 A value from the block that holds a [request](#request). The requester cannot
 know or influence it before that block is validated. Nodes read it from a final
 block, so every node derives the same delta (`SignArgs::entropy`,
-`chain-signatures/primitives/src/crypto.rs`). It also seeds the
+`chain-signatures/primitives/src/crypto.rs`). A response has no such block: its
+entropy hashes the first leg's with the message it signs and its key. It also seeds the
 [proposer](#proposer) election. See
 [delta-derivation.md](delta-derivation.md).
 
@@ -153,15 +152,14 @@ completed resharing raises by one (`RunningContractState::epoch`,
 ## f
 
 The number of [faulty nodes](#faulty-node) the model tolerates. Safety needs f
-< [t](#threshold) and f < 2t − [n](#n). See [protocol-properties.md
-§2](protocol-properties.md#2-system-model).
+< [t](#threshold) and f < 2t − [n](#n). See [system-model.md](system-model.md).
 
 ## Faulty node
 
 A node that may deviate arbitrarily from the protocol; at most [f](#f) of the
 [n](#n) nodes are faulty. A node whose RPC provider misleads it counts as
-faulty. Compare [correct node](#correct-node). See [protocol-properties.md
-§2](protocol-properties.md#2-system-model) and [checkpoints.md
+faulty. Compare [correct node](#correct-node). See
+[system-model.md](system-model.md) and [checkpoints.md
 §1](checkpoints.md#1-background).
 
 ## Final block
@@ -170,8 +168,8 @@ A block the network treats as final, so it will stay in the chain unchanged
 (called solidified on Tron). Nodes read [requests](#request) and attest
 [outcomes](#outcome) only from final blocks; what counts as finalized differs
 per chain. See [bidirectional-calls.md
-§3.3](bidirectional-calls.md#33-assumptions) and [protocol-properties.md
-§2](protocol-properties.md#2-system-model).
+§3.3](bidirectional-calls.md#33-assumptions) and
+[system-model.md](system-model.md).
 
 ## Generation
 
@@ -216,7 +214,7 @@ peers are eligible for a [participant](#participant) list. See
 ## n
 
 The number of nodes in the [committee](#committee). See
-[protocol-properties.md §2](protocol-properties.md#2-system-model).
+[system-model.md](system-model.md).
 
 ## Outcome
 
@@ -233,10 +231,8 @@ transaction, one of three kinds:
 
 See [bidirectional-calls.md §2](bidirectional-calls.md#2-vocabulary).
 
-*Code today:* Unviable is attested only for requests from Midnight, and even
-there not when only another request's response shows it
-([#1429](https://github.com/sig-net/mpc/issues/1429),
-[#1430](https://github.com/sig-net/mpc/issues/1430)).
+*Code today:* Unviable is attested only for requests from Midnight
+([#1429](https://github.com/sig-net/mpc/issues/1429)).
 
 ## Owner
 
@@ -306,10 +302,13 @@ chain](#source-chain). See
 ## Request
 
 What a contract asks the network to sign. A [bidirectional
-request](#bidirectional-request) is the tuple (transaction, target, key,
-schema), made when the contract passes it to `sign_bidirectional` and that
-call accepts it (`IndexedSignRequest`, `SignKind`,
-`chain-signatures/primitives/src/requests.rs`). See
+request](#bidirectional-request) is the tuple (sender, transaction, target,
+key, schema), where the sender is the requesting contract. It is made when
+the contract calls `sign_bidirectional` with the other four fields, which
+sets the sender to the calling contract and accepts the call
+(`IndexedSignRequest`, `SignKind`,
+`chain-signatures/primitives/src/requests.rs`; `SignBidirectionalEvent`,
+`chain-signatures/primitives/src/bidirectional.rs`). See
 [bidirectional-calls.md §2](bidirectional-calls.md#2-vocabulary).
 
 ## Request id
@@ -386,8 +385,7 @@ executes on (`executionDest` on the wire). See
 
 t, the number of nodes needed to sign, set by the [governance
 contract](#governance-contract) (`vote_threshold`,
-`chain-signatures/contract/src/lib.rs`). See [protocol-properties.md
-§2](protocol-properties.md#2-system-model).
+`chain-signatures/contract/src/lib.rs`). See [system-model.md](system-model.md).
 
 ## Triple pair
 

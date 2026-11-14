@@ -19,7 +19,10 @@ pub use eth_tx::{derive_user_address, public_key_to_address};
 pub use progress::{BidirectionalProgress, SignProgress, SignStatus};
 pub use signing::sign_and_hash_transaction;
 use signing::validate_unsigned_transaction;
-pub(crate) use signing::{owned_by_requester, pending_destination_id, transaction_chain_id};
+pub(crate) use signing::{
+    destination_expiry, owned_by_requester, pending_destination_id, transaction_chain_id,
+    transaction_nonce, ExpiryWindow,
+};
 
 /// The requester's chain-local identity string: Midnight and Canton senders
 /// are 32-byte addresses whose canonical form is the lowercase hex of those
@@ -127,6 +130,14 @@ pub trait SignBidirectionalEventExt {
         mpc_sig: Signature,
         root_pk: mpc_primitives::PublicKey,
     ) -> anyhow::Result<BidirectionalTx>;
+
+    /// The [`BidirectionalTx`] whose id a signature of this event gave.
+    fn bidirectional_tx(
+        &self,
+        request_id: [u8; 32],
+        id: BidirectionalTxId,
+        root_pk: mpc_primitives::PublicKey,
+    ) -> anyhow::Result<BidirectionalTx>;
 }
 
 impl SignBidirectionalEventExt for SignBidirectionalEvent {
@@ -176,12 +187,8 @@ impl SignBidirectionalEventExt for SignBidirectionalEvent {
             );
         }
         self.epsilon().context("cannot derive epsilon")?;
-        // TODO(tron): enforce §4.3's bound t_src < expiration ≤ t_src +
-        // 24 h. The raw bytes carry `expiration`; the missing pipe is the
-        // source time (event has none, Midnight reports block_timestamp:
-        // None) — thread indexed_ts into validate or expose block time.
-        // The expiry→Unviable scan must cover backlog entries, not just
-        // watchers.
+        // §4.3's expiry bound lives at ingestion (`expiry_bound` in stream
+        // ops): wall-clock anchors would split verdicts, block time does not.
         let calldata = validate_unsigned_transaction(target, &self.serialized_transaction)
             .context("undecodable serialized_transaction")?;
         match calldata {
@@ -215,14 +222,26 @@ impl SignBidirectionalEventExt for SignBidirectionalEvent {
         let target_chain = self.target_chain().with_context(|| {
             format!("failed to determine target chain for request: {request_id:?}")
         })?;
-        let epsilon = self.epsilon()?;
-        let from_address = derive_user_address(root_pk, epsilon);
-        // EVM-shaped; Tron consumers wrap it with `TronAddress::from_evm`.
-        let (signed_tx_hash, nonce) =
+        let signed_tx_hash =
             sign_and_hash_transaction(target_chain, &self.serialized_transaction, mpc_sig)?;
+        self.bidirectional_tx(request_id, BidirectionalTxId(signed_tx_hash), root_pk)
+    }
+
+    fn bidirectional_tx(
+        &self,
+        request_id: [u8; 32],
+        id: BidirectionalTxId,
+        root_pk: mpc_primitives::PublicKey,
+    ) -> anyhow::Result<BidirectionalTx> {
+        let target_chain = self.target_chain().with_context(|| {
+            format!("failed to determine target chain for request: {request_id:?}")
+        })?;
+        // EVM-shaped; Tron consumers wrap it with `TronAddress::from_evm`.
+        let from_address = **derive_user_address(root_pk, self.epsilon()?);
+        let nonce = transaction_nonce(target_chain, &self.serialized_transaction)?;
 
         Ok(BidirectionalTx {
-            id: BidirectionalTxId(signed_tx_hash),
+            id,
             sender: self.sender,
             serialized_transaction: self.serialized_transaction.clone(),
             source_chain: self.chain,
@@ -237,7 +256,7 @@ impl SignBidirectionalEventExt for SignBidirectionalEvent {
             output_deserialization_schema: self.output_deserialization_schema.clone(),
             respond_serialization_schema: self.respond_serialization_schema.clone(),
             request_id,
-            from_address: **from_address,
+            from_address,
             nonce,
         })
     }
@@ -422,10 +441,9 @@ mod tests {
             .unwrap()
         };
         let low = k256::Scalar::from(5u64);
-        let (id_low, nonce) = id_of(low, 1);
-        let (id_high, _) = id_of(-low, 0);
+        let id_low = id_of(low, 1);
+        let id_high = id_of(-low, 0);
         assert_eq!(id_low, id_high);
-        assert_eq!(nonce, 0);
         assert_eq!(hex::encode(id_low), TXID_HEX);
     }
 

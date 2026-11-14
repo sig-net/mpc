@@ -20,9 +20,6 @@ fn test_signer() -> alloy::signers::local::PrivateKeySigner {
         .unwrap()
 }
 
-/// Default refresh interval (ms) used by `IndexerBuilder` unless overridden.
-const DEFAULT_REFRESH_FINALIZED_INTERVAL: u64 = 100;
-
 /// Creates a test Ethereum client with a small retry strategy for testing purposes.
 pub async fn create_test_ethereum_client(url: &str) -> EthereumClient {
     create_test_ethereum_client_with_catchup(url, Default::default(), SharedBackoff::new()).await
@@ -48,16 +45,14 @@ pub async fn create_test_ethereum_client_with_catchup(
         execution_rpc_http_url: url.parse().unwrap(),
         account_sk: test_signer(),
         contract_address: Address::ZERO,
-        network: "".to_string(),
-        refresh_finalized_interval: 0,
-        optimistic_requests: false,
+        network: crate::config::EthNetwork::Sepolia,
         rpc: RpcConfig {
             catchup,
             ..Default::default()
         },
         gas: Default::default(),
         publisher: Default::default(),
-        indexer: Default::default(),
+        indexer: IndexerConfig::fast_polling(),
     };
 
     EthereumClient::new_with_strategy(eth, retry_strategy, shared_backoff)
@@ -84,13 +79,11 @@ impl TestIndexerBuilder {
                 account_sk: test_signer(),
                 execution_rpc_http_url: server_url.parse().unwrap(),
                 contract_address: Address::ZERO,
-                network: "sepolia".to_string(),
-                refresh_finalized_interval: DEFAULT_REFRESH_FINALIZED_INTERVAL,
-                optimistic_requests: false,
+                network: crate::config::EthNetwork::Sepolia,
                 rpc: Default::default(),
                 gas: Default::default(),
                 publisher: Default::default(),
-                indexer: Default::default(),
+                indexer: IndexerConfig::fast_polling(),
             },
             state_manager: MockStateManager::new(),
         }
@@ -126,7 +119,7 @@ mod tests {
     fn builder_defaults_to_finalized_requests() {
         let builder = TestIndexerBuilder::new("http://127.0.0.1:1");
 
-        assert!(!builder.eth.optimistic_requests);
+        assert!(!builder.eth.network.is_optimistic());
     }
 }
 
@@ -187,7 +180,7 @@ impl WatcherHarness {
         Self {
             client: Arc::new(create_test_ethereum_client(url).await),
             state_manager: MockStateManager::new(),
-            config: IndexerConfig::default(),
+            config: IndexerConfig::fast_polling(),
             gate: Mutex::new(WatcherGateState::default()),
             telemetry: CountingChainTelemetry::default(),
         }

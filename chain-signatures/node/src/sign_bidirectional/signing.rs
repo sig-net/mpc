@@ -5,7 +5,7 @@ use crate::protocol::Chain;
 use k256::elliptic_curve::point::AffineCoordinates as _;
 use k256::elliptic_curve::scalar::IsHigh as _;
 use mpc_primitives::{BidirectionalTxId, SignBidirectionalEvent, Signature};
-use mpc_tron_wire::{pb::RawTransaction, TronAddress};
+use mpc_tron_wire::{pb::RawTransaction, TronAddress, MAX_EXPIRATION_SPAN_MS};
 use rlp::Rlp;
 
 use super::eth_tx::{
@@ -44,6 +44,28 @@ pub(crate) fn pending_destination_id(
         Chain::Tron => Ok(Some(BidirectionalTxId(
             RawTransaction::parse(unsigned)?.txid(),
         ))),
+        _ => Ok(None),
+    }
+}
+
+/// Unsigned tx expiry window
+pub(crate) struct ExpiryWindow {
+    pub(crate) expiration_ms: u64,
+    pub(crate) cap_ms: u64,
+}
+
+/// The expiry the unsigned bytes carry pre-signing — Tron's `expiration`;
+/// Ethereum carries none.
+pub(crate) fn destination_expiry(
+    target: Chain,
+    unsigned: &[u8],
+) -> anyhow::Result<Option<ExpiryWindow>> {
+    match target {
+        // `parse` rejects a non-positive expiration.
+        Chain::Tron => Ok(Some(ExpiryWindow {
+            expiration_ms: RawTransaction::parse(unsigned)?.expiration as u64,
+            cap_ms: MAX_EXPIRATION_SPAN_MS,
+        })),
         _ => Ok(None),
     }
 }
@@ -216,18 +238,16 @@ fn validate_access_list(access_list: &Rlp) -> anyhow::Result<()> {
 }
 
 /// Signs `unsigned` for `target`, returning the transaction id the target
-/// chain records it under and the account-sequence field: Ethereum's nonce,
-/// or 0 for Tron, which has none (ref-block fields in the raw data serve
-/// that role).
+/// chain records it under.
 pub fn sign_and_hash_transaction(
     target: Chain,
     unsigned: &[u8],
     signature: Signature,
-) -> anyhow::Result<([u8; 32], u64)> {
+) -> anyhow::Result<[u8; 32]> {
     match target {
         Chain::Ethereum => sign_and_hash_ethereum(unsigned, signature),
         // The txID is sha256(raw_data) — signature-independent by construction.
-        Chain::Tron => Ok((RawTransaction::parse(unsigned)?.txid(), 0)),
+        Chain::Tron => Ok(RawTransaction::parse(unsigned)?.txid()),
         _ => anyhow::bail!("unsupported target chain {target}"),
     }
 }
@@ -246,10 +266,7 @@ fn normalized_rs_v(signature: &Signature) -> ([u8; 32], [u8; 32], u8) {
     (r, s, v)
 }
 
-fn sign_and_hash_ethereum(
-    unsigned_rlp: &[u8],
-    signature: Signature,
-) -> anyhow::Result<([u8; 32], u64)> {
+fn sign_and_hash_ethereum(unsigned_rlp: &[u8], signature: Signature) -> anyhow::Result<[u8; 32]> {
     let (r, s, v) = normalized_rs_v(&signature);
     let y_parity = v == 1;
 
@@ -258,6 +275,21 @@ fn sign_and_hash_ethereum(
     } else {
         let chain_id = transaction_chain_id(unsigned_rlp);
         sign_and_hash_legacy_from_unsigned(unsigned_rlp, chain_id, &r, &s, y_parity)
+    }
+}
+
+/// The replay-protection nonce of unsigned bytes for `target`: the EVM nonce, 0 on Tron.
+pub(crate) fn transaction_nonce(target: Chain, unsigned: &[u8]) -> anyhow::Result<u64> {
+    match target {
+        Chain::Ethereum => {
+            let nonce = match unsigned.strip_prefix(&[0x02]) {
+                Some(body) => Rlp::new(body).val_at(1)?,
+                None => Rlp::new(unsigned).val_at(0)?,
+            };
+            Ok(nonce)
+        }
+        Chain::Tron => Ok(0),
+        _ => anyhow::bail!("unsupported target chain {target}"),
     }
 }
 
@@ -282,10 +314,26 @@ fn is_eip1559(unsigned_rlp: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::super::eth_tx::legacy_tx;
-    use super::{sign_and_hash_transaction, validate_unsigned_transaction};
+    use super::{destination_expiry, sign_and_hash_transaction, validate_unsigned_transaction};
     use alloy::consensus::{SignableTransaction as _, TxEip1559};
     use alloy::primitives::TxKind;
     use mpc_primitives::Chain;
+
+    const TRON_RAW_HEX: &str = "0a02db6f220815ff9c9c504ad4a8409a80f5a491345aae01081f12a9010a31747970652e676f6f676c65617069732e636f6d2f70726f746f636f6c2e54726967676572536d617274436f6e747261637412740a154120eb85916a10d2c6542613e4c9517b5e99b2dee9121541a614f803b6fd780986a42c78ec9c7f77e6ded13c2244a9059cbb000000000000000000000000d9e02baf48ed306afc63cfa816a2b6be8442036a0000000000000000000000000000000000000000000000000000000008f428f870bad8e2a49134900180e1eb17";
+
+    #[test]
+    fn destination_expiry_is_some_for_tron_only() {
+        let tron = hex::decode(TRON_RAW_HEX).unwrap();
+        let bounded = enum_map::enum_map! {
+            Chain::Tron => true,
+            Chain::NEAR | Chain::Ethereum | Chain::Solana | Chain::Bitcoin
+                | Chain::Hydration | Chain::Canton | Chain::Midnight => false,
+        };
+        for (chain, wants_some) in bounded {
+            let expiry = destination_expiry(chain, &tron).expect("the Tron arm parses");
+            assert_eq!(expiry.is_some(), wants_some, "{chain}");
+        }
+    }
 
     #[test]
     fn transaction_chain_id_reads_legacy_and_eip1559() {
@@ -466,7 +514,6 @@ mod tests {
                 mpc_primitives::Signature::new(big_r, s, recovery_id),
             )
             .unwrap()
-            .0
         };
 
         assert_eq!(id_of(low, 1), id_of(high, 0));
@@ -480,8 +527,7 @@ mod tests {
             low.to_bytes().as_slice(),
             false,
         )
-        .unwrap()
-        .0;
+        .unwrap();
         assert_eq!(id_of(high, 1), expected);
     }
 

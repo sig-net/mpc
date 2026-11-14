@@ -3,7 +3,7 @@ use integration_tests::cluster;
 use integration_tests::utils;
 
 use k256::elliptic_curve::sec1::ToEncodedPoint as _;
-use mpc_contract::config::Config;
+use mpc_contract::config::ProtocolConfig;
 use mpc_contract::update::ProposeUpdateArgs;
 use mpc_crypto::{
     self, derive_epsilon_near, derive_key, reconstruct_signature, x_coordinate, ScalarExt,
@@ -35,7 +35,7 @@ pub mod store;
 pub mod sync;
 
 #[test(tokio::test)]
-async fn test_multichain_reshare() -> anyhow::Result<()> {
+async fn test_reshare() -> anyhow::Result<()> {
     let mut nodes = cluster::spawn().disable_prestockpile().await?;
 
     nodes.wait().signable().await?;
@@ -84,8 +84,7 @@ async fn test_signature_many() -> anyhow::Result<()> {
     let nodes = cluster::spawn()
         .disable_prestockpile()
         .with_config(|config| {
-            config.protocol.presignature.min_presignatures = 10;
-            config.protocol.presignature.max_presignatures = 100;
+            config.protocol.min_mine_presignatures = 10;
         })
         .await?;
 
@@ -129,7 +128,7 @@ async fn test_key_derivation() -> anyhow::Result<()> {
         let derivation_epsilon =
             derive_epsilon_near(LATEST_MPC_KEY_VERSION, outcome.account.id(), hd_path)?;
         let user_pk = derive_key(mpc_pk, derivation_epsilon);
-        let multichain_sig = reconstruct_signature(
+        let reconstructed = reconstruct_signature(
             &user_pk,
             &outcome.signature.big_r,
             &outcome.signature.s,
@@ -139,8 +138,8 @@ async fn test_key_derivation() -> anyhow::Result<()> {
 
         // start recovering the address and compare them:
         let user_addr = public_key_to_address(&user_pk.to_encoded_point(false));
-        let r = x_coordinate(&multichain_sig.big_r);
-        let s = multichain_sig.s;
+        let r = x_coordinate(&reconstructed.big_r);
+        let s = reconstructed.s;
         let signature_for_recovery: [u8; 64] = {
             let mut signature = [0u8; 64];
             signature[..32].copy_from_slice(&r.to_bytes());
@@ -150,7 +149,7 @@ async fn test_key_derivation() -> anyhow::Result<()> {
         let recovered_addr = actions::recover_eth_address(
             &outcome.payload_hash,
             &signature_for_recovery,
-            multichain_sig.recovery_id,
+            reconstructed.recovery_id,
         );
         assert_eq!(user_addr, recovered_addr);
     }
@@ -179,7 +178,7 @@ async fn test_signature_offline_node_back_online() -> anyhow::Result<()> {
 }
 
 #[test(tokio::test)]
-async fn test_multichain_update_contract() -> anyhow::Result<()> {
+async fn test_update_contract() -> anyhow::Result<()> {
     let nodes = cluster::spawn().await?;
     nodes.wait().signable().await?;
     nodes.sign().await.unwrap();
@@ -195,7 +194,7 @@ async fn test_multichain_update_contract() -> anyhow::Result<()> {
     let id = nodes
         .propose_update(ProposeUpdateArgs {
             code: None,
-            config: Some(Config::default()),
+            config: Some(ProtocolConfig::default()),
         })
         .await;
     nodes.vote_update(id).await;

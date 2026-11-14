@@ -1,0 +1,252 @@
+// Test-only real caller for the Rust-owned integration stack.
+pragma language_version >= 0.25;
+
+import CompactStandardLibrary;
+import "@sig-net/midnight/src/Signet";
+
+struct BoolResponse {
+  success: Boolean;
+}
+
+// The declaration order is protocol-visible. The request map is field 2 and the
+// notification below names that exact path.
+export ledger mpcResponseKey: Secp256k1Point;
+sealed ledger signetSigner: SignetSigner;
+export ledger requests: Map<RequestId, SignBidirectionalEventV1<EvmType2TxParams<1, 0, 0>, 64, 0>>;
+sealed ledger deployer: Bytes<32>;
+export ledger initialised: Counter;
+// Test-only transcript ballast; see addBallast.
+export ledger ballast: Map<Uint<8>, Bytes<32>>;
+// Test-only value the gated circuit reads in its fallible section.
+export ledger gate: Counter;
+
+witness deployerSecretKey(): Bytes<32>;
+
+struct IsEvenCall {
+  evmNonce: Uint<64>;
+  to: Bytes<20>;
+  argWord: Bytes<32>;
+}
+
+export pure circuit deployerCommitment(sk: Bytes<32>): Bytes<32> {
+  return persistentHash<Vector<2, Bytes<32>>>([pad(32, "signet-caller:deployer:"), sk]);
+}
+
+constructor(initialDeployerCommitment: Bytes<32>, signetContract: SignetSigner) {
+  deployer = disclose(initialDeployerCommitment);
+  signetSigner = disclose(signetContract);
+}
+
+export circuit initialise(responseKey: Secp256k1Point): [] {
+  assert(initialised == 0, "Already initialised");
+  assert(deployerCommitment(deployerSecretKey()) == deployer, "Not the deployer");
+  initialised.increment(1);
+  mpcResponseKey = disclose(responseKey);
+}
+
+circuit fileIsEvenRequest(
+  call: IsEvenCall,
+  keyVersion: Uint<8>,
+  outputSchema: Bytes<64>
+): RequestId {
+  const calldata = EvmCalldata<1> {
+    selector: Bytes [0x2a, 0x2e, 0x13, 0x20],
+    noWords: 1 as Uint<16>,
+    words: [call.argWord]
+  };
+  const txParams = EvmType2TxParams<1, 0, 0> {
+    chainId: 31337 as Uint<64>,
+    nonce: call.evmNonce,
+    maxPriorityFeePerGas: 1000000000 as Uint<128>,
+    maxFeePerGas: 30000000000 as Uint<128>,
+    gasLimit: 100000 as Uint<64>,
+    to: call.to,
+    value: 0 as Uint<128>,
+    calldata: some<EvmCalldata<1>>(calldata),
+    accessListEntryCount: 0,
+    accessList: []
+  };
+  const request = SignBidirectionalEventV1<EvmType2TxParams<1, 0, 0>, 64, 0> {
+    keyVersion: keyVersion,
+    sender: kernel.self(),
+    path: pad(32, "caller-path"),
+    algo: MPCSignatureAlgorithm.ecdsa,
+    txParamType: TxParamType.evmType2,
+    txParams: txParams,
+    executionDest: ethereumCaip2Id(),
+    signatureDest: MPCDestination.unused,
+    params: pad(64, ""),
+    outputDeserializationSchema: outputSchema,
+    respondSerializationSchema: default<Bytes<0>>
+  };
+  const requestId = disclose(calculateEvmType2RequestIdV1<1, 0, 0, 64>(request));
+
+  assert(!requests.member(requestId), "Request already exists");
+  requests.insert(requestId, disclose(request));
+  return requestId;
+}
+
+circuit notifySigner(requestId: RequestId): RequestId {
+  signetSigner.signBidirectional(
+    requestId,
+    constructSignBidirectionalEventNotificationV1(
+      kernel.self(),
+      1 as Uint<8>,
+      [2, 0, 0, 0] as Vector<4, Uint<8>>,
+    ),
+  );
+  return requestId;
+}
+
+// The partitioner keeps a call guaranteed only while its estimated cost fits the
+// guaranteed budget. These writes exceed it with margin, moving the call that makes
+// them, singleton calls included, to the fallible transcript.
+circuit addBallast(): [] {
+  for (const slot of 0..32) {
+    ballast.insert(slot as Uint<8>, pad(32, "signet-caller:ballast"));
+  }
+}
+
+export circuit submitIsEvenRequest(
+  evmNonce: Uint<64>,
+  keyVersion: Uint<8>,
+  to: Bytes<20>,
+  argWord: Bytes<32>,
+  outputSchema: Bytes<64>
+): RequestId {
+  return notifySigner(fileIsEvenRequest(
+    IsEvenCall { evmNonce: evmNonce, to: to, argWord: argWord },
+    keyVersion,
+    outputSchema
+  ));
+}
+
+// Test-only transcript placements. Each circuit files and notifies Boolean-schema
+// requests at key version 1. Without `kernel.checkpoint()`, which this compiler's ZKIR v3
+// backend does not implement, a call is either wholly guaranteed or wholly fallible.
+
+export circuit submitPlacedRequest(call: IsEvenCall, schema: Bytes<64>, fallible: Boolean): RequestId {
+  if (disclose(fallible)) {
+    addBallast();
+  }
+  return notifySigner(fileIsEvenRequest(call, 1, schema));
+}
+
+// Both singleton calls take this call's phase and notify in call order.
+export circuit submitPlacedRequestPair(
+  first: IsEvenCall,
+  second: IsEvenCall,
+  schema: Bytes<64>,
+  fallible: Boolean
+): [RequestId, RequestId] {
+  if (disclose(fallible)) {
+    addBallast();
+  }
+  const firstId = notifySigner(fileIsEvenRequest(first, 1, schema));
+  const secondId = notifySigner(fileIsEvenRequest(second, 1, schema));
+  return [firstId, secondId];
+}
+
+// A fallible request that applies only while `gate` still equals the value the
+// transaction was built against.
+export circuit submitGatedRequest(call: IsEvenCall, schema: Bytes<64>, expectedGate: Uint<64>): RequestId {
+  addBallast();
+  assert(gate == disclose(expectedGate), "Gate moved");
+  return notifySigner(fileIsEvenRequest(call, 1, schema));
+}
+
+export circuit bumpGate(): [] {
+  gate.increment(1);
+}
+
+// Test-only impersonation: notify the central Signet contract naming another contract's request.
+// The MPC must drop it because this contract, not `victim`, is the direct caller.
+export circuit notifyAs(victim: ContractAddress, requestId: RequestId): [] {
+  signetSigner.signBidirectional(
+    disclose(requestId),
+    constructSignBidirectionalEventNotificationV1(
+      disclose(victim),
+      1 as Uint<8>,
+      [2, 0, 0, 0] as Vector<4, Uint<8>>,
+    ),
+  );
+}
+
+circuit consumeResponse<#N>(response: RespondBidirectionalEventV1, serializedOutput: Bytes<N>): [] {
+  const requestId = disclose(response.requestId);
+  assert(initialised != 0, "Not initialised");
+  assert(verifyRespondBidirectionalEventV1<N>(serializedOutput, disclose(response), mpcResponseKey), "Invalid attestation signature");
+  assert(requests.member(requestId), "Request not found");
+  requests.remove(requestId);
+}
+
+export circuit verifyResponse0(response: RespondBidirectionalEventV1, serializedOutput: Bytes<0>): [] {
+  consumeResponse<0>(response, serializedOutput);
+  assert(response.outputKind == OutputKind.failed || response.outputKind == OutputKind.unviable, "Expected failed or unviable outcome");
+}
+
+export pure circuit checkResponse0(response: RespondBidirectionalEventV1, serializedOutput: Bytes<0>, responseKey: Secp256k1Point): Boolean {
+  return verifyRespondBidirectionalEventV1<0>(serializedOutput, response, responseKey);
+}
+
+export circuit verifyResponse(response: RespondBidirectionalEventV1, serializedOutput: Bytes<1>): [] {
+  consumeResponse<1>(response, serializedOutput);
+  assert(response.outputKind == OutputKind.executed, "Expected executed outcome");
+  assert(deserialize<BoolResponse, 1>(serializedOutput).success, "Foreign call reported failure");
+}
+
+export pure circuit checkResponse1(response: RespondBidirectionalEventV1, serializedOutput: Bytes<1>, responseKey: Secp256k1Point): Boolean {
+  return verifyRespondBidirectionalEventV1<1>(serializedOutput, response, responseKey);
+}
+
+export circuit verifyResponse8(response: RespondBidirectionalEventV1, serializedOutput: Bytes<8>): [] {
+  consumeResponse<8>(response, serializedOutput);
+  assert(response.outputKind == OutputKind.executed, "Expected executed outcome");
+}
+
+export pure circuit checkResponse8(response: RespondBidirectionalEventV1, serializedOutput: Bytes<8>, responseKey: Secp256k1Point): Boolean {
+  return verifyRespondBidirectionalEventV1<8>(serializedOutput, response, responseKey);
+}
+
+export circuit verifyResponse20(response: RespondBidirectionalEventV1, serializedOutput: Bytes<20>): [] {
+  consumeResponse<20>(response, serializedOutput);
+  assert(response.outputKind == OutputKind.executed, "Expected executed outcome");
+}
+
+export pure circuit checkResponse20(response: RespondBidirectionalEventV1, serializedOutput: Bytes<20>, responseKey: Secp256k1Point): Boolean {
+  return verifyRespondBidirectionalEventV1<20>(serializedOutput, response, responseKey);
+}
+
+export circuit verifyResponse32(response: RespondBidirectionalEventV1, serializedOutput: Bytes<32>): [] {
+  consumeResponse<32>(response, serializedOutput);
+  assert(response.outputKind == OutputKind.executed, "Expected executed outcome");
+}
+
+export pure circuit checkResponse32(response: RespondBidirectionalEventV1, serializedOutput: Bytes<32>, responseKey: Secp256k1Point): Boolean {
+  return verifyRespondBidirectionalEventV1<32>(serializedOutput, response, responseKey);
+}
+
+// Test-only shapes for the partial-success review, kept to one circuit so the caller's
+// deploy stays within the block limits. Mode 0 files `call`'s request without notifying.
+// Mode 1 notifies of `requestId`, applying only while `gate` still equals `expectedGate`.
+// Mode 2 removes `requestId`, then files `call`'s request, the same id, again and notifies.
+export circuit reviewShape(
+  mode: Uint<8>,
+  call: IsEvenCall,
+  schema: Bytes<64>,
+  requestId: RequestId,
+  expectedGate: Uint<64>
+): RequestId {
+  if (disclose(mode) == 0) {
+    return fileIsEvenRequest(call, 1, schema);
+  } else {
+    addBallast();
+    if (disclose(mode) == 1) {
+      assert(gate == disclose(expectedGate), "Gate moved");
+      return notifySigner(disclose(requestId));
+    } else {
+      requests.remove(disclose(requestId));
+      return notifySigner(fileIsEvenRequest(call, 1, schema));
+    }
+  }
+}

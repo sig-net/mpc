@@ -21,11 +21,19 @@ pub use inbox::MessageInbox;
 pub use outbox::{MessageOutbox, SendMessage};
 pub use sub::{PresignaturePosit, SignaturePosit, Subscriber, TriplePosit};
 
+/// Capacity of the inbox channel, in encrypted payloads from peers. When it is
+/// full, `send_inbox` waits.
 pub const MAX_MESSAGE_INCOMING: usize = 1024 * 1024;
+/// Capacity of the outbox channel, in messages. When it is full, `send` waits.
 pub const MAX_MESSAGE_OUTGOING: usize = 1024 * 1024;
+/// Most bytes of messages the outbox packs into one request to a peer. The
+/// rest goes into further requests; a single larger message is sent alone.
 pub const MAX_OUTBOX_PAYLOAD_LIMIT: usize = 256 * 1024;
+/// Capacity of the subscribe channel, in requests. When it is full, a
+/// subscriber waits.
 pub const MAX_SUBSCRIBE_REQUESTS: usize = 16 * 1024;
 
+use crate::config::NetworkConfig;
 use crate::metrics::messaging::set_channel_capacity_tx;
 use crate::node_client::NodeClient;
 use crate::protocol::message::sub::{
@@ -82,12 +90,13 @@ impl MessageChannel {
 
     pub async fn spawn(
         client: NodeClient,
+        network: NetworkConfig,
         config: watch::Receiver<Config>,
         contract: ContractStateWatcher,
     ) -> Self {
         let (inbox, outbox, channel) = Self::new();
-        tokio::spawn(inbox.run(config.clone(), contract.clone()));
-        tokio::spawn(outbox.run(client, config, contract));
+        tokio::spawn(inbox.run(network.cipher_sk, contract.clone()));
+        tokio::spawn(outbox.run(client, network.sign_sk, config, contract));
 
         channel
     }
