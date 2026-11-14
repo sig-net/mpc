@@ -447,7 +447,7 @@ mod tests {
         let cancel = CancellationToken::new();
         let calls = Arc::new(AtomicU32::new(0));
         let calls_clone = calls.clone();
-        let operation = format!("slot 401");
+        let operation = "slot 401".to_string();
 
         retry_until_ok_or_terminal(&cancel, Duration::from_millis(1), &operation, move || {
             let calls = calls_clone.clone();
