@@ -2,12 +2,8 @@ use crate::PublicKey;
 use anyhow::Context;
 use k256::{
     ecdsa::{signature::hazmat::PrehashSigner, RecoveryId, Signature, VerifyingKey},
-    elliptic_curve::{
-        point::{AffineCoordinates, DecompressPoint},
-        sec1::ToEncodedPoint,
-        CurveArithmetic,
-    },
-    Scalar, Secp256k1, SecretKey,
+    elliptic_curve::{point::DecompressPoint, sec1::ToEncodedPoint},
+    Scalar, SecretKey,
 };
 use mpc_primitives::{Chain, Signature as MpcSignature};
 use near_account_id::AccountId;
@@ -27,7 +23,7 @@ use sha3::Sha3_256;
 pub use signet_crypto::{
     derive_epsilon, derive_epsilon_bitcoin, derive_epsilon_canton, derive_epsilon_eth,
     derive_epsilon_hydration, derive_epsilon_midnight, derive_epsilon_sol, derive_key,
-    DerivationParams, UnsupportedKeyVersion, EPSILON_DERIVATION_PREFIX_V1,
+    x_coordinate, DerivationParams, UnsupportedKeyVersion, EPSILON_DERIVATION_PREFIX_V1,
     EPSILON_DERIVATION_PREFIX_V2,
 };
 
@@ -46,15 +42,6 @@ pub fn derive_epsilon_near(
 
 pub fn derive_secret_key(secret_key: &SecretKey, epsilon: Scalar) -> SecretKey {
     SecretKey::new((epsilon + secret_key.to_nonzero_scalar().as_ref()).into())
-}
-
-/// Get the x coordinate of a point, as a scalar
-pub fn x_coordinate(
-    point: &<Secp256k1 as CurveArithmetic>::AffinePoint,
-) -> <Secp256k1 as CurveArithmetic>::Scalar {
-    <<Secp256k1 as CurveArithmetic>::Scalar as k256::elliptic_curve::ops::Reduce<
-        <k256::Secp256k1 as k256::elliptic_curve::Curve>::Uint,
-    >>::reduce_bytes(&point.x())
 }
 
 pub fn check_ec_signature(

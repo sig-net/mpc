@@ -1,5 +1,8 @@
 use crate::{Address, KeyVersion, Path, Purpose};
-use k256::{elliptic_curve::CurveArithmetic, Scalar, Secp256k1};
+use k256::{
+    elliptic_curve::{point::AffineCoordinates, CurveArithmetic},
+    Scalar, Secp256k1,
+};
 use sha3::{Digest, Keccak256, Sha3_256};
 use signet_primitives::{Chain, PublicKey, ScalarExt, LATEST_MPC_KEY_VERSION};
 
@@ -186,9 +189,28 @@ pub fn derive_key(public_key: PublicKey, epsilon: Scalar) -> PublicKey {
     (<Secp256k1 as CurveArithmetic>::ProjectivePoint::GENERATOR * epsilon + public_key).to_affine()
 }
 
+/// x coordinate of `point`, reduced to a scalar.
+pub fn x_coordinate(point: &PublicKey) -> Scalar {
+    <<Secp256k1 as CurveArithmetic>::Scalar as k256::elliptic_curve::ops::Reduce<
+        <k256::Secp256k1 as k256::elliptic_curve::Curve>::Uint,
+    >>::reduce_bytes(&point.x())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_x_coordinate_of_generator() {
+        let expected = Scalar::from_bytes(
+            hex::decode("79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798")
+                .unwrap()
+                .try_into()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(x_coordinate(&PublicKey::GENERATOR), expected);
+    }
 
     #[test]
     fn test_derivation_path_stays_the_same() {
