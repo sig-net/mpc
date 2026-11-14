@@ -408,7 +408,7 @@ impl<S: StateManager, T: ChainTelemetry> SolanaIndexer<S, T> {
         }
     }
 
-    /// Retries `process_catchup_item` with `RETRY_DELAY` backoff until it
+    /// Retries `process_catchup_item` at fixed `RETRY_DELAY` intervals until it
     /// succeeds, `cancel` fires, or a terminal error is returned to the caller.
     async fn process_catchup_retrying(
         &self,
