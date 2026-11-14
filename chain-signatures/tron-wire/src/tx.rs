@@ -30,16 +30,25 @@ impl RawTransaction {
         Sha256::digest(self.encode_to_vec()).into()
     }
 
-    /// The trigger's `owner_address`, for admission checks that bind the
-    /// owner to the request's derived key.
-    pub fn owner_address(&self) -> anyhow::Result<Vec<u8>> {
+    /// The one trigger contract `parse` admitted, decoded.
+    fn trigger(&self) -> anyhow::Result<TriggerSmartContract> {
         let any = self
             .contract
             .first()
             .and_then(|contract| contract.parameter.as_ref())
             .context("missing TriggerSmartContract parameter")?;
-        let trigger = TriggerSmartContract::decode(any.value.as_slice())?;
-        Ok(trigger.owner_address)
+        Ok(TriggerSmartContract::decode(any.value.as_slice())?)
+    }
+
+    /// The trigger's `owner_address`, for admission checks that bind the
+    /// owner to the request's derived key.
+    pub fn owner_address(&self) -> anyhow::Result<Vec<u8>> {
+        Ok(self.trigger()?.owner_address)
+    }
+
+    /// The trigger's `data`, for output recovery's `is_contract_call` predicate.
+    pub fn calldata(&self) -> anyhow::Result<Vec<u8>> {
+        Ok(self.trigger()?.data)
     }
 
     /// Parses and validates the bytes the multichain API carries for Tron
@@ -233,6 +242,29 @@ mod tests {
         assert_eq!(
             trigger.owner_address.as_slice(),
             owner().as_bytes().as_slice()
+        );
+    }
+
+    #[test]
+    fn calldata_reads_the_assembled_trigger_data() {
+        let mut plain = params();
+        let plain_bytes = to_unsigned_tron_tx(&plain, owner()).unwrap();
+        assert!(RawTransaction::parse(&plain_bytes)
+            .unwrap()
+            .calldata()
+            .unwrap()
+            .is_empty());
+
+        plain.calldata.is_some = true;
+        plain.calldata.value.selector = [0xa9, 0x05, 0x9c, 0xbb];
+        plain.calldata.value.no_words = 2;
+        plain.calldata.value.words = vec![[0x11; 32]; 2];
+        let bytes = to_unsigned_tron_tx(&plain, owner()).unwrap();
+        let mut expected = vec![0xa9, 0x05, 0x9c, 0xbb];
+        expected.extend_from_slice(&[0x11; 64]);
+        assert_eq!(
+            RawTransaction::parse(&bytes).unwrap().calldata().unwrap(),
+            expected
         );
     }
 

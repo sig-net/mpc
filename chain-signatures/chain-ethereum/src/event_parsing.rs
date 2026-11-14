@@ -3,7 +3,7 @@
 
 use crate::abi::{ChainSignatures, SignatureRequestedEncoding};
 use alloy::primitives::hex::ToHexExt;
-use alloy::primitives::{Address, Bytes, U256};
+use alloy::primitives::{Address, U256};
 use alloy::rpc::types::Log;
 use alloy::sol_types::SolEvent;
 use k256::elliptic_curve::sec1::FromEncodedPoint;
@@ -15,11 +15,6 @@ use mpc_primitives::{
 };
 use mpc_utils::time::current_unix_timestamp;
 use tokio::sync::mpsc;
-
-/// Whether a transaction's calldata represents a contract call.
-pub fn is_contract_call(input: &Bytes) -> bool {
-    !input.is_empty()
-}
 
 pub fn parse_filtered_logs(logs: Vec<Log>) -> Vec<IndexedSignRequest> {
     let mut indexed_requests = Vec::new();
@@ -233,7 +228,7 @@ pub fn generate_request_id(
 mod tests {
     use super::*;
     use crate::abi::ChainSignatures;
-    use alloy::primitives::{Address, FixedBytes, Log as PrimitiveLog, U256};
+    use alloy::primitives::{Address, Bytes, FixedBytes, Log as PrimitiveLog, U256};
     use alloy::sol_types::SolEvent;
 
     fn sample_requested_event() -> ChainSignatures::SignatureRequested {
@@ -259,15 +254,6 @@ mod tests {
             ),
             ..Default::default()
         }
-    }
-
-    #[test]
-    fn is_contract_call_detects_calldata() {
-        assert!(!is_contract_call(&Bytes::new()));
-        assert!(is_contract_call(&Bytes::from(vec![0u8; 2])));
-        assert!(is_contract_call(&Bytes::from(vec![
-            0xa9, 0x05, 0x9c, 0xbb, 0x00
-        ])));
     }
 
     #[test]

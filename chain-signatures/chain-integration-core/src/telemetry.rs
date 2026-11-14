@@ -24,8 +24,8 @@ pub trait ChainTelemetry: Send + Sync + Clone + 'static {
     fn request_indexed(&self, kind: RequestKind);
 
     /// Records a failed attempt to extract the output of a bidirectional
-    /// execution on this chain. Counts *attempts*: a retryable failure on the
-    /// same transaction increments once per retry.
+    /// execution on this chain. Counts *attempts*: fetch failures once
+    /// per polled id, classification failures once per watched request.
     fn bidirectional_extraction_failed(&self, kind: ExtractionFailureKind);
 
     /// Records an expiry scan deferred by a solidity head-fetch

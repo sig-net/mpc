@@ -9,7 +9,7 @@ use alloy::primitives::B256;
 use anyhow::Context;
 use futures_util::stream::{iter, Stream, StreamExt};
 use mpc_chain_integration_core::{
-    ChainIndexer, ChainTelemetry, ExtractionFailureKind, StateManager, WatchedExecution,
+    ChainIndexer, ChainTelemetry, ExtractionFailure, StateManager, WatchedExecution,
 };
 use mpc_primitives::{BidirectionalTxId, Chain, ChainEvent, ExecutionOutcome};
 use tokio::sync::mpsc;
@@ -87,16 +87,25 @@ impl<S: StateManager, T: ChainTelemetry> TronWatcher<S, T> {
         members: Vec<WatchedExecution>,
     ) -> Vec<ChainEvent> {
         let member_count = members.len();
-        let Some(receipt) = self
+        let receipt = match self
             .client
             .get_transaction_info_solidity(&B256::from(tx_id.0))
             .await
-            .inspect_err(|err| {
-                tracing::warn!(?tx_id, members = member_count, ?err, "receipt poll failed")
-            })
-            .ok()
-            .flatten()
-        else {
+        {
+            Ok(receipt) => receipt,
+            Err(err) => {
+                let failure = ExtractionFailure::from(err);
+                self.telemetry
+                    .bidirectional_extraction_failed(failure.kind());
+                tracing::warn!(
+                    ?tx_id,
+                    members = member_count,
+                    "receipt poll failed: {failure:#}"
+                );
+                return Vec::new();
+            }
+        };
+        let Some(receipt) = receipt else {
             return Vec::new();
         };
 
@@ -111,25 +120,27 @@ impl<S: StateManager, T: ChainTelemetry> TronWatcher<S, T> {
     fn member_event(&self, member: WatchedExecution, receipt: &TronReceipt) -> Option<ChainEvent> {
         let WatchedExecution { sign_id, tx } = member;
         let tx_id = tx.id;
-        let result = receipt
-            .execution_outcome(&tx.output_deserialization_schema)
-            .inspect_err(|err| {
-                tracing::warn!(?tx_id, ?sign_id, "{err:#}");
+        let result = match receipt.execution_outcome(&tx) {
+            Ok(result) => result,
+            Err(failure) => {
                 self.telemetry
-                    .bidirectional_extraction_failed(ExtractionFailureKind::Retryable);
-            })
-            .ok()?;
-
-        // The park arm reports terminal telemetry.
-        if matches!(result, ExecutionOutcome::ExtractionFailed) {
-            self.telemetry
-                .bidirectional_extraction_failed(ExtractionFailureKind::Terminal);
-            tracing::error!(
-                ?tx_id,
-                ?sign_id,
-                "schema-carrying request, but Tron output extraction is undefined; parking"
-            );
-        }
+                    .bidirectional_extraction_failed(failure.kind());
+                match failure {
+                    ExtractionFailure::Retryable(err) => {
+                        tracing::warn!(?tx_id, ?sign_id, "{err:#}");
+                        return None;
+                    }
+                    ExtractionFailure::Terminal(err) => {
+                        tracing::error!(
+                            ?tx_id,
+                            ?sign_id,
+                            "output extraction failed; parking: {err:#}"
+                        );
+                        ExecutionOutcome::ExtractionFailed
+                    }
+                }
+            }
+        };
 
         Some(ChainEvent::ExecutionConfirmed {
             tx_id,
@@ -504,10 +515,68 @@ mod tests {
         run.stop().await;
     }
 
-    /// A successful receipt can't yield a schema-carrying request's
-    /// output: park rather than attest an empty one.
+    /// A successful receipt yields the request's output:
+    /// `contractResult[0]` decoded and re-serialized (Fab `bool` →
+    /// one byte).
     #[tokio::test]
-    async fn schema_carrying_success_parks() {
+    async fn schema_carrying_success_extracts() {
+        let server = mockito::Server::new_async().await;
+        let config = test_config(server.url().parse().unwrap());
+        let mut server = server;
+        nowblock_mock(&mut server);
+        receipt_stub(&mut server, 1, success_body_with_return(1, ABI_FALSE_WORD))
+            .expect(1)
+            .create();
+
+        let state = MockStateManager::new();
+        state
+            .watch_execution(Chain::Tron, schema_carrying_tx(1).2)
+            .await;
+
+        let telemetry = CountingTelemetry::default();
+        let mut run = spawn_watcher(config, state, telemetry.clone());
+        first_is_catchup_completed(&mut run).await;
+        let (_, result) = until_confirmed(&mut run, 1).await;
+        assert!(matches!(&result,
+            ExecutionOutcome::Success { output } if *output == vec![0]));
+        assert_eq!(telemetry.terminal_failures(), 0);
+        assert_eq!(telemetry.retryable_failures(), 0);
+
+        run.stop().await;
+    }
+
+    /// Receipt and entry are immutable, so a table refusal is
+    /// deterministic — park with terminal telemetry, never retry.
+    #[tokio::test]
+    async fn undecodable_return_data_parks() {
+        let server = mockito::Server::new_async().await;
+        let config = test_config(server.url().parse().unwrap());
+        let mut server = server;
+        nowblock_mock(&mut server);
+        receipt_stub(&mut server, 1, success_body_with_return(1, "00"))
+            .expect(1)
+            .create();
+
+        let state = MockStateManager::new();
+        state
+            .watch_execution(Chain::Tron, schema_carrying_tx(1).2)
+            .await;
+
+        let telemetry = CountingTelemetry::default();
+        let mut run = spawn_watcher(config, state, telemetry.clone());
+        first_is_catchup_completed(&mut run).await;
+        let (_, result) = until_confirmed(&mut run, 1).await;
+        assert!(matches!(result, ExecutionOutcome::ExtractionFailed));
+        assert!(telemetry.terminal_failures() >= 1);
+        assert_eq!(telemetry.retryable_failures(), 0);
+
+        run.stop().await;
+    }
+
+    /// A schema-carrying call whose receipt carries no return data
+    /// parks — same arm, different table row.
+    #[tokio::test]
+    async fn schema_without_return_data_parks() {
         let server = mockito::Server::new_async().await;
         let config = test_config(server.url().parse().unwrap());
         let mut server = server;
@@ -527,7 +596,66 @@ mod tests {
         let (_, result) = until_confirmed(&mut run, 1).await;
         assert!(matches!(result, ExecutionOutcome::ExtractionFailed));
         assert!(telemetry.terminal_failures() >= 1);
-        assert_eq!(telemetry.retryable_failures(), 0);
+
+        run.stop().await;
+    }
+
+    /// Return data with an empty output schema parks under EVM parity
+    /// — the recorded USDT shape the placeholder used to attest empty.
+    #[tokio::test]
+    async fn return_data_with_empty_schema_parks() {
+        let server = mockito::Server::new_async().await;
+        let config = test_config(server.url().parse().unwrap());
+        let mut server = server;
+        nowblock_mock(&mut server);
+        receipt_stub(&mut server, 1, success_body_with_return(1, ABI_FALSE_WORD))
+            .expect(1)
+            .create();
+
+        let state = MockStateManager::new();
+        state.watch_execution(Chain::Tron, calling_tx(1).2).await;
+
+        let telemetry = CountingTelemetry::default();
+        let mut run = spawn_watcher(config, state, telemetry.clone());
+        first_is_catchup_completed(&mut run).await;
+        let (_, result) = until_confirmed(&mut run, 1).await;
+        assert!(matches!(result, ExecutionOutcome::ExtractionFailed));
+        assert!(telemetry.terminal_failures() >= 1);
+
+        run.stop().await;
+    }
+
+    /// Counted per tick, never resolved — no verdict off an unreadable body.
+    #[tokio::test]
+    async fn malformed_receipt_counts_retryable_and_resolves_nothing() {
+        let server = mockito::Server::new_async().await;
+        let config = test_config(server.url().parse().unwrap());
+        let mut server = server;
+        nowblock_mock(&mut server);
+        let malformed = format!(
+            r#"{{ "id": "{}", "blockNumber": 1, "contractResult": ["zz"],
+                 "receipt": {{ "result": "SUCCESS" }} }}"#,
+            hex::encode(watcher_tx(3).0 .0)
+        );
+        receipt_stub(&mut server, 3, malformed).create();
+
+        let state = MockStateManager::new();
+        state.watch_execution(Chain::Tron, watcher_tx(3).2).await;
+
+        let telemetry = CountingTelemetry::default();
+        let mut run = spawn_watcher(config, state, telemetry.clone());
+        first_is_catchup_completed(&mut run).await;
+        for _ in 0..5 {
+            match run.events.recv().await.expect("watcher channel open") {
+                ChainEvent::Block(_) => {}
+                other => panic!("unexpected event: {other:?}"),
+            }
+        }
+        assert!(
+            telemetry.retryable_failures() >= 5,
+            "one malformed-receipt count per tick"
+        );
+        assert_eq!(telemetry.terminal_failures(), 0);
 
         run.stop().await;
     }
@@ -616,8 +744,15 @@ mod tests {
             )),
             "the failing watcher must not resolve: {seen:?}"
         );
-        // Transport failures only warn, as on Ethereum.
-        assert_eq!(telemetry.retryable_failures(), 0);
+        // A Block certifies the completed pass — seed 1's retries drain
+        // within it.
+        loop {
+            if let ChainEvent::Block(_) = run.events.recv().await.expect("watcher channel open") {
+                break;
+            }
+        }
+        // Counted, as on Ethereum's post-retry fetch failures.
+        assert!(telemetry.retryable_failures() >= 1);
         assert_eq!(telemetry.terminal_failures(), 0);
 
         run.stop().await;

@@ -1121,13 +1121,12 @@ network and `signetContractAddress` its signet contract. Clients can fetch
 the bytes by request ID from the endpoint advertised for their deployment
 and retry while they are not yet available. Providing a cache is optional.
 
-For `failed` and `unviable`, the serialised output is empty. It is also
-empty for an `executed` call without a return value, which requires an
-empty output schema. For a plain transfer it depends on the source chain's
-format: Midnight requires an empty output schema and gets an empty output;
-ABI and Borsh encode a default per schema field, `true` for a `bool` and
-`"non_function_call_success"` for a `string`, and refuse any other field
-type.
+For `failed` and `unviable`, the serialised output is empty. So is a
+Midnight output for an `executed` call without a return value or for a
+plain transfer; both require an empty output schema there. ABI and Borsh
+sources instead encode a default per respond-schema field in both cases —
+`true` for a `bool` and `"non_function_call_success"` for a `string` —
+and refuse any other field type.
 Whichever route supplies the bytes, they remain untrusted until the
 application contract's library recomputes the attestation digest and
 verifies the signature against the attestation key (Section 4.1). Incorrect
@@ -1150,6 +1149,5 @@ Still to change:
   anchors for them too.
 * Tron: Unviable at expiry for packable spans past the 24 h walk cap
   (the admission bound anchors at the source block, which sits after
-  the TaPoS reference — such windows are admitted but never verdicted);
-  output schemas.
+  the TaPoS reference — such windows are admitted but never verdicted).
 * Solana, Hydration and Canton: structures of Section 7, and Unviable.

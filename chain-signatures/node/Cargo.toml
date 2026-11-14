@@ -74,6 +74,7 @@ signet-crypto.workspace = true
 mpc-chain-integration-core.workspace = true
 mpc-chain-canton.workspace = true
 mpc-chain-ethereum.workspace = true
+mpc-evm-common.workspace = true
 mpc-chain-solana.workspace = true
 mpc-chain-near.workspace = true
 mpc-chain-hydration.workspace = true
