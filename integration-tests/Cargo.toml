@@ -25,6 +25,7 @@ reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 shell-escape = "0.1.5"
+sysinfo.workspace = true
 testcontainers = "0.28"
 tokio = { version = "1.45.1", features = ["full", "test-util"] }
 tokio-util.workspace = true
