@@ -53,7 +53,7 @@ impl RetryConfig {
 pub async fn retry_until_some_or_terminal<T, F, Fut>(
     cancel: &CancellationToken,
     delay: Duration,
-    operation: &'static str,
+    operation: &str,
     poll: F,
 ) -> anyhow::Result<Option<T>>
 where
@@ -85,7 +85,7 @@ where
 pub async fn retry_until_ok_or_terminal<F, Fut>(
     cancel: &CancellationToken,
     delay: Duration,
-    operation: &'static str,
+    operation: &str,
     process: F,
 ) -> anyhow::Result<()>
 where
@@ -447,8 +447,9 @@ mod tests {
         let cancel = CancellationToken::new();
         let calls = Arc::new(AtomicU32::new(0));
         let calls_clone = calls.clone();
+        let operation = format!("slot 401");
 
-        retry_until_ok_or_terminal(&cancel, Duration::from_millis(1), "test_op", move || {
+        retry_until_ok_or_terminal(&cancel, Duration::from_millis(1), &operation, move || {
             let calls = calls_clone.clone();
             async move {
                 if calls.fetch_add(1, Ordering::Relaxed) == 0 {
