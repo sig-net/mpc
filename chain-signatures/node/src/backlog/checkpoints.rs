@@ -212,8 +212,9 @@ impl Checkpoints {
             .await
             .map_err(|source| CheckpointError::Storage { chain, source })?;
 
+        // Not a fault by itself: a node behind consensus has no such checkpoint yet.
         let Some(remaining_count) = outcome else {
-            tracing::warn!(
+            tracing::debug!(
                 ?chain,
                 ?digest,
                 "pending checkpoint not found for promotion"
