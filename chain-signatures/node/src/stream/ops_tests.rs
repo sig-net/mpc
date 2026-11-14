@@ -135,7 +135,7 @@ async fn recover_backlog_requeues_pending_signs() {
             assert_eq!(req.request().kind, SignKind::Sign);
             // Verify that the unix_timestamp_indexed is preserved from the original entry
             assert_eq!(req.request().unix_timestamp_indexed, expected_timestamp);
-            assert!(req.request().unix_timestamp_indexed <= current_unix_timestamp());
+            assert!(req.request().unix_timestamp_indexed.unwrap() <= current_unix_timestamp());
         }
         other => panic!("unexpected message: {:?}", other),
     }
@@ -1223,13 +1223,15 @@ async fn adopting_a_body_ignores_its_progress() {
     assert_eq!(answered.digest(), executing.digest());
 
     let adopter = Backlog::new();
-    adopter.regress(&answered, test_root_pk()).await.unwrap();
+    let fetched = crate::backlog::Checkpoint::from(answered.shared());
+    adopter.regress(&fetched, test_root_pk()).await.unwrap();
 
     let entry = adopter.get(Chain::Solana, &request.id).await.unwrap();
     assert_matches!(
         entry.status(),
         SignStatus::Bidirectional(BidirectionalProgress::Executing(_))
     );
+    assert_eq!(entry.request().unix_timestamp_indexed, None);
     assert!(adopter
         .get_execution_watchers(Chain::Ethereum)
         .await

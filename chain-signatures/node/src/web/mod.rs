@@ -7,7 +7,7 @@ pub mod mock;
 pub mod debug;
 
 use self::error::Error;
-use crate::backlog::{Backlog, Checkpoint};
+use crate::backlog::{Backlog, Checkpoint, SharedCheckpoint};
 use crate::config::NetworkConfig;
 use crate::metrics::messaging::WEB_ENDPOINT_LATENCY;
 use crate::protocol::state::{NodeStateWatcher, NodeStatus};
@@ -176,11 +176,31 @@ async fn msg(
         .observe(start.elapsed().as_millis() as f64);
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct CheckpointResponse {
     #[serde(default)]
     pub version: u64,
     pub checkpoints: HashMap<Chain, Checkpoint>,
+    #[serde(default)]
+    pub shared: HashMap<Chain, SharedCheckpoint>,
+}
+
+impl CheckpointResponse {
+    /// Peers ask by digest and get what it covers; an old-format digest needs the whole body.
+    pub(crate) fn insert(&mut self, chain: Chain, by_digest: bool, checkpoint: Checkpoint) {
+        if by_digest && checkpoint.legacy_digest.is_none() {
+            self.shared.insert(chain, checkpoint.shared());
+        } else {
+            self.checkpoints.insert(chain, checkpoint);
+        }
+    }
+
+    /// The body to adopt for `chain`. A peer sends only an old-format one whole.
+    pub(crate) fn adoptable(mut self, chain: Chain) -> Option<Checkpoint> {
+        let shared = self.shared.remove(&chain).map(Checkpoint::from);
+        let whole = self.checkpoints.remove(&chain);
+        shared.or(whole.filter(|checkpoint| checkpoint.legacy_digest.is_some()))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -345,7 +365,10 @@ async fn checkpoint(
 ) -> Result<Cbor<CheckpointResponse>> {
     let start = Instant::now();
 
-    let mut resp = HashMap::new();
+    let mut resp = CheckpointResponse {
+        version: crate::CHECKPOINT_VERSION,
+        ..Default::default()
+    };
     let selections = query.parse()?;
 
     for (chain, digest) in selections {
@@ -366,17 +389,14 @@ async fn checkpoint(
             continue;
         };
 
-        resp.insert(chain, checkpoint);
+        resp.insert(chain, digest.is_some(), checkpoint);
     }
 
     WEB_ENDPOINT_LATENCY
         .with_label_values(&["checkpoint"])
         .observe(start.elapsed().as_millis() as f64);
 
-    Ok(Cbor(CheckpointResponse {
-        version: crate::CHECKPOINT_VERSION,
-        checkpoints: resp,
-    }))
+    Ok(Cbor(resp))
 }
 
 #[cfg(not(feature = "debug-page"))]

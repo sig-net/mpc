@@ -61,7 +61,7 @@ pub fn make_indexed(
             key_version: 0,
         },
         chain,
-        unix_timestamp_indexed: 0,
+        unix_timestamp_indexed: Some(0),
         kind,
     }
 }

@@ -354,8 +354,6 @@ Where no node can produce a checkpoint at all there is no recovery here (Section
 ### Dependencies on features not implemented yet
 
 * The digest covers `tx_ids`, the transaction IDs the published signatures give, since finding an execution needs only those. `unviable_at`, the height at which another request's `Response` says its replay protection was used up, covers Midnight so far.
-* The body of a checkpoint still carries each entry's progress beside the fields the digest covers, and a node trusts that only from its own storage: adopting a peer's body rebuilds progress from `tx_ids`. Moving it to `local` changes no digest.
-
 * `unviable_at` needs the outcome and height a `Response` reports, which only Midnight's carries so far.
   On the other source chains a node that starts from a checkpoint taken after another request's answer holds no trace of it and cannot attest.
 
@@ -421,9 +419,9 @@ The interval is `checkpoint_interval`, a per-chain constant with no per-node ove
 ### Node: backlog and digest
 
 3. Entries (§1 Backlog, which [bidirectional-calls.md](bidirectional-calls.md) also needs).
-   Now: an entry is the request, `tx_ids`, `unviable_at` and its status, the node's progress and the phases read from either chain, and the whole entry goes into the checkpoint.
+   Now: nodes exchange entries with only the fields the digest covers, except for a checkpoint in the earlier format, whose digest needs each entry's status: a node still serves and adopts its whole body.
    A node tries to store its signatures and attestations in `local` before publishing them, and applies them on catching up after a restart or a rebase.
-   Design: an entry holds the rid, the request, `tx_ids` and `unviable_at`, and the node's own progress is node-local in `local`, outside checkpoints.
+   Design: nodes exchange only the fields the digest covers, for every checkpoint.
 
 ### Node: indexing
 
@@ -436,3 +434,10 @@ The interval is `checkpoint_interval`, a per-chain constant with no per-node ove
    Now: the indexer makes no progress at the cap, so the stall watchdog restarts it again and again, and each restart makes the node not caught up.
    Until a settlement takes it below the cap, the node holds second-leg publishes and queues no second-leg sign requests.
    Design: at the cap the node keeps its caught-up state and keeps acting on the requests it holds.
+
+### Node: signatures
+
+8. Issued signatures (§1 Backlog).
+   Now: what a node signed and attested is in memory only until its next checkpoint stores it.
+   A node that adopts a settled checkpoint from a peer loses its signatures and attestations: that checkpoint replaces the stored one and does not hold them.
+   Design: a node stores signatures and attestations before publishing, and keeps them across restarts and when it adopts a settled checkpoint from a peer.

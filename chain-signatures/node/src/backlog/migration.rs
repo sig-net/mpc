@@ -190,7 +190,7 @@ mod tests {
         ciborium::into_writer(&stored, &mut bytes).unwrap();
         let decoded: BacklogEntry = ciborium::from_reader(bytes.as_slice()).unwrap();
         assert!(decoded.tx_ids.is_empty());
-        assert_eq!(decoded.digest_bytes(), stored.digest_bytes());
+        assert_eq!(decoded.shared(), stored.shared());
     }
 
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, Deserialize)]

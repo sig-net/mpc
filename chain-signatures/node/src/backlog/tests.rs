@@ -1777,7 +1777,7 @@ async fn advance_carries_the_origin_into_the_final_response() {
     let SignKind::RespondBidirectional(response) = &entry.request().kind else {
         panic!("expected RespondBidirectional");
     };
-    assert_eq!(response.origin_indexed_at, Some(origin));
+    assert_eq!(response.origin_indexed_at, origin);
 }
 
 /// The mock cadence must checkpoint exactly the chains production does: a
@@ -1789,6 +1789,103 @@ fn mock_cadence_covers_the_same_chains_as_production() {
             super::mock_checkpoint_interval(chain).is_some(),
             mpc_primitives::ChainConfig::checkpoint_interval(&chain).is_some(),
             "{chain:?}"
+        );
+    }
+}
+
+fn peer_response(
+    chain: Chain,
+    by_digest: bool,
+    body: Checkpoint,
+) -> crate::web::CheckpointResponse {
+    let mut response = crate::web::CheckpointResponse {
+        version: crate::CHECKPOINT_VERSION,
+        ..Default::default()
+    };
+    response.insert(chain, by_digest, body);
+    let mut bytes = Vec::new();
+    ciborium::into_writer(&response, &mut bytes).unwrap();
+    ciborium::from_reader(bytes.as_slice()).unwrap()
+}
+
+#[tokio::test]
+async fn a_peer_gets_only_what_the_digest_covers() {
+    let chain = Chain::Solana;
+    let backlog = Backlog::new();
+    backlog
+        .insert_mock_final(&mock_bidirectional_tx(SignId::from_u8(2), chain))
+        .await;
+    backlog.set_processed_block(chain, 100).await;
+    let body = backlog.checkpoint(chain).await.unwrap();
+
+    let response = peer_response(chain, true, body.clone());
+    assert!(response.checkpoints.is_empty());
+
+    let adopted = response.adoptable(chain).unwrap();
+    assert_eq!(adopted.digest(), body.digest());
+    let entry = &adopted.pending_requests[0];
+    assert_ne!(entry.status, body.pending_requests[0].status);
+    assert_eq!(entry.request.unix_timestamp_indexed, None);
+}
+
+#[tokio::test]
+async fn an_operator_gets_the_whole_body() {
+    let chain = Chain::Solana;
+    let backlog = Backlog::new();
+    backlog
+        .insert_mock_final(&mock_bidirectional_tx(SignId::from_u8(2), chain))
+        .await;
+    backlog.set_processed_block(chain, 100).await;
+    let body = backlog.checkpoint(chain).await.unwrap();
+
+    let response = peer_response(chain, false, body.clone());
+    assert!(response.shared.is_empty());
+    assert_eq!(
+        response.checkpoints[&chain].pending_requests,
+        body.pending_requests
+    );
+}
+
+#[tokio::test]
+async fn a_whole_body_is_adopted_only_in_the_old_format() {
+    let chain = Chain::Solana;
+    let backlog = Backlog::new();
+    backlog
+        .insert_mock_final(&mock_bidirectional_tx(SignId::from_u8(2), chain))
+        .await;
+    backlog.set_processed_block(chain, 100).await;
+    let whole = peer_response(chain, false, backlog.checkpoint(chain).await.unwrap());
+    assert_eq!(whole.adoptable(chain), None);
+
+    let old = old_format_body().await;
+    let digest = old.digest();
+    let adopted = peer_response(chain, true, old).adoptable(chain).unwrap();
+    assert_eq!(adopted.digest(), digest);
+}
+
+#[tokio::test]
+async fn restarting_on_an_old_format_body_keeps_its_indexing_times() {
+    let storage = crate::storage::checkpoint_storage::CheckpointStorage::in_memory();
+    let body = old_format_body().await;
+    Backlog::persisted(storage.clone())
+        .regress(&body, mock_root_pk())
+        .await
+        .unwrap();
+
+    let restarted = Backlog::persisted(storage);
+    restarted
+        .hydrate(Chain::Solana, mock_root_pk())
+        .await
+        .unwrap();
+    for entry in &body.pending_requests {
+        let recovered = restarted
+            .get(Chain::Solana, &entry.sign_id())
+            .await
+            .unwrap();
+        assert!(entry.request.unix_timestamp_indexed.is_some());
+        assert_eq!(
+            recovered.request.unix_timestamp_indexed,
+            entry.request.unix_timestamp_indexed
         );
     }
 }
