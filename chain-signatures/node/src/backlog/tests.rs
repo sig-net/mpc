@@ -11,11 +11,13 @@ use crate::backlog::mock::{
 };
 use crate::sign_bidirectional::{BidirectionalProgress, SignProgress, SignStatus};
 use crate::storage::checkpoint_storage::CheckpointStorage;
+use k256::{ProjectivePoint, Scalar};
 use mpc_chain_integration_core::StateManager;
 use mpc_primitives::{
     BidirectionalTx, BidirectionalTxId, Chain, ExecutionOutcome, IndexedSignRequest, SignId,
     SignKind,
 };
+use signet_crypto::x_coordinate;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -1855,9 +1857,6 @@ async fn the_legs_of_a_request_have_separate_records() {
 /// accepted by `advance`, not rejected as `InvalidSignature`.
 #[tokio::test]
 async fn advance_accepts_a_signature_recovered_by_the_second_recovery_id() {
-    use k256::{ProjectivePoint, Scalar};
-    use signet_crypto::x_coordinate;
-
     let backlog = Backlog::persisted(CheckpointStorage::in_memory());
     let mut request = (*mock_sign_request(SignId::new([7; 32]), Chain::Solana)).clone();
     request.args.payload = Scalar::from(1u32); // epsilon is already 1
@@ -1866,7 +1865,10 @@ async fn advance_accepts_a_signature_recovered_by_the_second_recovery_id() {
     // (big_r = -G, s = 1, payload = 1) recovers -(2/x(G))·G only under id 1; id 0 selects
     // R = G and recovery errors. epsilon = 1 means the expected key is G + pk.
     let expected = ProjectivePoint::GENERATOR
-        * -(Scalar::from(2u32) * x_coordinate(&k256::AffinePoint::GENERATOR).invert().unwrap());
+        * -(Scalar::from(2u32)
+            * x_coordinate(&k256::AffinePoint::GENERATOR)
+                .invert()
+                .unwrap());
     let pk = (expected - ProjectivePoint::GENERATOR).to_affine();
     let output = cait_sith::FullSignature::<k256::Secp256k1> {
         big_r: (-ProjectivePoint::GENERATOR).to_affine(),

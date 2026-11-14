@@ -5,7 +5,7 @@ use k256::{
     Scalar, Secp256k1,
 };
 use sha3::{Digest, Keccak256, Sha3_256};
-use signet_primitives::{Chain, PublicKey, Signature, ScalarExt, LATEST_MPC_KEY_VERSION};
+use signet_primitives::{Chain, PublicKey, ScalarExt, Signature, LATEST_MPC_KEY_VERSION};
 
 // Constant prefix that ensures epsilon derivation values are used specifically for
 // Sig.Network with key derivation protocol vX.Y.Z.
@@ -208,12 +208,11 @@ pub fn reconstruct_signature(
     let public_key = public_key.to_encoded_point(false);
     let signature = k256::ecdsa::Signature::from_scalars(x_coordinate(big_r), s).ok()?;
     for recovery_id in [0, 1] {
-        let recovery_id = RecoveryId::try_from(recovery_id).expect("0 and 1 are valid recovery ids");
-        let Ok(verifying) = VerifyingKey::recover_from_prehash(
-            &msg_hash.to_bytes()[..],
-            &signature,
-            recovery_id,
-        ) else {
+        let recovery_id =
+            RecoveryId::try_from(recovery_id).expect("0 and 1 are valid recovery ids");
+        let Ok(verifying) =
+            VerifyingKey::recover_from_prehash(&msg_hash.to_bytes()[..], &signature, recovery_id)
+        else {
             // One id may select an R that fails to recover while the other succeeds.
             continue;
         };
@@ -229,13 +228,12 @@ mod tests {
     use super::*;
     use k256::ecdsa::signature::hazmat::PrehashSigner;
     use k256::elliptic_curve::point::DecompressPoint;
-    use k256::{AffinePoint, SecretKey};
+    use k256::{AffinePoint, ProjectivePoint, SecretKey};
 
     fn sign_with(sk: &SecretKey, msg_hash: &Scalar) -> (AffinePoint, Scalar, u8) {
-        let (ecdsa_sig, rec_id): (k256::ecdsa::Signature, _) =
-            k256::ecdsa::SigningKey::from(sk)
-                .sign_prehash(&msg_hash.to_bytes())
-                .unwrap();
+        let (ecdsa_sig, rec_id): (k256::ecdsa::Signature, _) = k256::ecdsa::SigningKey::from(sk)
+            .sign_prehash(&msg_hash.to_bytes())
+            .unwrap();
         let (r_bytes, _) = ecdsa_sig.split_bytes();
         let big_r =
             AffinePoint::decompress(&r_bytes, k256::elliptic_curve::subtle::Choice::from(0))
@@ -284,9 +282,7 @@ mod tests {
         let public_key: PublicKey = sk.public_key().into();
         let msg_hash = Scalar::from_bytes([0x22; 32]).unwrap();
 
-        assert!(
-            reconstruct_signature(&public_key, &public_key, &Scalar::ZERO, msg_hash).is_none()
-        );
+        assert!(reconstruct_signature(&public_key, &public_key, &Scalar::ZERO, msg_hash).is_none());
     }
 
     #[test]
@@ -305,9 +301,6 @@ mod tests {
 
     #[test]
     fn test_reconstruct_signature_uses_second_id_when_first_fails_recovery() {
-        use k256::elliptic_curve::PrimeField;
-        use k256::ProjectivePoint;
-
         let one = Scalar::from(1u32);
         let r = x_coordinate(&AffinePoint::GENERATOR);
         // For (R = -G, s = 1, e = 1): id 0 selects R = G and recovery hits the point at
@@ -643,4 +636,3 @@ mod tests {
         );
     }
 }
-
