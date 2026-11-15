@@ -14,7 +14,7 @@
 //! The proposer is scheduled too. Its own deadline is one observe lag away, by
 //! which point its response is either observed, so the entry is gone, or it is
 //! not, and a second attempt is wanted. Skipping it would make the schedule
-//! depend on `is_proposer`, a local role that checkpoint recovery overwrites.
+//! depend on `is_proposer`, which a rebase drops and only a stored record restores.
 
 use crate::backlog::Publishing;
 
