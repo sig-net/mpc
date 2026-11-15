@@ -211,7 +211,7 @@ async fn run_supervised_with_watchdog<I: ChainIndexer, T: ChainTelemetry>(
         // enqueue must not act on a backlog being recovered or replayed into.
         ctx.caught_up = false;
         let recovered = async {
-            recover_backlog(
+            let rebased = recover_backlog(
                 chain,
                 load_local,
                 &ctx.backlog,
@@ -223,6 +223,10 @@ async fn run_supervised_with_watchdog<I: ChainIndexer, T: ChainTelemetry>(
             )
             .await?;
             load_local = false;
+            if rebased {
+                // Every node rebasing brings back old stamps, so count again.
+                ctx.failover_floor = None;
+            }
             // Failing here retries: without its records the node would sign again.
             ctx.local_records = ctx
                 .backlog
@@ -414,6 +418,33 @@ mod tests {
             height,
             digest,
         }))
+    }
+
+    #[tokio::test]
+    async fn recovery_reports_whether_it_rebased() {
+        let chain = Chain::Ethereum;
+        let backlog = Backlog::new();
+        let digest = mpc_primitives::reset_checkpoint_digest(chain, 42);
+        let (_digest_tx, mut digest_rx) = make_digest(chain, 42, digest);
+        let (_mesh_tx, mut mesh) = watch::channel(MeshState::default());
+        let client = crate::node_client::NodeClient::new();
+        let me = "test.near".parse().unwrap();
+
+        for expected in [true, false] {
+            let rebased = recover_backlog(
+                chain,
+                false,
+                &backlog,
+                &mut digest_rx,
+                &mut mesh,
+                &client,
+                &me,
+                ProjectivePoint::GENERATOR.to_affine(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(rebased, expected);
+        }
     }
 
     #[tokio::test]

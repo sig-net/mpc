@@ -11,7 +11,7 @@ use tokio::sync::watch;
 /// loads the local checkpoint into the backlog (it only touches local storage),
 /// then aligns the backlog with the consensus checkpoint feed. Mesh availability
 /// is handled inside `align_backlog_with_consensus` when it needs to fetch a
-/// checkpoint from peers.
+/// checkpoint from peers. Returns whether the backlog was rebased.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn recover_backlog(
     chain: Chain,
@@ -22,7 +22,7 @@ pub(crate) async fn recover_backlog(
     node_client: &NodeClient,
     my_account_id: &AccountId,
     root_pk: mpc_primitives::PublicKey,
-) -> Result<(), crate::backlog::CheckpointError> {
+) -> Result<bool, crate::backlog::CheckpointError> {
     tracing::info!(%chain, load_local, "starting checkpoint recovery or regression");
 
     // Hydrate the in-memory pending checkpoint counter from storage on every
@@ -45,7 +45,7 @@ pub(crate) async fn recover_backlog(
         }
     }
 
-    consensus::align_backlog_with_consensus(
+    let rebased = consensus::align_backlog_with_consensus(
         chain,
         backlog,
         checkpoints_rx,
@@ -54,7 +54,8 @@ pub(crate) async fn recover_backlog(
         my_account_id,
         root_pk,
     )
-    .await;
+    .await
+    .is_some();
 
-    Ok(())
+    Ok(rebased)
 }

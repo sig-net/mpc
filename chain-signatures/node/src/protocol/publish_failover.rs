@@ -1,8 +1,7 @@
 //! Publish failover: republish a response the proposer never got on chain.
 //!
-//! Every participant stores the [`PublishState`] when it marks the entry
-//! publishing. The schedule is a pure function of that entry, its stamp plus a
-//! per-node jitter, so a restart does not restart the clock.
+//! Every participant stamps the entry when it marks it publishing. The schedule is the later of
+//! that stamp and the first catch-up since starting or rebasing, plus a per-node jitter.
 //!
 //! The sweep lives in the chain stream on block events, gated on a completed
 //! catchup.
@@ -39,8 +38,8 @@ pub(crate) fn observe_lag(chain: Chain, override_lag: Option<Duration>) -> Durat
     })
 }
 
-/// The longest any participant can wait, for fixtures that outlast the schedule
-/// without restating it.
+/// The longest any participant can wait from the later of stamp and catch-up, for fixtures that
+/// outlast the schedule without restating it.
 #[cfg(any(test, feature = "test-feature"))]
 pub fn max_publish_failover_delay(
     chain: Chain,
@@ -72,21 +71,22 @@ fn failover_delay(participants: usize, jitter: f64, lag: Duration) -> Duration {
     lag + window.mul_f64(jitter)
 }
 
-/// Unix second from which `me` may publish this entry itself. `None` for an entry
-/// carrying no stamp, which never fails over; see
-/// [`PublishState::publishing_since`].
+/// Unix second from which `me` may publish this entry, `None` if it carries no stamp. Nodes
+/// restarting together wait from their first catch-up, or all would publish at its first block.
 pub(crate) fn publish_deadline(
     sign_id: &SignId,
     publish: &Publishing,
     me: &AccountId,
     lag: Duration,
+    failover_floor: Option<u64>,
 ) -> Option<u64> {
     let delay = failover_delay(
         publish.participants().len(),
         failover_jitter(sign_id, me),
         lag,
     );
-    Some(publish.publishing_since()? + delay.as_secs())
+    let since = publish.publishing_since()?;
+    Some(since.max(failover_floor.unwrap_or(0)) + delay.as_secs())
 }
 
 #[cfg(test)]
@@ -146,9 +146,7 @@ mod tests {
         assert!(draws.iter().any(|draw| *draw != first));
     }
 
-    /// The deadline is anchored on the entry's own stamp, so an entry recovered
-    /// after a restart resumes its schedule instead of starting a new one, and
-    /// two nodes reach different deadlines for the same entry.
+    /// The stamp anchors the deadline, and two nodes reach different deadlines for the same entry.
     #[test]
     fn publish_deadline_follows_the_stamp_and_the_node() {
         let sign_id = SignId::new([1u8; 32]);
@@ -161,6 +159,7 @@ mod tests {
                 &mock_publishing_since(3, since),
                 who,
                 observe_lag(Chain::Solana, LAG),
+                None,
             )
         };
 
@@ -181,6 +180,36 @@ mod tests {
         assert!(
             deadline(None, &me).is_none(),
             "an entry written before the stamp existed never fails over"
+        );
+    }
+
+    #[test]
+    fn publish_deadline_counts_from_the_later_of_stamp_and_floor() {
+        let sign_id = SignId::new([1u8; 32]);
+        let me = account("node0.near");
+        let publish = mock_publishing_since(3, Some(1_000));
+        let deadline = |failover_floor| {
+            publish_deadline(
+                &sign_id,
+                &publish,
+                &me,
+                observe_lag(Chain::Solana, LAG),
+                failover_floor,
+            )
+            .expect("a stamped entry has a deadline")
+        };
+
+        let from_stamp = deadline(None);
+        assert_eq!(deadline(Some(1_000)), from_stamp);
+        assert_eq!(
+            deadline(Some(400)),
+            from_stamp,
+            "stamped after catching up, the schedule stays on the stamp"
+        );
+        assert_eq!(
+            deadline(Some(1_700)),
+            from_stamp + 700,
+            "stamped before catching up, the schedule moves to the catch-up"
         );
     }
 }

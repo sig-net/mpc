@@ -30,6 +30,9 @@ pub struct StreamContext {
     pub node_client: NodeClient,
     pub checkpoints_rx: CheckpointWatcher,
     pub caught_up: bool,
+    /// Failover deadlines count from here at the earliest: this process's first catch-up on the
+    /// chain since starting or rebasing.
+    pub failover_floor: Option<u64>,
     /// This node's stored records, read by recovery and applied on catching up.
     pub local_records: Vec<(SignId, SignStatus)>,
     /// Overrides the failover schedule's observe lag; `None` is production. Fixtures
@@ -59,6 +62,7 @@ impl StreamContext {
             node_client,
             checkpoints_rx,
             caught_up: false,
+            failover_floor: None,
             local_records: Vec::new(),
             observe_lag: None,
             ethereum_chain_id: None,
@@ -109,6 +113,8 @@ pub(crate) async fn handle_chain_event<T: ChainTelemetry>(
                 return Ok(());
             }
             ctx.caught_up = true;
+            ctx.failover_floor
+                .get_or_insert_with(mpc_utils::time::current_unix_timestamp);
             // Before the flag lets another chain's stream send this chain's entries to sign.
             ctx.backlog
                 .claim_local(chain, std::mem::take(&mut ctx.local_records))
