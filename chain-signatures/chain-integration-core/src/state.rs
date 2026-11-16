@@ -15,7 +15,7 @@ pub struct WatchedExecution {
 impl WatchedExecution {
     /// The execution of `tx`, sign id derived from it. For pending
     /// enumerations; watch rows carry the key's sign id instead
-    /// ([`ExecutionWatchers::all`]).
+    /// ([`ExecutionWatchIndex::all`]).
     pub fn of(tx: Arc<BidirectionalTx>) -> Self {
         Self {
             sign_id: tx.sign_id(),
@@ -46,13 +46,13 @@ impl WatchKey {
 
 /// The transactions a node watches for execution, one per watch key —
 /// the index the backlog rebuilds from its `Executing` entries and the
-/// test mock keeps independent of them.
+/// test mock keeps independent of its pending entries.
 #[derive(Debug, Clone, Default)]
-pub struct ExecutionWatchers {
+pub struct ExecutionWatchIndex {
     watches: HashMap<WatchKey, Arc<BidirectionalTx>>,
 }
 
-impl ExecutionWatchers {
+impl ExecutionWatchIndex {
     pub fn insert(&mut self, tx: Arc<BidirectionalTx>) {
         self.insert_at(WatchKey::of(&tx), tx);
     }
@@ -115,8 +115,9 @@ pub trait StateManager: Send + Sync + Clone + 'static {
     /// derived index (the mock keeps the two independent).
     async fn get_pending_executions(&self, chain: Chain) -> Vec<WatchedExecution>;
 
-    /// Registers or refreshes the entry's own watch under `tx.id`, on
-    /// `tx`'s target chain; sibling watches under the same flat id survive.
+    /// Registers or refreshes the entry's own watch, keyed by its flat
+    /// id and sign id on `tx`'s target chain; sibling watches under the
+    /// same flat id survive.
     async fn watch_execution(&self, tx: Arc<BidirectionalTx>);
 
     /// Set the processed block height for a specific chain.
@@ -130,7 +131,7 @@ pub trait StateManager: Send + Sync + Clone + 'static {
 #[derive(Clone, Default)]
 pub struct MockStateManager {
     processed_blocks: Arc<RwLock<HashMap<Chain, u64>>>,
-    watchers: Arc<EnumMap<Chain, RwLock<ExecutionWatchers>>>,
+    watchers: Arc<EnumMap<Chain, RwLock<ExecutionWatchIndex>>>,
     pending: Arc<RwLock<Vec<Arc<BidirectionalTx>>>>,
 }
 
@@ -162,8 +163,7 @@ impl StateManager for MockStateManager {
     }
 
     async fn watch_execution(&self, tx: Arc<BidirectionalTx>) {
-        let target = tx.target_chain;
-        self.watchers[target].write().await.insert(tx);
+        self.watchers[tx.target_chain].write().await.insert(tx);
     }
 }
 

@@ -18,7 +18,7 @@ use crate::storage::checkpoint_storage::CheckpointStorage;
 pub use checkpoints::{Checkpoint, CheckpointError, Checkpoints};
 
 use enum_map::EnumMap;
-use mpc_chain_integration_core::{ExecutionWatchers, StateManager, WatchKey, WatchedExecution};
+use mpc_chain_integration_core::{ExecutionWatchIndex, StateManager, WatchKey, WatchedExecution};
 use mpc_primitives::{
     BidirectionalTx, BidirectionalTxId, Chain, IndexedSignRequest, PublicKey, SignId, SignKind,
 };
@@ -126,7 +126,7 @@ impl PendingRequests {
 /// lock: registering or resolving an execution touches both atomically.
 #[derive(Debug, Clone, Default)]
 struct WatchedExecutions {
-    index: ExecutionWatchers,
+    index: ExecutionWatchIndex,
     wait_starts: HashMap<WatchKey, Instant>,
 }
 
@@ -447,7 +447,8 @@ impl Backlog {
             .get(&tx.sign_id())
             .map(BacklogEntry::watched_txs)
             .unwrap_or_default();
-        // Under the pending lock, as `add_published_tx` inserts: no watch outlives the entry.
+        // Under the pending lock, as `add_published_tx` inserts: the
+        // sweep sees every tx the entry holds when it runs.
         for other in others {
             let other_key = WatchKey::of(&other);
             self.watchers(other_key.target)
@@ -843,7 +844,6 @@ impl StateManager for Backlog {
             .write()
             .await
             .register(tx, None);
-        // No clock: a re-registration keeps its resident start.
     }
 }
 
