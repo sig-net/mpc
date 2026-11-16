@@ -5,7 +5,7 @@ use k256::{
     Scalar, Secp256k1,
 };
 use sha3::{Digest, Keccak256, Sha3_256};
-use signet_primitives::{Chain, PublicKey, Signature, ScalarExt, LATEST_MPC_KEY_VERSION};
+use signet_primitives::{Chain, PublicKey, ScalarExt, Signature, LATEST_MPC_KEY_VERSION};
 
 // Constant prefix that ensures epsilon derivation values are used specifically for
 // Sig.Network with key derivation protocol vX.Y.Z.
@@ -209,13 +209,10 @@ pub fn reconstruct_signature(
     let signature = k256::ecdsa::Signature::from_scalars(x_coordinate(big_r), s).ok()?;
     for recovery_id in [0, 1] {
         let recovery_id = RecoveryId::try_from(recovery_id).ok()?;
-        let recovered = VerifyingKey::recover_from_prehash(
-            &msg_hash.to_bytes()[..],
-            &signature,
-            recovery_id,
-        )
-        .ok()?
-        .to_encoded_point(false);
+        let recovered =
+            VerifyingKey::recover_from_prehash(&msg_hash.to_bytes()[..], &signature, recovery_id)
+                .ok()?
+                .to_encoded_point(false);
         if public_key == recovered {
             return Some(Signature::new(*big_r, *s, recovery_id.to_byte()));
         }
@@ -231,10 +228,9 @@ mod tests {
     use k256::{AffinePoint, SecretKey};
 
     fn sign_with(sk: &SecretKey, msg_hash: &Scalar) -> (AffinePoint, Scalar, u8) {
-        let (ecdsa_sig, rec_id): (k256::ecdsa::Signature, _) =
-            k256::ecdsa::SigningKey::from(sk)
-                .sign_prehash(&msg_hash.to_bytes())
-                .unwrap();
+        let (ecdsa_sig, rec_id): (k256::ecdsa::Signature, _) = k256::ecdsa::SigningKey::from(sk)
+            .sign_prehash(&msg_hash.to_bytes())
+            .unwrap();
         let (r_bytes, _) = ecdsa_sig.split_bytes();
         let big_r =
             AffinePoint::decompress(&r_bytes, k256::elliptic_curve::subtle::Choice::from(0))
@@ -283,9 +279,7 @@ mod tests {
         let public_key: PublicKey = sk.public_key().into();
         let msg_hash = Scalar::from_bytes([0x22; 32]).unwrap();
 
-        assert!(
-            reconstruct_signature(&public_key, &public_key, &Scalar::ZERO, msg_hash).is_none()
-        );
+        assert!(reconstruct_signature(&public_key, &public_key, &Scalar::ZERO, msg_hash).is_none());
     }
 
     #[test]

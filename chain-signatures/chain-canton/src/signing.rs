@@ -7,10 +7,10 @@ use alloy::primitives::{keccak256, Address, Bytes, TxKind, B256, U256};
 use alloy::sol_types::SolValue;
 use borsh::{BorshDeserialize, BorshSerialize};
 use mpc_chain_integration_core::utils::payload::bidirectional_payload_scalar;
-use signet_crypto::x_coordinate;
 use mpc_primitives::{
     Chain, IndexedSignRequest, ScalarExt, SignArgs, SignBidirectionalEvent, SignId, Signature,
 };
+use signet_crypto::x_coordinate;
 
 use crate::daml::{
     CantonSignature, EvmAccessListEntry, EvmType2TransactionParams,

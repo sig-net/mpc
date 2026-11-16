@@ -5,8 +5,8 @@ use std::time::{Duration, Instant};
 use anyhow::Context as _;
 use cait_sith::FullSignature;
 use k256::{AffinePoint, Secp256k1};
-use signet_crypto::{derive_key, reconstruct_signature};
 use mpc_primitives::{Chain, ChainEvent, IndexedSignRequest, SignArgs, SignId, SignKind};
+use signet_crypto::{derive_key, reconstruct_signature};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio::time::timeout;
@@ -90,13 +90,9 @@ pub fn make_publish_action_for(
     let sk = k256::SecretKey::random(&mut rand::thread_rng());
     let pk: AffinePoint = sk.public_key().into();
     let output = make_signature(&sk, epsilon, payload);
-    let signature = reconstruct_signature(
-        &derive_key(pk, epsilon),
-        &output.big_r,
-        &output.s,
-        payload,
-    )
-    .expect("valid signature should reconstruct");
+    let signature =
+        reconstruct_signature(&derive_key(pk, epsilon), &output.big_r, &output.s, payload)
+            .expect("valid signature should reconstruct");
     PublishAction {
         request: Arc::new(make_indexed(chain, epsilon, payload, kind, sign_id)),
         signature,
