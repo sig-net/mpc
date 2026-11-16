@@ -126,14 +126,17 @@ jobs:
         with:
           toolchain: 1.95.0
 
+      - name: Install cargo-deny
+        uses: taiki-e/install-action@ab49d3c64680143e184118bed66a46419fc15519 # v2.90.5
+        with:
+          tool: cargo-deny@0.20.2
+
       # Check the feature-resolved dependency graph: security advisories
       # (vulnerabilities deny; `unmaintained`/`unsound` downgraded to warnings to
       # match the previous cargo-audit behavior), license compliance, dependency
       # bans, and source allow-listing.
       - name: Check dependencies (cargo-deny)
-        uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2
-        with:
-          command: check advisories bans licenses sources -W unmaintained -W unsound --hide-inclusion-graph
+        run: cargo deny --log-level warn --all-features check advisories bans licenses sources -W unmaintained -W unsound --hide-inclusion-graph
 
       - name: Install cargo-machete
         uses: taiki-e/install-action@e88e69ecdb9658bd172693dcdc2c84e7f0ab6a11 # nextest
