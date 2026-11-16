@@ -797,17 +797,15 @@ impl Backlog {
             pending.execution_watches()
         };
 
-        let mut by_target: HashMap<Chain, Vec<Arc<BidirectionalTx>>> = HashMap::new();
+        let mut by_target: EnumMap<Chain, Vec<Arc<BidirectionalTx>>> = EnumMap::default();
         for tx in execution_to_watch {
-            by_target.entry(tx.target_chain).or_default().push(tx);
+            by_target[tx.target_chain].push(tx);
         }
         for destination_chain in Chain::iter() {
-            let empty = Vec::new();
-            let entries = by_target.get(&destination_chain).unwrap_or(&empty);
             self.watchers(&destination_chain)
                 .write()
                 .await
-                .rebuild(chain, entries);
+                .rebuild(chain, &by_target[destination_chain]);
         }
     }
 }
