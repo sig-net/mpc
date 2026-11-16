@@ -15,15 +15,13 @@ use backon::{ExponentialBuilder, Retryable};
 use bollard::errors::Error as DockerError;
 use bollard::models::{Ipam, NetworkCreateRequest, PortBinding};
 use bollard::Docker;
-use borsh::{BorshDeserialize, BorshSerialize};
 use cait_sith::protocol::Participant;
 use cait_sith::triples::{TriplePub, TripleShare};
-use cait_sith::FullSignature;
 use deadpool_redis::redis;
 use deadpool_redis::{Config as RedisPoolConfig, Pool as RedisPool, Runtime as RedisRuntime};
 use elliptic_curve::rand_core::OsRng;
-use k256::elliptic_curve::sec1::ToEncodedPoint as _;
 use k256::Secp256k1;
+use mpc_chain_solana::solana_signet_program::client::{accounts, args};
 use mpc_chain_solana::SolConfig;
 use mpc_contract::primitives::Participants;
 use mpc_node::protocol::presignature::Presignature;
@@ -33,11 +31,9 @@ use mpc_primitives::Chain;
 use near_account_id::AccountId;
 use reqwest::Client;
 use serde_json::json;
-use sha2::{Digest, Sha256};
 use solana_client::nonblocking::pubsub_client::PubsubClient as SolanaPubsubClient;
 use solana_client::nonblocking::rpc_client::RpcClient as SolanaRpcClient;
 use solana_client::rpc_config::RpcSendTransactionConfig;
-use solana_sdk::instruction::AccountMeta;
 use solana_sdk::pubkey::Pubkey as SolanaPubkey;
 use solana_sdk::signature::Keypair as SolanaKeypair;
 use solana_sdk::signature::{EncodableKey as _, Signature as SolanaSignature};
@@ -552,22 +548,6 @@ fn derive_secret_key(mnemonic: &str) -> anyhow::Result<String> {
     Ok(format!("0x{}", hex::encode(bytes)))
 }
 
-#[cfg(test)]
-mod tests {
-    use super::derive_secret_key;
-
-    #[test]
-    fn derive_secret_key_matches_hardhat_default_account() {
-        let mnemonic = "test test test test test test test test test test test junk";
-        let secret_key = derive_secret_key(mnemonic).unwrap();
-
-        assert_eq!(
-            secret_key,
-            "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
-        );
-    }
-}
-
 fn shares_to_triples(
     public: &TriplePub<Secp256k1>,
     shares: &[TripleShare<Secp256k1>],
@@ -595,8 +575,8 @@ pub struct Solana {
 
 impl Solana {
     /// Program ID hardcoded in the solana program/contract.
-    /// Precompiled with https://github.com/sig-net/solana-signet-program @ 0.4.0
-    pub const PROGRAM_PATH: &str = "chain-signatures/contract-sol/artifacts/chain_signatures.so";
+    /// Precompiled with https://github.com/sig-net/solana-signet-program
+    pub const PROGRAM_PATH: &str = "integration-tests/fixtures/solana/chain_signatures.so";
 
     /// Fixed keypair for deterministic program address/id. This is embedded in the declare_id!
     /// macro of our Solana program/contract.
@@ -1093,26 +1073,19 @@ impl Solana {
             "calling initialize on solana program"
         );
 
-        // Create initialize instruction manually
-        let mut data = Vec::new();
-        // Add discriminator for initialize function (first 8 bytes of sha256("global:initialize"))
-        let discriminator = solana_sdk::hash::hash(b"global:initialize").to_bytes();
-        data.extend_from_slice(&discriminator[..8]);
-
-        // Serialize arguments using borsh: signature_deposit (u64) and chain_id (String)
-        let mut args_data = Vec::new();
-        signature_deposit.serialize(&mut args_data)?;
-        chain_id.serialize(&mut args_data)?;
-        data.extend_from_slice(&args_data);
-
         let instruction = solana_sdk::instruction::Instruction {
             program_id,
-            accounts: vec![
-                AccountMeta::new(program_state_pda, false),
-                AccountMeta::new(payer.pubkey(), true),
-                AccountMeta::new_readonly(system_program::id(), false),
-            ],
-            data,
+            accounts: accounts::Initialize {
+                program_state: program_state_pda,
+                admin: payer.pubkey(),
+                system_program: system_program::id(),
+            }
+            .to_account_metas(None),
+            data: args::Initialize {
+                signature_deposit,
+                chain_id,
+            }
+            .data(),
         };
 
         let recent_blockhash = self.rpc_client.get_latest_blockhash().await?;
@@ -1162,41 +1135,26 @@ impl Solana {
         let (event_authority_pda, _bump) =
             SolanaPubkey::find_program_address(&[b"__event_authority"], &program_id);
 
-        // Manually construct the instruction data
-        // Anchor instructions start with an 8-byte discriminator
-        let mut data = Vec::new();
-        // Correct discriminator for "sign" function: first 8 bytes of sha256("global:sign")
-        data.extend_from_slice(&[5, 221, 155, 46, 237, 91, 28, 236]);
-        // Serialize the arguments using Borsh
-        let args = SignArgs {
-            payload,
-            key_version,
-            path: path.to_string(),
-            algo: algo.to_string(),
-            dest: dest.to_string(),
-            params: params.to_string(),
-        };
-        args.serialize(&mut data)?;
-
-        // Create the instruction with correct accounts matching the external contract
-        // note that #[event_cpi] requires additional accounts
         let instruction = solana_sdk::instruction::Instruction {
             program_id,
-            accounts: vec![
-                // program_state account (writable, not signer)
-                AccountMeta::new(program_state_pda, false),
-                // requester (writable, signer)
-                AccountMeta::new(self.payer_keypair.pubkey(), true),
-                // fee_payer (writable, signer) - same as requester for simplicity
-                AccountMeta::new(self.payer_keypair.pubkey(), true),
-                // system_program (readonly, not signer)
-                AccountMeta::new_readonly(system_program::id(), false),
-                // event_authority (readonly, not signer) - required for #[event_cpi]
-                AccountMeta::new_readonly(event_authority_pda, false),
-                // program account (readonly, not signer) - required for #[event_cpi]
-                AccountMeta::new_readonly(program_id, false),
-            ],
-            data,
+            accounts: accounts::Sign {
+                program_state: program_state_pda,
+                requester: self.payer_keypair.pubkey(),
+                fee_payer: Some(self.payer_keypair.pubkey()),
+                system_program: system_program::id(),
+                event_authority: event_authority_pda,
+                program: program_id,
+            }
+            .to_account_metas(None),
+            data: args::Sign {
+                payload,
+                key_version,
+                path: path.to_string(),
+                algo: algo.to_string(),
+                dest: dest.to_string(),
+                params: params.to_string(),
+            }
+            .data(),
         };
 
         // Create and send the transaction to solana
@@ -1240,15 +1198,16 @@ impl Solana {
         // Emits a real sign CPI event
         let sign_ix = solana_sdk::instruction::Instruction {
             program_id,
-            accounts: signet_program::accounts::Sign {
+            accounts: accounts::Sign {
                 program_state: program_state_pda,
                 requester: self.payer_keypair.pubkey(),
+                fee_payer: Some(self.payer_keypair.pubkey()),
                 system_program: system_program::id(),
                 event_authority: event_authority_pda,
                 program: program_id,
             }
             .to_account_metas(None),
-            data: signet_program::instruction::Sign {
+            data: args::Sign {
                 payload,
                 key_version,
                 path: path.to_string(),
@@ -1262,13 +1221,13 @@ impl Solana {
         // The second instruction is a duplicate initialize, which will fail because the program-state PDA already exists.
         let initialize_ix = solana_sdk::instruction::Instruction {
             program_id,
-            accounts: signet_program::accounts::Initialize {
+            accounts: accounts::Initialize {
                 program_state: program_state_pda,
                 admin: self.payer_keypair.pubkey(),
                 system_program: system_program::id(),
             }
             .to_account_metas(None),
-            data: signet_program::instruction::Initialize {
+            data: args::Initialize {
                 signature_deposit: 1_000_000,
                 chain_id: Chain::Solana.caip2_chain_id().to_string(),
             }
@@ -1349,38 +1308,31 @@ impl Solana {
         let (event_authority_pda, _bump) =
             SolanaPubkey::find_program_address(&[b"__event_authority"], &contract_program_id);
 
-        let mut data = Vec::new();
-        let mut hasher = Sha256::new();
-        hasher.update(b"global:sign_bidirectional");
-        let discriminator = hasher.finalize();
-        data.extend_from_slice(&discriminator[..8]);
-
-        let args = SignBidirectionalArgs {
-            serialized_transaction: serialized_transaction.to_vec(),
-            caip2_id: caip2_id.to_string(),
-            key_version,
-            path: path.to_string(),
-            algo: algo.to_string(),
-            dest: dest.to_string(),
-            params: params.to_string(),
-            program_id: callback_program_id.to_bytes(),
-            output_deserialization_schema: output_deserialization_schema.to_vec(),
-            respond_serialization_schema: respond_serialization_schema.to_vec(),
-        };
-        args.serialize(&mut data)?;
-
         let instruction = solana_sdk::instruction::Instruction {
             program_id: contract_program_id,
-            accounts: vec![
-                AccountMeta::new(program_state_pda, false),
-                AccountMeta::new(self.payer_keypair.pubkey(), true),
-                AccountMeta::new(self.payer_keypair.pubkey(), true),
-                AccountMeta::new_readonly(system_program::id(), false),
-                AccountMeta::new_readonly(solana_sdk::sysvar::instructions::id(), false),
-                AccountMeta::new_readonly(event_authority_pda, false),
-                AccountMeta::new_readonly(contract_program_id, false),
-            ],
-            data,
+            accounts: accounts::SignBidirectional {
+                program_state: program_state_pda,
+                requester: self.payer_keypair.pubkey(),
+                fee_payer: Some(self.payer_keypair.pubkey()),
+                system_program: system_program::id(),
+                instructions: Some(solana_sdk::sysvar::instructions::id()),
+                event_authority: event_authority_pda,
+                program: contract_program_id,
+            }
+            .to_account_metas(None),
+            data: args::SignBidirectional {
+                serialized_transaction: serialized_transaction.to_vec(),
+                caip2_id: caip2_id.to_string(),
+                key_version,
+                path: path.to_string(),
+                algo: algo.to_string(),
+                dest: dest.to_string(),
+                params: params.to_string(),
+                program_id: callback_program_id,
+                output_deserialization_schema: output_deserialization_schema.to_vec(),
+                respond_serialization_schema: respond_serialization_schema.to_vec(),
+            }
+            .data(),
         };
 
         let recent_blockhash = self.rpc_client.get_latest_blockhash().await?;
@@ -1404,73 +1356,6 @@ impl Solana {
 
         Ok(signature)
     }
-
-    pub async fn respond_bidirectional(
-        &self,
-        request_id: [u8; 32],
-        serialized_output: Vec<u8>,
-        signature: &FullSignature<Secp256k1>,
-        recovery_id: u8,
-    ) -> anyhow::Result<SolanaSignature> {
-        if self.rpc_client.get_version().await.is_err() {
-            anyhow::bail!("solana container is not ready");
-        }
-
-        let program_id = self.program_keypair.pubkey();
-        let mut data = Vec::new();
-        let mut hasher = Sha256::new();
-        hasher.update(b"global:respond_bidirectional");
-        let discriminator = hasher.finalize();
-        data.extend_from_slice(&discriminator[..8]);
-
-        let encoded_point = signature.big_r.to_encoded_point(false);
-        let point_bytes = encoded_point.as_bytes();
-        debug_assert_eq!(point_bytes.len(), 65);
-        let mut x = [0u8; 32];
-        let mut y = [0u8; 32];
-        x.copy_from_slice(&point_bytes[1..33]);
-        y.copy_from_slice(&point_bytes[33..65]);
-
-        let mut s_bytes = [0u8; 32];
-        s_bytes.copy_from_slice(signature.s.to_bytes().as_slice());
-
-        let args = RespondBidirectionalArgs {
-            request_id,
-            serialized_output,
-            signature: RespondBidirectionalSignature {
-                big_r: RespondBidirectionalAffinePoint { x, y },
-                s: s_bytes,
-                recovery_id,
-            },
-        };
-        args.serialize(&mut data)?;
-
-        let instruction = solana_sdk::instruction::Instruction {
-            program_id,
-            accounts: vec![AccountMeta::new(self.payer_keypair.pubkey(), true)],
-            data,
-        };
-
-        let recent_blockhash = self.rpc_client.get_latest_blockhash().await?;
-        let mut transaction = solana_sdk::transaction::Transaction::new_with_payer(
-            &[instruction],
-            Some(&self.payer_keypair.pubkey()),
-        );
-        transaction.sign(&[&self.payer_keypair], recent_blockhash);
-
-        let signature = self
-            .rpc_client
-            .send_and_confirm_transaction(&transaction)
-            .await?;
-
-        tracing::info!(
-            ?signature,
-            request_id = %hex::encode(request_id),
-            "respond_bidirectional transaction successful",
-        );
-
-        Ok(signature)
-    }
 }
 
 impl Drop for Solana {
@@ -1487,46 +1372,18 @@ impl Drop for Solana {
     }
 }
 
-#[derive(BorshSerialize, BorshDeserialize)]
-struct SignArgs {
-    payload: [u8; 32],
-    key_version: u32,
-    path: String,
-    algo: String,
-    dest: String,
-    params: String,
-}
+#[cfg(test)]
+mod tests {
+    use super::derive_secret_key;
 
-#[derive(BorshSerialize, BorshDeserialize)]
-struct SignBidirectionalArgs {
-    serialized_transaction: Vec<u8>,
-    caip2_id: String,
-    key_version: u32,
-    path: String,
-    algo: String,
-    dest: String,
-    params: String,
-    program_id: [u8; 32],
-    output_deserialization_schema: Vec<u8>,
-    respond_serialization_schema: Vec<u8>,
-}
+    #[test]
+    fn derive_secret_key_matches_hardhat_default_account() {
+        let mnemonic = "test test test test test test test test test test test junk";
+        let secret_key = derive_secret_key(mnemonic).unwrap();
 
-#[derive(BorshSerialize, BorshDeserialize)]
-struct RespondBidirectionalArgs {
-    request_id: [u8; 32],
-    serialized_output: Vec<u8>,
-    signature: RespondBidirectionalSignature,
-}
-
-#[derive(BorshSerialize, BorshDeserialize)]
-struct RespondBidirectionalSignature {
-    big_r: RespondBidirectionalAffinePoint,
-    s: [u8; 32],
-    recovery_id: u8,
-}
-
-#[derive(BorshSerialize, BorshDeserialize)]
-struct RespondBidirectionalAffinePoint {
-    x: [u8; 32],
-    y: [u8; 32],
+        assert_eq!(
+            secret_key,
+            "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
+        );
+    }
 }

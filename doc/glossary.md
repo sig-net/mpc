@@ -347,7 +347,8 @@ digest never changes. See [checkpoints.md §1](checkpoints.md#1-background).
 The contract on a [source chain](#source-chain) that takes
 [requests](#request) and receives [published](#publish) signatures and
 [attestations](#attestation), for example `ChainSignatures.sol` on EVM chains
-(`chain-signatures/contract-eth/contracts/`) and `chain-signatures/contract-sol`
+(`chain-signatures/contract-eth/contracts/`) and the
+[`chain_signatures` program](https://github.com/sig-net/solana-signet-program)
 on Solana. See [bidirectional-calls.md
 §4.2](bidirectional-calls.md#42-signet-contract-per-source-chain).
 

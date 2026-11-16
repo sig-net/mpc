@@ -31,7 +31,9 @@ use crate::actions::{self, wait_for};
 use crate::cluster::Cluster;
 use crate::containers;
 
-use signet_program::{RespondBidirectionalEvent, SignatureRespondedEvent};
+use mpc_chain_solana::solana_signet_program::events::{
+    RespondBidirectionalEvent, SignatureRespondedEvent,
+};
 
 pub const SIGN_GAS: Gas = Gas::from_tgas(50);
 pub const SIGN_DEPOSIT: NearToken = NearToken::from_yoctonear(1);
@@ -947,7 +949,7 @@ impl SignAction<'_> {
 
 /// Convert a Solana contract signature to FullSignature<Secp256k1>
 fn parse_sol_signature(
-    solana_sig: &signet_program::Signature,
+    solana_sig: &mpc_chain_solana::solana_signet_program::types::Signature,
 ) -> anyhow::Result<(FullSignature<Secp256k1>, u8)> {
     use k256::elliptic_curve::sec1::FromEncodedPoint;
     use k256::{AffinePoint, Scalar};

@@ -2,7 +2,6 @@
 members = [
     "chain-signatures/crypto",
     "chain-signatures/contract",
-    "chain-signatures/contract-sol",
     "chain-signatures/keys",
     "chain-signatures/node",
     "chain-signatures/primitives",
@@ -124,7 +123,6 @@ mpc-primitives = { path = "./chain-signatures/primitives" }
 signet-crypto = { path = "./signet-crypto" }
 signet-midnight-serde = "=0.24.0"
 signet-primitives = { path = "./signet-primitives" }
-signet-program = { path = "./chain-signatures/contract-sol" }
 
 # big optimization even in test builds for math heavy crates
 [profile.dev.package.curve25519-dalek]

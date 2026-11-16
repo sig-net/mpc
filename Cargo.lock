@@ -6033,7 +6033,6 @@ dependencies = [
  "sha2 0.10.9",
  "sha3 0.10.8",
  "shell-escape",
- "signet-program",
  "solana-client",
  "solana-commitment-config",
  "solana-sdk",
@@ -7760,7 +7759,6 @@ dependencies = [
  "serde",
  "serde_json",
  "sha3 0.10.8",
- "signet-program",
  "solana-client",
  "solana-commitment-config",
  "solana-sdk",
@@ -11702,14 +11700,6 @@ dependencies = [
  "serde_json",
  "sha3 0.10.8",
  "thiserror 1.0.69",
-]
-
-[[package]]
-name = "signet-program"
-version = "0.1.0"
-dependencies = [
- "anchor-lang",
- "serde",
 ]
 
 [[package]]

@@ -14,6 +14,24 @@ The indexer runs in two phases:
 - **Live** — interval polling of the finalized slot with the same catchup
   machinery.
 
+## Program bindings
+
+The types for the Signet program's instructions, accounts and events are
+generated at compile time from its IDL, `idls/solana_signet_program.json`, by
+Anchor's `declare_program!` (see `src/program.rs`). The program itself lives
+in [`sig-net/solana-signet-program`](https://github.com/sig-net/solana-signet-program);
+the current IDL is from commit `1d47697` (0.4.3).
+
+The IDL is a copy, so refresh it when the program's interface changes:
+
+1. Take `chain_signatures.json` from the `anchor build` output of the program
+   version to track (the program's deploy workflow uploads it as an artifact).
+2. Replace `idls/solana_signet_program.json` with it.
+3. Update the commit and version above.
+
+The IDL's `address` is the program id of the build it came from. The node
+never reads it: the program id comes from `--sol-program-address`.
+
 ## Configuration
 
 The node builds `SolConfig` from its `--sol-*` parameters, which
