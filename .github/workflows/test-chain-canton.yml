@@ -48,7 +48,7 @@ jobs:
       # Pull the images in parallel. The images are used in Canton test harness
       - name: Pull Redis and Foundry images
         run: |
-          printf '%s\n' redis:7.4.2 ghcr.io/foundry-rs/foundry:nightly \
+          printf '%s\n' redis:7.4.12 ghcr.io/foundry-rs/foundry:nightly \
             | xargs -P "$(nproc)" -n 1 docker pull
 
       - name: Install Java 21

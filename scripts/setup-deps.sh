@@ -15,7 +15,7 @@ set -u
 
 RUST_VERSION="$(sed -n 's/^channel = "\(.*\)"/\1/p' "$(dirname "$0")/../rust-toolchain.toml")"
 WASM_TARGET="wasm32-unknown-unknown"
-REDIS_IMAGE="redis:7.4.2"
+REDIS_IMAGE="redis:7.4.12"
 SOLANA_VERSION="2.3.9"
 ANCHOR_VERSION="0.30.1"
 CANTON_SDK="3.5.1"

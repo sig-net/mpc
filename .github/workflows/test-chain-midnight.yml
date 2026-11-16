@@ -65,7 +65,7 @@ jobs:
       - name: Pull Docker images
         run: |
           {
-            echo 'redis:7.4.2'
+            echo 'redis:7.4.12'
             echo 'ghcr.io/foundry-rs/foundry:nightly'
             perl -0ne 'while (/const \w+_IMAGE: \(&str, &str\) = \(\s*"([^"]+)",\s*"([^"]+)",?/g) { print "$1:$2\n" }' \
               integration-tests/src/midnight.rs
