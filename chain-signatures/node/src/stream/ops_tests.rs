@@ -301,9 +301,7 @@ async fn process_execution_confirmed_resolves_a_displaced_watch_by_sign_id() {
     backlog.insert_mock_executing(&tx).await;
     // A flat Tron id: an earlier confirmation consumed this entry's watch
     // while the entry itself is still Executing.
-    backlog
-        .unwatch_execution(tx.target_chain, WatchKey::of(&tx))
-        .await;
+    backlog.unwatch_execution(WatchKey::of(&tx)).await;
 
     // No watch, no wait start: the resolution must count as unmeasured.
     let unmeasured = EXECUTION_WAIT_UNMEASURED
@@ -980,7 +978,7 @@ async fn an_execution_under_a_later_signature_is_found() {
     );
 
     let found = backlog
-        .unwatch_execution(Chain::Ethereum, WatchKey::of(&later))
+        .unwatch_execution(WatchKey::of(&later))
         .await
         .unwrap();
     assert_eq!(found.execution_tx().id, later.id, "the response names it");
@@ -1077,9 +1075,7 @@ async fn a_later_signature_past_execution_only_records_its_id() {
         executing.watch_execution().await;
         if parked {
             executing.park().await.unwrap();
-            ctx.backlog
-                .unwatch_execution(Chain::Ethereum, WatchKey::of(&tx))
-                .await;
+            ctx.backlog.unwatch_execution(WatchKey::of(&tx)).await;
         } else {
             process_execution_confirmed(
                 tx.id,
@@ -3233,7 +3229,7 @@ async fn midnight_response_settles_entries_that_missed_the_outcome() {
         lagging.insert_mock_executing(&tx).await;
         if parked {
             lagging
-                .unwatch_execution(Chain::Ethereum, WatchKey::of(&tx))
+                .unwatch_execution(WatchKey::of(&tx))
                 .await
                 .unwrap()
                 .park()
@@ -3510,7 +3506,7 @@ async fn unobserved_response_settles_when_it_verifies() {
         lagging.insert_mock_executing(&tx).await;
         if parked {
             lagging
-                .unwatch_execution(Chain::Ethereum, WatchKey::of(&tx))
+                .unwatch_execution(WatchKey::of(&tx))
                 .await
                 .unwrap()
                 .park()

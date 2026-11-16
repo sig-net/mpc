@@ -24,12 +24,13 @@ impl WatchedExecution {
     }
 }
 
-/// Watch key for an execution: identifies the flat id, source chain, and sign id.
+/// Watch key: flat id, source, sign id, and target chain.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct WatchKey {
     pub flat_id: BidirectionalTxId,
     pub source: Chain,
     pub sign_id: SignId,
+    pub target: Chain,
 }
 
 impl WatchKey {
@@ -38,6 +39,7 @@ impl WatchKey {
             flat_id: tx.id,
             source: tx.source_chain,
             sign_id: tx.sign_id(),
+            target: tx.target_chain,
         }
     }
 }
@@ -178,6 +180,7 @@ impl MockStateManager {
                 flat_id: tx.id,
                 source: tx.source_chain,
                 sign_id,
+                target: tx.target_chain,
             },
             tx,
         );
@@ -200,7 +203,7 @@ impl MockStateManager {
 
     /// Removes one entry's watch, routed to its target chain;
     /// sibling watches stay.
-    pub async fn remove_execution_watch(&self, target: Chain, key: WatchKey) {
-        self.watchers[target].write().await.remove(&key);
+    pub async fn remove_execution_watch(&self, key: WatchKey) {
+        self.watchers[key.target].write().await.remove(&key);
     }
 }

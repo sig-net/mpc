@@ -943,7 +943,7 @@ async fn test_watch_unwatch_and_respond() {
 
     // Unwatch returns the executing SignEntry (automatically registered on advance to executing)
     let executing_entry = backlog
-        .unwatch_execution(tx.target_chain, WatchKey::of(&tx))
+        .unwatch_execution(WatchKey::of(&tx))
         .await
         .expect("watcher present");
     assert_eq!(executing_entry.sign_id(), sign_id);
@@ -956,7 +956,7 @@ async fn test_watch_unwatch_and_respond() {
     executing_entry.watch_execution().await;
 
     let executing_entry = backlog
-        .unwatch_execution(tx.target_chain, WatchKey::of(&tx))
+        .unwatch_execution(WatchKey::of(&tx))
         .await
         .expect("watcher present");
     assert_eq!(executing_entry.sign_id(), sign_id);
@@ -1395,7 +1395,7 @@ async fn respond_observed_at_survives_the_unwatch_lookup() {
     backlog.insert_mock_executing(&tx).await;
 
     let entry = backlog
-        .unwatch_execution(tx.target_chain, WatchKey::of(&tx))
+        .unwatch_execution(WatchKey::of(&tx))
         .await
         .expect("watch must resolve to the executing entry");
 
@@ -1420,7 +1420,7 @@ async fn watch_execution_re_register_keeps_the_wait_start() {
     StateManager::watch_execution(&backlog, Arc::new(tx.clone())).await;
 
     let entry = backlog
-        .unwatch_execution(tx.target_chain, WatchKey::of(&tx))
+        .unwatch_execution(WatchKey::of(&tx))
         .await
         .expect("the re-registered watch must resolve");
     let measured = entry
@@ -1440,14 +1440,14 @@ async fn watch_execution_without_a_resident_watch_starts_unmeasured() {
     let tx = mock_bidirectional_tx(SignId::new([79; 32]), Chain::Solana);
     backlog.insert_mock_executing(&tx).await;
     backlog
-        .unwatch_execution(tx.target_chain, WatchKey::of(&tx))
+        .unwatch_execution(WatchKey::of(&tx))
         .await
         .expect("the initial watch must resolve");
 
     StateManager::watch_execution(&backlog, Arc::new(tx.clone())).await;
 
     let entry = backlog
-        .unwatch_execution(tx.target_chain, WatchKey::of(&tx))
+        .unwatch_execution(WatchKey::of(&tx))
         .await
         .expect("the re-registered watch must resolve");
     assert_eq!(entry.awaiting_execution(), None);
@@ -1472,12 +1472,10 @@ async fn executing_entry_for_falls_back_to_the_backlog_entry_without_a_watch() {
     let backlog = Backlog::new();
     let tx = mock_bidirectional_tx(SignId::new([77; 32]), Chain::Solana);
     backlog.insert_mock_executing(&tx).await;
-    backlog
-        .unwatch_execution(tx.target_chain, WatchKey::of(&tx))
-        .await;
+    backlog.unwatch_execution(WatchKey::of(&tx)).await;
 
     let entry = backlog
-        .executing_entry_for(tx.target_chain, WatchKey::of(&tx))
+        .executing_entry_for(WatchKey::of(&tx))
         .await
         .expect("a watch-less entry must fall back to the backlog");
     assert_eq!(
@@ -1488,14 +1486,12 @@ async fn executing_entry_for_falls_back_to_the_backlog_entry_without_a_watch() {
 
     assert!(
         backlog
-            .executing_entry_for(
-                tx.target_chain,
-                WatchKey {
-                    flat_id: tx.id,
-                    source: tx.source_chain,
-                    sign_id: SignId::new([1; 32]),
-                },
-            )
+            .executing_entry_for(WatchKey {
+                flat_id: tx.id,
+                source: tx.source_chain,
+                sign_id: SignId::new([1; 32]),
+                target: tx.target_chain,
+            })
             .await
             .is_none(),
         "the fallback is keyed by sign id, not the flat tx id"
@@ -1522,7 +1518,7 @@ async fn executing_entry_for_resolves_only_the_entrys_own_watch_for_duplicate_id
 
     // By second's keys its own watch answers and is consumed.
     let resolved = backlog
-        .executing_entry_for(second.target_chain, WatchKey::of(&second))
+        .executing_entry_for(WatchKey::of(&second))
         .await
         .expect("second resolves through its watch");
     assert_eq!(resolved.sign_id(), second.sign_id());
@@ -1539,7 +1535,7 @@ async fn executing_entry_for_resolves_only_the_entrys_own_watch_for_duplicate_id
     // Re-register second, then first resolves through its own watch.
     backlog.watch_execution(&second_entry).await;
     let resolved = backlog
-        .executing_entry_for(first.target_chain, WatchKey::of(&first))
+        .executing_entry_for(WatchKey::of(&first))
         .await
         .expect("first resolves through its own watch");
     assert_eq!(resolved.sign_id(), first.sign_id());
@@ -1590,7 +1586,7 @@ async fn live_regress_preserves_only_matching_execution_wait_starts() {
     backlog.insert_mock_executing(&restored).await;
     let checkpoint = backlog.checkpoint(Chain::Solana).await.unwrap();
     backlog
-        .unwatch_execution(restored.target_chain, WatchKey::of(&restored))
+        .unwatch_execution(WatchKey::of(&restored))
         .await
         .unwrap();
     backlog.insert_mock_executing(&stale).await;
@@ -1602,22 +1598,22 @@ async fn live_regress_preserves_only_matching_execution_wait_starts() {
     backlog.regress(&checkpoint, mock_root_pk()).await.unwrap();
 
     let entry = backlog
-        .unwatch_execution(retained.target_chain, WatchKey::of(&retained))
+        .unwatch_execution(WatchKey::of(&retained))
         .await
         .expect("matching execution must remain watched");
     assert_eq!(entry.respond_observed_at(), Some(observed_at));
     assert!(entry.awaiting_execution().unwrap() >= Duration::from_secs(120));
     let entry = backlog
-        .unwatch_execution(restored.target_chain, WatchKey::of(&restored))
+        .unwatch_execution(WatchKey::of(&restored))
         .await
         .expect("checkpoint execution must be re-watched");
     assert_eq!(entry.respond_observed_at(), None);
     assert!(backlog
-        .unwatch_execution(stale.target_chain, WatchKey::of(&stale))
+        .unwatch_execution(WatchKey::of(&stale))
         .await
         .is_none());
     let entry = backlog
-        .unwatch_execution(unrelated.target_chain, WatchKey::of(&unrelated))
+        .unwatch_execution(WatchKey::of(&unrelated))
         .await
         .expect("other source chain must remain watched");
     assert_eq!(entry.respond_observed_at(), unrelated_observed_at);
@@ -1653,12 +1649,12 @@ async fn twin_wait_starts_survive_recovery_and_re_registration() {
     backlog.regress(&checkpoint, mock_root_pk()).await.unwrap();
 
     let first = backlog
-        .unwatch_execution(first_tx.target_chain, WatchKey::of(&first_tx))
+        .unwatch_execution(WatchKey::of(&first_tx))
         .await
         .expect("first twin must remain watched");
     assert_eq!(first.respond_observed_at(), Some(first_observed));
     let twin = backlog
-        .unwatch_execution(twin_tx.target_chain, WatchKey::of(&twin_tx))
+        .unwatch_execution(WatchKey::of(&twin_tx))
         .await
         .expect("twin must remain watched");
     assert_eq!(twin.respond_observed_at(), Some(twin_observed));
@@ -1672,12 +1668,12 @@ async fn twin_wait_starts_survive_recovery_and_re_registration() {
         .await;
     StateManager::watch_execution(&backlog, Arc::new(twin_tx.clone())).await;
     let re_registered = backlog
-        .unwatch_execution(twin_tx.target_chain, WatchKey::of(&twin_tx))
+        .unwatch_execution(WatchKey::of(&twin_tx))
         .await
         .expect("re-registered twin must resolve");
     assert_eq!(re_registered.respond_observed_at(), Some(twin_observed));
     let sibling = backlog
-        .unwatch_execution(first_tx.target_chain, WatchKey::of(&first_tx))
+        .unwatch_execution(WatchKey::of(&first_tx))
         .await
         .expect("sibling watch must survive the re-register");
     assert_eq!(sibling.respond_observed_at(), Some(first_observed));
@@ -1697,7 +1693,7 @@ async fn recovered_executing_entry_has_no_wait_start() {
     recovered.recover_by_checkpoint(&checkpoint).await;
 
     let entry = recovered
-        .unwatch_execution(tx.target_chain, WatchKey::of(&tx))
+        .unwatch_execution(WatchKey::of(&tx))
         .await
         .expect("recovery must re-register the watch");
     assert_eq!(

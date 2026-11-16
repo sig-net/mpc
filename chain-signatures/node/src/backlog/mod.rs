@@ -433,10 +433,9 @@ impl Backlog {
     /// Stops watching and retrieves the entry; sibling watches stay.
     pub async fn unwatch_execution(
         &self,
-        target: Chain,
         key: WatchKey,
     ) -> Option<SignEntry<Bidirectional<Executing>>> {
-        let (tx, observed_at) = self.watchers(&target).write().await.remove(&key)?;
+        let (tx, observed_at) = self.watchers(&key.target).write().await.remove(&key)?;
 
         // The status names one transaction and no observation time; the watch that fired has both.
         let entry = self
@@ -449,11 +448,14 @@ impl Backlog {
             .map(BacklogEntry::watched_txs)
             .unwrap_or_default();
         // Under the pending lock, as `add_published_tx` inserts: no watch outlives the entry.
-        let mut watchers = self.watchers(&target).write().await;
         for other in others {
-            watchers.remove(&WatchKey::of(&other));
+            let other_key = WatchKey::of(&other);
+            self.watchers(&other_key.target)
+                .write()
+                .await
+                .remove(&other_key);
         }
-        drop((watchers, pending));
+        drop(pending);
         Some(entry.with_execution_watch(ExecutionWatch::new(tx, observed_at)))
     }
 
@@ -475,9 +477,15 @@ impl Backlog {
             return;
         };
         let status_key = WatchKey::of(status_tx);
-        let mut watchers = self.watchers(&tx.target_chain).write().await;
-        let observed_at = watchers.clock_of(&status_key);
-        watchers.register(tx, observed_at);
+        let observed_at = self
+            .watchers(&status_key.target)
+            .read()
+            .await
+            .clock_of(&status_key);
+        self.watchers(&tx.target_chain)
+            .write()
+            .await
+            .register(tx, observed_at);
     }
 
     /// Unwatch and return the entries of `chain` that `taker`, executed, leaves unexecutable (M4),
@@ -542,17 +550,15 @@ impl Backlog {
             };
             let watched_txs = entry.watched_txs();
             let mut observed_at = None;
-            // One request has one target chain, so one guard sweeps its txs.
-            if let Some(target) = watched_txs.first().map(|tx| tx.target_chain) {
-                // Ensure all watched transactions have the same target chain.
-                debug_assert!(watched_txs.iter().all(|tx| tx.target_chain == target));
-                let mut watches = self.watchers(&target).write().await;
-                for watched in &watched_txs {
-                    let clock = watches
-                        .remove(&WatchKey::of(watched))
-                        .and_then(|(_, clock)| clock);
-                    observed_at = observed_at.or(clock);
-                }
+            for watched in entry.watched_txs() {
+                let key = WatchKey::of(&watched);
+                let clock = self
+                    .watchers(&key.target)
+                    .write()
+                    .await
+                    .remove(&key)
+                    .and_then(|(_, clock)| clock);
+                observed_at = observed_at.or(clock);
             }
             unwatched.push(SignEntry {
                 chain,
@@ -588,10 +594,9 @@ impl Backlog {
     /// watch, or by source and sign id from the backlog.
     pub async fn executing_entry_for(
         &self,
-        target: Chain,
         key: WatchKey,
     ) -> Option<SignEntry<Bidirectional<Executing>>> {
-        if let Some(entry) = self.unwatch_execution(target, key).await {
+        if let Some(entry) = self.unwatch_execution(key).await {
             return Some(entry);
         }
         self.get_by::<Bidirectional<Executing>>(key.source, &key.sign_id)

@@ -959,14 +959,12 @@ mod tests {
             .remove_pending_execution(Chain::Midnight, sign_id)
             .await;
         state
-            .remove_execution_watch(
-                Chain::Tron,
-                WatchKey {
-                    flat_id: id,
-                    source: Chain::Midnight,
-                    sign_id,
-                },
-            )
+            .remove_execution_watch(WatchKey {
+                flat_id: id,
+                source: Chain::Midnight,
+                sign_id,
+                target: Chain::Tron,
+            })
             .await;
         let next_tick = until_blocks(&mut run, 1).await;
         assert!(
