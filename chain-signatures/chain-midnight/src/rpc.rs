@@ -679,13 +679,14 @@ type RuntimeVersionKey = (u32, u32);
 
 type Header = <SubstrateConfig as subxt::Config>::Header;
 
-/// Recently read blocks' headers and executing-runtime clients, by hash. Neither
+/// Recently read blocks' headers, executing-runtime clients and times, by hash. None
 /// changes once a block exists, so a landing scan, its TTL check and the fee's head
 /// reads share one read of each.
 #[derive(Default)]
 struct BlockMemo {
     headers: std::collections::VecDeque<(H256, Header)>,
     clients: std::collections::VecDeque<(H256, OnlineClient<SubstrateConfig>)>,
+    times: std::collections::VecDeque<(H256, midnight_base_crypto::time::Timestamp)>,
 }
 
 /// Blocks a memo keeps: more than one landing poll scans.
@@ -950,6 +951,9 @@ impl crate::native::SubmitChain for MidnightPublisherRpc {
         at_hash_0x: &str,
     ) -> anyhow::Result<midnight_base_crypto::time::Timestamp> {
         let at = parse_block_hash(at_hash_0x)?;
+        if let Some(time) = recall(&self.blocks().times, at) {
+            return Ok(time);
+        }
         let key = self
             .client_for_block(at)
             .await?
@@ -968,9 +972,9 @@ impl crate::native::SubmitChain for MidnightPublisherRpc {
             .with_context(|| format!("midnight node has no block time at {at_hash_0x}"))?;
         let millis =
             u64::decode_all(&mut &raw[..]).context("the midnight block time is not a u64")?;
-        Ok(midnight_base_crypto::time::Timestamp::from_secs(
-            millis / 1000,
-        ))
+        let time = midnight_base_crypto::time::Timestamp::from_secs(millis / 1000);
+        remember(&mut self.blocks().times, at, time);
+        Ok(time)
     }
 
     async fn submit(&self, transaction: &[u8]) -> Result<(), SubmitRefusal> {
@@ -3521,8 +3525,9 @@ mod tests {
         );
     }
 
-    /// A landing scan reads a block's number, events and time: the header and the
-    /// runtime that executed the block are read once for all three.
+    /// A landing scan reads a block's number, events and time, and the fee reads the
+    /// head's time too: the header, the runtime that executed the block and its time
+    /// are each read once.
     #[tokio::test]
     async fn the_publisher_reads_a_block_header_and_runtime_once() {
         use crate::native::SubmitChain as _;
@@ -3547,6 +3552,11 @@ mod tests {
             midnight_base_crypto::time::Timestamp::from_secs(1_761_400_000)
         );
         assert_eq!(rpc.block_number(&block).await.unwrap(), 0x1b0);
+        // The fee's head read and the landing scan's TTL check of the same block.
+        assert_eq!(
+            rpc.block_time(&block).await.unwrap(),
+            midnight_base_crypto::time::Timestamp::from_secs(1_761_400_000)
+        );
 
         assert_eq!(
             *log.lock().unwrap(),
