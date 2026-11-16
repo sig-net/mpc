@@ -88,13 +88,13 @@ jobs:
       - name: Test clippy
         run: just lint
       
-      - name: Unit tests
-        run: just test-unit
-
       - name: Install cargo-nextest
         uses: taiki-e/install-action@e88e69ecdb9658bd172693dcdc2c84e7f0ab6a11 # nextest
         with:
           tool: nextest
+
+      - name: Unit tests
+        run: just test-unit
 
       # Each test migrates a live contract's state. A branch never upgrades the contracts
       # before it (develop -> testnet -> mainnet), so those are skipped. Merge queue runs all.
