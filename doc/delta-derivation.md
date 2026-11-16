@@ -33,18 +33,11 @@ contents, or censor a request into a later block; these producer-level powers
 are outside the threat model. Requester-proposer collusion is not covered.
 Production nodes derive entropy only from finalized blocks.
 
-## Deployment compatibility
+## Upgrade safety
 
-Changing Ethereum's entropy source changes `SignArgs::entropy` without changing
-the request ID. Every node signing a request must use the same entropy value.
-A lagging indexer that replays a pre-upgrade request after the change can derive
-block-hash/request-ID entropy while peers retain the old transaction-hash entropy.
-Backlog checkpoints identify requests by ID and status, not by entropy, so they do not
-necessarily expose this mismatch.
-
-Before switching sources, either prevent new Ethereum sign requests from being
-submitted, let every indexer catch up through the last request's finalized
-block, drain pending Ethereum requests, and deploy to all nodes before
-submissions resume; or implement a fixed activation height and retain the old
-derivation for requests in earlier blocks. Do not let nodes sign the same
-request under mixed entropy rules.
+Changing the entropy source changes `SignArgs::entropy` without changing the
+request ID, so nodes on different rules derive different values for the same
+request. Since [#1595](https://github.com/sig-net/mpc/pull/1595) the checkpoint
+digest covers `request.args` (entropy included), such a split shows up as
+diverging digests: it heals by rebase while one rule still has `t` nodes, and
+otherwise Ethereum checkpoints stall.
