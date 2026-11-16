@@ -505,10 +505,8 @@ impl MidnightRpc {
     }
 
     /// The finalized head as a [`BlockRef`]: the head hash, then, when it moved, its
-    /// block for the number and parent, each read on the ordinary retry budget. The
-    /// block is kept for [`block_emissions`](Self::block_emissions) of that head. A
-    /// block that cannot be read leaves the head to its header, so the poll goes on
-    /// and the block is fetched again when the head is processed.
+    /// number and parent from [`block_or_header`](Self::block_or_header). The block is
+    /// kept for [`block_emissions`](Self::block_emissions) of that head.
     pub async fn finalized_block_ref(&self) -> anyhow::Result<BlockRef> {
         let head = self.reads.finalized_head().await?;
         let hash = hex_0x(head);
@@ -534,13 +532,14 @@ impl MidnightRpc {
     }
 
     /// Block `hash`'s number and parent from its block, which comes back for processing,
-    /// or from its header when the block cannot be read; `None` when the node has
-    /// neither.
+    /// or, when one attempt cannot read the block, from its header on the ordinary
+    /// retry budget, as the block is fetched again under the per-block budget when it
+    /// is processed; `None` when the node has neither.
     async fn block_or_header(
         &self,
         hash: H256,
     ) -> anyhow::Result<Option<(u64, H256, Option<BlockDetails<SubstrateConfig>>)>> {
-        let error = match self.reads.block(hash).await {
+        let error = match self.reads.block_once(hash).await {
             Ok(Some(block)) => {
                 let header = &block.block.header;
                 return Ok(Some((
@@ -1493,10 +1492,30 @@ impl Reads {
 
     /// Header and body in one call: `chain_getBlock` carries the header.
     async fn block(&self, hash: H256) -> anyhow::Result<Option<BlockDetails<SubstrateConfig>>> {
+        self.block_with(hash, self.retry).await
+    }
+
+    /// [`block`](Self::block) in a single attempt.
+    async fn block_once(
+        &self,
+        hash: H256,
+    ) -> anyhow::Result<Option<BlockDetails<SubstrateConfig>>> {
+        let once = RetryConfig {
+            max_times: 0,
+            ..self.retry
+        };
+        self.block_with(hash, once).await
+    }
+
+    async fn block_with(
+        &self,
+        hash: H256,
+        retry: RetryConfig,
+    ) -> anyhow::Result<Option<BlockDetails<SubstrateConfig>>> {
         retry_read(
             &self.gate,
             self.request_timeout,
-            self.retry,
+            retry,
             "midnight_block",
             || async {
                 self.legacy
@@ -4135,6 +4154,69 @@ mod tests {
                 ("chain_getBlock", hash_of_byte(0x42))
             ]
         );
+    }
+
+    /// A block read that fails is tried once before the header is read, whatever the
+    /// retry budget: the poll goes on as soon as the header answers.
+    #[tokio::test]
+    async fn a_failed_block_read_falls_back_to_the_header_at_once() {
+        let server = ServerBuilder::default().build("127.0.0.1:0").await.unwrap();
+        let config = http_config(server.local_addr().unwrap());
+        let blocks = Arc::new(AtomicUsize::new(0));
+        let mut module = RpcModule::new(());
+        module
+            .register_method("chain_getFinalizedHead", |_, _, _| hash_of_byte(0x43))
+            .unwrap();
+        let read = blocks.clone();
+        module
+            .register_method("chain_getBlock", move |_, _, _| {
+                read.fetch_add(1, Ordering::SeqCst);
+                Err::<serde_json::Value, _>(ErrorObjectOwned::owned(
+                    -32000,
+                    "the backend is behind",
+                    None::<()>,
+                ))
+            })
+            .unwrap();
+        module
+            .register_method("chain_getHeader", |_, _, _| {
+                json!({
+                    "parentHash": hash_of_byte(0x42),
+                    "number": "0x1b0",
+                    "stateRoot": hash_of_byte(0x44),
+                    "extrinsicsRoot": hash_of_byte(0x45),
+                    "digest": { "logs": [] }
+                })
+            })
+            .unwrap();
+        let _handle = server.start(module);
+        let metadata = subxt::Metadata::decode_all(
+            &mut &include_bytes!("../fixtures/fallible-block-432-metadata.scale")[..],
+        )
+        .unwrap();
+        let transport = connect_http(&config).unwrap();
+        let rpc = MidnightRpc {
+            client: OnlineClient::<SubstrateConfig>::from_rpc_client_with(
+                H256([0x11; 32]),
+                subxt::client::RuntimeVersion {
+                    spec_version: 1,
+                    transaction_version: 1,
+                },
+                metadata,
+                transport.clone(),
+            )
+            .unwrap(),
+            reads: Reads::new(
+                transport,
+                Duration::from_secs(5),
+                RpcConfig::default().retry,
+            ),
+            head: Default::default(),
+            walked: Default::default(),
+        };
+
+        assert_eq!(rpc.finalized_block_ref().await.unwrap().number, 0x1b0);
+        assert_eq!(blocks.load(Ordering::SeqCst), 1);
     }
 
     /// A block looked up by number is read once: its number and parent come from the
