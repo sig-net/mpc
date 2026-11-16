@@ -236,8 +236,8 @@ impl Backlog {
 
     /// Get the execution watchers for a specific chain.
     #[inline]
-    fn watchers(&self, chain: &Chain) -> &RwLock<WatchedExecutions> {
-        &self.execution_watchers[*chain]
+    fn watchers(&self, chain: Chain) -> &RwLock<WatchedExecutions> {
+        &self.execution_watchers[chain]
     }
 
     /// Insert a new Sign request into the backlog for the specified chain.
@@ -424,7 +424,7 @@ impl Backlog {
     /// Begin watching for execution of a bidirectional transaction on the destination chain.
     pub async fn watch_execution(&self, entry: &SignEntry<Bidirectional<Executing>>) {
         let watch = entry.execution_watch();
-        self.watchers(&watch.tx.target_chain)
+        self.watchers(watch.tx.target_chain)
             .write()
             .await
             .register(Arc::clone(&watch.tx), watch.respond_observed_at);
@@ -435,7 +435,7 @@ impl Backlog {
         &self,
         key: WatchKey,
     ) -> Option<SignEntry<Bidirectional<Executing>>> {
-        let (tx, observed_at) = self.watchers(&key.target).write().await.remove(&key)?;
+        let (tx, observed_at) = self.watchers(key.target).write().await.remove(&key)?;
 
         // The status names one transaction and no observation time; the watch that fired has both.
         let entry = self
@@ -450,7 +450,7 @@ impl Backlog {
         // Under the pending lock, as `add_published_tx` inserts: no watch outlives the entry.
         for other in others {
             let other_key = WatchKey::of(&other);
-            self.watchers(&other_key.target)
+            self.watchers(other_key.target)
                 .write()
                 .await
                 .remove(&other_key);
@@ -478,11 +478,11 @@ impl Backlog {
         };
         let status_key = WatchKey::of(status_tx);
         let observed_at = self
-            .watchers(&status_key.target)
+            .watchers(status_key.target)
             .read()
             .await
             .clock_of(&status_key);
-        self.watchers(&tx.target_chain)
+        self.watchers(tx.target_chain)
             .write()
             .await
             .register(tx, observed_at);
@@ -553,7 +553,7 @@ impl Backlog {
             for watched in entry.watched_txs() {
                 let key = WatchKey::of(&watched);
                 let clock = self
-                    .watchers(&key.target)
+                    .watchers(key.target)
                     .write()
                     .await
                     .remove(&key)
@@ -802,7 +802,7 @@ impl Backlog {
             by_target[tx.target_chain].push(tx);
         }
         for destination_chain in Chain::iter() {
-            self.watchers(&destination_chain)
+            self.watchers(destination_chain)
                 .write()
                 .await
                 .rebuild(chain, &by_target[destination_chain]);
@@ -828,7 +828,7 @@ impl StateManager for Backlog {
         &self,
         chain: Chain,
     ) -> HashMap<BidirectionalTxId, Vec<WatchedExecution>> {
-        self.watchers(&chain).read().await.all()
+        self.watchers(chain).read().await.all()
     }
 
     async fn get_pending_executions(&self, chain: Chain) -> Vec<WatchedExecution> {
@@ -836,7 +836,7 @@ impl StateManager for Backlog {
     }
 
     async fn watch_execution(&self, tx: Arc<BidirectionalTx>) {
-        self.watchers(&tx.target_chain)
+        self.watchers(tx.target_chain)
             .write()
             .await
             .register(tx, None);
