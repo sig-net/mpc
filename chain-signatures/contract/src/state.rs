@@ -65,6 +65,15 @@ impl ProtocolContractState {
             ProtocolContractState::Resharing(_) => "Resharing",
         }
     }
+
+    pub fn is_voter(&self, account: &AccountId) -> bool {
+        match self {
+            ProtocolContractState::NotInitialized => false,
+            ProtocolContractState::Initializing(state) => state.candidates.contains_key(account),
+            ProtocolContractState::Running(state) => state.participants.contains_key(account),
+            ProtocolContractState::Resharing(state) => state.old_participants.contains_key(account),
+        }
+    }
 }
 
 /// Public running state. Candidate data is available through `candidate_info`.

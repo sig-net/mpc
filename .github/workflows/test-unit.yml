@@ -28,10 +28,10 @@ jobs:
           curl --proto '=https' --tlsv1.2 -sSfL "https://github.com/casey/just/releases/download/1.54.0/just-1.54.0-x86_64-unknown-linux-musl.tar.gz" | tar zxf - -C "$HOME/.cargo/bin"
           echo "$HOME/.cargo/bin" >> $GITHUB_PATH
 
-      - name: Install Rust (1.93.0)
-        uses: dtolnay/rust-toolchain@283fb51ee3c8a49cd7c8ff30102f3fcf3cfbe0e1 # 1.93.0
+      - name: Install Rust (1.95.0)
+        uses: dtolnay/rust-toolchain@035fceb3c12fb0c6a9461b52775e16473133e591 # 1.95.0
         with:
-          toolchain: 1.93.0
+          toolchain: 1.95.0
           targets: wasm32-unknown-unknown
           components: clippy, rustfmt
 
@@ -47,9 +47,11 @@ jobs:
         if: github.event_name == 'pull_request'
         run: |
           git fetch --quiet --depth=1 origin develop
-          git diff --name-only FETCH_HEAD...HEAD |
-            grep -qE '(^|/)(Cargo\.toml|Cargo\.lock|rust-toolchain(\.toml)?)$|^\.cargo/|^\.github/workflows/' &&
-            echo changed=true >> "$GITHUB_OUTPUT" || true
+          # Two trees, no merge base: the shallow checkout has no common history.
+          files=$(git diff --name-only FETCH_HEAD HEAD)
+          if grep -qE '(^|/)(Cargo\.toml|Cargo\.lock|rust-toolchain(\.toml)?)$|^\.cargo/|^\.github/workflows/' <<< "$files"; then
+            echo changed=true >> "$GITHUB_OUTPUT"
+          fi
 
       # Cache policy: doc/ci-caching.md
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
@@ -89,6 +91,24 @@ jobs:
       - name: Unit tests
         run: just test-unit
 
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@e88e69ecdb9658bd172693dcdc2c84e7f0ab6a11 # nextest
+        with:
+          tool: nextest
+
+      # Each test migrates a live contract's state. A branch never upgrades the contracts
+      # before it (develop -> testnet -> mainnet), so those are skipped. Merge queue runs all.
+      - name: Migration test, dev contract
+        if: github.base_ref != 'testnet' && github.base_ref != 'mainnet'
+        run: cargo nextest run -p mpc-contract --run-ignored only -E 'test(=test_migrate_dev_state)'
+
+      - name: Migration test, testnet contract
+        if: github.base_ref != 'mainnet'
+        run: cargo nextest run -p mpc-contract --run-ignored only -E 'test(=test_migrate_testnet_state)'
+
+      - name: Migration test, mainnet contract
+        run: cargo nextest run -p mpc-contract --run-ignored only -E 'test(=test_migrate_mainnet_state)'
+
       - name: Midnight output storage tests
         run: cargo test -p mpc-chain-midnight --lib --features sandbox output_storage::tests
 
@@ -102,9 +122,9 @@ jobs:
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@283fb51ee3c8a49cd7c8ff30102f3fcf3cfbe0e1 # 1.93.0
+        uses: dtolnay/rust-toolchain@035fceb3c12fb0c6a9461b52775e16473133e591 # 1.95.0
         with:
-          toolchain: 1.93.0
+          toolchain: 1.95.0
 
       # Check the feature-resolved dependency graph: security advisories
       # (vulnerabilities deny; `unmaintained`/`unsound` downgraded to warnings to

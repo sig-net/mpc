@@ -18,22 +18,37 @@ use mpc_primitives::{Calldata, CompactMaybe, TronTxParams};
 use prost_types::Any;
 use sha2::{Digest, Sha256};
 
+/// java-tron's own cap: `expiration` at most 24 h past the producing
+/// head (`Constant.MAXIMUM_TIME_UNTIL_EXPIRATION`,
+/// `Manager.validateCommon` at b33eed89a6a4) — §4.3's cap, anchored
+/// at the source block.
+pub const MAX_EXPIRATION_SPAN_MS: u64 = 24 * 60 * 60 * 1000;
+
 impl RawTransaction {
     /// txID as defined by java-tron: sha256 over the serialized `raw` message.
     pub fn txid(&self) -> [u8; 32] {
         Sha256::digest(self.encode_to_vec()).into()
     }
 
-    /// The trigger's `owner_address`, for admission checks that bind the
-    /// owner to the request's derived key.
-    pub fn owner_address(&self) -> anyhow::Result<Vec<u8>> {
+    /// The one trigger contract `parse` admitted, decoded.
+    fn trigger(&self) -> anyhow::Result<TriggerSmartContract> {
         let any = self
             .contract
             .first()
             .and_then(|contract| contract.parameter.as_ref())
             .context("missing TriggerSmartContract parameter")?;
-        let trigger = TriggerSmartContract::decode(any.value.as_slice())?;
-        Ok(trigger.owner_address)
+        Ok(TriggerSmartContract::decode(any.value.as_slice())?)
+    }
+
+    /// The trigger's `owner_address`, for admission checks that bind the
+    /// owner to the request's derived key.
+    pub fn owner_address(&self) -> anyhow::Result<Vec<u8>> {
+        Ok(self.trigger()?.owner_address)
+    }
+
+    /// The trigger's `data`, for output recovery's `is_contract_call` predicate.
+    pub fn calldata(&self) -> anyhow::Result<Vec<u8>> {
+        Ok(self.trigger()?.data)
     }
 
     /// Parses and validates the bytes the multichain API carries for Tron
@@ -213,6 +228,11 @@ mod tests {
     }
 
     #[test]
+    fn max_expiration_span_is_java_trons_24h() {
+        assert_eq!(MAX_EXPIRATION_SPAN_MS, 86_400_000);
+    }
+
+    #[test]
     fn absent_calldata_assembles_a_plain_transfer() {
         let mut params = params();
         params.call_value = 1_000_000;
@@ -222,6 +242,29 @@ mod tests {
         assert_eq!(
             trigger.owner_address.as_slice(),
             owner().as_bytes().as_slice()
+        );
+    }
+
+    #[test]
+    fn calldata_reads_the_assembled_trigger_data() {
+        let mut plain = params();
+        let plain_bytes = to_unsigned_tron_tx(&plain, owner()).unwrap();
+        assert!(RawTransaction::parse(&plain_bytes)
+            .unwrap()
+            .calldata()
+            .unwrap()
+            .is_empty());
+
+        plain.calldata.is_some = true;
+        plain.calldata.value.selector = [0xa9, 0x05, 0x9c, 0xbb];
+        plain.calldata.value.no_words = 2;
+        plain.calldata.value.words = vec![[0x11; 32]; 2];
+        let bytes = to_unsigned_tron_tx(&plain, owner()).unwrap();
+        let mut expected = vec![0xa9, 0x05, 0x9c, 0xbb];
+        expected.extend_from_slice(&[0x11; 64]);
+        assert_eq!(
+            RawTransaction::parse(&bytes).unwrap().calldata().unwrap(),
+            expected
         );
     }
 

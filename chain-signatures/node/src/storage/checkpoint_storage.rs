@@ -1,8 +1,10 @@
 use crate::protocol::Chain;
 
 use crate::backlog::Checkpoint;
+use crate::sign_bidirectional::{BidirectionalProgress, SignStatus};
 use anyhow::Context;
 use deadpool_redis::Pool;
+use mpc_primitives::SignId;
 use near_account_id::AccountId;
 use redis::AsyncCommands;
 use tokio::sync::RwLock;
@@ -16,6 +18,7 @@ pub enum CheckpointStorage {
     InMemory {
         latest: Arc<RwLock<HashMap<Chain, Checkpoint>>>,
         pending: Arc<RwLock<HashMap<Chain, BTreeMap<u64, Checkpoint>>>>,
+        local: Arc<RwLock<HashMap<Chain, LocalRecords>>>,
         /// Number of upcoming `load_pending` calls to fail, for tests of transient errors.
         #[cfg(test)]
         load_pending_failures: Arc<std::sync::atomic::AtomicUsize>,
@@ -36,6 +39,7 @@ impl CheckpointStorage {
         Self::InMemory {
             latest: Arc::new(RwLock::new(HashMap::new())),
             pending: Arc::new(RwLock::new(HashMap::new())),
+            local: Arc::default(),
             #[cfg(test)]
             load_pending_failures: Arc::default(),
         }
@@ -100,6 +104,103 @@ impl CheckpointStorage {
         self.key("pending_digest", chain)
     }
 
+    fn local_key(&self, chain: Chain) -> String {
+        self.key("local", chain)
+    }
+
+    /// Store what this node signed for one leg of a request, before it is published.
+    pub async fn put_local(
+        &self,
+        chain: Chain,
+        id: SignId,
+        status: &SignStatus,
+    ) -> anyhow::Result<()> {
+        match self {
+            CheckpointStorage::Redis(pool, _) => {
+                let bytes = encode_local(status)?;
+                let mut conn = pool.get().await.context("failed to get redis connection")?;
+                conn.hset::<_, _, _, ()>(
+                    self.local_key(chain),
+                    local_field(id, leg(status)),
+                    bytes,
+                )
+                .await
+                .context("failed to store local record")?;
+            }
+            CheckpointStorage::InMemory { local, .. } => {
+                local
+                    .write()
+                    .await
+                    .entry(chain)
+                    .or_default()
+                    .insert((id, leg(status)), status.clone());
+            }
+            #[cfg(test)]
+            CheckpointStorage::Failing => anyhow::bail!("failing storage"),
+        }
+        Ok(())
+    }
+
+    /// This node's records for `chain`, up to one per leg of a request. One that cannot be read
+    /// is skipped, which costs only signing that leg again.
+    pub async fn load_local(&self, chain: Chain) -> anyhow::Result<Vec<(SignId, SignStatus)>> {
+        match self {
+            CheckpointStorage::Redis(pool, _) => {
+                let mut conn = pool.get().await.context("failed to get redis connection")?;
+                let stored: HashMap<Vec<u8>, Vec<u8>> = conn
+                    .hgetall(self.local_key(chain))
+                    .await
+                    .context("failed to load local records")?;
+                let decode = |(field, bytes): (Vec<u8>, Vec<u8>)| {
+                    let id = SignId::new(field.get(..32)?.try_into().ok()?);
+                    decode_local(&bytes)
+                        .inspect_err(|err| {
+                            tracing::warn!(?chain, ?id, ?err, "skipping unreadable local record");
+                        })
+                        .ok()
+                        .map(|status| (id, status))
+                };
+                Ok(stored.into_iter().filter_map(decode).collect())
+            }
+            CheckpointStorage::InMemory { local, .. } => {
+                let local = local.read().await;
+                let records = local.get(&chain).into_iter().flatten();
+                Ok(records
+                    .map(|((id, _), status)| (*id, status.clone()))
+                    .collect())
+            }
+            #[cfg(test)]
+            CheckpointStorage::Failing => anyhow::bail!("failing storage"),
+        }
+    }
+
+    /// Delete this node's records of both legs of `ids`.
+    pub async fn remove_local(&self, chain: Chain, ids: &[SignId]) -> anyhow::Result<()> {
+        if ids.is_empty() {
+            return Ok(());
+        }
+        match self {
+            CheckpointStorage::Redis(pool, _) => {
+                let fields: Vec<Vec<u8>> = ids
+                    .iter()
+                    .flat_map(|id| LEGS.map(|leg| local_field(*id, leg)))
+                    .collect();
+                let mut conn = pool.get().await.context("failed to get redis connection")?;
+                conn.hdel::<_, _, ()>(self.local_key(chain), fields)
+                    .await
+                    .context("failed to remove local records")?;
+            }
+            CheckpointStorage::InMemory { local, .. } => {
+                if let Some(records) = local.write().await.get_mut(&chain) {
+                    records.retain(|(id, _), _| !ids.contains(id));
+                }
+            }
+            #[cfg(test)]
+            CheckpointStorage::Failing => anyhow::bail!("failing storage"),
+        }
+        Ok(())
+    }
+
     /// Persist a checkpoint as the latest consensus checkpoint.
     ///
     /// Only consensus-confirmed checkpoints should be persisted.
@@ -140,14 +241,15 @@ impl CheckpointStorage {
                 // Atomically inserts a pending checkpoint and its reverse digest index
                 // while checking for height collisions:
                 // - If an entry already exists at `block_height`:
-                //   - If the serialized payload is different, return -1 (conflicting checkpoint).
+                //   - If its digest is different, return -1 (a body can differ in this node's
+                //     progress alone; conflicting checkpoint).
                 //   - If identical, return 0 (idempotent no-op).
                 // - If new, write `height -> body` to pending and `digest -> height` to index,
                 //   and return 1 (successfully inserted).
                 const PERSIST: &str = r#"
                     local existing = redis.call('HGET', KEYS[1], ARGV[1])
                     if existing then
-                        if existing ~= ARGV[2] then
+                        if redis.call('HGET', KEYS[2], ARGV[3]) ~= ARGV[1] then
                             return -1
                         end
                         return 0
@@ -178,7 +280,7 @@ impl CheckpointStorage {
                 let checkpoints = pending.entry(checkpoint.chain).or_default();
                 if let Some(existing) = checkpoints.get(&checkpoint.block_height) {
                     anyhow::ensure!(
-                        existing == checkpoint,
+                        existing.digest() == checkpoint.digest(),
                         "conflicting pending checkpoint at height {}",
                         checkpoint.block_height
                     );
@@ -559,6 +661,40 @@ impl CheckpointStorage {
     }
 }
 
+/// In-memory records, by request and leg.
+type LocalRecords = HashMap<(SignId, Leg), SignStatus>;
+
+/// The byte after the request id in a record's field, so the values are part of the format.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Leg {
+    First = 0,
+    Attestation = 1,
+}
+
+const LEGS: [Leg; 2] = [Leg::First, Leg::Attestation];
+
+/// The leg a record belongs to, so an attestation never replaces the first leg's signature.
+fn leg(status: &SignStatus) -> Leg {
+    match status {
+        SignStatus::Bidirectional(BidirectionalProgress::Final { .. }) => Leg::Attestation,
+        _ => Leg::First,
+    }
+}
+
+fn local_field(id: SignId, leg: Leg) -> Vec<u8> {
+    [id.request_id.as_slice(), &[leg as u8]].concat()
+}
+
+fn encode_local(status: &SignStatus) -> anyhow::Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    ciborium::into_writer(status, &mut bytes).context("failed to encode local record")?;
+    Ok(bytes)
+}
+
+fn decode_local(bytes: &[u8]) -> anyhow::Result<SignStatus> {
+    ciborium::from_reader(bytes).context("failed to decode local record")
+}
+
 fn encode_checkpoint(checkpoint: &Checkpoint) -> anyhow::Result<Vec<u8>> {
     let mut bytes = Vec::new();
     ciborium::into_writer(checkpoint, &mut bytes).context("failed to encode checkpoint CBOR")?;
@@ -586,7 +722,7 @@ mod tests {
             chain: Chain::Solana,
             block_height: 10,
             pending_requests: vec![],
-            cumulative_digest: Checkpoint::empty_cumulative_digest(),
+            legacy_digest: None,
         };
         storage.persist(&cp1).await?;
 
@@ -599,7 +735,7 @@ mod tests {
             chain: Chain::Solana,
             block_height: 20,
             pending_requests: vec![],
-            cumulative_digest: Checkpoint::empty_cumulative_digest(),
+            legacy_digest: None,
         };
         storage.persist(&cp2).await?;
 
@@ -618,7 +754,7 @@ mod tests {
             chain,
             block_height,
             pending_requests: vec![],
-            cumulative_digest: Checkpoint::empty_cumulative_digest(),
+            legacy_digest: None,
         };
 
         let first = checkpoint(10);
@@ -659,10 +795,17 @@ mod tests {
             chain: Chain::Solana,
             block_height: 10,
             pending_requests: vec![],
-            cumulative_digest: Checkpoint::empty_cumulative_digest(),
+            legacy_digest: None,
         };
         let mut conflicting = checkpoint.clone();
-        conflicting.cumulative_digest[0] = 1;
+        conflicting
+            .pending_requests
+            .push(crate::backlog::BacklogEntry::new(
+                crate::backlog::mock::mock_sign_request(
+                    mpc_primitives::SignId::new([1; 32]),
+                    conflicting.chain,
+                ),
+            ));
 
         assert!(storage.persist_pending(&checkpoint).await?);
         assert!(!storage.persist_pending(&checkpoint).await?);
@@ -681,7 +824,7 @@ mod tests {
             chain: Chain::Ethereum,
             block_height: 100,
             pending_requests: vec![],
-            cumulative_digest: [42u8; 32],
+            legacy_digest: None,
         };
         let encoded = encode_checkpoint(&checkpoint).unwrap();
         let decoded = decode_checkpoint(&encoded).unwrap();

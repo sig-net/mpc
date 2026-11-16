@@ -1,11 +1,12 @@
 //! Catch up from the persisted checkpoint, then follow the live finalized chain. For
-//! each block, discovery reads the ordered body and decodes the singleton's transcript
-//! emissions. The source also returns the V1 proof-ready seed for the block, but the
-//! indexer currently discards it; persistence and independent verification come later.
+//! each block, discovery reads the ordered body and decodes the transcript emissions of
+//! the singleton (requests) and the responder (responses). The source also returns the
+//! V1 proof-ready seed for the block, but the indexer currently discards it; persistence
+//! and independent verification come later.
 
 use crate::config::MidnightConfig;
 use crate::convert::generate_sign_request;
-use crate::emissions::{EmissionKind, SingletonCallEmissions, TranscriptPhase};
+use crate::emissions::{ContractCallEmissions, EmissionKind, TranscriptPhase};
 use crate::reader::{
     decode_bidirectional_response_payload, decode_notification, decode_response_payload,
     resolve_verified_record, signet_field_node_by_path, unpack_notification_v1, Resolved,
@@ -106,6 +107,14 @@ fn drop_entry<T>(
     None
 }
 
+/// Which protocol contract a call went to. Requests count only when notified to the
+/// singleton and responses only when posted to the responder, the one clients read.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ProtocolContract {
+    Singleton,
+    Responder,
+}
+
 /// The outcome of fully indexing one block: processed and emitted, or `cancel` fired
 /// mid-flight, which every caller answers by returning `Ok(())`.
 enum Indexed {
@@ -114,18 +123,23 @@ enum Indexed {
 }
 
 impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
-    /// Per-block processing, shared by catchup and live: discover the singleton's
-    /// transcript emissions from the finalized block body and translate them.
+    /// Per-block processing, shared by catchup and live: discover the singleton's and the
+    /// responder's transcript emissions from the finalized block body and translate them.
     async fn process_block<C: ChainSource>(
         &self,
         source: &C,
         block: &BlockRef,
     ) -> anyhow::Result<Vec<ChainEvent>> {
         let Some(BlockEmissions {
+            block_time_ms,
             proof_seed,
             candidates,
         }) = source
-            .block_emissions(block, self.config.central_address.as_bytes())
+            .block_emissions(
+                block,
+                self.config.central_address.as_bytes(),
+                self.config.responder_address.as_bytes(),
+            )
             .await?
         else {
             return Ok(Vec::new());
@@ -136,28 +150,52 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
         let mut events = Vec::new();
         let mut indexed_ts = None;
         for candidate in candidates {
-            for SingletonCallEmissions {
-                call_index,
-                physical_segment,
-                phase,
-                caller,
-                emissions,
-            } in candidate.calls
+            let mut calls: Vec<_> = candidate
+                .singleton_calls
+                .into_iter()
+                .map(|call| (ProtocolContract::Singleton, call))
+                .chain(
+                    candidate
+                        .responder_calls
+                        .into_iter()
+                        .map(|call| (ProtocolContract::Responder, call)),
+                )
+                .collect();
+            // Ledger execution order across both contracts: every guaranteed phase,
+            // then every fallible one, each by segment and call position.
+            calls.sort_by_key(|(_, call)| {
+                (
+                    call.phase == TranscriptPhase::Fallible,
+                    call.physical_segment,
+                    call.call_index,
+                )
+            });
+            for (
+                contract,
+                ContractCallEmissions {
+                    call_index,
+                    physical_segment,
+                    phase,
+                    caller,
+                    emissions,
+                },
+            ) in calls
             {
                 if emissions.is_empty() {
                     tracing::warn!(
-                        reason = "singleton-call-silent",
+                        reason = "contract-call-silent",
+                        ?contract,
                         height = block.number,
                         extrinsic_index = candidate.extrinsic_index,
                         call_index,
                         physical_segment,
                         ?phase,
-                        "midnight singleton call emitted no decoded events"
+                        "midnight protocol contract call emitted no decoded events"
                     );
                 }
                 for emission in emissions {
-                    match emission.kind {
-                        EmissionKind::SignBidirectional => {
+                    match (contract, emission.kind) {
+                        (ProtocolContract::Singleton, EmissionKind::SignBidirectional) => {
                             let notification = decode_notification(&emission.payload);
                             let request_id = hex::encode(notification.request_id);
                             let indexed_ts = *indexed_ts.get_or_insert_with(current_unix_timestamp);
@@ -191,9 +229,12 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
                                     sign_id = ?request.id,
                                     "midnight signature requested"
                                 );
+                                // Seconds for the event field; truncation adds
+                                // <1 s of slack to the bound - negligible
+                                // against the 24 h cap and the walk's 3 s slots.
                                 events.push(ChainEvent::SignRequest {
                                     request: Arc::new(request),
-                                    block_timestamp: None,
+                                    block_timestamp: Some(block_time_ms / 1000),
                                 });
                             } else {
                                 tracing::warn!(
@@ -210,7 +251,7 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
                                 );
                             }
                         }
-                        EmissionKind::SignatureResponded => {
+                        (ProtocolContract::Responder, EmissionKind::SignatureResponded) => {
                             let decoded = decode_response_payload(&emission.payload);
                             match decoded.signature {
                                 Ok(signature) => {
@@ -230,7 +271,7 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
                                 }
                             }
                         }
-                        EmissionKind::RespondBidirectional => {
+                        (ProtocolContract::Responder, EmissionKind::RespondBidirectional) => {
                             let decoded = decode_bidirectional_response_payload(&emission.payload);
                             match decoded.response {
                                 Ok((attestation, signature)) => events.push(
@@ -251,6 +292,28 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
                                     );
                                 }
                             }
+                        }
+                        (
+                            ProtocolContract::Singleton,
+                            kind @ (EmissionKind::SignatureResponded
+                            | EmissionKind::RespondBidirectional),
+                        ) => {
+                            // Clients read responses only from the responder, so one posted
+                            // to the singleton answers nobody and must not settle a request.
+                            drop_entry::<()>(
+                                "response-off-responder",
+                                block.number,
+                                emission.payload[..32].try_into().ok(),
+                                &format!("{kind:?} posted to the singleton"),
+                            );
+                        }
+                        (ProtocolContract::Responder, EmissionKind::SignBidirectional) => {
+                            drop_entry::<()>(
+                                "notification-off-singleton",
+                                block.number,
+                                None,
+                                "SignBidirectional emitted by the responder",
+                            );
                         }
                     }
                 }
@@ -704,6 +767,7 @@ mod tests {
 
     const CALLER: [u8; 32] = [0xab; 32];
     const SINGLETON: [u8; 32] = [0x12; 32];
+    const RESPONDER: [u8; 32] = [0x56; 32];
     const LEDGER_TX_HASH: [u8; 32] = [
         0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e,
         0x0f, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d,
@@ -723,17 +787,19 @@ mod tests {
 
     fn test_config() -> MidnightConfig {
         MidnightConfig {
-            node_url: "http://127.0.0.1:1".to_string(),
+            node_url: "http://127.0.0.1:1".parse().unwrap(),
             central_address: crate::MidnightAddress::from_bytes(SINGLETON),
+            responder_address: crate::MidnightAddress::from_bytes(RESPONDER),
             publisher: crate::PublisherConfig {
                 funding_seed: "ab".repeat(32),
-                proof_server_url: "http://127.0.0.1:1".to_string(),
-                indexer_url: "http://127.0.0.1:1/api/v3/graphql".to_string(),
-                indexer_ws_url: "ws://127.0.0.1:1/api/v3/graphql/ws".to_string(),
+                indexer_ws_url: "ws://127.0.0.1:1/api/v3/graphql/ws".parse().unwrap(),
                 ..Default::default()
             },
             rpc: Default::default(),
-            indexer: Default::default(),
+            // Under `RunFixture::next_event`'s 5 s wait.
+            indexer: crate::IndexerConfig {
+                poll_interval: Duration::from_secs(2),
+            },
         }
     }
 
@@ -755,26 +821,33 @@ mod tests {
             reported_block_number: height,
             reported_block_hash: [height as u8; 32],
             singleton_address: SINGLETON,
+            responder_address: RESPONDER,
             scale_header: vec![0x21, height as u8],
             scale_body: vec![vec![0x31], vec![0x32, height as u8]],
             scale_system_events: vec![0x41, height as u8],
         }
     }
 
-    fn batch(height: u64, calls: Vec<SingletonCallEmissions>) -> BlockEmissions {
+    fn batch(height: u64, calls: Vec<ContractCallEmissions>) -> BlockEmissions {
         BlockEmissions {
+            block_time_ms: fixture_block_ms(height),
             proof_seed: proof_seed(height),
             candidates: vec![CandidateTransactionEmissions {
                 ledger_tx_hash: LEDGER_TX_HASH,
                 extrinsic_index: 1,
                 partial_success: false,
-                calls,
+                singleton_calls: calls,
+                responder_calls: Vec::new(),
             }],
         }
     }
 
-    fn one_call(kind: EmissionKind, payload: [u8; 256]) -> Vec<SingletonCallEmissions> {
-        vec![SingletonCallEmissions {
+    fn fixture_block_ms(height: u64) -> u64 {
+        1_700_000_000_000 + height * 1_000
+    }
+
+    fn one_call(kind: EmissionKind, payload: [u8; 256]) -> Vec<ContractCallEmissions> {
+        vec![ContractCallEmissions {
             phase: crate::emissions::TranscriptPhase::Guaranteed,
             physical_segment: 1,
             call_index: 1,
@@ -835,14 +908,20 @@ mod tests {
     }
 
     impl FixtureSource {
-        fn set_emissions(&mut self, height: u64, calls: Vec<SingletonCallEmissions>) {
+        fn set_emissions(&mut self, height: u64, calls: Vec<ContractCallEmissions>) {
             self.emissions.insert(height, Some(batch(height, calls)));
+        }
+
+        fn set_responder_emissions(&mut self, height: u64, calls: Vec<ContractCallEmissions>) {
+            let mut emissions = batch(height, Vec::new());
+            emissions.candidates[0].responder_calls = calls;
+            self.emissions.insert(height, Some(emissions));
         }
 
         fn set_partial_success_emissions(
             &mut self,
             height: u64,
-            calls: Vec<SingletonCallEmissions>,
+            calls: Vec<ContractCallEmissions>,
         ) {
             let mut emissions = batch(height, calls);
             emissions.candidates[0].partial_success = true;
@@ -926,8 +1005,10 @@ mod tests {
             &self,
             block: &BlockRef,
             singleton: &[u8; 32],
+            responder: &[u8; 32],
         ) -> anyhow::Result<Option<BlockEmissions>> {
             assert_eq!(singleton, &SINGLETON, "configured singleton bytes");
+            assert_eq!(responder, &RESPONDER, "configured responder bytes");
             if let Some(reason) = self.emission_holds.get(&block.number) {
                 return Err(BlockHold::new(
                     reason,
@@ -1065,7 +1146,7 @@ mod tests {
         );
     }
 
-    fn assert_request(event: ChainEvent, rid: [u8; 32]) {
+    fn assert_request(event: ChainEvent, rid: [u8; 32], height: u64) {
         let ChainEvent::SignRequest {
             request,
             block_timestamp,
@@ -1074,7 +1155,7 @@ mod tests {
             panic!("expected SignRequest");
         };
         assert_eq!(request.id, SignId::new(rid));
-        assert_eq!(block_timestamp, None);
+        assert_eq!(block_timestamp, Some(fixture_block_ms(height) / 1000));
     }
 
     #[tokio::test(start_paused = true)]
@@ -1151,7 +1232,7 @@ mod tests {
     async fn fixture_source_preserves_the_proof_seed_and_stable_locator() {
         let expected = batch(
             42,
-            vec![SingletonCallEmissions {
+            vec![ContractCallEmissions {
                 phase: crate::emissions::TranscriptPhase::Guaranteed,
                 physical_segment: 1,
                 call_index: 1,
@@ -1172,16 +1253,16 @@ mod tests {
         source.emissions.insert(42, Some(expected.clone()));
 
         let carried = source
-            .block_emissions(&block_ref(42), &SINGLETON)
+            .block_emissions(&block_ref(42), &SINGLETON, &RESPONDER)
             .await
             .expect("source read")
             .expect("candidate block");
 
         assert_eq!(carried, expected);
         assert_eq!(carried.candidates[0].extrinsic_index, 1);
-        assert_eq!(carried.candidates[0].calls[0].call_index, 1);
+        assert_eq!(carried.candidates[0].singleton_calls[0].call_index, 1);
         assert_eq!(
-            carried.candidates[0].calls[0].emissions[1].kind,
+            carried.candidates[0].singleton_calls[0].emissions[1].kind,
             EmissionKind::SignatureResponded
         );
     }
@@ -1192,7 +1273,7 @@ mod tests {
         let mut source = FixtureSource::default();
         source.set_emissions(
             9,
-            vec![SingletonCallEmissions {
+            vec![ContractCallEmissions {
                 phase: crate::emissions::TranscriptPhase::Guaranteed,
                 physical_segment: 1,
                 call_index: 1,
@@ -1219,8 +1300,33 @@ mod tests {
 
         assert_eq!(events.len(), 2);
         for event in events {
-            assert_request(event, rid);
+            assert_request(event, rid, 9);
         }
+    }
+
+    #[tokio::test]
+    async fn process_block_carries_the_block_time_in_seconds() {
+        let (record, rid) = named_record_and_rid(7);
+        let mut source = FixtureSource::default();
+        source.set_emissions(
+            9,
+            one_call(EmissionKind::SignBidirectional, notification(rid)),
+        );
+        source.set_state(CALLER, 9, caller_state(&record, rid));
+
+        let events = direct_indexer()
+            .await
+            .process_block(&source, &block_ref(9))
+            .await
+            .expect("block processes");
+
+        let ChainEvent::SignRequest {
+            block_timestamp, ..
+        } = events[0].clone()
+        else {
+            panic!("expected SignRequest");
+        };
+        assert_eq!(block_timestamp, Some(fixture_block_ms(9) / 1000));
     }
 
     #[tokio::test]
@@ -1299,7 +1405,7 @@ mod tests {
             let mut source = FixtureSource::default();
             source.set_emissions(
                 9,
-                vec![SingletonCallEmissions {
+                vec![ContractCallEmissions {
                     phase: crate::emissions::TranscriptPhase::Guaranteed,
                     physical_segment: 1,
                     call_index: 1,
@@ -1400,7 +1506,7 @@ mod tests {
         let mut source = FixtureSource::default();
         source.set_emissions(
             9,
-            vec![SingletonCallEmissions {
+            vec![ContractCallEmissions {
                 phase: crate::emissions::TranscriptPhase::Guaranteed,
                 physical_segment: 1,
                 call_index: 1,
@@ -1441,7 +1547,7 @@ mod tests {
 
         assert_eq!(events.len(), 2);
         for event in events {
-            assert_request(event, rid);
+            assert_request(event, rid, 9);
         }
 
         let recorded = recorder.snapshot();
@@ -1612,9 +1718,9 @@ mod tests {
         let s1: [u8; 32] = k256::Scalar::from(9u64).to_bytes().into();
         let s2: [u8; 32] = k256::Scalar::from(10u64).to_bytes().into();
         let mut source = FixtureSource::default();
-        source.set_emissions(
+        source.set_responder_emissions(
             9,
-            vec![SingletonCallEmissions {
+            vec![ContractCallEmissions {
                 phase: crate::emissions::TranscriptPhase::Guaranteed,
                 physical_segment: 1,
                 call_index: 4,
@@ -1687,9 +1793,9 @@ mod tests {
         let rid = [0x44; 32];
         let s: [u8; 32] = k256::Scalar::from(9u64).to_bytes().into();
         let mut source = FixtureSource::default();
-        source.set_emissions(
+        source.set_responder_emissions(
             9,
-            vec![SingletonCallEmissions {
+            vec![ContractCallEmissions {
                 phase: crate::emissions::TranscriptPhase::Guaranteed,
                 physical_segment: 1,
                 call_index: 1,
@@ -1734,9 +1840,140 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn responses_count_only_from_the_responder_and_requests_only_from_the_singleton() {
+        use k256::elliptic_curve::sec1::ToEncodedPoint as _;
+
+        let encoded = k256::AffinePoint::GENERATOR.to_encoded_point(false);
+        let mut x = [0u8; 32];
+        x.copy_from_slice(encoded.x().expect("x"));
+        let mut y = [0u8; 32];
+        y.copy_from_slice(encoded.y().expect("y"));
+        let s: [u8; 32] = k256::Scalar::from(9u64).to_bytes().into();
+        let attestation = mpc_primitives::PublishedAttestation {
+            block_height: 42,
+            outcome_kind: mpc_primitives::AttestationOutcomeKind::Executed,
+            serialized_output_length: 32,
+            output_hash: [0x53; 32],
+            digest: [0x54; 32],
+        };
+        let responses = |respond_rid, bidirectional_rid| ContractCallEmissions {
+            phase: crate::emissions::TranscriptPhase::Guaranteed,
+            physical_segment: 1,
+            call_index: 0,
+            caller: None,
+            emissions: vec![
+                Emission {
+                    kind: EmissionKind::SignatureResponded,
+                    payload: response_payload(respond_rid, x, y, s, 0),
+                },
+                Emission {
+                    kind: EmissionKind::RespondBidirectional,
+                    payload: crate::test_utils::bidirectional_response_payload(
+                        bidirectional_rid,
+                        attestation,
+                        x,
+                        y,
+                        s,
+                        0,
+                    ),
+                },
+            ],
+        };
+        // A notification the singleton would sign: its caller holds the record.
+        let (record, rid) = named_record_and_rid(7);
+        let mut batch = batch(9, vec![responses([0x61; 32], [0x62; 32])]);
+        batch.candidates[0].responder_calls = vec![
+            responses([0x63; 32], [0x64; 32]),
+            one_call(EmissionKind::SignBidirectional, notification(rid)).remove(0),
+        ];
+        let mut source = FixtureSource::default();
+        source.emissions.insert(9, Some(batch));
+        source.set_state(CALLER, 9, caller_state(&record, rid));
+
+        let events = direct_indexer()
+            .await
+            .process_block(&source, &block_ref(9))
+            .await
+            .expect("misplaced emissions are per-emission drops");
+        let request_ids: Vec<_> = events
+            .iter()
+            .map(|event| match event {
+                ChainEvent::Respond(event) => event.request_id,
+                ChainEvent::RespondBidirectional(event) => event.request_id,
+                other => panic!("only the responder's responses may surface: {other:?}"),
+            })
+            .collect();
+        assert_eq!(request_ids, vec![[0x63; 32], [0x64; 32]]);
+    }
+
+    #[tokio::test]
+    async fn both_contracts_calls_are_processed_in_ledger_execution_order() {
+        use crate::emissions::TranscriptPhase::{Fallible, Guaranteed};
+        use k256::elliptic_curve::sec1::ToEncodedPoint as _;
+
+        let encoded = k256::AffinePoint::GENERATOR.to_encoded_point(false);
+        let mut x = [0u8; 32];
+        x.copy_from_slice(encoded.x().expect("x"));
+        let mut y = [0u8; 32];
+        y.copy_from_slice(encoded.y().expect("y"));
+        let s: [u8; 32] = k256::Scalar::from(9u64).to_bytes().into();
+        let (record, rid) = named_record_and_rid(7);
+        // In each case the singleton's notification comes first in the transaction and
+        // the responder's response second, yet the ledger applies the response first:
+        // every guaranteed phase precedes every fallible one, and within a phase the
+        // segments run in order whatever position the calls hold.
+        let cases = [
+            ("phase", (Fallible, 1), (Guaranteed, 2)),
+            ("segment", (Guaranteed, 2), (Guaranteed, 1)),
+        ];
+        for (
+            case,
+            (notification_phase, notification_segment),
+            (response_phase, response_segment),
+        ) in cases
+        {
+            let mut batch = batch(
+                9,
+                vec![ContractCallEmissions {
+                    phase: notification_phase,
+                    physical_segment: notification_segment,
+                    call_index: 0,
+                    ..one_call(EmissionKind::SignBidirectional, notification(rid)).remove(0)
+                }],
+            );
+            batch.candidates[0].responder_calls = vec![ContractCallEmissions {
+                phase: response_phase,
+                physical_segment: response_segment,
+                call_index: 1,
+                ..one_call(
+                    EmissionKind::SignatureResponded,
+                    response_payload([0x66; 32], x, y, s, 0),
+                )
+                .remove(0)
+            }];
+            let mut source = FixtureSource::default();
+            source.emissions.insert(9, Some(batch));
+            source.set_state(CALLER, 9, caller_state(&record, rid));
+
+            let events = direct_indexer()
+                .await
+                .process_block(&source, &block_ref(9))
+                .await
+                .expect("block processes");
+            assert!(
+                matches!(
+                    events.as_slice(),
+                    [ChainEvent::Respond(_), ChainEvent::SignRequest { .. }]
+                ),
+                "{case}: the response precedes the notification: {events:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn a_block_hold_from_the_block_reader_halts_without_events() {
         let mut source = FixtureSource::default();
-        source.emission_holds.insert(9, "singleton-tx-undecodable");
+        source.emission_holds.insert(9, "contract-tx-undecodable");
         let indexer = direct_indexer().await;
         let (events_tx, mut events_rx) = chain_event_channel();
         let result = tokio::time::timeout(
@@ -1757,7 +1994,7 @@ mod tests {
         let block_hold = result
             .downcast_ref::<BlockHold>()
             .expect("typed BlockHold preserved");
-        assert_eq!(block_hold.reason, "singleton-tx-undecodable");
+        assert_eq!(block_hold.reason, "contract-tx-undecodable");
         assert!(events_rx.try_recv().is_err());
     }
 
@@ -1792,7 +2029,7 @@ mod tests {
         };
         source.set_emissions(
             9,
-            vec![SingletonCallEmissions {
+            vec![ContractCallEmissions {
                 phase: crate::emissions::TranscriptPhase::Guaranteed,
                 physical_segment: 1,
                 call_index: 1,
@@ -1825,7 +2062,11 @@ mod tests {
             .await
             .expect("caller data failures do not hold");
         assert_eq!(events.len(), 1);
-        assert_request(events.into_iter().next().expect("good request"), good_rid);
+        assert_request(
+            events.into_iter().next().expect("good request"),
+            good_rid,
+            9,
+        );
     }
 
     #[tokio::test]
@@ -1862,7 +2103,7 @@ mod tests {
         let mut source = FixtureSource::default();
         source.set_emissions(
             9,
-            vec![SingletonCallEmissions {
+            vec![ContractCallEmissions {
                 phase: crate::emissions::TranscriptPhase::Guaranteed,
                 physical_segment: 1,
                 call_index: 6,
@@ -1894,10 +2135,9 @@ mod tests {
         );
         source.set_state(CALLER, 7, caller_state(&record, rid));
         live_tx.send(block_ref(9)).await.expect("queue live block");
-
         let mut harness = RunFixture::spawn(source, 5).await;
         assert_block(harness.next_event().await, 6);
-        assert_request(harness.next_event().await, rid);
+        assert_request(harness.next_event().await, rid, 7);
         assert_block(harness.next_event().await, 7);
         assert_block(harness.next_event().await, 8);
         assert!(matches!(
@@ -1920,7 +2160,7 @@ mod tests {
         source.set_transient_emission_error(7, 1, "connection reset by peer");
 
         let mut harness = RunFixture::spawn(source, 6).await;
-        assert_request(harness.next_event().await, rid);
+        assert_request(harness.next_event().await, rid, 7);
         assert_block(harness.next_event().await, 7);
         assert_block(harness.next_event().await, 8);
         assert!(matches!(
@@ -2037,7 +2277,7 @@ mod tests {
             ChainEvent::CatchupCompleted
         ));
         live_tx.send(block_ref(9)).await.expect("send live block");
-        assert_request(harness.next_event().await, rid);
+        assert_request(harness.next_event().await, rid, 9);
         assert_block(harness.next_event().await, 9);
         harness.cancel_and_join().await;
     }
@@ -2098,7 +2338,7 @@ mod tests {
         drop(live_tx);
     }
 
-    fn fallible_notification(rid: [u8; 32]) -> Vec<SingletonCallEmissions> {
+    fn fallible_notification(rid: [u8; 32]) -> Vec<ContractCallEmissions> {
         let mut calls = one_call(EmissionKind::SignBidirectional, notification(rid));
         calls[0].phase = crate::emissions::TranscriptPhase::Fallible;
         calls
@@ -2136,7 +2376,7 @@ mod tests {
 
             assert_eq!(events.len(), usize::from(signed), "{case}");
             for event in events {
-                assert_request(event, rid);
+                assert_request(event, rid, 9);
             }
         }
     }
@@ -2228,7 +2468,7 @@ mod tests {
                 .expect("block processes");
 
             assert_eq!(events.len(), 1, "{case}");
-            assert_request(events.into_iter().next().unwrap(), rid);
+            assert_request(events.into_iter().next().unwrap(), rid, 9);
         }
     }
 
@@ -2280,7 +2520,7 @@ mod tests {
         let mut source = FixtureSource::default();
         source.set_emissions(
             9,
-            vec![SingletonCallEmissions {
+            vec![ContractCallEmissions {
                 phase: crate::emissions::TranscriptPhase::Guaranteed,
                 physical_segment: 1,
                 call_index: 1,
@@ -2322,7 +2562,11 @@ mod tests {
             .await
             .expect("per-entry failures do not hold the block");
         assert_eq!(events.len(), 1);
-        assert_request(events.into_iter().next().expect("good request"), good_rid);
+        assert_request(
+            events.into_iter().next().expect("good request"),
+            good_rid,
+            9,
+        );
     }
 
     #[tokio::test]
