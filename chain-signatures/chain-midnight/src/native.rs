@@ -517,8 +517,11 @@ fn report_submit<W: FeePayer>(
 /// which the chain looks up by `ctime`, so it names a time the replay has seen: no
 /// later than the finalized head or the newest block the indexer has indexed, and
 /// no earlier than the newest replayed event. The replay is checked caught up after
-/// the indexer answers, but an event the subscription has not delivered yet still
-/// leaves the roots stale; the node then refuses the spend and the publish retries.
+/// the indexer answers, up to the newest event id the indexer names right after it.
+/// An event the subscription has not delivered can still leave the roots stale when
+/// the indexer names none in time, or when a subscription opened since serves an
+/// indexer that has not stored it yet; the node then refuses the spend and the publish
+/// retries.
 fn fee_ctime(head_time: Timestamp, indexed_time: Timestamp, sync_time: Timestamp) -> Timestamp {
     head_time.min(indexed_time).max(sync_time)
 }
