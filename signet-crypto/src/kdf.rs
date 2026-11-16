@@ -287,8 +287,9 @@ mod tests {
 
     #[test]
     fn test_reconstruct_signature_accepts_both_recovery_ids() {
-        // Fixed vectors: one signature recovering under each ordinary recovery id.
-        for ((sk_seed, msg_seed), expected_id) in [((0x11u8, 0x22u8), 0u8), ((0x49, 0x8a), 1)] {
+        // Fixed vectors: one signature recovering under each ordinary recovery id;
+        // the id-0 vector is distinct from test_reconstruct_signature_success.
+        for ((sk_seed, msg_seed), expected_id) in [((0x21u8, 0x22u8), 0u8), ((0x49, 0x8a), 1)] {
             let sk = SecretKey::from_bytes((&[sk_seed; 32]).into()).unwrap();
             let public_key: PublicKey = sk.public_key().into();
             let msg_hash = Scalar::from_bytes([msg_seed; 32]).unwrap();

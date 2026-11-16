@@ -13,11 +13,11 @@ use crate::sign_bidirectional::{BidirectionalProgress, SignProgress, SignStatus}
 use crate::storage::checkpoint_storage::CheckpointStorage;
 use k256::{ProjectivePoint, Scalar};
 use mpc_chain_integration_core::StateManager;
+use mpc_crypto::x_coordinate;
 use mpc_primitives::{
     BidirectionalTx, BidirectionalTxId, Chain, ExecutionOutcome, IndexedSignRequest, SignId,
     SignKind,
 };
-use mpc_crypto::x_coordinate;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
