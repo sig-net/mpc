@@ -2,7 +2,7 @@ use crate::{Address, KeyVersion, Path, Purpose};
 use k256::{
     ecdsa::{RecoveryId, VerifyingKey},
     elliptic_curve::{point::AffineCoordinates, sec1::ToEncodedPoint, CurveArithmetic},
-    Scalar, Secp256k1,
+    AffinePoint, Scalar, Secp256k1,
 };
 use sha3::{Digest, Keccak256, Sha3_256};
 use signet_primitives::{Chain, PublicKey, ScalarExt, Signature, LATEST_MPC_KEY_VERSION};
@@ -191,7 +191,7 @@ pub fn derive_key(public_key: PublicKey, epsilon: Scalar) -> PublicKey {
 }
 
 /// x coordinate of `point`, reduced to a scalar.
-pub fn x_coordinate(point: &PublicKey) -> Scalar {
+pub fn x_coordinate(point: &AffinePoint) -> Scalar {
     <<Secp256k1 as CurveArithmetic>::Scalar as k256::elliptic_curve::ops::Reduce<
         <k256::Secp256k1 as k256::elliptic_curve::Curve>::Uint,
     >>::reduce_bytes(&point.x())
@@ -201,7 +201,7 @@ pub fn x_coordinate(point: &PublicKey) -> Scalar {
 /// verifies against `public_key` for one of the two recovery ids.
 pub fn reconstruct_signature(
     public_key: &PublicKey,
-    big_r: &PublicKey,
+    big_r: &AffinePoint,
     s: &Scalar,
     msg_hash: Scalar,
 ) -> Option<Signature> {
