@@ -658,16 +658,31 @@ mod tests {
         latest_mock.assert_async().await;
     }
 
-    /// Ethereum reads classify via the send table: 409 terminal, where
-    /// solana/midnight reads retry it. Deliberate until reads attach verdicts.
     #[tokio::test]
-    async fn read_side_409s_stay_terminal_through_process_range() {
+    async fn read_side_409s_retry_through_process_range() {
         let mut server = Server::new_async().await;
 
-        let http = server
+        let conflict = server
             .mock("POST", "/")
             .with_status(409)
             .expect(2)
+            .create_async()
+            .await;
+        let served = server
+            .mock("POST", "/")
+            .match_body(Matcher::PartialJson(json!({
+                "method": "eth_getBlockByNumber",
+                "params": ["0xc", false]
+            })))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body_from_request(|req| {
+                let body: serde_json::Value =
+                    serde_json::from_slice(req.body().expect("request body")).expect("json body");
+                let id = body["id"].as_u64().expect("request id");
+                test_utils::block_response(id, 12).to_string().into_bytes()
+            })
+            .expect(1)
             .create_async()
             .await;
 
@@ -676,14 +691,20 @@ mod tests {
             .await;
         let (events_tx, mut events_rx) = chain_event_channel();
 
-        let err = indexer
-            .process_range(&events_tx, 12, 13, &CancellationToken::new())
-            .await
-            .unwrap_err();
-        assert!(!is_retryable(&err), "{err:#}");
-        assert!(format!("{err:#}").contains("block 12"), "{err:#}");
-        assert!(events_rx.try_recv().is_err(), "no events");
-        http.assert_async().await;
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            indexer.process_range(&events_tx, 12, 13, &CancellationToken::new()),
+        )
+        .await
+        .expect("a read-side 409 must stay in the retry loop, not escalate")
+        .unwrap();
+
+        assert!(matches!(
+            events_rx.recv().await,
+            Some(ChainEvent::Block(12))
+        ));
+        conflict.assert_async().await;
+        served.assert_async().await;
     }
 
     /// A retryable batch fault is retried, not escalated — even at block

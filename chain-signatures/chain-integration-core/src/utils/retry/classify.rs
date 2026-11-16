@@ -243,14 +243,15 @@ fn contains_status_code(s: &str, code: &str) -> bool {
 
 /// [`is_retryable`] without the text fallback: an untyped error is
 /// retryable. Use where error contexts carry item numbers ("slot 401")
-/// the fallback would read as status codes.
+/// the fallback would read as status codes; bare statuses use the read
+/// partition (the supervisor loops only read).
 pub fn is_retryable_typed(e: &anyhow::Error) -> bool {
     let (failure, status) = typed_signals(e);
     if let Some(failure) = failure {
         return !failure.terminal;
     }
     if let Some(status) = status {
-        return http_status_retryable(status);
+        return http_status_read_retryable(status);
     }
     true
 }
@@ -495,6 +496,26 @@ mod tests {
 
         // no typed signal at all
         assert!(RpcFailure::from_chain(&anyhow::anyhow!("plain failure")).is_none());
+    }
+
+    #[test]
+    fn typed_loop_check_partitions_bare_statuses_by_reads() {
+        let alloy_http_error = |status: u16| {
+            let kind = TransportErrorKind::HttpError(alloy::transports::HttpError {
+                status,
+                body: String::new(),
+            });
+            let err: AlloyTransportError = AlloyRpcError::Transport(kind);
+            anyhow::Error::new(err)
+        };
+        // the loops only read — send-terminal statuses retry there
+        for n in [409, 410, 422, 429, 301, 500] {
+            assert!(is_retryable_typed(&alloy_http_error(n)), "{n}");
+        }
+        for n in [400, 401, 403, 404, 405] {
+            assert!(!is_retryable_typed(&alloy_http_error(n)), "{n}");
+        }
+        assert!(!is_retryable(&alloy_http_error(409)));
     }
 
     #[test]
