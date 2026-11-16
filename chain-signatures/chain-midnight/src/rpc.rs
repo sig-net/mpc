@@ -360,6 +360,8 @@ pub(crate) struct MidnightRpc {
     client: OnlineClient<SubstrateConfig>,
     reads: Reads,
     head: std::sync::Mutex<Option<FinalizedHead>>,
+    /// The block a lookup by number last read, until the indexer processes it.
+    walked: std::sync::Mutex<Option<(String, BlockDetails<SubstrateConfig>)>>,
 }
 
 /// The finalized head last read, with its block until the indexer processes it.
@@ -384,6 +386,7 @@ impl MidnightRpc {
             client,
             reads: Reads::new(rpc, config.rpc.request_timeout, config.rpc.retry),
             head: Default::default(),
+            walked: Default::default(),
         })
     }
 
@@ -412,35 +415,12 @@ impl MidnightRpc {
                 return Ok(known.block_ref.clone());
             }
         }
-        let (number, parent_hash, block) = match self.reads.block(head).await {
-            Ok(Some(block)) => (
-                block.block.header.number,
-                block.block.header.parent_hash,
-                Some(block),
-            ),
-            read => {
-                let error = match read {
-                    Err(error) => format!("{error:#}"),
-                    _ => "the node has no block for it".to_owned(),
-                };
-                if let Some(count) = mpc_utils::throttle::check("midnight:head-block-unread") {
-                    tracing::warn!(
-                        count,
-                        block_hash = %hash,
-                        error,
-                        "midnight: the finalized head's block could not be read; reading its header"
-                    );
-                }
-                let header = self
-                    .reads
-                    .header(head)
-                    .await?
-                    .context("midnight node returned no header for its own finalized head")?;
-                (header.number, header.parent_hash, None)
-            }
-        };
+        let (number, parent_hash, block) = self
+            .block_or_header(head)
+            .await?
+            .context("midnight node returned no header for its own finalized head")?;
         let block_ref = BlockRef {
-            number: u64::from(number),
+            number,
             hash,
             parent_hash: hex_0x(parent_hash),
         };
@@ -451,34 +431,75 @@ impl MidnightRpc {
         Ok(block_ref)
     }
 
+    /// Block `hash`'s number and parent from its block, which comes back for processing,
+    /// or from its header when the block cannot be read; `None` when the node has
+    /// neither.
+    async fn block_or_header(
+        &self,
+        hash: H256,
+    ) -> anyhow::Result<Option<(u64, H256, Option<BlockDetails<SubstrateConfig>>)>> {
+        let error = match self.reads.block(hash).await {
+            Ok(Some(block)) => {
+                let header = &block.block.header;
+                return Ok(Some((
+                    u64::from(header.number),
+                    header.parent_hash,
+                    Some(block),
+                )));
+            }
+            Ok(None) => "the node has no block for it".to_owned(),
+            Err(error) => format!("{error:#}"),
+        };
+        if let Some(count) = mpc_utils::throttle::check("midnight:block-unread") {
+            tracing::warn!(
+                count,
+                block_hash = %hex_0x(hash),
+                error,
+                "midnight: a block could not be read; reading its header"
+            );
+        }
+        Ok(self
+            .reads
+            .header(hash)
+            .await?
+            .map(|header| (u64::from(header.number), header.parent_hash, None)))
+    }
+
     fn head(&self) -> std::sync::MutexGuard<'_, Option<FinalizedHead>> {
         self.head
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
-    /// The block at `number` as a [`BlockRef`], for the catchup range walk.
+    fn walked(&self) -> std::sync::MutexGuard<'_, Option<(String, BlockDetails<SubstrateConfig>)>> {
+        self.walked
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// The block at `number` as a [`BlockRef`], for the catchup range walk. The block
+    /// read for it is kept for [`block_emissions`](Self::block_emissions) of that block.
     pub async fn block_ref_at(&self, number: u64) -> anyhow::Result<BlockRef> {
         let hash = self
             .reads
             .block_hash_at(number)
             .await?
             .with_context(|| format!("midnight node has no block hash for height {number}"))?;
-        let header = self
-            .reads
-            .header(hash)
+        let (returned_number, parent_hash, block) = self
+            .block_or_header(hash)
             .await?
             .with_context(|| format!("midnight node has no header for height {number}"))?;
-        let returned_number = u64::from(header.number);
         anyhow::ensure!(
             returned_number == number,
             "midnight block lookup requested height {number} but returned height {returned_number}"
         );
-        Ok(BlockRef {
+        let block_ref = BlockRef {
             number: returned_number,
             hash: hex_0x(hash),
-            parent_hash: hex_0x(header.parent_hash),
-        })
+            parent_hash: hex_0x(parent_hash),
+        };
+        *self.walked() = block.map(|block| (block_ref.hash.clone(), block));
+        Ok(block_ref)
     }
 
     pub(crate) async fn block_emissions(
@@ -492,7 +513,12 @@ impl MidnightRpc {
             .head()
             .as_mut()
             .filter(|head| head.block_ref.hash == block_ref.hash)
-            .and_then(|head| head.block.take());
+            .and_then(|head| head.block.take())
+            .or_else(|| {
+                self.walked()
+                    .take_if(|(hash, _)| *hash == block_ref.hash)
+                    .map(|(_, block)| block)
+            });
         let block = match read {
             Some(block) => block,
             None => self
@@ -1697,6 +1723,7 @@ mod tests {
             client,
             reads: Reads::new(transport, config.rpc.request_timeout, config.rpc.retry),
             head: Default::default(),
+            walked: Default::default(),
         };
         let block = BlockRef {
             number: 432,
@@ -3675,6 +3702,12 @@ mod tests {
         module
             .register_method("chain_getFinalizedHead", |_, _, _| hash_of_byte(0x43))
             .unwrap();
+        module
+            .register_method("chain_getBlockHash", |params, _, _| {
+                let [number] = params.parse::<[u64; 1]>().unwrap();
+                hash_of_byte((number + 0x43 - 0x1b0) as u8)
+            })
+            .unwrap();
         let logged = log.clone();
         module
             .register_method("chain_getBlock", move |params, _, _| {
@@ -3705,6 +3738,7 @@ mod tests {
             client,
             reads: Reads::new(transport, config.rpc.request_timeout, config.rpc.retry),
             head: Default::default(),
+            walked: Default::default(),
         };
         (rpc, handle, log)
     }
@@ -3737,6 +3771,55 @@ mod tests {
             [
                 ("chain_getBlock", hash_of_byte(0x43)),
                 ("chain_getBlock", hash_of_byte(0x42))
+            ]
+        );
+    }
+
+    /// A block looked up by number is read once: its number and parent come from the
+    /// block, which its processing then takes. It serves that block alone.
+    #[tokio::test]
+    async fn a_block_looked_up_by_number_is_read_once() {
+        let (rpc, _handle, log) = numbered_indexer_node(|block| block).await;
+        assert_eq!(
+            rpc.block_ref_at(0x1af).await.unwrap(),
+            numbered_block_ref(0x42)
+        );
+        rpc.block_emissions(&numbered_block_ref(0x41), &[0xab; 32], &[0xcd; 32])
+            .await
+            .unwrap();
+        rpc.block_emissions(&numbered_block_ref(0x42), &[0xab; 32], &[0xcd; 32])
+            .await
+            .unwrap();
+        assert_eq!(
+            *log.lock().unwrap(),
+            [
+                ("chain_getBlock", hash_of_byte(0x42)),
+                ("chain_getBlock", hash_of_byte(0x41))
+            ]
+        );
+        rpc.block_emissions(&numbered_block_ref(0x42), &[0xab; 32], &[0xcd; 32])
+            .await
+            .unwrap();
+        assert_eq!(
+            log.lock().unwrap().last(),
+            Some(&("chain_getBlock", hash_of_byte(0x42))),
+            "a second processing of the block, as a retry makes, fetches it again"
+        );
+    }
+
+    /// A block looked up by number that the node has no block for is read by its header.
+    #[tokio::test]
+    async fn a_block_looked_up_by_number_without_a_block_is_read_by_its_header() {
+        let (rpc, _handle, log) = numbered_indexer_node(|_| serde_json::Value::Null).await;
+        assert_eq!(
+            rpc.block_ref_at(0x1af).await.unwrap(),
+            numbered_block_ref(0x42)
+        );
+        assert_eq!(
+            *log.lock().unwrap(),
+            [
+                ("chain_getBlock", hash_of_byte(0x42)),
+                ("chain_getHeader", hash_of_byte(0x42))
             ]
         );
     }
@@ -3820,6 +3903,7 @@ mod tests {
             client,
             reads: Reads::new(transport, config.rpc.request_timeout, config.rpc.retry),
             head: Default::default(),
+            walked: Default::default(),
         };
         let at_0x43 = BlockRef {
             number: 0x1b0,
@@ -3908,6 +3992,7 @@ mod tests {
             client,
             reads: Reads::new(transport, config.rpc.request_timeout, config.rpc.retry),
             head: Default::default(),
+            walked: Default::default(),
         };
         let at_0x43 = BlockRef {
             number: 0x1b0,
