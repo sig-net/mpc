@@ -405,8 +405,8 @@ async fn test_respond_event_advances_to_pending_execution() {
 
     let watchers = backlog.get_execution_watchers(Chain::Ethereum).await;
     assert_eq!(watchers.len(), 1, "expected exactly one execution watcher");
-    let (watched_sign_id, _watched_tx) = watchers.values().next().unwrap();
-    assert_eq!(*watched_sign_id, sign_id);
+    let watched_sign_id = watchers.values().next().unwrap()[0].sign_id;
+    assert_eq!(watched_sign_id, sign_id);
 }
 
 /// `process_execution_confirmed` on a watched bidirectional tx should advance the
@@ -454,6 +454,7 @@ async fn test_execution_confirmation_advances_to_respond_bidirectional() {
         ExecutionOutcome::Success { output: vec![] },
         &ctx,
         Chain::Ethereum,
+        crate::backlog::mock::mock_root_pk(),
     )
     .await
     .expect("execution confirmation should advance to a RespondBidirectional request");

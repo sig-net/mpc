@@ -20,3 +20,7 @@ big_r' = big_r * delta,  k' = k / delta,  sigma' = (sigma + epsilon * k) / delta
 Operators choose which presignature they propose and so control `big_r`. That is acceptable: `delta` still depends on the request and on `entropy`, so choosing `big_r` gives no advantage toward forging. `entropy` is not there to counter presignature choice.
 
 Which block field satisfies requirement 1 depends on the chain and is decided per chain.
+
+## Entropy of a response
+
+For a response to a bidirectional request ([bidirectional-calls.md](bidirectional-calls.md), Section 4.3) its `entropy` is `H(first_leg_entropy || payload || epsilon)`, the hash of the first leg's `entropy`, the message being signed and its key's tweak, so `delta` moves with the first leg's `entropy` and binds the other two. Every node signing that message under that key derives the same `entropy`, whichever way it learned the outcome.

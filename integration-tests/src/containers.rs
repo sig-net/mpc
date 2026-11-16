@@ -13,12 +13,14 @@ use anyhow::{anyhow, Context};
 use async_process::{Child, Command};
 use backon::{ExponentialBuilder, Retryable};
 use bollard::errors::Error as DockerError;
-use bollard::models::{Ipam, NetworkCreateRequest};
+use bollard::models::{Ipam, NetworkCreateRequest, PortBinding};
 use bollard::Docker;
 use borsh::{BorshDeserialize, BorshSerialize};
 use cait_sith::protocol::Participant;
 use cait_sith::triples::{TriplePub, TripleShare};
 use cait_sith::FullSignature;
+use deadpool_redis::redis;
+use deadpool_redis::{Config as RedisPoolConfig, Pool as RedisPool, Runtime as RedisRuntime};
 use elliptic_curve::rand_core::OsRng;
 use k256::elliptic_curve::sec1::ToEncodedPoint as _;
 use k256::Secp256k1;
@@ -237,13 +239,45 @@ impl Redis {
     const DEFAULT_REDIS_PORT: u16 = 6379;
 
     pub async fn run(spawner: &ClusterSpawner) -> Self {
+        Self::run_with_debug(spawner, false).await
+    }
+
+    /// Start the benchmark's isolated Redis with DEBUG commands enabled.
+    pub async fn run_for_benchmark(spawner: &ClusterSpawner) -> Self {
+        Self::run_with_debug(spawner, true).await
+    }
+
+    async fn run_with_debug(spawner: &ClusterSpawner, enable_debug: bool) -> Self {
         tracing::info!("Running Redis container...");
+        let password = enable_debug.then(|| uuid::Uuid::new_v4().simple().to_string());
         let container = start_container_with_network_retry(
             || {
-                GenericImage::new("redis", "7.4.2")
+                let container = GenericImage::new("redis", "7.4.2")
                     .with_exposed_port(Self::DEFAULT_REDIS_PORT.tcp())
                     .with_wait_for(WaitFor::message_on_stdout("Ready to accept connections"))
-                    .with_network(&spawner.network)
+                    .with_network(&spawner.network);
+                if let Some(password) = &password {
+                    container
+                        .with_cmd(vec![
+                            "redis-server",
+                            "--enable-debug-command",
+                            "yes",
+                            "--requirepass",
+                            password,
+                        ])
+                        .with_host_config_modifier(|config| {
+                            config.publish_all_ports = Some(false);
+                            config.port_bindings = Some(HashMap::from([(
+                                "6379/tcp".to_string(),
+                                Some(vec![PortBinding {
+                                    host_ip: Some("127.0.0.1".to_string()),
+                                    host_port: Some(String::new()),
+                                }]),
+                            )]));
+                        })
+                } else {
+                    container
+                }
             },
             &spawner.network,
         )
@@ -255,7 +289,15 @@ impl Redis {
             .await
             .unwrap();
 
-        let external_address = format!("redis://{}:{}", network_ip, Self::DEFAULT_REDIS_PORT);
+        let credentials = password
+            .as_ref()
+            .map(|p| format!(":{p}@"))
+            .unwrap_or_default();
+        let external_address = format!(
+            "redis://{credentials}{}:{}",
+            network_ip,
+            Self::DEFAULT_REDIS_PORT
+        );
 
         // The port mapping can lag the container start when several containers come
         // up at once (PortNotExposed), so give Docker a moment before giving up.
@@ -273,17 +315,13 @@ impl Redis {
                 }
             }
         };
-        let internal_address: Url = format!("redis://127.0.0.1:{host_port}")
+        let internal_address: Url = format!("redis://{credentials}127.0.0.1:{host_port}")
             .parse()
             .expect("a valid url");
 
         Self::wait_for_host_port_readiness(&internal_address).await;
 
-        tracing::info!(
-            external_address,
-            %internal_address,
-            "Redis container is running",
-        );
+        tracing::info!(network_ip, host_port, "Redis container is running");
 
         Self {
             container,
@@ -294,14 +332,14 @@ impl Redis {
 
     /// Wait for the Redis container to be reachable via the host port.
     async fn wait_for_host_port_readiness(internal_address: &Url) {
-        let cfg = deadpool_redis::Config::from_url(internal_address.clone());
+        let cfg = RedisPoolConfig::from_url(internal_address.clone());
         let pool = cfg
-            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+            .create_pool(Some(RedisRuntime::Tokio1))
             .expect("valid redis pool config");
 
         let ping = || async {
             let mut conn = pool.get().await.map_err(anyhow::Error::from)?;
-            deadpool_redis::redis::cmd("PING")
+            redis::cmd("PING")
                 .query_async::<()>(&mut conn)
                 .await
                 .map_err(anyhow::Error::from)
@@ -319,18 +357,13 @@ impl Redis {
             .await
             .is_err()
         {
-            tracing::error!(
-                %internal_address,
-                "redis never became reachable via host port"
-            );
+            tracing::error!("redis never became reachable via host port");
         }
     }
 
-    pub fn pool(&self) -> deadpool_redis::Pool {
-        let redis_cfg = deadpool_redis::Config::from_url(self.internal_address.clone());
-        redis_cfg
-            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-            .unwrap()
+    pub fn pool(&self) -> RedisPool {
+        let redis_cfg = RedisPoolConfig::from_url(self.internal_address.clone());
+        redis_cfg.create_pool(Some(RedisRuntime::Tokio1)).unwrap()
     }
 
     pub fn triple_storage(

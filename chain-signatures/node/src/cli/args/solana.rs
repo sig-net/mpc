@@ -5,7 +5,8 @@ use url::Url;
 #[derive(Debug, Clone, clap::Parser)]
 #[group(id = "indexer_sol_options")]
 pub struct SolArgs {
-    /// The solana account secret key used to sign solana respond txn.
+    /// Keypair that signs and pays for the node's Solana responses, in base58,
+    /// not the JSON byte array `solana-keygen` writes.
     #[arg(
         long,
         env("MPC_SOL_ACCOUNT_SK"),

@@ -37,14 +37,9 @@ Core pieces:
 
 ## Configuration
 
-`TronConfig` fields, populated from the node's `--tron-*` flags or their
-environment variables:
-
-| field | env var | required? | notes |
-|---|---|---|---|
-| `endpoint` | `MPC_TRON_ENDPOINT` | to watch execution | wallet/solidity base URL; without it the node admits and signs Tron targets but nothing confirms execution or expiry |
-| `api_key` | `MPC_TRON_API_KEY` | no | `TRON-PRO-API-KEY` when the provider is TronGrid; requires the endpoint |
-| `poll_interval` | `MPC_TRON_POLL_INTERVAL_MS` | no | milliseconds between receipt polls, default `15000` |
+The node builds `TronConfig` from its `--tron-*` parameters, which
+`mpc-node start --help` lists. Without an endpoint the node admits and signs
+Tron targets but nothing confirms execution or expiry.
 
 `request_timeout` (10s) and the HTTP `retry` backoff are fixed defaults.
 

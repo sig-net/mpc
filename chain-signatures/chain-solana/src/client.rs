@@ -7,14 +7,10 @@ use mpc_chain_integration_core::{
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use solana_client::{
-    client_error::{ClientError, ClientErrorKind},
-    nonblocking::rpc_client::RpcClient,
-    rpc_client::GetConfirmedSignaturesForAddress2Config,
-    rpc_config::RpcBlockConfig,
+    rpc_config::{RpcBlockConfig, RpcSignaturesForAddressConfig},
     rpc_custom_error::{
         JSON_RPC_SERVER_ERROR_LONG_TERM_STORAGE_SLOT_SKIPPED, JSON_RPC_SERVER_ERROR_SLOT_SKIPPED,
     },
-    rpc_request::RpcError,
     rpc_response::RpcConfirmedTransactionStatusWithSignature,
 };
 use solana_commitment_config::CommitmentConfig;
@@ -41,6 +37,8 @@ const MAX_CHUNK_SIZE: usize = 50;
 
 const SOL_RPC_TIMEOUT: Duration = Duration::from_secs(2);
 const SOL_BATCH_TIMEOUT: Duration = Duration::from_secs(30);
+/// HTTP-level timeout for requests (Vendored client default)
+const SOL_HTTP_TIMEOUT: Duration = Duration::from_secs(30);
 const SOL_RPC_MIN_DELAY: Duration = Duration::from_millis(500);
 const SOL_RPC_MAX_DELAY: Duration = Duration::from_secs(10);
 const SOL_RPC_MAX_RETRIES: usize = 5;
@@ -82,44 +80,51 @@ pub(crate) fn skipped_code(err: &anyhow::Error) -> Option<i64> {
         .filter(|&code| slot_skipped(code))
 }
 
-/// Boundary classification — `ClientError`'s `#[source] Box<ErrorKind>`
-/// nesting hides inner causes from chain walks (`publisher.rs` resolves the
-/// same blindness for publishes). The skipped-slot code rides along for the
-/// indexer, which emits an inactive-slot marker and advances.
-// TODO: transitional boundary helper — disappears once the retry macros
-// classify typed verdict enums instead of walking anyhow chains.
-fn classify_read(e: ClientError) -> anyhow::Error {
-    let carrier = match e.kind() {
-        ClientErrorKind::Reqwest(req) => read_carrier(req),
-        ClientErrorKind::RpcError(RpcError::RpcResponseError { code, .. })
-            if slot_skipped(*code) =>
-        {
-            RpcFailure::terminal_code(*code, format!("{e}"))
-        }
-        // structural default: node-local gaps retry on another LB backend —
-        // block absence (-32001/-32004), no signatures history (-32011),
-        // long-term storage (-32019, returns), NodeUnhealthy, not yet
-        // available, request/parse shapes; bare errors let the fallback
-        // misread "behind by 401/429 slots"
-        _ => RpcFailure::retryable(format!("{e}")),
-    };
-    anyhow::Error::new(carrier)
+/// A bare reqwest transport error (send, status, or decode) to carrier.
+// TODO: transitional boundary helper — disappears with typed verdict enums.
+fn classify_transport(e: reqwest::Error) -> anyhow::Error {
+    classify_transport_with(e, None)
 }
 
-/// Read carrier for a bare reqwest error.
-fn read_carrier(e: &reqwest::Error) -> RpcFailure {
-    match e.status() {
+/// `classify_transport`, carrying a `Retry-After` pause read off the
+/// response before `error_for_status()` discards it.
+fn classify_transport_with(e: reqwest::Error, retry_after: Option<Duration>) -> anyhow::Error {
+    let carrier = match e.status() {
         Some(status) => RpcFailure::read_status(status, format!("{e:#}")),
         // statusless (connection): explicit retryable so the fallback
         // can't misread a ":429" port
         None => RpcFailure::retryable(format!("{e:#}")),
-    }
+    };
+    let carrier = match retry_after {
+        Some(ra) => carrier.with_retry_after(ra),
+        None => carrier,
+    };
+    anyhow::Error::new(carrier)
 }
 
-/// The batch fetch bypasses the solana client, so its errors arrive bare.
-// TODO: transitional boundary helper — same replacement as `classify_read`.
-fn classify_batch(e: reqwest::Error) -> anyhow::Error {
-    anyhow::Error::new(read_carrier(&e))
+/// `Retry-After` seconds on a 429; the HTTP-date form reads as absent.
+fn retry_after_secs(resp: &reqwest::Response) -> Option<Duration> {
+    if resp.status() != reqwest::StatusCode::TOO_MANY_REQUESTS {
+        return None;
+    }
+    resp.headers()
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.parse::<u64>().ok())
+        .map(Duration::from_secs)
+}
+
+/// JSON-RPC body error to carrier: skipped slots are terminal with their
+/// code, everything else retryable (another LB backend may serve it).
+fn classify_body_error(error: JsonRpcError) -> anyhow::Error {
+    let JsonRpcError { code, message } = error;
+    let message = message.unwrap_or_else(|| format!("code {code:?}"));
+    match code {
+        Some(code) if slot_skipped(code) => {
+            anyhow::Error::new(RpcFailure::terminal_code(code, message))
+        }
+        _ => anyhow::Error::new(RpcFailure::retryable(message)),
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -136,12 +141,21 @@ struct JsonRpcRequest {
     params: serde_json::Value,
 }
 
+/// A JSON-RPC error object.
+#[derive(Debug, Deserialize)]
+struct JsonRpcError {
+    code: Option<i64>,
+    message: Option<String>,
+}
+
 /// Represents a JSON-RPC response, which can either be a successful result or an error.
+/// `id: Option` — the spec permits `null`, and a decode failure must not
+/// swallow the error side's verdict.
 #[derive(Deserialize)]
 struct JsonRpcResponse<T> {
-    id: usize,
+    id: Option<usize>,
     result: Option<T>,
-    error: Option<serde_json::Value>,
+    error: Option<JsonRpcError>,
 }
 
 #[derive(Clone)]
@@ -153,12 +167,18 @@ pub struct SolanaClient {
     catchup_retry: RetryConfig,
     /// Shared 429 cooldown across all RPC call sites
     shared_backoff: SharedBackoff,
-    pub rpc_client: Arc<RpcClient>,
     pub rpc_http_url: Url,
     pub http_client: reqwest::Client,
     pub program_id: Pubkey,
     pub payer: Arc<Keypair>,
     pub telemetry: Arc<dyn PublisherTelemetry>,
+}
+
+fn http_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .timeout(SOL_HTTP_TIMEOUT)
+        .build()
+        .expect("reqwest client builder cannot fail for a timeout-only config")
 }
 
 impl SolanaClient {
@@ -173,7 +193,6 @@ impl SolanaClient {
             payer.clone(),
             CommitmentConfig::confirmed(),
         );
-        let rpc_client = Arc::new(RpcClient::new(sol.rpc_http_url.to_string()));
         Self {
             client: Arc::new(client),
             rpc_retry: default_retry_strategy(),
@@ -181,9 +200,8 @@ impl SolanaClient {
             // TODO: `from_config` retakes the stack gate once publish gating
             // moves inside the client
             shared_backoff: SharedBackoff::new(),
-            rpc_client,
             rpc_http_url: sol.rpc_http_url.clone(),
-            http_client: reqwest::Client::new(),
+            http_client: http_client(),
             program_id: sol.program_address,
             payer,
             telemetry,
@@ -205,7 +223,6 @@ impl SolanaClient {
             payer.clone(),
             CommitmentConfig::finalized(),
         );
-        let rpc_client = Arc::new(RpcClient::new(rpc_http_url.to_string()));
         Self {
             client: Arc::new(client),
             rpc_retry: default_retry_strategy(),
@@ -213,9 +230,8 @@ impl SolanaClient {
             // the stack's gate: indexer reads share one cooldown window with
             // publishes (and vice versa)
             shared_backoff,
-            rpc_client,
             rpc_http_url,
-            http_client: reqwest::Client::new(),
+            http_client: http_client(),
             program_id: program_address,
             payer,
             telemetry,
@@ -247,6 +263,47 @@ impl SolanaClient {
         }
     }
 
+    /// Single JSON-RPC call over raw reqwest, like `fetch_blocks`: statuses
+    /// and body error codes arrive typed. The vendored client hides 429s
+    /// behind its internal retry loop and surfaces them as timeouts.
+    async fn rpc_call<T: serde::de::DeserializeOwned>(
+        &self,
+        method: &'static str,
+        params: serde_json::Value,
+    ) -> anyhow::Result<T> {
+        let request = JsonRpcRequest {
+            jsonrpc: "2.0",
+            id: 0,
+            method,
+            params,
+        };
+        let resp = self
+            .http_client
+            .post(self.rpc_http_url.clone())
+            .json(&request)
+            .send()
+            .await
+            .map_err(classify_transport)?;
+        let retry_after = retry_after_secs(&resp);
+        let resp = resp
+            .error_for_status()
+            .map_err(|e| classify_transport_with(e, retry_after))?;
+        let resp = resp
+            .json::<JsonRpcResponse<T>>()
+            .await
+            .map_err(classify_transport)?;
+        match (resp.result, resp.error) {
+            // error wins over a paired result, like the batch envelope
+            (_, Some(error)) => Err(classify_body_error(error)),
+            (Some(result), None) => Ok(result),
+            // null result: retryable, matching the vendored client's
+            // decode failure
+            (None, None) => Err(anyhow::Error::new(RpcFailure::retryable(format!(
+                "{method} returned no result"
+            )))),
+        }
+    }
+
     /// Get the latest finalized slot from the Solana RPC.
     /// This is used to determine the upper bound for catchup.
     pub async fn get_slot_finalized(&self) -> anyhow::Result<u64> {
@@ -258,16 +315,17 @@ impl SolanaClient {
             {
                 #[cfg(feature = "bench")]
                 crate::bench::rpc_inc("getSlot");
-                self.rpc_client
-                    .get_slot_with_commitment(CommitmentConfig::finalized())
+                self.rpc_call::<u64>("getSlot", json!([CommitmentConfig::finalized()]))
                     .await
-                    .map_err(classify_read)
             }
         )
     }
 
     pub async fn get_block(&self, slot: u64) -> anyhow::Result<UiConfirmedBlock> {
         let max_attempts = self.catchup_retry.max_times;
+        let block_config = serde_json::to_value(Self::block_fetch_config())
+            .context("serializing the getBlock config")?;
+
         retry_rpc!(
             SOL_RPC_TIMEOUT,
             self.catchup_retry,
@@ -287,10 +345,8 @@ impl SolanaClient {
             {
                 #[cfg(feature = "bench")]
                 crate::bench::rpc_inc("getBlock(refetch)");
-                self.rpc_client
-                    .get_block_with_config(slot, Self::block_fetch_config())
+                self.rpc_call::<UiConfirmedBlock>("getBlock", json!([slot, &block_config]))
                     .await
-                    .map_err(classify_read)
             }
         )
     }
@@ -340,12 +396,14 @@ impl SolanaClient {
                     .json(&requests)
                     .send()
                     .await
-                    .and_then(|resp| resp.error_for_status())
-                    .map_err(classify_batch)?;
+                    .map_err(classify_transport)?;
+                let retry_after = retry_after_secs(&resp);
                 let responses = resp
+                    .error_for_status()
+                    .map_err(|e| classify_transport_with(e, retry_after))?
                     .json::<Vec<JsonRpcResponse<UiConfirmedBlock>>>()
                     .await
-                    .map_err(classify_batch)?;
+                    .map_err(classify_transport)?;
 
                 let mut results = HashMap::new();
                 for resp in responses {
@@ -355,17 +413,14 @@ impl SolanaClient {
                         // silent — node-local absence warns because
                         // `process_catchup_item` refetch-retries it
                         (_, Some(error)) => {
-                            let skipped = error
-                                .get("code")
-                                .and_then(serde_json::Value::as_i64)
-                                .is_some_and(slot_skipped);
-                            let slot = slots.get(resp.id).copied();
+                            let skipped = error.code.is_some_and(slot_skipped);
+                            let slot = resp.id.and_then(|id| slots.get(id)).copied();
                             if !skipped {
                                 tracing::warn!(?error, ?slot, "JSON-RPC batch response error");
                             }
                         }
                         (Some(block), None) => {
-                            if let Some(slot) = slots.get(resp.id).copied() {
+                            if let Some(slot) = resp.id.and_then(|id| slots.get(id)).copied() {
                                 results.insert(slot, block);
                             }
                         }
@@ -398,6 +453,15 @@ impl SolanaClient {
         address: &Pubkey,
         before: Option<Signature>,
     ) -> anyhow::Result<Vec<RpcConfirmedTransactionStatusWithSignature>> {
+        let config = serde_json::to_value(RpcSignaturesForAddressConfig {
+            before: before.map(|sig| sig.to_string()),
+            until: None,
+            limit: Some(CATCHUP_PAGE_SIZE),
+            commitment: Some(CommitmentConfig::finalized()),
+            min_context_slot: None,
+        })
+        .context("serializing the getSignaturesForAddress config")?;
+
         retry_rpc!(
             SOL_RPC_TIMEOUT,
             self.catchup_retry,
@@ -415,20 +479,15 @@ impl SolanaClient {
             {
                 #[cfg(feature = "bench")]
                 crate::bench::rpc_inc("getSignaturesForAddress");
-                let config = GetConfirmedSignaturesForAddress2Config {
-                    before,
-                    until: None,
-                    limit: Some(CATCHUP_PAGE_SIZE),
-                    commitment: Some(CommitmentConfig::finalized()),
-                };
-                self.rpc_client
-                    .get_signatures_for_address_with_config(address, config)
-                    .await
-                    .map_err(classify_read)
-                    .inspect(|_batch| {
-                        #[cfg(feature = "bench")]
-                        crate::bench::inc_sig_page(_batch.len() as u64);
-                    })
+                self.rpc_call::<Vec<RpcConfirmedTransactionStatusWithSignature>>(
+                    "getSignaturesForAddress",
+                    json!([address.to_string(), &config]),
+                )
+                .await
+                .inspect(|_batch| {
+                    #[cfg(feature = "bench")]
+                    crate::bench::inc_sig_page(_batch.len() as u64);
+                })
             }
         )
     }
@@ -560,7 +619,6 @@ mod tests {
         JSON_RPC_SERVER_ERROR_LONG_TERM_STORAGE_UNREACHABLE, JSON_RPC_SERVER_ERROR_NODE_UNHEALTHY,
         JSON_RPC_SERVER_ERROR_TRANSACTION_HISTORY_NOT_AVAILABLE,
     };
-    use solana_client::rpc_request::RpcResponseErrorData;
     use solana_sdk::{pubkey::Pubkey, signature::Signature};
 
     /// Helper to create a SolanaClient for testing with mockito
@@ -618,6 +676,12 @@ mod tests {
         let mut server = mockito::Server::new_async().await;
         let _mock = server
             .mock("POST", "/")
+            // the vendored client's exact request
+            // (solana-rpc-client 3.1.14, rpc_client.rs:1848)
+            .match_body(mockito::Matcher::Json(json!({
+                "jsonrpc": "2.0", "id": 0, "method": "getSlot",
+                "params": [{ "commitment": "finalized" }]
+            })))
             .with_status(200)
             .with_header("content-type", "application/json")
             .with_body(slot_response(42))
@@ -664,7 +728,9 @@ mod tests {
             .await;
 
         let client = test_client(&server.url());
-        assert!(client.get_slot_finalized().await.is_err());
+        let err = client.get_slot_finalized().await.unwrap_err();
+        assert!(is_retryable(&err), "{err:#}");
+        assert!(!is_provider_throttled(&err), "{err:#}");
     }
 
     #[tokio::test]
@@ -689,6 +755,17 @@ mod tests {
 
         let _mock = server
             .mock("POST", "/")
+            // the vendored client's exact request (rpc_client.rs:2457)
+            .match_body(mockito::Matcher::Json(json!({
+                "jsonrpc": "2.0", "id": 0, "method": "getBlock",
+                "params": [HEIGHT, {
+                    "encoding": "jsonParsed",
+                    "transactionDetails": "full",
+                    "rewards": false,
+                    "commitment": "finalized",
+                    "maxSupportedTransactionVersion": 1
+                }]
+            })))
             .with_status(200)
             .with_header("content-type", "application/json")
             .with_body(response.to_string())
@@ -828,6 +905,7 @@ mod tests {
     async fn fetch_signatures_from_latest_returns_signatures() {
         const SLOT: u64 = 42;
         let mut server = mockito::Server::new_async().await;
+        let address = Pubkey::new_unique();
         let response = serde_json::json!({
             "jsonrpc": "2.0",
             "id": 1,
@@ -845,6 +923,15 @@ mod tests {
 
         let _mock = server
             .mock("POST", "/")
+            // the vendored client's exact request
+            // (rpc_client.rs:2786); None fields serialize as null
+            .match_body(mockito::Matcher::Json(json!({
+                "jsonrpc": "2.0", "id": 0, "method": "getSignaturesForAddress",
+                "params": [address.to_string(), {
+                    "before": null, "until": null, "limit": CATCHUP_PAGE_SIZE,
+                    "commitment": "finalized", "minContextSlot": null
+                }]
+            })))
             .with_status(200)
             .with_header("content-type", "application/json")
             .with_body(response.to_string())
@@ -853,7 +940,7 @@ mod tests {
 
         let client = test_client(&server.url());
         let sigs = client
-            .fetch_signatures_from_latest(&Pubkey::new_unique(), None)
+            .fetch_signatures_from_latest(&address, None)
             .await
             .unwrap();
 
@@ -920,6 +1007,7 @@ mod tests {
         let sig_a = Signature::new_unique().to_string();
         let sig_b = Signature::new_unique().to_string();
         let sig_c = Signature::new_unique().to_string();
+        let program_id = Pubkey::new_unique();
 
         // Page 1: slots 200, 150 — both in range [100, 200]
         let page1 =
@@ -938,6 +1026,15 @@ mod tests {
 
         let _mock2 = server
             .mock("POST", "/")
+            // page 2 carries page 1's last signature as the cursor — the
+            // Some arm of the config conversion
+            .match_body(mockito::Matcher::Json(json!({
+                "jsonrpc": "2.0", "id": 0, "method": "getSignaturesForAddress",
+                "params": [program_id.to_string(), {
+                    "before": sig_b, "until": null, "limit": CATCHUP_PAGE_SIZE,
+                    "commitment": "finalized", "minContextSlot": null
+                }]
+            })))
             .with_status(200)
             .with_header("content-type", "application/json")
             .with_body(page2)
@@ -945,7 +1042,13 @@ mod tests {
             .create_async()
             .await;
 
-        let client = test_client(&server.url());
+        let client = SolanaClient::for_indexer(
+            server.url().parse().unwrap(),
+            program_id,
+            Arc::new(NoopPublisherTelemetry),
+            SharedBackoff::new(),
+        )
+        .with_fast_retry();
         let sigs = client.fetch_signatures(100, 200).await.unwrap();
 
         assert_eq!(sigs.len(), 2);
@@ -953,20 +1056,35 @@ mod tests {
         assert_eq!(sigs[1].slot, 150);
     }
 
-    #[test]
-    fn node_unhealthy_renders_do_not_invert_the_default() {
-        // 401 and 429 collide with the fallback's status-code matching
+    #[tokio::test]
+    async fn node_unhealthy_renders_do_not_invert_the_default() {
+        // "behind by 401/429 slots" in the body message must not reach
+        // the string fallback
         for slots_behind in [401u64, 429] {
-            let e = ClientError::from(ClientErrorKind::RpcError(RpcError::RpcResponseError {
-                code: JSON_RPC_SERVER_ERROR_NODE_UNHEALTHY,
-                message: format!("Node is behind by {slots_behind} slots"),
-                data: RpcResponseErrorData::NodeUnhealthy {
-                    num_slots_behind: Some(slots_behind),
-                },
-            }));
-            let err = classify_read(e);
+            let mut server = mockito::Server::new_async().await;
+            let mock = server
+                .mock("POST", "/")
+                .with_status(200)
+                .with_header("content-type", "application/json")
+                .with_body(
+                    json!({
+                        "jsonrpc": "2.0", "id": 0,
+                        "error": {
+                            "code": JSON_RPC_SERVER_ERROR_NODE_UNHEALTHY,
+                            "message": format!("Node is behind by {slots_behind} slots")
+                        }
+                    })
+                    .to_string(),
+                )
+                .expect(3)
+                .create_async()
+                .await;
+
+            let client = test_client(&server.url());
+            let err = client.get_slot_finalized().await.unwrap_err();
             assert!(is_retryable(&err), "{slots_behind}: {err:#}");
             assert!(!is_provider_throttled(&err), "{slots_behind}: {err:#}");
+            mock.assert_async().await;
         }
     }
 
@@ -1129,6 +1247,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn null_id_error_envelopes_keep_their_verdict() {
+        // JSON-RPC 2.0 permits id: null on error responses; the decode
+        // must not swallow the terminal code into a retryable
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                json!({
+                    "jsonrpc": "2.0", "id": null,
+                    "error": {
+                        "code": JSON_RPC_SERVER_ERROR_SLOT_SKIPPED,
+                        "message": "Slot was skipped"
+                    }
+                })
+                .to_string(),
+            )
+            .expect(1)
+            .create_async()
+            .await;
+
+        let client = test_client(&server.url());
+        let err = client.get_block(1234).await.unwrap_err();
+        assert!(!is_retryable(&err), "{err:#}");
+        assert_eq!(skipped_code(&err), Some(JSON_RPC_SERVER_ERROR_SLOT_SKIPPED));
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
     async fn node_local_absence_stays_retryable() {
         // another LB backend may still serve these
         for (code, message) in [
@@ -1228,6 +1376,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn read_throttling_engages_the_shared_gate() {
+        // a 429 used to surface as the vendored sender's timeout, so the
+        // gate never engaged on reads
+        let mut server = mockito::Server::new_async().await;
+        let throttled = server
+            .mock("POST", "/")
+            .with_status(429)
+            .expect(3) // 1 attempt + 2 retries
+            .create_async()
+            .await;
+
+        let gate =
+            SharedBackoff::with_cooldowns(Duration::from_millis(300), Duration::from_millis(600));
+        let client = test_client_with_gate(&server.url(), gate.clone());
+        let start = std::time::Instant::now();
+        let err = client.get_slot_finalized().await.unwrap_err();
+        assert!(is_retryable(&err), "{err:#}");
+        assert!(is_provider_throttled(&err), "{err:#}");
+        assert!(
+            start.elapsed() >= Duration::from_millis(800),
+            "gated retries must wait out the cooldowns, took {:?}",
+            start.elapsed()
+        );
+        assert!(gate.remaining() > Duration::ZERO);
+        throttled.assert_async().await;
+    }
+
+    #[tokio::test]
     async fn batch_statuses_follow_the_read_partition() {
         // 409 is send-terminal — the read table must retry it to exhaustion
         let mut server = mockito::Server::new_async().await;
@@ -1295,8 +1471,106 @@ mod tests {
             .send()
             .await
             .unwrap_err();
-        let err = classify_batch(reqwest_err);
+        let err = classify_transport(reqwest_err);
         assert!(is_retryable(&err));
         assert!(!is_provider_throttled(&err));
+    }
+
+    #[tokio::test]
+    async fn null_block_results_classify_retryable() {
+        // providers send null for absent blocks; the vendored client also
+        // treated it as a retryable decode failure
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"jsonrpc":"2.0","id":0,"result":null}"#)
+            .expect(3) // 1 attempt + 2 retries
+            .create_async()
+            .await;
+
+        let client = test_client(&server.url());
+        let err = client.get_block(1234).await.unwrap_err();
+        assert!(is_retryable(&err), "{err:#}");
+        assert!(!is_provider_throttled(&err), "{err:#}");
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn undecodable_read_bodies_stay_retryable() {
+        // 200 with HTML: statusless decode failure on the single-read path
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "text/html")
+            .with_body("<html>502 Bad Gateway</html>")
+            .expect(3) // 1 attempt + 2 retries
+            .create_async()
+            .await;
+
+        let client = test_client(&server.url());
+        let err = client.get_slot_finalized().await.unwrap_err();
+        assert!(is_retryable(&err), "{err:#}");
+        assert!(!is_provider_throttled(&err), "{err:#}");
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn retry_after_advertised_pauses_are_honored() {
+        // the gate waits the advertised pause instead of the ladder rung
+        let mut server = mockito::Server::new_async().await;
+        let throttled = server
+            .mock("POST", "/")
+            .with_status(429)
+            .with_header("Retry-After", "1")
+            .expect(3) // 1 attempt + 2 retries
+            .create_async()
+            .await;
+
+        let gate =
+            SharedBackoff::with_cooldowns(Duration::from_millis(100), Duration::from_secs(60));
+        let client = test_client_with_gate(&server.url(), gate.clone());
+        let err = client.get_slot_finalized().await.unwrap_err();
+        assert!(is_retryable(&err), "{err:#}");
+        // the ladder rung alone would leave ~100ms; the advertised 1s wins
+        assert!(
+            gate.remaining() >= Duration::from_millis(800),
+            "remaining: {:?}",
+            gate.remaining()
+        );
+        throttled.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn both_field_read_envelopes_classify_by_their_error() {
+        // error wins over a paired result, like the batch envelope — the
+        // block must not be delivered
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                json!({
+                    "jsonrpc": "2.0", "id": 0,
+                    "result": make_block_response(0, 1234)["result"],
+                    "error": {
+                        "code": JSON_RPC_SERVER_ERROR_SLOT_SKIPPED,
+                        "message": "Slot was skipped"
+                    }
+                })
+                .to_string(),
+            )
+            .expect(1)
+            .create_async()
+            .await;
+
+        let client = test_client(&server.url());
+        let err = client.get_block(1234).await.unwrap_err();
+        assert!(!is_retryable(&err), "{err:#}");
+        assert_eq!(skipped_code(&err), Some(JSON_RPC_SERVER_ERROR_SLOT_SKIPPED));
+        mock.assert_async().await;
     }
 }

@@ -12,6 +12,7 @@ async-trait.workspace = true
 futures-util.workspace = true
 hex.workspace = true
 mpc-chain-integration-core.workspace = true
+mpc-evm-common.workspace = true
 mpc-primitives.workspace = true
 mpc-tron-wire.workspace = true
 reqwest.workspace = true

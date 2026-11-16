@@ -1,6 +1,8 @@
 //! Chain-dispatched validation and signing of unsigned transactions:
 //! admission and respond processing share one path per target chain.
 
+use std::borrow::Cow;
+
 use crate::protocol::Chain;
 use k256::elliptic_curve::point::AffineCoordinates as _;
 use k256::elliptic_curve::scalar::IsHigh as _;
@@ -14,20 +16,20 @@ use super::eth_tx::{
 use super::SignBidirectionalEventExt as _;
 
 /// Checks the unsigned bytes against the target chain's signing rules,
-/// returning the Ethereum calldata when the target runs schema checks.
-/// Admission calls this so a transaction that cannot be signed at respond
-/// time is rejected before it enters the backlog; running the actual
-/// signing path is what keeps admission structurally equal to respond
+/// returning the calldata the schema checks run on. Admission calls
+/// this so a transaction that cannot be signed at respond time is
+/// rejected before it enters the backlog; running the actual signing
+/// path is what keeps admission structurally equal to respond
 /// processing.
 pub(crate) fn validate_unsigned_transaction(
     target: Chain,
     unsigned: &[u8],
-) -> anyhow::Result<Option<&[u8]>> {
+) -> anyhow::Result<std::borrow::Cow<'_, [u8]>> {
     match target {
-        Chain::Ethereum => validate_unsigned_ethereum(unsigned).map(Some),
-        // Tron's receipt-based output extraction defines no schemas yet;
-        // admission requires them empty (see `validate`).
-        Chain::Tron => RawTransaction::parse(unsigned).map(|_| None),
+        Chain::Ethereum => validate_unsigned_ethereum(unsigned).map(Cow::Borrowed),
+        Chain::Tron => RawTransaction::parse(unsigned)
+            .and_then(|raw| raw.calldata())
+            .map(Cow::Owned),
         _ => anyhow::bail!("unsupported target chain {target}"),
     }
 }
@@ -238,18 +240,16 @@ fn validate_access_list(access_list: &Rlp) -> anyhow::Result<()> {
 }
 
 /// Signs `unsigned` for `target`, returning the transaction id the target
-/// chain records it under and the account-sequence field: Ethereum's nonce,
-/// or 0 for Tron, which has none (ref-block fields in the raw data serve
-/// that role).
+/// chain records it under.
 pub fn sign_and_hash_transaction(
     target: Chain,
     unsigned: &[u8],
     signature: Signature,
-) -> anyhow::Result<([u8; 32], u64)> {
+) -> anyhow::Result<[u8; 32]> {
     match target {
         Chain::Ethereum => sign_and_hash_ethereum(unsigned, signature),
         // The txID is sha256(raw_data) — signature-independent by construction.
-        Chain::Tron => Ok((RawTransaction::parse(unsigned)?.txid(), 0)),
+        Chain::Tron => Ok(RawTransaction::parse(unsigned)?.txid()),
         _ => anyhow::bail!("unsupported target chain {target}"),
     }
 }
@@ -268,10 +268,7 @@ fn normalized_rs_v(signature: &Signature) -> ([u8; 32], [u8; 32], u8) {
     (r, s, v)
 }
 
-fn sign_and_hash_ethereum(
-    unsigned_rlp: &[u8],
-    signature: Signature,
-) -> anyhow::Result<([u8; 32], u64)> {
+fn sign_and_hash_ethereum(unsigned_rlp: &[u8], signature: Signature) -> anyhow::Result<[u8; 32]> {
     let (r, s, v) = normalized_rs_v(&signature);
     let y_parity = v == 1;
 
@@ -280,6 +277,21 @@ fn sign_and_hash_ethereum(
     } else {
         let chain_id = transaction_chain_id(unsigned_rlp);
         sign_and_hash_legacy_from_unsigned(unsigned_rlp, chain_id, &r, &s, y_parity)
+    }
+}
+
+/// The replay-protection nonce of unsigned bytes for `target`: the EVM nonce, 0 on Tron.
+pub(crate) fn transaction_nonce(target: Chain, unsigned: &[u8]) -> anyhow::Result<u64> {
+    match target {
+        Chain::Ethereum => {
+            let nonce = match unsigned.strip_prefix(&[0x02]) {
+                Some(body) => Rlp::new(body).val_at(1)?,
+                None => Rlp::new(unsigned).val_at(0)?,
+            };
+            Ok(nonce)
+        }
+        Chain::Tron => Ok(0),
+        _ => anyhow::bail!("unsupported target chain {target}"),
     }
 }
 
@@ -504,7 +516,6 @@ mod tests {
                 mpc_primitives::Signature::new(big_r, s, recovery_id),
             )
             .unwrap()
-            .0
         };
 
         assert_eq!(id_of(low, 1), id_of(high, 0));
@@ -518,8 +529,7 @@ mod tests {
             low.to_bytes().as_slice(),
             false,
         )
-        .unwrap()
-        .0;
+        .unwrap();
         assert_eq!(id_of(high, 1), expected);
     }
 

@@ -202,17 +202,16 @@ async fn run_supervised_with_watchdog<I: ChainIndexer, T: ChainTelemetry>(
     let mut resubmit_votes = true;
     let mut recovery_retry_delay = ERROR_RESTART_DELAY;
     let mut restart_delay = ERROR_RESTART_DELAY;
-    // Highest block dispatched this supervisor instance. The persisted
-    // watermark only advances once caught up, so a persistent per-height
-    // failure replays the same catchup blocks every restart; only a new
-    // high-water mark is real progress.
+    // Highest block dispatched this supervisor instance. A run that keeps
+    // failing at one height resumes below it on every restart and dispatches
+    // the same blocks again; only a new high-water mark is real progress.
     let mut highest_block: u64 = 0;
     loop {
-        // Cleared before recovery, not after: checkpoint creation and publish
-        // failover must not act on a backlog being recovered or replayed into.
+        // Cleared before recovery, not after: publish failover and sign-request
+        // enqueue must not act on a backlog being recovered or replayed into.
         ctx.caught_up = false;
         let recovered = async {
-            recover_backlog(
+            let rebased = recover_backlog(
                 chain,
                 load_local,
                 &ctx.backlog,
@@ -220,9 +219,14 @@ async fn run_supervised_with_watchdog<I: ChainIndexer, T: ChainTelemetry>(
                 &mut ctx.mesh_state,
                 &ctx.node_client,
                 &my_account_id,
+                root_pk,
             )
             .await?;
             load_local = false;
+            if rebased {
+                // Every node rebasing brings back old stamps, so count again.
+                ctx.failover_floor = None;
+            }
             // Failing here retries: without its records the node would sign again.
             ctx.local_records = ctx
                 .backlog
@@ -414,6 +418,33 @@ mod tests {
             height,
             digest,
         }))
+    }
+
+    #[tokio::test]
+    async fn recovery_reports_whether_it_rebased() {
+        let chain = Chain::Ethereum;
+        let backlog = Backlog::new();
+        let digest = mpc_primitives::reset_checkpoint_digest(chain, 42);
+        let (_digest_tx, mut digest_rx) = make_digest(chain, 42, digest);
+        let (_mesh_tx, mut mesh) = watch::channel(MeshState::default());
+        let client = crate::node_client::NodeClient::new();
+        let me = "test.near".parse().unwrap();
+
+        for expected in [true, false] {
+            let rebased = recover_backlog(
+                chain,
+                false,
+                &backlog,
+                &mut digest_rx,
+                &mut mesh,
+                &client,
+                &me,
+                ProjectivePoint::GENERATOR.to_affine(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(rebased, expected);
+        }
     }
 
     #[tokio::test]

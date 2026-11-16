@@ -90,6 +90,15 @@ impl PublicKey {
     }
 }
 
+/// Parses the hex of the key's 32 bytes.
+impl std::str::FromStr for SecretKey {
+    type Err = Box<dyn std::error::Error + Send + Sync>;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(Self::try_from_bytes(&hex::decode(s)?)?)
+    }
+}
+
 impl SecretKey {
     pub fn to_bytes(&self) -> [u8; 32] {
         hpke::Serializable::to_bytes(&self.0).into()
@@ -160,5 +169,19 @@ mod tests {
         let sk = super::SecretKey::try_from_bytes(&hex::decode(sk_hex).unwrap()).unwrap();
         let pk = super::PublicKey::try_from_bytes(&hex::decode(pk_hex).unwrap()).unwrap();
         assert_eq!(sk.public_key(), pk);
+    }
+
+    #[test]
+    fn secret_key_parses_from_hex() {
+        let (sk, _) = super::generate();
+        let parsed: super::SecretKey = hex::encode(sk.to_bytes()).parse().unwrap();
+        assert_eq!(parsed, sk);
+
+        for malformed in ["", "not hex", "abcd"] {
+            assert!(
+                malformed.parse::<super::SecretKey>().is_err(),
+                "{malformed:?}"
+            );
+        }
     }
 }
