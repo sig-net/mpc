@@ -7,6 +7,7 @@ use crate::rpc::{BlockRef, MidnightRpc};
 use crate::state::decode_contract_state;
 
 use async_trait::async_trait;
+use mpc_chain_integration_core::utils::retry::SharedBackoff;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct BlockProofSeed {
@@ -74,9 +75,12 @@ pub(crate) struct LiveSource {
 }
 
 impl LiveSource {
-    pub(crate) async fn connect(config: &MidnightConfig) -> anyhow::Result<Self> {
+    pub(crate) async fn connect(
+        config: &MidnightConfig,
+        gate: SharedBackoff,
+    ) -> anyhow::Result<Self> {
         Ok(Self {
-            rpc: MidnightRpc::connect(config).await?,
+            rpc: MidnightRpc::connect(config, gate).await?,
         })
     }
 }

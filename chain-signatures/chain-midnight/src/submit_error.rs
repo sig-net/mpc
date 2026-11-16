@@ -35,7 +35,7 @@ pub(crate) enum SubmitError {
     #[error("[internal] {0}")]
     Internal(String),
     /// A read from or a send to the node failed. Counted as `internal`; its text
-    /// may hold the provider's own status, which the core's checks read.
+    /// may hold the provider's own status, which the core's retry check reads.
     #[error("[internal] {0}")]
     Node(String),
 }
@@ -57,8 +57,8 @@ impl SubmitError {
     }
 
     /// As the publisher's error. Every failure but the node's carries a retryable
-    /// verdict, so the core's retry and throttle checks never read its message,
-    /// whose event ids and amounts can include a standalone 429 or 402.
+    /// verdict, so the core's retry check never reads its message, whose event ids
+    /// and amounts can include a standalone 429 or 402.
     pub(crate) fn into_publish_error(self) -> anyhow::Error {
         match self {
             Self::Node(_) => anyhow::Error::new(self),
@@ -126,7 +126,8 @@ mod tests {
         assert!(!is_provider_throttled(&error), "{error:#}");
         assert_eq!(refusal_code(&error), Some("internal"));
 
-        // The node's failure may be the provider's own throttle, which stays visible.
+        // The node's failure keeps the provider's text; throttles engage the gate at
+        // the transport, before the failure gets here.
         let error = SubmitError::Node("the node answered 429 Too Many Requests".to_string())
             .into_publish_error();
         assert!(is_provider_throttled(&error), "{error:#}");

@@ -9,6 +9,7 @@ use async_trait::async_trait;
 use futures_util::stream::BoxStream;
 use futures_util::{Sink, SinkExt as _, Stream, StreamExt as _};
 use midnight_base_crypto::time::Timestamp;
+use mpc_chain_integration_core::utils::retry::{run_gated, RpcFailure, SharedBackoff};
 use mpc_utils::task::AbortOnDrop;
 use serde::Deserialize;
 use serde_json::json;
@@ -52,11 +53,22 @@ pub(crate) trait DustEventSource: Send + Sync + 'static {
 
 pub(crate) struct IndexerDustEvents {
     url: Url,
+    gate: SharedBackoff,
 }
 
 impl IndexerDustEvents {
+    /// Opens every connection under `gate`, which the node's other Midnight callers share.
+    pub(crate) fn gated(url: Url, gate: SharedBackoff) -> Self {
+        Self { url, gate }
+    }
+
+    #[cfg(test)]
     pub(crate) fn new(url: Url) -> Self {
-        Self { url }
+        Self::gated(url, SharedBackoff::new())
+    }
+
+    async fn open(&self) -> anyhow::Result<Socket> {
+        open(&self.url, &self.gate).await
     }
 }
 
@@ -74,7 +86,7 @@ impl DustEventSource for IndexerDustEvents {
         &self,
         from: Option<u64>,
     ) -> anyhow::Result<BoxStream<'static, anyhow::Result<DustEventUpdate>>> {
-        let mut socket = open(&self.url).await?;
+        let mut socket = self.open().await?;
         socket
             .send(Message::text(
                 json!({
@@ -102,8 +114,10 @@ impl DustEventSource for IndexerDustEvents {
     }
 
     async fn indexed_time(&self) -> anyhow::Result<Timestamp> {
+        // The gate's cooldown is waited out before the query's timeout starts.
+        crate::rpc::wait_out(&self.gate, "midnight_indexer_ws").await;
         let query = async {
-            let mut socket = open(&self.url).await?;
+            let mut socket = self.open().await?;
             socket
                 .send(Message::text(
                     json!({
@@ -150,8 +164,9 @@ impl DustEventSource for IndexerDustEvents {
     }
 }
 
-/// A `graphql-transport-ws` connection, past its acknowledgement.
-async fn open(url: &Url) -> anyhow::Result<Socket> {
+/// A `graphql-transport-ws` connection, past its acknowledgement. The handshake runs
+/// under `gate`: only the HTTP status it is refused with can engage it.
+async fn open(url: &Url, gate: &SharedBackoff) -> anyhow::Result<Socket> {
     let mut request = url
         .as_str()
         .into_client_request()
@@ -169,10 +184,15 @@ async fn open(url: &Url) -> anyhow::Result<Socket> {
         false,
         Some(tokio_tungstenite::Connector::Rustls(tls()?)),
     );
-    let (mut socket, _) = tokio::time::timeout(KEEPALIVE, connect)
-        .await
-        .context("timed out connecting to the indexer subscription")?
-        .context("connecting to the indexer subscription")?;
+    crate::rpc::wait_out(gate, "midnight_indexer_ws").await;
+    let (mut socket, _) = run_gated(gate, "midnight_indexer_ws", async {
+        tokio::time::timeout(KEEPALIVE, connect)
+            .await
+            .context("timed out connecting to the indexer subscription")?
+            .map_err(handshake_failure)
+            .context("connecting to the indexer subscription")
+    })
+    .await?;
     socket
         .send(Message::text(
             json!({ "type": "connection_init" }).to_string(),
@@ -200,6 +220,20 @@ async fn open(url: &Url) -> anyhow::Result<Socket> {
         }
     }
     Ok(socket)
+}
+
+/// A failed handshake as the gate reads it: with the HTTP status the indexer refused it
+/// with, or none, so a number in the message is never read as a status.
+fn handshake_failure(error: WsError) -> anyhow::Error {
+    let status = match &error {
+        WsError::Http(response) => Some(response.status()),
+        _ => None,
+    };
+    let message = error.to_string();
+    anyhow::Error::new(match status {
+        Some(status) => RpcFailure::read_status(status, message),
+        None => RpcFailure::retryable(message),
+    })
 }
 
 fn tls() -> anyhow::Result<std::sync::Arc<rustls::ClientConfig>> {
@@ -550,5 +584,135 @@ mod tests {
             .expect("the indexer script ends")
             .unwrap();
         assert_eq!(time, Timestamp::from_secs(1_761_400_000));
+    }
+    /// A handshake waits out a cooldown another caller's throttle extends while it waits.
+    #[tokio::test]
+    async fn a_handshake_waits_out_a_cooldown_extended_while_it_waits() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url: Url = format!("ws://{}", listener.local_addr().unwrap())
+            .parse()
+            .unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let arrived = std::time::Instant::now();
+            let mut request = [0; 1024];
+            let _ = tokio::io::AsyncReadExt::read(&mut stream, &mut request).await;
+            tokio::io::AsyncWriteExt::write_all(
+                &mut stream,
+                b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\n\r\n",
+            )
+            .await
+            .unwrap();
+            arrived
+        });
+        let gate =
+            SharedBackoff::with_cooldowns(Duration::from_millis(400), Duration::from_secs(5));
+        gate.extend_cooldown();
+        let throttled = gate.clone();
+        let started = std::time::Instant::now();
+        let extend = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            for _ in 0..3 {
+                throttled.extend_cooldown();
+            }
+        });
+        let _ = IndexerDustEvents::gated(url, gate).subscribe(None).await;
+        extend.await.unwrap();
+        let went_out = server.await.unwrap() - started;
+        assert!(
+            went_out >= Duration::from_millis(3200),
+            "the handshake went out {went_out:?} in, inside a window extended to about 3.3 s"
+        );
+    }
+
+    /// What the indexer says after the handshake never engages the gate, whatever
+    /// digits its text carries.
+    #[tokio::test]
+    async fn a_refusal_after_the_handshake_leaves_the_gate_open() {
+        let (url, server) = indexer(|mut socket| async move {
+            assert_eq!(receive(&mut socket).await["type"], "connection_init");
+            send(
+                &mut socket,
+                json!({ "type": "connection_error", "payload": { "message": "limit 429" } }),
+            )
+            .await;
+        })
+        .await;
+        let gate = SharedBackoff::with_cooldowns(Duration::from_secs(5), Duration::from_secs(5));
+        let error = IndexerDustEvents::gated(url, gate.clone())
+            .subscribe(None)
+            .await
+            .err()
+            .expect("the indexer refuses the subscription");
+        server.await.unwrap();
+        assert!(format!("{error:#}").contains("429"), "{error:#}");
+        assert_eq!(gate.remaining(), Duration::ZERO, "{error:#}");
+    }
+
+    /// An indexer that refuses the websocket handshake with 429 engages the gate it
+    /// shares with the node's other Midnight callers, and the next connection waits it
+    /// out; a refusal for another status does not.
+    #[tokio::test]
+    async fn a_throttled_handshake_holds_the_next_connection() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url: Url = format!("ws://{}", listener.local_addr().unwrap())
+            .parse()
+            .unwrap();
+        let statuses = [
+            "429 Too Many Requests",
+            "429 Too Many Requests",
+            "503 Service Unavailable",
+        ];
+        let arrivals = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let arrived = arrivals.clone();
+        let server = tokio::spawn(async move {
+            for status in statuses {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                arrived.lock().unwrap().push(std::time::Instant::now());
+                let mut request = [0; 1024];
+                let _ = tokio::io::AsyncReadExt::read(&mut stream, &mut request).await;
+                let response = format!("HTTP/1.1 {status}\r\nContent-Length: 0\r\n\r\n");
+                tokio::io::AsyncWriteExt::write_all(&mut stream, response.as_bytes())
+                    .await
+                    .unwrap();
+            }
+        });
+        let cooldown = Duration::from_millis(400);
+        let gate = SharedBackoff::with_cooldowns(cooldown, Duration::from_secs(5));
+        let events = IndexerDustEvents::gated(url, gate.clone());
+
+        events
+            .subscribe(None)
+            .await
+            .err()
+            .expect("the indexer throttles");
+        assert!(
+            gate.remaining() > Duration::ZERO,
+            "a 429 handshake engaged no gate"
+        );
+        events
+            .indexed_time()
+            .await
+            .expect_err("the indexer still throttles");
+        // Waits out the second 429's cooldown, so the 503 is answered on an open gate.
+        tokio::time::sleep(gate.remaining()).await;
+        events
+            .subscribe(None)
+            .await
+            .err()
+            .expect("the indexer is unavailable");
+        server.await.unwrap();
+        let arrivals = arrivals.lock().unwrap().clone();
+
+        assert!(
+            arrivals[1] - arrivals[0] >= cooldown - Duration::from_millis(100),
+            "the second connection came {:?} after a 429",
+            arrivals[1] - arrivals[0]
+        );
+        assert_eq!(
+            gate.remaining(),
+            Duration::ZERO,
+            "a 503 handshake engaged the gate"
+        );
     }
 }
