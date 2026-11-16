@@ -11,7 +11,7 @@ use crate::backlog::mock::{
 };
 use crate::sign_bidirectional::{BidirectionalProgress, SignProgress, SignStatus};
 use crate::storage::checkpoint_storage::CheckpointStorage;
-use mpc_chain_integration_core::StateManager;
+use mpc_chain_integration_core::{StateManager, WatchKey};
 use mpc_primitives::{
     BidirectionalTx, BidirectionalTxId, Chain, ExecutionOutcome, IndexedSignRequest, SignId,
     SignKind,
@@ -943,7 +943,7 @@ async fn test_watch_unwatch_and_respond() {
 
     // Unwatch returns the executing SignEntry (automatically registered on advance to executing)
     let executing_entry = backlog
-        .unwatch_execution(tx.target_chain, &tx.id, tx.source_chain, &tx.sign_id())
+        .unwatch_execution(tx.target_chain, WatchKey::of(&tx))
         .await
         .expect("watcher present");
     assert_eq!(executing_entry.sign_id(), sign_id);
@@ -956,7 +956,7 @@ async fn test_watch_unwatch_and_respond() {
     executing_entry.watch_execution().await;
 
     let executing_entry = backlog
-        .unwatch_execution(tx.target_chain, &tx.id, tx.source_chain, &tx.sign_id())
+        .unwatch_execution(tx.target_chain, WatchKey::of(&tx))
         .await
         .expect("watcher present");
     assert_eq!(executing_entry.sign_id(), sign_id);
@@ -1395,7 +1395,7 @@ async fn respond_observed_at_survives_the_unwatch_lookup() {
     backlog.insert_mock_executing(&tx).await;
 
     let entry = backlog
-        .unwatch_execution(tx.target_chain, &tx.id, tx.source_chain, &tx.sign_id())
+        .unwatch_execution(tx.target_chain, WatchKey::of(&tx))
         .await
         .expect("watch must resolve to the executing entry");
 
@@ -1417,10 +1417,10 @@ async fn watch_execution_re_register_keeps_the_wait_start() {
     backlog.insert_mock_executing(&tx).await;
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    StateManager::watch_execution(&backlog, tx.target_chain, Arc::new(tx.clone())).await;
+    StateManager::watch_execution(&backlog, Arc::new(tx.clone())).await;
 
     let entry = backlog
-        .unwatch_execution(tx.target_chain, &tx.id, tx.source_chain, &tx.sign_id())
+        .unwatch_execution(tx.target_chain, WatchKey::of(&tx))
         .await
         .expect("the re-registered watch must resolve");
     let measured = entry
@@ -1440,14 +1440,14 @@ async fn watch_execution_without_a_resident_watch_starts_unmeasured() {
     let tx = mock_bidirectional_tx(SignId::new([79; 32]), Chain::Solana);
     backlog.insert_mock_executing(&tx).await;
     backlog
-        .unwatch_execution(tx.target_chain, &tx.id, tx.source_chain, &tx.sign_id())
+        .unwatch_execution(tx.target_chain, WatchKey::of(&tx))
         .await
         .expect("the initial watch must resolve");
 
-    StateManager::watch_execution(&backlog, tx.target_chain, Arc::new(tx.clone())).await;
+    StateManager::watch_execution(&backlog, Arc::new(tx.clone())).await;
 
     let entry = backlog
-        .unwatch_execution(tx.target_chain, &tx.id, tx.source_chain, &tx.sign_id())
+        .unwatch_execution(tx.target_chain, WatchKey::of(&tx))
         .await
         .expect("the re-registered watch must resolve");
     assert_eq!(entry.awaiting_execution(), None);
@@ -1460,8 +1460,8 @@ async fn re_signed_replacement_keeps_both_flat_id_watches() {
     backlog.insert_mock_executing(&tx).await;
     let mut replacement = tx.clone();
     replacement.id = BidirectionalTxId([0xee; 32]);
-    StateManager::watch_execution(&backlog, tx.target_chain, Arc::new(tx.clone())).await;
-    StateManager::watch_execution(&backlog, tx.target_chain, Arc::new(replacement)).await;
+    StateManager::watch_execution(&backlog, Arc::new(tx.clone())).await;
+    StateManager::watch_execution(&backlog, Arc::new(replacement)).await;
 
     let watchers = backlog.get_execution_watchers(tx.target_chain).await;
     assert_eq!(watchers.len(), 2, "one sign id, two flat ids: both watched");
@@ -1473,11 +1473,11 @@ async fn executing_entry_for_falls_back_to_the_backlog_entry_without_a_watch() {
     let tx = mock_bidirectional_tx(SignId::new([77; 32]), Chain::Solana);
     backlog.insert_mock_executing(&tx).await;
     backlog
-        .unwatch_execution(tx.target_chain, &tx.id, tx.source_chain, &tx.sign_id())
+        .unwatch_execution(tx.target_chain, WatchKey::of(&tx))
         .await;
 
     let entry = backlog
-        .executing_entry_for(tx.target_chain, &tx.id, tx.source_chain, &tx.sign_id())
+        .executing_entry_for(tx.target_chain, WatchKey::of(&tx))
         .await
         .expect("a watch-less entry must fall back to the backlog");
     assert_eq!(
@@ -1490,9 +1490,11 @@ async fn executing_entry_for_falls_back_to_the_backlog_entry_without_a_watch() {
         backlog
             .executing_entry_for(
                 tx.target_chain,
-                &tx.id,
-                tx.source_chain,
-                &SignId::new([1; 32]),
+                WatchKey {
+                    flat_id: tx.id,
+                    source: tx.source_chain,
+                    sign_id: SignId::new([1; 32]),
+                },
             )
             .await
             .is_none(),
@@ -1520,12 +1522,7 @@ async fn executing_entry_for_resolves_only_the_entrys_own_watch_for_duplicate_id
 
     // By second's keys its own watch answers and is consumed.
     let resolved = backlog
-        .executing_entry_for(
-            second.target_chain,
-            &second.id,
-            second.source_chain,
-            &second.sign_id(),
-        )
+        .executing_entry_for(second.target_chain, WatchKey::of(&second))
         .await
         .expect("second resolves through its watch");
     assert_eq!(resolved.sign_id(), second.sign_id());
@@ -1542,12 +1539,7 @@ async fn executing_entry_for_resolves_only_the_entrys_own_watch_for_duplicate_id
     // Re-register second, then first resolves through its own watch.
     backlog.watch_execution(&second_entry).await;
     let resolved = backlog
-        .executing_entry_for(
-            first.target_chain,
-            &first.id,
-            first.source_chain,
-            &first.sign_id(),
-        )
+        .executing_entry_for(first.target_chain, WatchKey::of(&first))
         .await
         .expect("first resolves through its own watch");
     assert_eq!(resolved.sign_id(), first.sign_id());
@@ -1598,12 +1590,7 @@ async fn live_regress_preserves_only_matching_execution_wait_starts() {
     backlog.insert_mock_executing(&restored).await;
     let checkpoint = backlog.checkpoint(Chain::Solana).await.unwrap();
     backlog
-        .unwatch_execution(
-            restored.target_chain,
-            &restored.id,
-            restored.source_chain,
-            &restored.sign_id(),
-        )
+        .unwatch_execution(restored.target_chain, WatchKey::of(&restored))
         .await
         .unwrap();
     backlog.insert_mock_executing(&stale).await;
@@ -1615,42 +1602,22 @@ async fn live_regress_preserves_only_matching_execution_wait_starts() {
     backlog.regress(&checkpoint, mock_root_pk()).await.unwrap();
 
     let entry = backlog
-        .unwatch_execution(
-            retained.target_chain,
-            &retained.id,
-            retained.source_chain,
-            &retained.sign_id(),
-        )
+        .unwatch_execution(retained.target_chain, WatchKey::of(&retained))
         .await
         .expect("matching execution must remain watched");
     assert_eq!(entry.respond_observed_at(), Some(observed_at));
     assert!(entry.awaiting_execution().unwrap() >= Duration::from_secs(120));
     let entry = backlog
-        .unwatch_execution(
-            restored.target_chain,
-            &restored.id,
-            restored.source_chain,
-            &restored.sign_id(),
-        )
+        .unwatch_execution(restored.target_chain, WatchKey::of(&restored))
         .await
         .expect("checkpoint execution must be re-watched");
     assert_eq!(entry.respond_observed_at(), None);
     assert!(backlog
-        .unwatch_execution(
-            stale.target_chain,
-            &stale.id,
-            stale.source_chain,
-            &stale.sign_id()
-        )
+        .unwatch_execution(stale.target_chain, WatchKey::of(&stale))
         .await
         .is_none());
     let entry = backlog
-        .unwatch_execution(
-            unrelated.target_chain,
-            &unrelated.id,
-            unrelated.source_chain,
-            &unrelated.sign_id(),
-        )
+        .unwatch_execution(unrelated.target_chain, WatchKey::of(&unrelated))
         .await
         .expect("other source chain must remain watched");
     assert_eq!(entry.respond_observed_at(), unrelated_observed_at);
@@ -1686,22 +1653,12 @@ async fn twin_wait_starts_survive_recovery_and_re_registration() {
     backlog.regress(&checkpoint, mock_root_pk()).await.unwrap();
 
     let first = backlog
-        .unwatch_execution(
-            first_tx.target_chain,
-            &first_tx.id,
-            first_tx.source_chain,
-            &first_tx.sign_id(),
-        )
+        .unwatch_execution(first_tx.target_chain, WatchKey::of(&first_tx))
         .await
         .expect("first twin must remain watched");
     assert_eq!(first.respond_observed_at(), Some(first_observed));
     let twin = backlog
-        .unwatch_execution(
-            twin_tx.target_chain,
-            &twin_tx.id,
-            twin_tx.source_chain,
-            &twin_tx.sign_id(),
-        )
+        .unwatch_execution(twin_tx.target_chain, WatchKey::of(&twin_tx))
         .await
         .expect("twin must remain watched");
     assert_eq!(twin.respond_observed_at(), Some(twin_observed));
@@ -1713,24 +1670,14 @@ async fn twin_wait_starts_survive_recovery_and_re_registration() {
     backlog
         .watch_execution(&twin.observed_since(twin_observed))
         .await;
-    StateManager::watch_execution(&backlog, twin_tx.target_chain, Arc::new(twin_tx.clone())).await;
+    StateManager::watch_execution(&backlog, Arc::new(twin_tx.clone())).await;
     let re_registered = backlog
-        .unwatch_execution(
-            twin_tx.target_chain,
-            &twin_tx.id,
-            twin_tx.source_chain,
-            &twin_tx.sign_id(),
-        )
+        .unwatch_execution(twin_tx.target_chain, WatchKey::of(&twin_tx))
         .await
         .expect("re-registered twin must resolve");
     assert_eq!(re_registered.respond_observed_at(), Some(twin_observed));
     let sibling = backlog
-        .unwatch_execution(
-            first_tx.target_chain,
-            &first_tx.id,
-            first_tx.source_chain,
-            &first_tx.sign_id(),
-        )
+        .unwatch_execution(first_tx.target_chain, WatchKey::of(&first_tx))
         .await
         .expect("sibling watch must survive the re-register");
     assert_eq!(sibling.respond_observed_at(), Some(first_observed));
@@ -1750,7 +1697,7 @@ async fn recovered_executing_entry_has_no_wait_start() {
     recovered.recover_by_checkpoint(&checkpoint).await;
 
     let entry = recovered
-        .unwatch_execution(tx.target_chain, &tx.id, tx.source_chain, &tx.sign_id())
+        .unwatch_execution(tx.target_chain, WatchKey::of(&tx))
         .await
         .expect("recovery must re-register the watch");
     assert_eq!(

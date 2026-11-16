@@ -368,8 +368,6 @@ pub(crate) async fn watched_expiry_entry(
     expiration: u64,
 ) -> (BidirectionalTxId, SignId, Arc<BidirectionalTx>) {
     let entry = pending_expiry_entry(state, seed, source, expiration).await;
-    state
-        .watch_execution(Chain::Tron, Arc::clone(&entry.2))
-        .await;
+    state.watch_execution(Arc::clone(&entry.2)).await;
     entry
 }

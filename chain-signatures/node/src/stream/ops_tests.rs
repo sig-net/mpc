@@ -26,7 +26,7 @@ use alloy::primitives::B256;
 use cait_sith::protocol::Participant;
 use k256::{ProjectivePoint, Scalar};
 use mpc_chain_canton::CantonChainCtx;
-use mpc_chain_integration_core::{NoopChainTelemetry, StateManager};
+use mpc_chain_integration_core::{NoopChainTelemetry, StateManager, WatchKey};
 use mpc_primitives::{
     BidirectionalTx, BidirectionalTxId, IndexedSignRequest, SignArgs, SignBidirectionalEvent,
     SignKind, Signature,
@@ -302,7 +302,7 @@ async fn process_execution_confirmed_resolves_a_displaced_watch_by_sign_id() {
     // A flat Tron id: an earlier confirmation consumed this entry's watch
     // while the entry itself is still Executing.
     backlog
-        .unwatch_execution(tx.target_chain, &tx.id, tx.source_chain, &tx.sign_id())
+        .unwatch_execution(tx.target_chain, WatchKey::of(&tx))
         .await;
 
     // No watch, no wait start: the resolution must count as unmeasured.
@@ -980,12 +980,7 @@ async fn an_execution_under_a_later_signature_is_found() {
     );
 
     let found = backlog
-        .unwatch_execution(
-            Chain::Ethereum,
-            &later.id,
-            later.source_chain,
-            &later.sign_id(),
-        )
+        .unwatch_execution(Chain::Ethereum, WatchKey::of(&later))
         .await
         .unwrap();
     assert_eq!(found.execution_tx().id, later.id, "the response names it");
@@ -1083,7 +1078,7 @@ async fn a_later_signature_past_execution_only_records_its_id() {
         if parked {
             executing.park().await.unwrap();
             ctx.backlog
-                .unwatch_execution(Chain::Ethereum, &tx.id, tx.source_chain, &tx.sign_id())
+                .unwatch_execution(Chain::Ethereum, WatchKey::of(&tx))
                 .await;
         } else {
             process_execution_confirmed(
@@ -3238,7 +3233,7 @@ async fn midnight_response_settles_entries_that_missed_the_outcome() {
         lagging.insert_mock_executing(&tx).await;
         if parked {
             lagging
-                .unwatch_execution(Chain::Ethereum, &tx.id, tx.source_chain, &tx.sign_id())
+                .unwatch_execution(Chain::Ethereum, WatchKey::of(&tx))
                 .await
                 .unwrap()
                 .park()
@@ -3515,7 +3510,7 @@ async fn unobserved_response_settles_when_it_verifies() {
         lagging.insert_mock_executing(&tx).await;
         if parked {
             lagging
-                .unwatch_execution(Chain::Ethereum, &tx.id, tx.source_chain, &tx.sign_id())
+                .unwatch_execution(Chain::Ethereum, WatchKey::of(&tx))
                 .await
                 .unwrap()
                 .park()

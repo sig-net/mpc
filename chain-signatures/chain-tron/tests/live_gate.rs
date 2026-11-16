@@ -403,7 +403,7 @@ impl Gate {
         let expected = accepted.receipt.execution_outcome(&tx)?;
 
         let state = MockStateManager::new();
-        state.watch_execution(Chain::Tron, tx).await;
+        state.watch_execution(tx).await;
         let mut run = spawn_watcher(self.watcher_config(), state)?;
         let deadline = Instant::now() + self.deadline;
         let confirmation = loop {

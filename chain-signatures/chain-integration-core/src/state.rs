@@ -109,9 +109,9 @@ pub trait StateManager: Send + Sync + Clone + 'static {
     /// derived index (the mock keeps the two independent).
     async fn get_pending_executions(&self, chain: Chain) -> Vec<WatchedExecution>;
 
-    /// Registers or refreshes the entry's own watch under `tx.id`;
-    /// sibling watches under the same flat id survive.
-    async fn watch_execution(&self, chain: Chain, tx: Arc<BidirectionalTx>);
+    /// Registers or refreshes the entry's own watch under `tx.id`, on
+    /// `tx`'s target chain; sibling watches under the same flat id survive.
+    async fn watch_execution(&self, tx: Arc<BidirectionalTx>);
 
     /// Set the processed block height for a specific chain.
     async fn set_processed_block(&self, chain: Chain, height: u64);
@@ -155,8 +155,9 @@ impl StateManager for MockStateManager {
         self.processed_blocks.write().await.insert(chain, height);
     }
 
-    async fn watch_execution(&self, chain: Chain, tx: Arc<BidirectionalTx>) {
-        self.watchers[chain].write().await.insert(tx);
+    async fn watch_execution(&self, tx: Arc<BidirectionalTx>) {
+        let target = tx.target_chain;
+        self.watchers[target].write().await.insert(tx);
     }
 }
 
@@ -167,13 +168,8 @@ impl MockStateManager {
 
     /// Watch under an explicit sign_id — tests pair one the tx does
     /// not derive.
-    pub async fn watch_execution_as(
-        &self,
-        chain: Chain,
-        sign_id: SignId,
-        tx: Arc<BidirectionalTx>,
-    ) {
-        self.watchers[chain].write().await.insert_at(
+    pub async fn watch_execution_as(&self, sign_id: SignId, tx: Arc<BidirectionalTx>) {
+        self.watchers[tx.target_chain].write().await.insert_at(
             WatchKey {
                 flat_id: tx.id,
                 source: tx.source_chain,
@@ -198,18 +194,9 @@ impl MockStateManager {
             .retain(|tx| tx.source_chain != source_chain || tx.sign_id() != sign_id);
     }
 
-    /// Removes one entry's watch; sibling watches stay.
-    pub async fn remove_execution_watch(
-        &self,
-        chain: Chain,
-        tx_id: &BidirectionalTxId,
-        source_chain: Chain,
-        sign_id: SignId,
-    ) {
-        self.watchers[chain].write().await.remove(&WatchKey {
-            flat_id: *tx_id,
-            source: source_chain,
-            sign_id,
-        });
+    /// Removes one entry's watch, routed to its target chain;
+    /// sibling watches stay.
+    pub async fn remove_execution_watch(&self, target: Chain, key: WatchKey) {
+        self.watchers[target].write().await.remove(&key);
     }
 }

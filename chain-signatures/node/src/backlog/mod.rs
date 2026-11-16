@@ -432,21 +432,13 @@ impl Backlog {
             .register(Arc::clone(&watch.tx), watch.respond_observed_at);
     }
 
-    /// Stops watching and retrieves the entry, keyed by flat id plus
-    /// the entry's own source and sign id; sibling watches stay.
+    /// Stops watching and retrieves the entry; sibling watches stay.
     pub async fn unwatch_execution(
         &self,
-        chain: Chain,
-        tx_id: &BidirectionalTxId,
-        source_chain: Chain,
-        sign_id: &SignId,
+        target: Chain,
+        key: WatchKey,
     ) -> Option<SignEntry<Bidirectional<Executing>>> {
-        let key = WatchKey {
-            flat_id: *tx_id,
-            source: source_chain,
-            sign_id: *sign_id,
-        };
-        let Some((tx, observed_at)) = self.watchers(&chain).write().await.remove(&key) else {
+        let Some((tx, observed_at)) = self.watchers(&target).write().await.remove(&key) else {
             return None;
         };
 
@@ -464,7 +456,7 @@ impl Backlog {
             .map(BacklogEntry::watched_txs)
             .unwrap_or_default();
         // Under the pending lock, as `add_published_tx` inserts: no watch outlives the entry.
-        let mut watchers = self.watchers(&chain).write().await;
+        let mut watchers = self.watchers(&target).write().await;
         for other in others {
             watchers.remove(&WatchKey::of(&other));
         }
@@ -559,6 +551,8 @@ impl Backlog {
             let mut observed_at = None;
             // One request has one target chain, so one guard sweeps its txs.
             if let Some(target) = watched_txs.first().map(|tx| tx.target_chain) {
+                // Ensure all watched transactions have the same target chain.
+                debug_assert!(watched_txs.iter().all(|tx| tx.target_chain == target));
                 let mut watches = self.watchers(&target).write().await;
                 for watched in &watched_txs {
                     let clock = watches
@@ -601,18 +595,13 @@ impl Backlog {
     /// watch, or by source and sign id from the backlog.
     pub async fn executing_entry_for(
         &self,
-        target_chain: Chain,
-        tx_id: &BidirectionalTxId,
-        source_chain: Chain,
-        sign_id: &SignId,
+        target: Chain,
+        key: WatchKey,
     ) -> Option<SignEntry<Bidirectional<Executing>>> {
-        if let Some(entry) = self
-            .unwatch_execution(target_chain, tx_id, source_chain, sign_id)
-            .await
-        {
+        if let Some(entry) = self.unwatch_execution(target, key).await {
             return Some(entry);
         }
-        self.get_by::<Bidirectional<Executing>>(source_chain, sign_id)
+        self.get_by::<Bidirectional<Executing>>(key.source, &key.sign_id)
             .await
     }
 
@@ -850,8 +839,11 @@ impl StateManager for Backlog {
         self.pending_executions_targeting(chain).await
     }
 
-    async fn watch_execution(&self, chain: Chain, tx: Arc<BidirectionalTx>) {
-        self.watchers(&chain).write().await.register(tx, None);
+    async fn watch_execution(&self, tx: Arc<BidirectionalTx>) {
+        self.watchers(&tx.target_chain)
+            .write()
+            .await
+            .register(tx, None);
         // No clock: a re-registration keeps its resident start.
     }
 }

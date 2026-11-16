@@ -19,7 +19,7 @@ use crate::sign_bidirectional::{
 };
 use crate::stream::StreamContext;
 use crate::types::SignCommand;
-use mpc_chain_integration_core::ChainTelemetry;
+use mpc_chain_integration_core::{ChainTelemetry, WatchKey};
 use mpc_chain_solana::Pubkey;
 use mpc_primitives::{
     AttestationOutcomeKind, BidirectionalTx, Chain, ExecutionOutcome, IndexedSignRequest,
@@ -563,7 +563,7 @@ async fn settle_unobserved(
     let sign_id = entry.sign_id();
     // An unviable transaction is never mined, so no execution event would retire its watch.
     ctx.backlog
-        .unwatch_execution(tx.target_chain, &tx.id, tx.source_chain, &tx.sign_id())
+        .unwatch_execution(tx.target_chain, WatchKey::of(tx))
         .await;
     entry.complete().await;
     tracing::info!(
@@ -608,11 +608,12 @@ pub async fn process_execution_confirmed(
         "received execution confirmation event"
     );
 
-    let Some(entry) = ctx
-        .backlog
-        .executing_entry_for(target_chain, &tx_id, source_chain, &sign_id)
-        .await
-    else {
+    let key = WatchKey {
+        flat_id: tx_id,
+        source: source_chain,
+        sign_id,
+    };
+    let Some(entry) = ctx.backlog.executing_entry_for(target_chain, key).await else {
         tracing::warn!(
             ?tx_id,
             ?sign_id,
