@@ -96,7 +96,7 @@ alias ts := test-seq
 
 # Build artifacts: `just build` = whole Rust workspace (via setup),
 # `just build eth` = EVM artifacts, `just build contract` = NEAR contract wasm,
-# `just build test-node` = mpc-node with test-feature, the binary the integration harness spawns (not the release build),
+# `just build test-node` = mpc-node with test-feature in the test-node profile, the binary the integration harness spawns (not the release build),
 # `just build midnight` = midnight-devtools real-stack fixtures,
 # `just build tests` = integration test binaries without running them,
 # `just build compat` = latest release node binary for the compat test
@@ -107,7 +107,7 @@ build target="":
     elif [ "{{target}}" = "contract" ]; then \
       ./build-contract.sh; \
     elif [ "{{target}}" = "test-node" ]; then \
-      cargo build -p mpc-node --release --features test-feature,debug-page; \
+      cargo build -p mpc-node --profile test-node --features test-feature,debug-page; \
     elif [ "{{target}}" = "midnight" ]; then \
       cd chain-signatures/midnight-devtools && npm ci && npm run compile:real-stack-caller && npm run compile:real-stack-vault && npm run typecheck:real-stack; \
     elif [ "{{target}}" = "tests" ]; then \

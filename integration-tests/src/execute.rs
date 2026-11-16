@@ -49,9 +49,10 @@ pub fn target_dir() -> Option<std::path::PathBuf> {
     }
 }
 
+/// `release` selects the `test-node` profile that `just build test-node` builds.
 pub fn executable(release: bool, executable: &str) -> Option<std::path::PathBuf> {
     let executable = target_dir()?
-        .join(if release { "release" } else { "debug" })
+        .join(if release { "test-node" } else { "debug" })
         .join(executable);
     Some(executable)
 }

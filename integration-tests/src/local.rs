@@ -31,7 +31,7 @@ pub struct NodeEnvConfig {
     pub cfg: NodeConfig,
     // near rpc address, after proxy
     pub near_rpc: String,
-    /// Optional custom binary path to use instead of the default target/release
+    /// Optional custom binary path to use instead of the default target/test-node
     pub binary_path: Option<PathBuf>,
 }
 

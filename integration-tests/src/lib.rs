@@ -43,7 +43,7 @@ use serde_json::json;
 /// Specifies which binary to use when spawning a node
 #[derive(Clone, Debug)]
 pub enum NodeBinarySource {
-    /// Use the current compiled code from target/release
+    /// Use the current compiled code from target/test-node
     CurrentCode,
     /// Use the latest release binary compiled under target/compat/latest
     LatestRelease,

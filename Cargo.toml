@@ -147,3 +147,15 @@ debug = 0
 
 [profile.release]
 debug = 0
+
+# The node the integration tests spawn (`just build test-node`). Workspace
+# crates build at opt-level 1 to cut the rebuild time after a code change;
+# dependencies, which hold the crypto, stay fully optimized.
+[profile.test-node]
+inherits = "release"
+opt-level = 1
+codegen-units = 256
+
+[profile.test-node.package."*"]
+opt-level = 3
+codegen-units = 16
