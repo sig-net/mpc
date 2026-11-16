@@ -15,10 +15,16 @@ use serde_json::json;
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest as _;
 use tokio_tungstenite::tungstenite::http::HeaderValue;
+use tokio_tungstenite::tungstenite::protocol::CloseFrame;
 use tokio_tungstenite::tungstenite::{Error as WsError, Message};
 
 /// A connection that answers no keepalive within this long is dead.
 const KEEPALIVE: Duration = Duration::from_secs(30);
+/// How long answering the indexer's close may take: well inside the newest-block query's
+/// own timeout, so a close that cannot be answered still reports its code there unless it
+/// comes in that query's last few seconds.
+const CLOSE_REPLY: Duration = Duration::from_secs(5);
+const _: () = assert!(CLOSE_REPLY.as_secs() < KEEPALIVE.as_secs());
 /// Events buffered between the socket and the replay; with `MAX_MESSAGE`, it bounds
 /// what an indexer can make the node hold.
 const BUFFER: usize = 512;
@@ -122,6 +128,9 @@ impl DustEventSource for IndexerDustEvents {
                     .context("the indexer closed the connection before answering")?
                     .context("reading the indexer's newest block")?;
                 let Message::Text(text) = frame else {
+                    if let Message::Close(close) = frame {
+                        return Err(closed(&mut socket, "the connection", close).await);
+                    }
                     continue;
                 };
                 let message: serde_json::Value = serde_json::from_str(&text)
@@ -185,6 +194,9 @@ async fn open(url: &Url) -> anyhow::Result<Socket> {
             .context("the indexer did not acknowledge the subscription")?
             .context("the indexer closed the subscription before acknowledging it")?
             .context("reading the indexer's acknowledgement")?;
+        if let Message::Close(close) = frame {
+            return Err(closed(&mut socket, "the subscription", close).await);
+        }
         if let Message::Text(text) = frame {
             let message: serde_json::Value = serde_json::from_str(&text)
                 .context("the indexer sent a message that is not JSON")?;
@@ -214,6 +226,27 @@ fn tls() -> anyhow::Result<std::sync::Arc<rustls::ClientConfig>> {
     .with_root_certificates(roots)
     .with_no_client_auth();
     Ok(std::sync::Arc::new(config))
+}
+
+/// Sends the reply tungstenite queued on reading the indexer's close, which it would only
+/// send on a next read, flush or close, and renders why the indexer closed `what`: the code
+/// as a number and the reason quoted, so it stays on one log line. tungstenite hands over a
+/// code the protocol reserves or forbids (1005, 1006, 1015, 5000, ...) as 1002 "Protocol
+/// violation".
+async fn closed<S>(socket: &mut S, what: &str, close: Option<CloseFrame>) -> anyhow::Error
+where
+    S: Sink<Message> + Unpin,
+{
+    // Best effort: a peer that stopped reading must not hold the caller.
+    let _ = tokio::time::timeout(CLOSE_REPLY, socket.close()).await;
+    match close {
+        Some(frame) => anyhow::anyhow!(
+            "the indexer closed {what} with code {} and reason {:?}",
+            frame.code,
+            frame.reason.as_str()
+        ),
+        None => anyhow::anyhow!("the indexer closed {what} without a close code"),
+    }
 }
 
 type Socket =
@@ -246,7 +279,7 @@ where
                 answered = true;
                 let Message::Text(text) = frame else {
                     if let Message::Close(close) = frame {
-                        anyhow::bail!("the indexer closed the subscription: {close:?}");
+                        return Err(closed(&mut socket, "the subscription", close).await);
                     }
                     continue;
                 };
@@ -467,6 +500,34 @@ mod tests {
         assert!(format!("{error:#}").contains("keepalive"), "{error:#}");
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn an_unanswerable_close_holds_the_subscription_for_its_reply_timeout_at_most() {
+        use tokio_tungstenite::tungstenite::protocol::Role;
+        // Too small for the close reply, and never read.
+        let (client, server) = tokio::io::duplex(8);
+        let client = WebSocketStream::from_raw_socket(client, Role::Client, None).await;
+        let mut server = WebSocketStream::from_raw_socket(server, Role::Server, None).await;
+        let indexer = tokio::spawn(async move {
+            let close = CloseFrame {
+                code: 4003.into(),
+                reason: "full".into(),
+            };
+            server.send(Message::Close(Some(close))).await.unwrap();
+            // Held open and never read.
+            std::future::pending::<()>().await;
+        });
+        let (sender, _receiver) = mpsc::channel(1);
+
+        let started = tokio::time::Instant::now();
+        let error = tokio::time::timeout(CLOSE_REPLY * 2, pump(client, &sender))
+            .await
+            .expect("answering the close gives up after its timeout")
+            .unwrap_err();
+        assert!(started.elapsed() <= CLOSE_REPLY, "{:?}", started.elapsed());
+        assert!(format!("{error:#}").contains("code 4003"), "{error:#}");
+        indexer.abort();
+    }
+
     #[tokio::test]
     async fn an_oversized_message_ends_the_subscription_with_an_error() {
         let (url, server) = indexer(|mut socket| async move {
@@ -550,5 +611,96 @@ mod tests {
             .expect("the indexer script ends")
             .unwrap();
         assert_eq!(time, Timestamp::from_secs(1_761_400_000));
+    }
+
+    /// Closes the connection, and checks the client answers the close as RFC 6455 asks
+    /// instead of dropping the connection.
+    async fn close(socket: &mut ServerSocket, close: Option<(u16, &'static str)>) {
+        let frame = close.map(|(code, reason)| CloseFrame {
+            code: code.into(),
+            reason: reason.into(),
+        });
+        socket.send(Message::Close(frame)).await.unwrap();
+        loop {
+            match socket.next().await {
+                Some(Ok(Message::Close(_))) => return,
+                Some(Ok(_)) => {}
+                other => panic!("the client dropped the connection unanswered: {other:?}"),
+            }
+        }
+    }
+
+    /// The indexer's close code and reason reach the error wherever it closes.
+    #[tokio::test]
+    async fn the_indexer_s_close_code_and_reason_reach_the_error() {
+        let (url, server) = indexer(|mut socket| async move {
+            assert_eq!(receive(&mut socket).await["type"], "connection_init");
+            close(
+                &mut socket,
+                Some((4429, "Too many initialisation requests")),
+            )
+            .await;
+        })
+        .await;
+        let refused =
+            tokio::time::timeout(TEST_TIMEOUT, IndexerDustEvents::new(url).subscribe(None))
+                .await
+                .expect("a close ends the handshake")
+                .err()
+                .expect("a closed handshake opens no subscription");
+        server.await.unwrap();
+
+        let (url, server) = indexer(|mut socket| async move {
+            accept(&mut socket).await;
+            receive(&mut socket).await;
+            close(&mut socket, Some((1013, "try again later"))).await;
+        })
+        .await;
+        let unanswered =
+            tokio::time::timeout(TEST_TIMEOUT, IndexerDustEvents::new(url).indexed_time())
+                .await
+                .expect("a close ends the query")
+                .unwrap_err();
+        server.await.unwrap();
+
+        let (url, server) = indexer(|mut socket| async move {
+            accept(&mut socket).await;
+            receive(&mut socket).await;
+            close(&mut socket, Some((1001, "going\naway"))).await;
+        })
+        .await;
+        let mut stream = IndexerDustEvents::new(url).subscribe(None).await.unwrap();
+        let dropped = tokio::time::timeout(TEST_TIMEOUT, stream.next())
+            .await
+            .expect("a close ends the subscription")
+            .unwrap()
+            .unwrap_err();
+        server.await.unwrap();
+
+        let (url, server) = indexer(|mut socket| async move {
+            assert_eq!(receive(&mut socket).await["type"], "connection_init");
+            close(&mut socket, None).await;
+        })
+        .await;
+        let bare = tokio::time::timeout(TEST_TIMEOUT, IndexerDustEvents::new(url).subscribe(None))
+            .await
+            .expect("a close ends the handshake")
+            .err()
+            .expect("a closed handshake opens no subscription");
+        server.await.unwrap();
+        assert!(
+            format!("{bare:#}").contains("without a close code"),
+            "{bare:#}"
+        );
+
+        for (error, code, reason) in [
+            (refused, "4429", "Too many initialisation requests"),
+            (unanswered, "1013", "try again later"),
+            (dropped, "1001", r#""going\naway""#),
+        ] {
+            let error = format!("{error:#}");
+            assert!(error.contains(code) && error.contains(reason), "{error}");
+            assert!(!error.contains('\n'), "one log line: {error}");
+        }
     }
 }
