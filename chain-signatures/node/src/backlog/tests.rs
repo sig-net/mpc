@@ -1884,6 +1884,37 @@ async fn advance_accepts_a_signature_recovered_by_the_second_recovery_id() {
     assert_eq!(publishing.signature().recovery_id, 1);
 }
 
+/// After id 0's recovery fails, an id-1 recovery that yields a different key
+/// is still rejected.
+#[tokio::test]
+async fn advance_rejects_a_second_id_signature_for_a_different_key() {
+    use k256::{ProjectivePoint, Scalar};
+
+    let backlog = Backlog::persisted(CheckpointStorage::in_memory());
+    let mut request = (*mock_sign_request(SignId::new([7; 32]), Chain::Solana)).clone();
+    request.args.payload = Scalar::from(1u32); // epsilon is already 1
+    let request = Arc::new(request);
+
+    // Same (big_r = -G, s = payload = 1) vector as the positive case, but the
+    // derived key (G + G) is not the -(2/x(G))·G that id 1 recovers.
+    let output = cait_sith::FullSignature::<k256::Secp256k1> {
+        big_r: (-ProjectivePoint::GENERATOR).to_affine(),
+        s: Scalar::from(1u32),
+    };
+
+    let (entry, _) = backlog.insert(Arc::clone(&request)).await;
+    let result = entry
+        .advance(
+            ProjectivePoint::GENERATOR.to_affine(),
+            &output,
+            mock_participants(),
+            true,
+        )
+        .await;
+
+    assert_matches!(result, Err(BacklogError::InvalidSignature));
+}
+
 /// A round that finishes after its request left the backlog leaves no record.
 #[tokio::test]
 async fn a_round_after_removal_leaves_no_record() {
