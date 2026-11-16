@@ -799,7 +799,7 @@ impl Backlog {
         // Under the pending lock, as `add_published_tx` inserts: a
         // racing publish registers after the rebuild, not into rows it
         // deletes.
-        let mut pending = self.pending(&chain).write().await;
+        let pending = self.pending(&chain).write().await;
         let mut by_target: EnumMap<Chain, Vec<Arc<BidirectionalTx>>> = EnumMap::default();
         for tx in pending.execution_watches() {
             by_target[tx.target_chain].push(tx);
