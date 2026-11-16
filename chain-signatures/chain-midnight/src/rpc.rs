@@ -9,8 +9,7 @@ use jsonrpsee::core::traits::ToRpcParams;
 use jsonrpsee::http_client::{HttpClient, HttpClientBuilder};
 use jsonrpsee::types::error::{INVALID_PARAMS_CODE, OVERSIZED_RESPONSE_CODE};
 use mpc_chain_integration_core::utils::retry::{
-    exhausted, http_status_read_retryable, is_retryable, run_gated, RetryConfig, RpcFailure,
-    SharedBackoff,
+    exhausted, http_status_read_retryable, is_retryable, RetryConfig,
 };
 use subxt::backend::legacy::rpc_methods::{BlockDetails, NumberOrHex};
 use subxt::backend::legacy::LegacyRpcMethods;
@@ -105,28 +104,22 @@ impl ToRpcParams for Params {
 /// fallen out of sync would fail every request for as long as the connection lives. A
 /// failed request therefore replaces the client and its connection pool, and the next
 /// request dials afresh.
-///
-/// Every request, from any caller sharing `gate`, waits out the gate's cooldown first,
-/// and an answer of 429 or 402 extends it, so a throttling provider slows every caller
-/// instead of each retrying on its own schedule.
 struct HttpRpcClient {
     node_url: String,
     config: RpcConfig,
     max_response_size: u32,
-    gate: SharedBackoff,
     /// The client plus a generation, so concurrent failures replace it once.
     current: std::sync::RwLock<(u64, HttpClient)>,
 }
 
 impl HttpRpcClient {
-    fn new(node_url: &str, config: &RpcConfig, gate: SharedBackoff) -> anyhow::Result<Self> {
-        Self::with_response_cap(node_url, config, gate, MAX_RESPONSE_SIZE)
+    fn new(node_url: &str, config: &RpcConfig) -> anyhow::Result<Self> {
+        Self::with_response_cap(node_url, config, MAX_RESPONSE_SIZE)
     }
 
     fn with_response_cap(
         node_url: &str,
         config: &RpcConfig,
-        gate: SharedBackoff,
         max_response_size: u32,
     ) -> anyhow::Result<Self> {
         Ok(Self {
@@ -137,7 +130,6 @@ impl HttpRpcClient {
             node_url: node_url.to_owned(),
             config: config.clone(),
             max_response_size,
-            gate,
         })
     }
 
@@ -182,81 +174,6 @@ impl HttpRpcClient {
     }
 }
 
-/// A failed request as the gate reads it: the transport's error with an [`RpcFailure`]
-/// beneath it that carries the HTTP status the node answered with, or none, so a number
-/// in the message is never read as a status.
-#[derive(Debug)]
-struct GatedRequest {
-    error: JsonrpseeClientError,
-    failure: RpcFailure,
-    /// The client generation the request went out on.
-    generation: u64,
-}
-
-impl GatedRequest {
-    fn new(error: JsonrpseeClientError, generation: u64) -> Self {
-        let message = error.to_string();
-        let failure = match rejected_status(&error).and_then(|code| StatusCode::from_u16(code).ok())
-        {
-            Some(status) => RpcFailure::read_status(status, message),
-            None => RpcFailure::retryable(message),
-        };
-        Self {
-            error,
-            failure,
-            generation,
-        }
-    }
-}
-
-impl std::fmt::Display for GatedRequest {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("midnight RPC request failed")
-    }
-}
-
-impl std::error::Error for GatedRequest {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        Some(&self.failure)
-    }
-}
-
-/// The HTTP status of a response the transport refused for its status.
-fn rejected_status(error: &JsonrpseeClientError) -> Option<u16> {
-    let JsonrpseeClientError::Transport(transport_error) = error else {
-        return None;
-    };
-    match transport_error.downcast_ref::<jsonrpsee::http_client::transport::Error>()? {
-        jsonrpsee::http_client::transport::Error::Rejected { status_code } => Some(*status_code),
-        _ => None,
-    }
-}
-
-/// Waits until `gate`'s cooldown has passed, including any extension another caller's
-/// throttle makes meanwhile, so a timeout started next is not spent waiting on it.
-pub(crate) async fn wait_out(gate: &SharedBackoff, operation: &'static str) {
-    loop {
-        let remaining = gate.remaining();
-        if remaining.is_zero() {
-            return;
-        }
-        if remaining > GATE_PARK_WARN_AFTER {
-            if let Some(count) = mpc_utils::throttle::check("midnight:gate-wait") {
-                tracing::warn!(
-                    count,
-                    operation,
-                    ?remaining,
-                    "midnight: waiting out the shared throttle window"
-                );
-            }
-        }
-        gate.wait().await;
-    }
-}
-
-/// A wait longer than this is logged, as the core's gated calls log theirs.
-const GATE_PARK_WARN_AFTER: Duration = Duration::from_secs(5);
-
 fn build_http_client(
     node_url: &str,
     config: &RpcConfig,
@@ -276,24 +193,11 @@ impl RpcClientT for HttpRpcClient {
         params: Option<Box<RawValue>>,
     ) -> RawRpcFuture<'a, Box<RawValue>> {
         Box::pin(async move {
-            wait_out(&self.gate, "midnight_rpc").await;
-            // The client is taken once the gate lets the request go, so a request that
-            // waited does not go out on a pool a failure meanwhile replaced.
-            let result = run_gated(&self.gate, "midnight_rpc", async {
-                let (generation, client) = self.current();
-                client
-                    .request(method, Params(params))
-                    .await
-                    .map_err(|error| anyhow::Error::new(GatedRequest::new(error, generation)))
-            })
-            .await
-            .map_err(|error| {
-                let failed = error
-                    .downcast::<GatedRequest>()
-                    .expect("the gated request fails only with its own error");
-                self.replace(failed.generation);
-                failed.error
-            });
+            let (generation, client) = self.current();
+            let result = client.request(method, Params(params)).await;
+            if result.is_err() {
+                self.replace(generation);
+            }
             result.map_err(|error| match error {
                 JsonrpseeClientError::Call(error) => RawRpcError::User(UserError {
                     code: error.code(),
@@ -444,16 +348,12 @@ fn parse_block_hash(at_block_hash_0x: &str) -> anyhow::Result<H256> {
     Ok(H256(bytes))
 }
 
-fn connect_gated(config: &MidnightConfig, gate: SharedBackoff) -> anyhow::Result<RpcClient> {
-    connect_http_endpoint(config.node_url.as_str(), &config.rpc, gate)
+fn connect_http(config: &MidnightConfig) -> anyhow::Result<RpcClient> {
+    connect_http_endpoint(config.node_url.as_str(), &config.rpc)
 }
 
-fn connect_http_endpoint(
-    node_url: &str,
-    config: &RpcConfig,
-    gate: SharedBackoff,
-) -> anyhow::Result<RpcClient> {
-    Ok(RpcClient::new(HttpRpcClient::new(node_url, config, gate)?))
+fn connect_http_endpoint(node_url: &str, config: &RpcConfig) -> anyhow::Result<RpcClient> {
+    Ok(RpcClient::new(HttpRpcClient::new(node_url, config)?))
 }
 
 pub(crate) struct MidnightRpc {
@@ -471,11 +371,9 @@ struct FinalizedHead {
 }
 
 impl MidnightRpc {
-    /// Builds Subxt over the request-only HTTP client named by `config.node_url`, its
-    /// requests under `gate`.
-    pub async fn connect(config: &MidnightConfig, gate: SharedBackoff) -> anyhow::Result<Self> {
-        let rpc = connect_gated(config, gate.clone())?;
-        wait_out(&gate, "midnight_connect").await;
+    /// Builds Subxt over the request-only HTTP client named by `config.node_url`.
+    pub async fn connect(config: &MidnightConfig) -> anyhow::Result<Self> {
+        let rpc = connect_http(config)?;
         let client = tokio::time::timeout(
             config.rpc.connect_timeout,
             OnlineClient::<SubstrateConfig>::from_rpc_client(rpc.clone()),
@@ -486,7 +384,7 @@ impl MidnightRpc {
 
         Ok(Self {
             client,
-            reads: Reads::gated(rpc, config.rpc.request_timeout, config.rpc.retry, gate),
+            reads: Reads::new(rpc, config.rpc.request_timeout, config.rpc.retry),
             head: Default::default(),
             walked: Default::default(),
         })
@@ -676,7 +574,6 @@ impl MidnightRpc {
             .value
             .now;
         let block_events = retry_read(
-            &self.reads.gate,
             self.reads.request_timeout,
             self.reads.retry,
             "midnight_block_events",
@@ -835,11 +732,9 @@ fn recall<T: Clone>(entries: &std::collections::VecDeque<(H256, T)>, hash: H256)
 }
 
 impl MidnightPublisherRpc {
-    /// Connects over the request-only HTTP client, its requests under `gate`.
-    pub async fn connect(config: &MidnightConfig, gate: SharedBackoff) -> anyhow::Result<Self> {
-        wait_out(&gate, "midnight_connect").await;
+    pub async fn connect(config: &MidnightConfig) -> anyhow::Result<Self> {
         tokio::time::timeout(config.rpc.connect_timeout, async {
-            let rpc = connect_gated(config, gate)?;
+            let rpc = connect_http(config)?;
             let legacy = LegacyRpcMethods::<SubstrateConfig>::new(rpc.clone());
             let network_id = network_id(&legacy).await?;
             let genesis_hash = legacy
@@ -1184,7 +1079,7 @@ fn decode_network_id(answer: &[u8]) -> anyhow::Result<String> {
 /// answers with a connection error and the caller keeps polling.
 #[cfg(feature = "sandbox")]
 pub async fn probe_network_id(node_http_url: &str) -> anyhow::Result<Option<String>> {
-    let rpc = connect_http_endpoint(node_http_url, &RpcConfig::default(), SharedBackoff::new())?;
+    let rpc = connect_http_endpoint(node_http_url, &RpcConfig::default())?;
     let legacy = LegacyRpcMethods::<SubstrateConfig>::new(rpc);
     let block_one = legacy
         .chain_get_block_hash(Some(NumberOrHex::Number(1)))
@@ -1357,8 +1252,6 @@ struct Reads {
     legacy: LegacyRpcMethods<SubstrateConfig>,
     request_timeout: Duration,
     retry: RetryConfig,
-    /// The transport's gate, waited out before an attempt's timeout starts.
-    gate: SharedBackoff,
 }
 
 fn rejected_http_status(error: &anyhow::Error) -> Option<u16> {
@@ -1366,7 +1259,17 @@ fn rejected_http_status(error: &anyhow::Error) -> Option<u16> {
         let RawRpcError::Client(client_error) = cause.downcast_ref::<RawRpcError>()? else {
             return None;
         };
-        rejected_status(client_error.downcast_ref::<JsonrpseeClientError>()?)
+        let JsonrpseeClientError::Transport(transport_error) =
+            client_error.downcast_ref::<JsonrpseeClientError>()?
+        else {
+            return None;
+        };
+        let jsonrpsee::http_client::transport::Error::Rejected { status_code } =
+            transport_error.downcast_ref::<jsonrpsee::http_client::transport::Error>()?
+        else {
+            return None;
+        };
+        Some(*status_code)
     })
 }
 
@@ -1390,10 +1293,7 @@ fn is_read_retryable(error: &anyhow::Error) -> bool {
     is_retryable(error)
 }
 
-/// Retries a read on `retry`, each attempt bounded by `timeout` from when it may go out:
-/// a cooldown `gate` imposes is waited out first, so it never times an attempt out.
 async fn retry_read<T, F, Fut>(
-    gate: &SharedBackoff,
     timeout: Duration,
     retry: RetryConfig,
     operation: &'static str,
@@ -1407,7 +1307,6 @@ where
     let operation_call = || {
         let future = attempt();
         async move {
-            wait_out(gate, operation).await;
             match tokio::time::timeout(timeout, future).await {
                 Ok(result) => result,
                 Err(_) => Err(anyhow::anyhow!("operation timed out after {timeout:?}")),
@@ -1433,29 +1332,17 @@ where
 }
 
 impl Reads {
-    fn gated(
-        rpc: RpcClient,
-        request_timeout: Duration,
-        retry: RetryConfig,
-        gate: SharedBackoff,
-    ) -> Self {
+    fn new(rpc: RpcClient, request_timeout: Duration, retry: RetryConfig) -> Self {
         Self {
             legacy: LegacyRpcMethods::<SubstrateConfig>::new(rpc.clone()),
             rpc,
             request_timeout,
             retry,
-            gate,
         }
-    }
-
-    #[cfg(test)]
-    fn new(rpc: RpcClient, request_timeout: Duration, retry: RetryConfig) -> Self {
-        Self::gated(rpc, request_timeout, retry, SharedBackoff::new())
     }
 
     async fn finalized_head(&self) -> anyhow::Result<H256> {
         retry_read(
-            &self.gate,
             self.request_timeout,
             self.retry,
             "midnight_finalized_head",
@@ -1475,7 +1362,6 @@ impl Reads {
         hash: H256,
     ) -> anyhow::Result<Option<<SubstrateConfig as subxt::Config>::Header>> {
         retry_read(
-            &self.gate,
             self.request_timeout,
             self.retry,
             "midnight_header",
@@ -1512,25 +1398,18 @@ impl Reads {
         hash: H256,
         retry: RetryConfig,
     ) -> anyhow::Result<Option<BlockDetails<SubstrateConfig>>> {
-        retry_read(
-            &self.gate,
-            self.request_timeout,
-            retry,
-            "midnight_block",
-            || async {
-                self.legacy
-                    .chain_get_block(Some(hash))
-                    .await
-                    .map_err(anyhow::Error::new)
-                    .context("failed to fetch a midnight block")
-            },
-        )
+        retry_read(self.request_timeout, retry, "midnight_block", || async {
+            self.legacy
+                .chain_get_block(Some(hash))
+                .await
+                .map_err(anyhow::Error::new)
+                .context("failed to fetch a midnight block")
+        })
         .await
     }
 
     async fn block_hash_at(&self, number: u64) -> anyhow::Result<Option<H256>> {
         retry_read(
-            &self.gate,
             self.request_timeout,
             self.retry,
             "midnight_block_hash_at",
@@ -1551,7 +1430,6 @@ impl Reads {
         at_block_hash_0x: &str,
     ) -> anyhow::Result<Option<Vec<u8>>> {
         retry_read(
-            &self.gate,
             self.request_timeout,
             self.retry,
             "midnight_contractState",
@@ -1592,15 +1470,6 @@ mod tests {
     use subxt::ext::scale_decode::DecodeAsType;
     use subxt::ext::subxt_rpcs::UserError;
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
-
-    /// The transport under a gate of its own, whose cooldowns are too short to slow a
-    /// test that is not about them.
-    fn connect_http(config: &MidnightConfig) -> anyhow::Result<RpcClient> {
-        connect_gated(
-            config,
-            SharedBackoff::with_cooldowns(Duration::from_millis(1), Duration::from_millis(1)),
-        )
-    }
 
     /// The `Timestamp::set` moment the synthetic test body carries, unix ms.
     const FIXTURE_BLOCK_TIME_MS: u64 = 1_700_000_000_000;
@@ -2422,7 +2291,7 @@ mod tests {
             rpc: Default::default(),
             indexer: Default::default(),
         };
-        let rpc = MidnightRpc::connect(&config, SharedBackoff::new())
+        let rpc = MidnightRpc::connect(&config)
             .await
             .expect("connect to capture node");
         let block_ref = rpc
@@ -2593,232 +2462,6 @@ mod tests {
         }
     }
 
-    /// A 429 or 402 answered to one caller holds the next request of every caller sharing
-    /// the gate, as the indexer's reads and the publisher's share the chain's.
-    #[tokio::test]
-    async fn a_throttled_answer_holds_every_caller_sharing_the_gate() {
-        let cooldown = Duration::from_millis(400);
-        for (status, reason) in [(429, "Too Many Requests"), (402, "Payment Required")] {
-            let gate = SharedBackoff::with_cooldowns(cooldown, Duration::from_secs(5));
-            let (address, calls, server) = http_status_server(status, reason).await;
-            let config = http_config(address);
-            let indexer = Reads::gated(
-                connect_gated(&config, gate.clone()).unwrap(),
-                Duration::from_secs(5),
-                attempts(0),
-                gate.clone(),
-            );
-            let publisher = LegacyRpcMethods::<SubstrateConfig>::new(
-                connect_gated(&config, gate.clone()).unwrap(),
-            );
-
-            indexer
-                .finalized_head()
-                .await
-                .expect_err("the node throttles");
-            assert!(
-                gate.remaining() > Duration::ZERO,
-                "{status} must engage the shared gate"
-            );
-            let held = std::time::Instant::now();
-            publisher
-                .chain_get_finalized_head()
-                .await
-                .expect_err("the node still throttles");
-            let waited = held.elapsed();
-            server.abort();
-
-            assert!(
-                waited >= cooldown - Duration::from_millis(100),
-                "the other caller's request went out {waited:?} after a {status}"
-            );
-            assert_eq!(calls.load(Ordering::SeqCst), 2);
-        }
-    }
-
-    /// A read waiting out the shared gate's cooldown is not timed out by it: the attempt's
-    /// timeout runs from when the request goes out.
-    #[tokio::test]
-    async fn a_read_waits_out_a_cooldown_longer_than_its_timeout() {
-        let server = ServerBuilder::default().build("127.0.0.1:0").await.unwrap();
-        let config = http_config(server.local_addr().unwrap());
-        let mut module = RpcModule::new(());
-        module
-            .register_method("chain_getFinalizedHead", |_, _, _| hash_of_byte(0x22))
-            .unwrap();
-        let _handle = server.start(module);
-        let gate = SharedBackoff::with_cooldowns(Duration::from_secs(2), Duration::from_secs(2));
-        gate.extend_cooldown();
-        let reads = Reads::gated(
-            connect_gated(&config, gate.clone()).unwrap(),
-            Duration::from_millis(500),
-            attempts(0),
-            gate,
-        );
-        let head = reads
-            .finalized_head()
-            .await
-            .expect("the read goes out once the cooldown has passed");
-        assert_eq!(hex_0x(head), hash_of_byte(0x22));
-    }
-
-    /// A read whose wait another caller's throttle extends waits out the extension too
-    /// before its timeout starts.
-    #[tokio::test]
-    async fn a_read_waits_out_a_cooldown_extended_while_it_waits() {
-        let server = ServerBuilder::default().build("127.0.0.1:0").await.unwrap();
-        let config = http_config(server.local_addr().unwrap());
-        let mut module = RpcModule::new(());
-        module
-            .register_method("chain_getFinalizedHead", |_, _, _| hash_of_byte(0x22))
-            .unwrap();
-        let _handle = server.start(module);
-        let gate =
-            SharedBackoff::with_cooldowns(Duration::from_millis(300), Duration::from_secs(2));
-        gate.extend_cooldown();
-        let throttled = gate.clone();
-        let extend = tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(100)).await;
-            for _ in 0..3 {
-                throttled.extend_cooldown();
-            }
-        });
-        let reads = Reads::gated(
-            connect_gated(&config, gate.clone()).unwrap(),
-            Duration::from_millis(500),
-            attempts(0),
-            gate,
-        );
-        let head = reads
-            .finalized_head()
-            .await
-            .expect("the read goes out once the extended cooldown has passed");
-        extend.await.unwrap();
-        assert_eq!(hex_0x(head), hash_of_byte(0x22));
-    }
-
-    /// A single request, as the publisher sends, also waits out a cooldown another
-    /// caller's throttle extends while it waits.
-    #[tokio::test]
-    async fn a_request_waits_out_a_cooldown_extended_while_it_waits() {
-        let server = ServerBuilder::default().build("127.0.0.1:0").await.unwrap();
-        let config = http_config(server.local_addr().unwrap());
-        let arrived = Arc::new(std::sync::Mutex::new(None));
-        let mut module = RpcModule::new(());
-        let arrival = arrived.clone();
-        module
-            .register_method("chain_getFinalizedHead", move |_, _, _| {
-                arrival
-                    .lock()
-                    .unwrap()
-                    .get_or_insert_with(std::time::Instant::now);
-                hash_of_byte(0x22)
-            })
-            .unwrap();
-        let _handle = server.start(module);
-        let gate =
-            SharedBackoff::with_cooldowns(Duration::from_millis(400), Duration::from_secs(5));
-        gate.extend_cooldown();
-        let throttled = gate.clone();
-        let started = std::time::Instant::now();
-        let extend = tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(100)).await;
-            for _ in 0..3 {
-                throttled.extend_cooldown();
-            }
-        });
-        LegacyRpcMethods::<SubstrateConfig>::new(connect_gated(&config, gate).unwrap())
-            .chain_get_finalized_head()
-            .await
-            .unwrap();
-        extend.await.unwrap();
-        let went_out = arrived.lock().unwrap().unwrap() - started;
-        assert!(
-            went_out >= Duration::from_millis(3200),
-            "the request went out {went_out:?} in, inside a window extended to about 3.3 s"
-        );
-    }
-
-    /// The indexer's and the publisher's connects wait out the shared gate's cooldown
-    /// before their connect timeout starts: their first request goes out after it.
-    #[tokio::test]
-    async fn connects_wait_out_a_cooldown_longer_than_their_timeout() {
-        let server = ServerBuilder::default().build("127.0.0.1:0").await.unwrap();
-        let address = server.local_addr().unwrap();
-        let calls = Arc::new(AtomicUsize::new(0));
-        let mut module = RpcModule::new(());
-        for method in ["chain_getBlockHash", "chain_getFinalizedHead"] {
-            let counted = calls.clone();
-            module
-                .register_method(method, move |_, _, _| {
-                    counted.fetch_add(1, Ordering::SeqCst);
-                    hash_of_byte(0x11)
-                })
-                .unwrap();
-        }
-        let _handle = server.start(module);
-        let mut config = http_config(address);
-        config.rpc.connect_timeout = Duration::from_millis(500);
-        let engaged = || {
-            let gate =
-                SharedBackoff::with_cooldowns(Duration::from_secs(2), Duration::from_secs(2));
-            gate.extend_cooldown();
-            gate
-        };
-
-        // Neither connect completes against this node; each must have sent a request.
-        let _ = MidnightRpc::connect(&config, engaged()).await;
-        assert!(calls.load(Ordering::SeqCst) > 0, "the indexer sent nothing");
-        let sent = calls.load(Ordering::SeqCst);
-        let _ = MidnightPublisherRpc::connect(&config, engaged()).await;
-        assert!(
-            calls.load(Ordering::SeqCst) > sent,
-            "the publisher sent nothing"
-        );
-    }
-
-    /// Only a throttling status engages the gate: neither a server error nor a node's
-    /// own refusal whose message carries the digits 429.
-    #[tokio::test]
-    async fn other_failures_leave_the_gate_open() {
-        let gate = SharedBackoff::with_cooldowns(Duration::from_secs(5), Duration::from_secs(5));
-        let (address, _calls, server) = http_status_server(500, "Internal Server Error").await;
-        LegacyRpcMethods::<SubstrateConfig>::new(
-            connect_gated(&http_config(address), gate.clone()).unwrap(),
-        )
-        .chain_get_finalized_head()
-        .await
-        .expect_err("the node fails");
-        server.abort();
-        assert_eq!(gate.remaining(), Duration::ZERO, "a 500 engaged the gate");
-
-        let server = ServerBuilder::default().build("127.0.0.1:0").await.unwrap();
-        let address = server.local_addr().unwrap();
-        let mut module = RpcModule::new(());
-        module
-            .register_method("chain_getFinalizedHead", |_, _, _| {
-                Err::<String, _>(ErrorObjectOwned::owned(
-                    -32000,
-                    "no block 429 at 127.0.0.1:429",
-                    None::<()>,
-                ))
-            })
-            .unwrap();
-        let _handle = server.start(module);
-        let error = LegacyRpcMethods::<SubstrateConfig>::new(
-            connect_gated(&http_config(address), gate.clone()).unwrap(),
-        )
-        .chain_get_finalized_head()
-        .await
-        .expect_err("the node refuses");
-        assert!(error.to_string().contains("429"), "{error}");
-        assert_eq!(
-            gate.remaining(),
-            Duration::ZERO,
-            "a refusal mentioning 429 engaged the gate"
-        );
-    }
-
     /// A keep-alive HTTP server whose first connection reaches a node that has fallen
     /// out of sync: every request on that connection fails as such a node fails, and
     /// every later connection answers like a healthy node. A load balancer keeps one
@@ -2941,12 +2584,8 @@ mod tests {
 
     #[test]
     fn a_late_failure_does_not_replace_the_client_that_replaced_its_own() {
-        let client = HttpRpcClient::new(
-            "http://127.0.0.1:1",
-            &RpcConfig::default(),
-            SharedBackoff::new(),
-        )
-        .expect("build request-only client");
+        let client = HttpRpcClient::new("http://127.0.0.1:1", &RpcConfig::default())
+            .expect("build request-only client");
 
         client.replace(0);
         client.replace(0);
@@ -3085,7 +2724,6 @@ mod tests {
             HttpRpcClient::with_response_cap(
                 capped_config.node_url.as_str(),
                 &capped_config.rpc,
-                SharedBackoff::new(),
                 128,
             )
             .expect("build capped transport"),
@@ -3244,13 +2882,8 @@ mod tests {
 
         let config = http_config(address);
         let rpc = RpcClient::new(
-            HttpRpcClient::with_response_cap(
-                config.node_url.as_str(),
-                &config.rpc,
-                SharedBackoff::new(),
-                128,
-            )
-            .expect("build capped transport"),
+            HttpRpcClient::with_response_cap(config.node_url.as_str(), &config.rpc, 128)
+                .expect("build capped transport"),
         );
         let reads = Reads::new(rpc, READ_TIMEOUT, attempts(2));
         let err = reads
@@ -3359,7 +2992,7 @@ mod tests {
 
         let result = tokio::time::timeout(
             Duration::from_millis(750),
-            MidnightPublisherRpc::connect(&config, SharedBackoff::new()),
+            MidnightPublisherRpc::connect(&config),
         )
         .await;
         server.abort();

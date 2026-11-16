@@ -12,7 +12,6 @@ use integration_tests::midnight::{
     AdversarialScenario, CallPlacement, MidnightContext, PlacementScenario,
 };
 use k256::elliptic_curve::sec1::ToEncodedPoint as _;
-use mpc_chain_integration_core::utils::retry::SharedBackoff;
 use mpc_chain_integration_core::utils::test::ChainIndexerStream;
 use mpc_chain_integration_core::{MockStateManager, NoopChainTelemetry};
 use mpc_chain_midnight::MidnightIndexer;
@@ -339,7 +338,6 @@ async fn midnight_to_ethereum_to_midnight_consumes_caller_response() -> anyhow::
         MockStateManager::new(),
         NoopChainTelemetry,
         root_pk,
-        SharedBackoff::new(),
     )
     .await?;
     let mut events = ChainIndexerStream::start(indexer, EVENT_TIMEOUT).await?;
@@ -738,7 +736,6 @@ async fn midnight_indexes_notifications_by_transcript_placement() -> anyhow::Res
         MockStateManager::new(),
         NoopChainTelemetry,
         root_public_key,
-        SharedBackoff::new(),
     )
     .await?;
     let mut events = ChainIndexerStream::start(indexer, EVENT_TIMEOUT).await?;
@@ -974,7 +971,6 @@ async fn midnight_vault_operations_complete_with_real_mpc() -> anyhow::Result<()
         MockStateManager::new(),
         NoopChainTelemetry,
         root_public_key,
-        SharedBackoff::new(),
     )
     .await?;
     let mut events = ChainIndexerStream::start(indexer, EVENT_TIMEOUT).await?;
@@ -1090,7 +1086,6 @@ async fn midnight_partial_success_review_shapes() -> anyhow::Result<()> {
         MockStateManager::new(),
         NoopChainTelemetry,
         root_public_key,
-        SharedBackoff::new(),
     )
     .await?;
     let mut events = ChainIndexerStream::start(indexer, EVENT_TIMEOUT).await?;

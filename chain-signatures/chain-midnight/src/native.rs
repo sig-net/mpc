@@ -1776,18 +1776,12 @@ mod live {
             indexer: Default::default(),
         };
         config.validate().unwrap();
-        let gate = mpc_chain_integration_core::utils::retry::SharedBackoff::new();
-        let rpc = Arc::new(
-            MidnightPublisherRpc::connect(&config, gate.clone())
-                .await
-                .unwrap(),
-        );
+        let rpc = Arc::new(MidnightPublisherRpc::connect(&config).await.unwrap());
         let key = dust_secret_key(&parse_seed(&config.publisher.funding_seed).unwrap()).unwrap();
         let wallet = FundingWallet::start(
             key,
-            Arc::new(IndexerDustEvents::gated(
+            Arc::new(IndexerDustEvents::new(
                 config.publisher.indexer_ws_url.clone(),
-                gate,
             )),
             None,
         );
