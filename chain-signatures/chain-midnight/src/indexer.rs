@@ -1439,7 +1439,7 @@ mod tests {
         assert_eq!(request.id, SignId::new(genuine_rid));
         assert_eq!(
             request.args.epsilon,
-            mpc_crypto::kdf::derive_epsilon_midnight(
+            signet_crypto::derive_epsilon_midnight(
                 1,
                 &hex::encode(CALLER),
                 &hex::encode(genuine.path),
