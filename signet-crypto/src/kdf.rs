@@ -208,12 +208,15 @@ pub fn reconstruct_signature(
     let public_key = public_key.to_encoded_point(false);
     let signature = k256::ecdsa::Signature::from_scalars(x_coordinate(big_r), s).ok()?;
     for recovery_id in [0, 1] {
-        let recovery_id = RecoveryId::try_from(recovery_id).ok()?;
-        let recovered =
+        let recovery_id =
+            RecoveryId::try_from(recovery_id).expect("0 and 1 are valid recovery ids");
+        let Ok(verifying) =
             VerifyingKey::recover_from_prehash(&msg_hash.to_bytes()[..], &signature, recovery_id)
-                .ok()?
-                .to_encoded_point(false);
-        if public_key == recovered {
+        else {
+            // One id may select an R that fails to recover while the other succeeds.
+            continue;
+        };
+        if public_key == verifying.to_encoded_point(false) {
             return Some(Signature::new(*big_r, *s, recovery_id.to_byte()));
         }
     }
@@ -225,7 +228,7 @@ mod tests {
     use super::*;
     use k256::ecdsa::signature::hazmat::PrehashSigner;
     use k256::elliptic_curve::point::DecompressPoint;
-    use k256::{AffinePoint, SecretKey};
+    use k256::{AffinePoint, ProjectivePoint, SecretKey};
 
     fn sign_with(sk: &SecretKey, msg_hash: &Scalar) -> (AffinePoint, Scalar, u8) {
         let (ecdsa_sig, rec_id): (k256::ecdsa::Signature, _) = k256::ecdsa::SigningKey::from(sk)
@@ -280,6 +283,34 @@ mod tests {
         let msg_hash = Scalar::from_bytes([0x22; 32]).unwrap();
 
         assert!(reconstruct_signature(&public_key, &public_key, &Scalar::ZERO, msg_hash).is_none());
+    }
+
+    #[test]
+    fn test_reconstruct_signature_accepts_both_recovery_ids() {
+        // Fixed vectors: one signature recovering under each ordinary recovery id.
+        for ((sk_seed, msg_seed), expected_id) in [((0x11u8, 0x22u8), 0u8), ((0x49, 0x8a), 1)] {
+            let sk = SecretKey::from_bytes((&[sk_seed; 32]).into()).unwrap();
+            let public_key: PublicKey = sk.public_key().into();
+            let msg_hash = Scalar::from_bytes([msg_seed; 32]).unwrap();
+            let (big_r, s, _) = sign_with(&sk, &msg_hash);
+
+            let sig = reconstruct_signature(&public_key, &big_r, &s, msg_hash).unwrap();
+            assert_eq!(sig.recovery_id, expected_id, "sk seed {sk_seed:#x}");
+        }
+    }
+
+    #[test]
+    fn test_reconstruct_signature_uses_second_id_when_first_fails_recovery() {
+        let one = Scalar::from(1u32);
+        let r = x_coordinate(&AffinePoint::GENERATOR);
+        // For (R = -G, s = 1, e = 1): id 0 selects R = G and recovery hits the point at
+        // infinity; id 1 selects R = -G and recovers -(2/x(G))·G.
+        let expected_pk =
+            (ProjectivePoint::GENERATOR * -(Scalar::from(2u32) * r.invert().unwrap())).to_affine();
+        let neg_g = (-ProjectivePoint::GENERATOR).to_affine();
+
+        let sig = reconstruct_signature(&expected_pk, &neg_g, &one, one).unwrap();
+        assert_eq!(sig.recovery_id, 1);
     }
 
     #[test]
