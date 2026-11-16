@@ -30,7 +30,7 @@ The indexer is trusted for liveness only. A replay that disagrees with the chain
 
 ## Budget and failures
 
-A submit has one budget, `PublisherConfig::submit_timeout` (420 s): waiting for the wallet may use all but the last 120 s, and everything after that, proving, pricing and the landing, shares what is left. The publish loop retries every failure. A failed build or submit carries a class in its error message, which says what the retry may assume:
+A submit has one budget, `PublisherConfig::submit_timeout` (420 s): waiting for the wallet may use all but the last 120 s, and everything after that, proving, pricing and the landing, shares what is left. The publish loop retries every failure except `bad_request` and `contract_mismatch`: a retry would send the same bytes again, so these go to failover. Requests the publisher cannot serve (wrong chain, `Sign`, a `recovery_id` other than 0 or 1) are refused the same way, before any read. A failed build or submit carries a class in its error message, for the logs and the refusal metric. The retry decision itself reads a typed verdict, not the message:
 
 | Class | Meaning |
 |---|---|
@@ -43,6 +43,8 @@ A submit has one budget, `PublisherConfig::submit_timeout` (420 s): waiting for 
 | `state_conflict` | The node refused the transaction or it expired unlanded. The retry rebuilds against fresh state. |
 | `ambiguous_submit` | The transaction was not seen finalized within the budget and may still land. A retry may post the response again; duplicate responses are harmless. |
 | `internal` | Anything else. |
+
+A node failure (`internal`) keeps the HTTP status when there was one: nothing was posted yet, so a classic 4xx goes to failover; 402, 408, 429 and 5xx retry.
 
 The node counts each failed build or submit by its class in `multichain_publish_refusals`. A landed publish sets `multichain_funding_wallet_balance` to the spendable DUST its fee was planned from.
 
