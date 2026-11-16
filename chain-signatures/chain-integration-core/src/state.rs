@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use enum_map::EnumMap;
 use mpc_primitives::{BidirectionalTx, BidirectionalTxId, Chain, SignId};
 use tokio::sync::RwLock;
 
@@ -12,7 +13,9 @@ pub struct WatchedExecution {
 }
 
 impl WatchedExecution {
-    /// Create a new `WatchedExecution` for the given transaction.
+    /// The execution of `tx`, sign id derived from it. For pending
+    /// enumerations; watch rows carry the key's sign id instead
+    /// ([`ExecutionWatchers::all`]).
     pub fn of(tx: Arc<BidirectionalTx>) -> Self {
         Self {
             sign_id: tx.sign_id(),
@@ -75,10 +78,13 @@ impl ExecutionWatchers {
     pub fn all(&self) -> HashMap<BidirectionalTxId, Vec<WatchedExecution>> {
         let mut grouped: HashMap<BidirectionalTxId, Vec<WatchedExecution>> = HashMap::new();
         for (key, tx) in &self.watches {
-            grouped.entry(key.flat_id).or_default().push(WatchedExecution {
-                sign_id: key.sign_id,
-                tx: Arc::clone(tx),
-            });
+            grouped
+                .entry(key.flat_id)
+                .or_default()
+                .push(WatchedExecution {
+                    sign_id: key.sign_id,
+                    tx: Arc::clone(tx),
+                });
         }
         grouped
     }
@@ -118,7 +124,7 @@ pub trait StateManager: Send + Sync + Clone + 'static {
 #[derive(Clone, Default)]
 pub struct MockStateManager {
     processed_blocks: Arc<RwLock<HashMap<Chain, u64>>>,
-    watchers: Arc<RwLock<HashMap<Chain, ExecutionWatchers>>>,
+    watchers: Arc<EnumMap<Chain, RwLock<ExecutionWatchers>>>,
     pending: Arc<RwLock<Vec<Arc<BidirectionalTx>>>>,
 }
 
@@ -132,12 +138,7 @@ impl StateManager for MockStateManager {
         &self,
         chain: Chain,
     ) -> HashMap<BidirectionalTxId, Vec<WatchedExecution>> {
-        self.watchers
-            .read()
-            .await
-            .get(&chain)
-            .map(ExecutionWatchers::all)
-            .unwrap_or_default()
+        self.watchers[chain].read().await.all()
     }
 
     async fn get_pending_executions(&self, chain: Chain) -> Vec<WatchedExecution> {
@@ -155,12 +156,7 @@ impl StateManager for MockStateManager {
     }
 
     async fn watch_execution(&self, chain: Chain, tx: Arc<BidirectionalTx>) {
-        self.watchers
-            .write()
-            .await
-            .entry(chain)
-            .or_default()
-            .insert(tx);
+        self.watchers[chain].write().await.insert(tx);
     }
 }
 
@@ -177,19 +173,14 @@ impl MockStateManager {
         sign_id: SignId,
         tx: Arc<BidirectionalTx>,
     ) {
-        self.watchers
-            .write()
-            .await
-            .entry(chain)
-            .or_default()
-            .insert_at(
-                WatchKey {
-                    flat_id: tx.id,
-                    source: tx.source_chain,
-                    sign_id,
-                },
-                tx,
-            );
+        self.watchers[chain].write().await.insert_at(
+            WatchKey {
+                flat_id: tx.id,
+                source: tx.source_chain,
+                sign_id,
+            },
+            tx,
+        );
     }
 
     /// Register an `Executing` backlog entry targeting `tx.target_chain`.
@@ -215,12 +206,10 @@ impl MockStateManager {
         source_chain: Chain,
         sign_id: SignId,
     ) {
-        if let Some(watches) = self.watchers.write().await.get_mut(&chain) {
-            watches.remove(&WatchKey {
-                flat_id: *tx_id,
-                source: source_chain,
-                sign_id,
-            });
-        }
+        self.watchers[chain].write().await.remove(&WatchKey {
+            flat_id: *tx_id,
+            source: source_chain,
+            sign_id,
+        });
     }
 }

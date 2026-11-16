@@ -796,7 +796,10 @@ impl Backlog {
             pending.execution_watches()
         };
 
-        // Replace this chain's watches.
+        let fresh: HashSet<WatchKey> = execution_to_watch
+            .iter()
+            .map(|tx| WatchKey::of(tx))
+            .collect();
         let mut by_target: HashMap<Chain, Vec<Arc<BidirectionalTx>>> = HashMap::new();
         for tx in execution_to_watch {
             by_target.entry(tx.target_chain).or_default().push(tx);
@@ -810,11 +813,6 @@ impl Backlog {
                 .rebuild(chain, entries.iter().cloned());
         }
         // A returning execution keeps its first observation.
-        let fresh: HashSet<WatchKey> = by_target
-            .values()
-            .flatten()
-            .map(|tx| WatchKey::of(tx))
-            .collect();
         self.wait_starts(&chain)
             .write()
             .await
