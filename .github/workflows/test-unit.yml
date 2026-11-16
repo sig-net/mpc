@@ -91,9 +91,9 @@ jobs:
         run: just test-unit
 
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@e88e69ecdb9658bd172693dcdc2c84e7f0ab6a11 # nextest
+        uses: taiki-e/install-action@ab49d3c64680143e184118bed66a46419fc15519 # v2.90.5
         with:
-          tool: nextest
+          tool: nextest@0.9.145
 
       # Each test migrates a live contract's state. A branch never upgrades the contracts
       # before it (develop -> testnet -> mainnet), so those are skipped. Merge queue runs all.
@@ -135,7 +135,7 @@ jobs:
           command: check advisories bans licenses sources -W unmaintained -W unsound --hide-inclusion-graph
 
       - name: Install cargo-machete
-        uses: taiki-e/install-action@e88e69ecdb9658bd172693dcdc2c84e7f0ab6a11 # nextest
+        uses: taiki-e/install-action@ab49d3c64680143e184118bed66a46419fc15519 # v2.90.5
         with:
           tool: cargo-machete@0.9.2
 

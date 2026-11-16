@@ -175,9 +175,9 @@ jobs:
           save-if: ${{ github.event_name != 'merge_group' && (github.event_name != 'pull_request' || steps.depchange.outputs.changed == 'true') }}
 
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@e88e69ecdb9658bd172693dcdc2c84e7f0ab6a11 # nextest
+        uses: taiki-e/install-action@ab49d3c64680143e184118bed66a46419fc15519 # v2.90.5
         with:
-          tool: nextest
+          tool: nextest@0.9.145
 
       - name: Restore cargo-near
         id: cargo-near-restore
