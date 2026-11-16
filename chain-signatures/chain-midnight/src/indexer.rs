@@ -20,6 +20,7 @@ use std::time::Duration;
 
 use anyhow::Context as _;
 use async_trait::async_trait;
+use mpc_chain_integration_core::utils::retry::SharedBackoff;
 use mpc_chain_integration_core::{ChainIndexer, ChainTelemetry, StateManager};
 use mpc_primitives::{
     Chain, ChainEvent, IndexedSignRequest, PublicKey, RespondBidirectionalEvent,
@@ -72,6 +73,8 @@ pub struct MidnightIndexer<S: StateManager, T: ChainTelemetry> {
     state_manager: S,
     telemetry: T,
     root_pk: PublicKey,
+    /// The chain's cooldown gate, shared with the node's other Midnight callers.
+    gate: SharedBackoff,
 }
 
 impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
@@ -80,6 +83,7 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
         state_manager: S,
         telemetry: T,
         root_pk: PublicKey,
+        gate: SharedBackoff,
     ) -> anyhow::Result<Self> {
         config.validate()?;
         Ok(Self {
@@ -87,6 +91,7 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
             state_manager,
             telemetry,
             root_pk,
+            gate,
         })
     }
 }
@@ -741,7 +746,7 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for MidnightIndexer<S, T> 
         events_tx: mpsc::Sender<ChainEvent>,
         cancel: CancellationToken,
     ) -> anyhow::Result<()> {
-        let source = LiveSource::connect(&self.config).await?;
+        let source = LiveSource::connect(&self.config, self.gate.clone()).await?;
         self.run_with_source(&source, events_tx, cancel).await
     }
 }
@@ -1062,6 +1067,7 @@ mod tests {
             MockStateManager::new(),
             NoopChainTelemetry,
             test_root_pk(),
+            SharedBackoff::new(),
         )
         .await
         .expect("indexer constructs")
@@ -1092,10 +1098,15 @@ mod tests {
             state: MockStateManager,
             config: MidnightConfig,
         ) -> Self {
-            let indexer =
-                MidnightIndexer::new(config, state.clone(), NoopChainTelemetry, test_root_pk())
-                    .await
-                    .expect("indexer constructs");
+            let indexer = MidnightIndexer::new(
+                config,
+                state.clone(),
+                NoopChainTelemetry,
+                test_root_pk(),
+                SharedBackoff::new(),
+            )
+            .await
+            .expect("indexer constructs");
             let (events_tx, events_rx) = chain_event_channel();
             let cancel = CancellationToken::new();
             let handle = tokio::spawn({
@@ -2608,9 +2619,15 @@ mod tests {
         let state = MockStateManager::new();
         state.set_processed_block(Chain::Midnight, 8).await;
         let counted = CountingTelemetry::default();
-        let indexer = MidnightIndexer::new(test_config(), state, counted.clone(), test_root_pk())
-            .await
-            .expect("indexer constructs");
+        let indexer = MidnightIndexer::new(
+            test_config(),
+            state,
+            counted.clone(),
+            test_root_pk(),
+            SharedBackoff::new(),
+        )
+        .await
+        .expect("indexer constructs");
         let (events_tx, mut events_rx) = chain_event_channel();
         let cancel = CancellationToken::new();
         let handle = tokio::spawn({
@@ -2629,6 +2646,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_indexer_reads_under_the_gate_it_is_given() {
+        let (node_url, server) = crate::test_utils::throttling_node().await;
+        let mut config = test_config();
+        config.node_url = node_url;
+        let gate = SharedBackoff::with_cooldowns(Duration::from_secs(30), Duration::from_secs(30));
+        let indexer = MidnightIndexer::new(
+            config,
+            MockStateManager::new(),
+            NoopChainTelemetry,
+            test_root_pk(),
+            gate.clone(),
+        )
+        .await
+        .unwrap();
+        let (events_tx, _events_rx) = chain_event_channel();
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            indexer.run(events_tx, CancellationToken::new()),
+        )
+        .await
+        .expect("the run ends on the throttled node")
+        .expect_err("the node throttles");
+        server.abort();
+        assert!(gate.remaining() > Duration::ZERO, "a 429 engaged no gate");
+    }
+
+    #[tokio::test]
     async fn midnight_indexer_new_rejects_zero_poll_interval() {
         let mut config = test_config();
         config.indexer.poll_interval = std::time::Duration::ZERO;
@@ -2637,6 +2681,7 @@ mod tests {
             MockStateManager::new(),
             NoopChainTelemetry,
             test_root_pk(),
+            SharedBackoff::new(),
         )
         .await
         {

@@ -472,7 +472,8 @@ impl ChainConfigs {
 struct ChainStack {
     configs: ChainConfigs,
     /// One 429 cooldown gate per chain, shared by that chain's indexer and
-    /// publisher (they hit the same RPC endpoint).
+    /// publisher (they hit the same RPC endpoint; Midnight's also gates the
+    /// publisher's connections to the Midnight indexer service).
     gates: EnumMap<Chain, SharedBackoff>,
     /// Where the Midnight funding wallet keeps its DUST replay across restarts.
     midnight_dust: Option<Arc<dyn DustCheckpointStore>>,
@@ -497,8 +498,8 @@ impl ChainStack {
     }
 
     /// Wraps an internally-ungated publisher in [`GatedPublisher`] bound to
-    /// this stack's gate for `chain` (Solana, Midnight and Hydration are
-    /// externally gated — their clients don't gate publishes themselves).
+    /// this stack's gate for `chain` (Solana and Hydration are externally
+    /// gated — their clients don't gate publishes themselves).
     /// `operation` labels the adapter's throttle warn per chain.
     ///
     /// TODO: deleted once those clients gate publishes internally
@@ -564,12 +565,10 @@ impl ChainStack {
                 telemetry,
                 awaiter,
                 self.midnight_dust.clone(),
+                self.gate(Chain::Midnight),
             )
             .context("failed to create midnight publisher")?;
-            publishers.insert(
-                Chain::Midnight,
-                self.gated_publisher(Chain::Midnight, "midnight publish", client),
-            );
+            publishers.insert(Chain::Midnight, Arc::new(client));
         }
 
         Ok(publishers)
@@ -984,8 +983,7 @@ async fn spawn_indexers(
 
     if let Some(midnight_config) = midnight {
         let midnight_telemetry = NodeTelemetry::new(Chain::Midnight);
-        // TODO: read-side gating - this indexer's reads don't share the
-        // chain's cooldown gate yet
+        let midnight_gate = gates[Chain::Midnight].clone();
         // Waits for the network public key inside the task, so a stop signal or
         // a failed core task during the wait still ends the node.
         let mut contract_watcher = contract_watcher.clone();
@@ -1013,6 +1011,7 @@ async fn spawn_indexers(
                 backlog,
                 midnight_telemetry.clone(),
                 root_pk,
+                midnight_gate,
             )
             .await
             .context("failed to create midnight indexer")?;

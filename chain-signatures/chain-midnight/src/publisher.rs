@@ -9,6 +9,7 @@ use anyhow::Context as _;
 use async_trait::async_trait;
 use k256::elliptic_curve::sec1::ToEncodedPoint as _;
 use minocrab_publisher::{Attestation, EcdsaSignature};
+use mpc_chain_integration_core::utils::retry::SharedBackoff;
 use mpc_chain_integration_core::{ChainPublisher, PublishAction, PublisherTelemetry};
 use mpc_primitives::{Chain, SignKind, Signature};
 use mpc_utils::task::AbortOnDrop;
@@ -86,9 +87,10 @@ impl MidnightPublisher {
         telemetry: Arc<dyn PublisherTelemetry>,
         awaiter: Arc<dyn ResponseAwaiter>,
         checkpoints: Option<Arc<dyn DustCheckpointStore>>,
+        gate: SharedBackoff,
     ) -> anyhow::Result<Self> {
         config.publisher.validate_output_storage()?;
-        let rpc = Arc::new(MidnightPublisherRpc::connect(config).await?);
+        let rpc = Arc::new(MidnightPublisherRpc::connect(config, gate.clone()).await?);
         let output_store = RecoveringOutputStore::start(
             config.publisher.output_storage.as_ref(),
             rpc.network_id(),
@@ -104,8 +106,9 @@ impl MidnightPublisher {
         let key = dust_secret_key(&parse_seed(&config.publisher.funding_seed)?)?;
         let wallet = FundingWallet::start(
             key,
-            Arc::new(IndexerDustEvents::new(
+            Arc::new(IndexerDustEvents::gated(
                 config.publisher.indexer_ws_url.clone(),
+                gate,
             )),
             checkpoints,
         );
@@ -299,12 +302,15 @@ pub struct RecoveringMidnightPublisher {
 impl RecoveringMidnightPublisher {
     /// Validates `config` now, so a configuration that can never publish still fails at
     /// startup, then connects in the background. `checkpoints` keeps the funding
-    /// wallet's DUST replay across restarts.
+    /// wallet's DUST replay across restarts. Every node request and every indexer
+    /// connection waits out `gate`'s cooldown, and a 429 or 402 answer to either
+    /// extends it.
     pub fn start(
         config: &MidnightConfig,
         telemetry: Arc<dyn PublisherTelemetry>,
         awaiter: Arc<dyn ResponseAwaiter>,
         checkpoints: Option<Arc<dyn DustCheckpointStore>>,
+        gate: SharedBackoff,
     ) -> anyhow::Result<Self> {
         config.validate()?;
         let config = config.clone();
@@ -313,7 +319,10 @@ impl RecoveringMidnightPublisher {
             let telemetry = telemetry.clone();
             let awaiter = awaiter.clone();
             let checkpoints = checkpoints.clone();
-            async move { MidnightPublisher::connect(&config, telemetry, awaiter, checkpoints).await }
+            let gate = gate.clone();
+            async move {
+                MidnightPublisher::connect(&config, telemetry, awaiter, checkpoints, gate).await
+            }
         }))
     }
 
@@ -1759,6 +1768,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_publisher_connects_under_the_gate_it_is_given() {
+        let (node_url, server) = crate::test_utils::throttling_node().await;
+        let config = MidnightConfig {
+            node_url,
+            central_address: MidnightAddress::from_hex(CENTRAL)
+                .expect("CENTRAL is a 32-byte hex address"),
+            responder_address: MidnightAddress::from_hex(RESPONDER)
+                .expect("RESPONDER is a 32-byte hex address"),
+            publisher: PublisherConfig {
+                funding_seed: "ab".repeat(32),
+                indexer_ws_url: "ws://127.0.0.1:1/api/v3/graphql/ws".parse().unwrap(),
+                ..Default::default()
+            },
+            rpc: Default::default(),
+            indexer: Default::default(),
+        };
+        let gate = SharedBackoff::with_cooldowns(Duration::from_secs(30), Duration::from_secs(30));
+        let _publisher = RecoveringMidnightPublisher::start(
+            &config,
+            Arc::new(NoopPublisherTelemetry),
+            ScriptedAwaiter::new(&[]),
+            None,
+            gate.clone(),
+        )
+        .expect("the configuration is valid");
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while gate.remaining().is_zero() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the throttled connect engages the gate");
+        server.abort();
+    }
+
+    #[tokio::test]
     async fn start_rejects_a_configuration_that_can_never_publish() {
         let config = MidnightConfig {
             node_url: "ftp://127.0.0.1:1".parse().unwrap(),
@@ -1780,6 +1825,7 @@ mod tests {
             Arc::new(NoopPublisherTelemetry),
             ScriptedAwaiter::new(&[]),
             None,
+            SharedBackoff::new(),
         )
         .err()
         .expect("an ftp node_url is refused before any connection attempt");

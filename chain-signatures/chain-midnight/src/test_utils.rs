@@ -518,3 +518,28 @@ impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for EventRecorder {
         self.events.lock().expect("recorded events").push(fields);
     }
 }
+
+/// A node that answers every request with 429, at the URL returned.
+pub(crate) async fn throttling_node() -> (url::Url, tokio::task::JoinHandle<()>) {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap())
+        .parse()
+        .unwrap();
+    let server = tokio::spawn(async move {
+        loop {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            tokio::spawn(async move {
+                let mut request = [0; 4096];
+                let _ = stream.read(&mut request).await;
+                let _ = stream
+                    .write_all(
+                        b"HTTP/1.1 429 Too Many Requests\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                    )
+                    .await;
+            });
+        }
+    });
+    (url, server)
+}
