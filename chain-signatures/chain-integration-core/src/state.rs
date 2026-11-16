@@ -58,6 +58,8 @@ impl ExecutionWatchers {
     }
 
     /// Under an explicit key — for a sign id the tx does not derive.
+    /// Refresh and remove see only the namespace used to insert: a row
+    /// inserted here is invisible to derived-key operations.
     pub fn insert_at(&mut self, key: WatchKey, tx: Arc<BidirectionalTx>) {
         self.watches.insert(key, tx);
     }
@@ -177,10 +179,8 @@ impl MockStateManager {
     pub async fn watch_execution_as(&self, sign_id: SignId, tx: Arc<BidirectionalTx>) {
         self.watchers[tx.target_chain].write().await.insert_at(
             WatchKey {
-                flat_id: tx.id,
-                source: tx.source_chain,
                 sign_id,
-                target: tx.target_chain,
+                ..WatchKey::of(&tx)
             },
             tx,
         );
@@ -205,5 +205,64 @@ impl MockStateManager {
     /// sibling watches stay.
     pub async fn remove_execution_watch(&self, key: WatchKey) {
         self.watchers[key.target].write().await.remove(&key);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn watched_tx() -> Arc<BidirectionalTx> {
+        Arc::new(BidirectionalTx {
+            id: BidirectionalTxId([1; 32]),
+            sender: [2; 32],
+            serialized_transaction: vec![],
+            source_chain: Chain::Solana,
+            target_chain: Chain::Ethereum,
+            caip2_id: "eip155:1".to_string(),
+            key_version: 1,
+            deposit: 0,
+            path: String::new(),
+            algo: String::new(),
+            dest: String::new(),
+            params: String::new(),
+            output_deserialization_schema: vec![],
+            respond_serialization_schema: vec![],
+            request_id: [3; 32],
+            from_address: [0; 20],
+            nonce: 0,
+        })
+    }
+
+    /// An explicit-key watch is invisible to derived-key operations:
+    /// remove sees only the namespace used to insert.
+    #[tokio::test]
+    async fn an_explicit_key_watch_survives_a_derived_key_removal() {
+        let state = MockStateManager::new();
+        let tx = watched_tx();
+        let foreign = SignId {
+            request_id: [9; 32],
+        };
+        state.watch_execution_as(foreign, Arc::clone(&tx)).await;
+
+        state.remove_execution_watch(WatchKey::of(&tx)).await;
+        let watchers = state.get_execution_watchers(tx.target_chain).await;
+        assert!(
+            watchers[&tx.id]
+                .iter()
+                .any(|watch| watch.sign_id == foreign),
+            "the derived-key remove cannot see the explicit-key row"
+        );
+
+        state
+            .remove_execution_watch(WatchKey {
+                sign_id: foreign,
+                ..WatchKey::of(&tx)
+            })
+            .await;
+        assert!(state
+            .get_execution_watchers(tx.target_chain)
+            .await
+            .is_empty());
     }
 }
