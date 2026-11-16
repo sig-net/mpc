@@ -883,9 +883,10 @@ impl crate::native::SubmitChain for MidnightPublisherRpc {
                 vec![subxt::dynamic::Value::from_bytes(transaction)],
             ))
             .map_err(|error| {
-                SubmitRefusal::Unsent(anyhow::anyhow!(
-                    "send_mn_transaction did not match metadata: {error}"
-                ))
+                SubmitRefusal::Unsent(
+                    anyhow::Error::new(error)
+                        .context("send_mn_transaction did not match the node's metadata"),
+                )
             })?;
         let encoded = format!("0x{}", hex::encode(extrinsic.encoded()));
         classify_submit_reply(
@@ -1125,7 +1126,7 @@ struct Reads {
     retry: RetryConfig,
 }
 
-fn rejected_http_status(error: &anyhow::Error) -> Option<u16> {
+pub(crate) fn rejected_http_status(error: &anyhow::Error) -> Option<u16> {
     error.chain().find_map(|cause| {
         let RawRpcError::Client(client_error) = cause.downcast_ref::<RawRpcError>()? else {
             return None;

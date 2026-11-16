@@ -268,7 +268,14 @@ impl ChainPublisher for MidnightPublisher {
             .submit(&bytes)
             .await
             .inspect_err(|error| self.record_refusal(error))
-            .with_context(|| submit_failed(&chain.at_hash, submitting.elapsed()))?;
+            .with_context(|| {
+                format!(
+                    "submitting the midnight respond intent built over the chain at {} \
+                     failed after {:?}",
+                    chain.at_hash,
+                    submitting.elapsed()
+                )
+            })?;
         let submit_took = submitting.elapsed();
         self.telemetry
             .funding_wallet_observed(submitted.dust_balance as f64 / SPECK_PER_DUST);
@@ -432,15 +439,6 @@ fn circuit_signature(signature: &Signature) -> anyhow::Result<EcdsaSignature> {
         s: signature.s.to_bytes().into(),
         recovery_id: signature.recovery_id,
     })
-}
-
-/// Whole milliseconds, never `Duration`'s `401.3s`: the publish loop's retry reads
-/// a bare 400-405 in the message as an HTTP status and drops the publish.
-fn submit_failed(at_hash: &str, elapsed: Duration) -> String {
-    format!(
-        "submitting the midnight respond intent built over the chain at {at_hash} failed after {}ms",
-        elapsed.as_millis()
-    )
 }
 
 /// The respond intent's expiry, as absolute unix seconds: one publish's build and
@@ -1347,14 +1345,21 @@ mod tests {
 
     #[test]
     fn a_submit_failing_at_any_time_stays_retryable() {
+        // The carrier carries the verdict; the elapsed render is diagnostics.
         for elapsed in [
             Duration::from_millis(400),
             Duration::from_millis(401_300),
             Duration::from_secs(403),
             Duration::from_secs(405),
         ] {
-            let error = anyhow::anyhow!("[state_conflict] expired")
-                .context(submit_failed(HEAD_ONE, elapsed));
+            let wrapped = format!(
+                "submitting the midnight respond intent built over the chain at \
+                 {HEAD_ONE} failed after {elapsed:?}"
+            );
+            let error =
+                SubmitError::StateConflict("expired".into())
+                    .into_publish_error()
+                    .context(wrapped);
             assert!(
                 mpc_chain_integration_core::utils::retry::is_retryable(&error),
                 "{error:#}"

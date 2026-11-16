@@ -375,9 +375,9 @@ impl<W: FeePayer, C: SubmitChain> NativeIntentClient<W, C> {
             }
             Err(SubmitRefusal::Unsent(error)) => {
                 self.wallet.release(spent);
-                return Err(SubmitError::Node(format!(
-                    "the transaction could not be sent: {error:#}; nothing was posted"
-                )));
+                return Err(SubmitError::Node {
+                    source: error.context("the transaction could not be sent; nothing was posted"),
+                });
             }
             Err(SubmitRefusal::Unanswered(error)) => {
                 tracing::warn!(
@@ -578,7 +578,7 @@ where
 }
 
 fn node(error: anyhow::Error) -> SubmitError {
-    SubmitError::Node(format!("{error:#}"))
+    SubmitError::Node { source: error }
 }
 
 #[cfg(test)]
@@ -1256,7 +1256,7 @@ mod tests {
             )
             .await
             .unwrap_err();
-        assert!(matches!(error, SubmitError::Node(_)), "{error}");
+        assert!(matches!(error, SubmitError::Node { .. }), "{error}");
         assert_eq!(*client.wallet.released.lock().unwrap(), vec![spent()]);
         assert!(client.chain.landing_reads.lock().unwrap().is_empty());
     }
