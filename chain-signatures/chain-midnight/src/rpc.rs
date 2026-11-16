@@ -401,27 +401,52 @@ impl MidnightRpc {
 
     /// The finalized head as a [`BlockRef`]: the head hash, then, when it moved, its
     /// block for the number and parent, each read on the ordinary retry budget. The
-    /// block is kept for [`block_emissions`](Self::block_emissions) of that head.
+    /// block is kept for [`block_emissions`](Self::block_emissions) of that head. A
+    /// block that cannot be read leaves the head to its header, so the poll goes on
+    /// and the block is fetched again when the head is processed.
     pub async fn finalized_block_ref(&self) -> anyhow::Result<BlockRef> {
-        let hash = hex_0x(self.reads.finalized_head().await?);
-        if let Some(head) = self.head().as_ref() {
-            if head.block_ref.hash == hash {
-                return Ok(head.block_ref.clone());
+        let head = self.reads.finalized_head().await?;
+        let hash = hex_0x(head);
+        if let Some(known) = self.head().as_ref() {
+            if known.block_ref.hash == hash {
+                return Ok(known.block_ref.clone());
             }
         }
-        let block = self
-            .reads
-            .block(parse_block_hash(&hash)?)
-            .await?
-            .context("midnight node returned no block for its own finalized head")?;
+        let (number, parent_hash, block) = match self.reads.block(head).await {
+            Ok(Some(block)) => (
+                block.block.header.number,
+                block.block.header.parent_hash,
+                Some(block),
+            ),
+            read => {
+                let error = match read {
+                    Err(error) => format!("{error:#}"),
+                    _ => "the node has no block for it".to_owned(),
+                };
+                if let Some(count) = mpc_utils::throttle::check("midnight:head-block-unread") {
+                    tracing::warn!(
+                        count,
+                        block_hash = %hash,
+                        error,
+                        "midnight: the finalized head's block could not be read; reading its header"
+                    );
+                }
+                let header = self
+                    .reads
+                    .header(head)
+                    .await?
+                    .context("midnight node returned no header for its own finalized head")?;
+                (header.number, header.parent_hash, None)
+            }
+        };
         let block_ref = BlockRef {
-            number: u64::from(block.block.header.number),
+            number: u64::from(number),
             hash,
-            parent_hash: hex_0x(block.block.header.parent_hash),
+            parent_hash: hex_0x(parent_hash),
         };
         *self.head() = Some(FinalizedHead {
             block_ref: block_ref.clone(),
-            block: Some(block),
+            block,
         });
         Ok(block_ref)
     }
@@ -3531,6 +3556,86 @@ mod tests {
                 "System::Events",
                 "Timestamp::Now"
             ]
+        );
+    }
+
+    /// A moved head whose block cannot be read is read by its header: the poll goes on,
+    /// and the block is fetched when the head is processed.
+    #[tokio::test]
+    async fn a_head_whose_block_read_fails_is_read_by_its_header() {
+        let metadata = subxt::Metadata::decode_all(
+            &mut &include_bytes!("../fixtures/fallible-block-432-metadata.scale")[..],
+        )
+        .unwrap();
+        let server = ServerBuilder::default().build("127.0.0.1:0").await.unwrap();
+        let mut config = http_config(server.local_addr().unwrap());
+        config.rpc.retry = attempts(0);
+        let transport = connect_http(&config).unwrap();
+        let client = OnlineClient::<SubstrateConfig>::from_rpc_client_with(
+            H256([0x11; 32]),
+            subxt::client::RuntimeVersion {
+                spec_version: 1,
+                transaction_version: 1,
+            },
+            metadata,
+            transport.clone(),
+        )
+        .unwrap();
+        let blocks = Arc::new(AtomicUsize::new(0));
+        let mut module = RpcModule::new(());
+        module
+            .register_method("chain_getFinalizedHead", |_, _, _| hash_of_byte(0x43))
+            .unwrap();
+        let read = blocks.clone();
+        module
+            .register_method("chain_getBlock", move |_, _, _| {
+                read.fetch_add(1, Ordering::SeqCst);
+                Err::<serde_json::Value, _>(ErrorObjectOwned::owned(
+                    -32000,
+                    "the backend is behind",
+                    None::<()>,
+                ))
+            })
+            .unwrap();
+        module
+            .register_method("chain_getHeader", |params, _, _| {
+                let [hash] = params.parse::<[String; 1]>().unwrap();
+                assert_eq!(hash, hash_of_byte(0x43));
+                json!({
+                    "parentHash": hash_of_byte(0x42),
+                    "number": "0x1b0",
+                    "stateRoot": hash_of_byte(0x44),
+                    "extrinsicsRoot": hash_of_byte(0x45),
+                    "digest": { "logs": [] }
+                })
+            })
+            .unwrap();
+        let _handle = server.start(module);
+        let rpc = MidnightRpc {
+            client,
+            reads: Reads::new(transport, config.rpc.request_timeout, config.rpc.retry),
+            head: Default::default(),
+        };
+        let at_0x43 = BlockRef {
+            number: 0x1b0,
+            hash: hash_of_byte(0x43),
+            parent_hash: hash_of_byte(0x42),
+        };
+
+        assert_eq!(rpc.finalized_block_ref().await.unwrap(), at_0x43);
+        assert_eq!(rpc.finalized_block_ref().await.unwrap(), at_0x43);
+        assert_eq!(
+            blocks.load(Ordering::SeqCst),
+            1,
+            "a standing head reads no block"
+        );
+        rpc.block_emissions(&at_0x43, &[0xab; 32], &[0xcd; 32])
+            .await
+            .expect_err("the block still cannot be read");
+        assert_eq!(
+            blocks.load(Ordering::SeqCst),
+            2,
+            "processing the head fetches its block"
         );
     }
 
