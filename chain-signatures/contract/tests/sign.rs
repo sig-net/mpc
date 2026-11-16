@@ -1,5 +1,7 @@
 pub mod common;
-use common::{candidates, create_response, init, init_env, sign_and_validate};
+use common::{
+    candidates, create_response, init, init_env, sign_and_validate, wait_for_pending_requests,
+};
 
 use mpc_contract::errors;
 use mpc_contract::primitives::{CandidateInfo, Read, SignRequest, View};
@@ -86,7 +88,7 @@ async fn test_contract_sign_success_refund() -> anyhow::Result<()> {
         .transact_async()
         .await?;
     dbg!(&status);
-    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+    wait_for_pending_requests(&contract, 1).await?;
 
     // Call `respond` as if we are the MPC network itself.
     let respond = contract
@@ -160,7 +162,6 @@ async fn test_contract_sign_fail_refund() -> anyhow::Result<()> {
         .transact_async()
         .await?;
     dbg!(&status);
-    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
 
     // we do not respond, sign will fail due to timeout
     let execution = status.await;
@@ -321,7 +322,7 @@ async fn test_contract_respond_rogue_signature() -> anyhow::Result<()> {
         .max_gas()
         .transact_async()
         .await?;
-    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+    wait_for_pending_requests(&contract, 1).await?;
 
     // Respond with a bogus signature (zeroed big_r and s)
     let rogue_signature = Signature {

@@ -454,6 +454,7 @@ async fn test_execution_confirmation_advances_to_respond_bidirectional() {
         ExecutionOutcome::Success { output: vec![] },
         &ctx,
         Chain::Ethereum,
+        crate::backlog::mock::mock_root_pk(),
     )
     .await
     .expect("execution confirmation should advance to a RespondBidirectional request");

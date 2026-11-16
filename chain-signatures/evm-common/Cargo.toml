@@ -1,0 +1,15 @@
+[package]
+name = "mpc-evm-common"
+edition = "2021"
+version.workspace = true
+publish.workspace = true
+description = "Shared output recovery for EVM-family target chains"
+
+[dependencies]
+alloy.workspace = true
+anyhow.workspace = true
+borsh.workspace = true
+mpc-midnight-respond-codec.workspace = true
+mpc-primitives.workspace = true
+serde.workspace = true
+serde_json.workspace = true

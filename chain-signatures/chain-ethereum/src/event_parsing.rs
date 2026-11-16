@@ -3,23 +3,18 @@
 
 use crate::abi::{ChainSignatures, SignatureRequestedEncoding};
 use alloy::primitives::hex::ToHexExt;
-use alloy::primitives::{Address, Bytes, U256};
+use alloy::primitives::{Address, U256};
 use alloy::rpc::types::Log;
 use alloy::sol_types::SolEvent;
 use k256::elliptic_curve::sec1::FromEncodedPoint;
 use k256::{AffinePoint as K256AffinePoint, EncodedPoint, FieldBytes, Scalar};
-use mpc_crypto::{kdf::derive_epsilon_eth, ScalarExt as _};
 use mpc_primitives::{
     Chain, ChainEvent, IndexedSignRequest, SignArgs, SignId, Signature as MpcSignature,
     SignatureRespondedEvent, MAX_SECP256K1_SCALAR,
 };
 use mpc_utils::time::current_unix_timestamp;
+use signet_crypto::{derive_epsilon_eth, ScalarExt as _};
 use tokio::sync::mpsc;
-
-/// Whether a transaction's calldata represents a contract call.
-pub fn is_contract_call(input: &Bytes) -> bool {
-    !input.is_empty()
-}
 
 /// Derives request-specific entropy from the finalized containing block and request ID.
 pub(crate) fn derive_request_entropy(block_hash: [u8; 32], request_id: [u8; 32]) -> [u8; 32] {
@@ -240,7 +235,7 @@ pub fn generate_request_id(
 mod tests {
     use super::*;
     use crate::abi::ChainSignatures;
-    use alloy::primitives::{Address, FixedBytes, Log as PrimitiveLog, U256};
+    use alloy::primitives::{Address, Bytes, FixedBytes, Log as PrimitiveLog, U256};
     use alloy::sol_types::SolEvent;
 
     fn sample_requested_event() -> ChainSignatures::SignatureRequested {
@@ -295,15 +290,6 @@ mod tests {
             requests[0].args.entropy, requests[1].args.entropy,
             "requests in one block should receive distinct entropy"
         );
-    }
-
-    #[test]
-    fn is_contract_call_detects_calldata() {
-        assert!(!is_contract_call(&Bytes::new()));
-        assert!(is_contract_call(&Bytes::from(vec![0u8; 2])));
-        assert!(is_contract_call(&Bytes::from(vec![
-            0xa9, 0x05, 0x9c, 0xbb, 0x00
-        ])));
     }
 
     #[test]

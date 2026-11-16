@@ -27,7 +27,7 @@ tokio.workspace = true
 near-sdk = { workspace = true, features = ["unit-testing"] }
 
 # crypto dependencies
-ecdsa = { version = "0.16.9", features = ["digest", "hazmat"] }
+ecdsa = { workspace = true, features = ["digest", "hazmat"] }
 signature = "2.2.0"
 digest = "0.10.7"
 

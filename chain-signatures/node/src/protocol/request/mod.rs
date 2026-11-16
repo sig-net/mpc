@@ -511,7 +511,7 @@ impl SignatureSpawner {
             SignCommand::AbortChain(chain) => {
                 tracing::warn!(
                     ?chain,
-                    "aborting all in-flight signature tasks on chain regression"
+                    "aborting in-flight signature tasks to rebase onto the consensus checkpoint"
                 );
                 let to_abort: Vec<SignId> = self
                     .requests

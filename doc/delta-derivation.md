@@ -41,3 +41,7 @@ request. Since [#1595](https://github.com/sig-net/mpc/pull/1595) the checkpoint
 digest covers `request.args` (entropy included), such a split shows up as
 diverging digests: it heals by rebase while one rule still has `t` nodes, and
 otherwise Ethereum checkpoints stall.
+
+## Entropy of a response
+
+For a response to a bidirectional request ([bidirectional-calls.md](bidirectional-calls.md), Section 4.3) its `entropy` is `H(first_leg_entropy || payload || epsilon)`, the hash of the first leg's `entropy`, the message being signed and its key's tweak, so `delta` moves with the first leg's `entropy` and binds the other two. Every node signing that message under that key derives the same `entropy`, whichever way it learned the outcome.

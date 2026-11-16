@@ -1,6 +1,6 @@
 FROM redis:7.4.2 AS redis-bin
 
-FROM node:20 AS eth-builder
+FROM node:22 AS eth-builder
 WORKDIR /usr/src/app/contract-eth
 COPY chain-signatures/contract-eth/package.json chain-signatures/contract-eth/package-lock.json ./
 RUN npm install
@@ -35,7 +35,7 @@ RUN curl -fsSL --retry 4 -o responder.tgz \
       "d211cacb22391b9db60f945787d98c16d344cbb4790246132117084c080399c1  dust/10/spend.bzkir" \
       | sha256sum -c
 
-FROM rust:1.95-bookworm AS node-builder
+FROM rust:1.95.0-bookworm AS node-builder
 RUN rustc --version --verbose
 WORKDIR /usr/src/app
 ARG GIT_COMMIT_HASH
