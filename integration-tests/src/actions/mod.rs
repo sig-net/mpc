@@ -216,7 +216,7 @@ mod tests {
 
         let signature = cait_sith::FullSignature::<k256::Secp256k1> { big_r, s };
 
-        let multichain_sig = mpc_crypto::kdf::reconstruct_signature(
+        let reconstructed = mpc_crypto::kdf::reconstruct_signature(
             &user_pk,
             &signature.big_r,
             &signature.s,
@@ -270,7 +270,7 @@ mod tests {
         let recovered_from_signature_address_web3 = recover_eth_address(
             &payload_hash,
             &signature_for_recovery,
-            multichain_sig.recovery_id,
+            reconstructed.recovery_id,
         );
         assert_eq!(user_address_from_pk, recovered_from_signature_address_web3);
     }

@@ -1,4 +1,5 @@
 use mpc_chain_canton::{CantonAuthConfig, CantonConfig};
+use url::Url;
 
 /// CLI arguments for the Canton indexer.
 #[derive(Debug, Clone, clap::Parser)]
@@ -20,14 +21,14 @@ pub struct CantonArgs {
             "canton_signer_template_id",
         ]
     )]
-    pub canton_json_api_url: Option<String>,
+    pub canton_json_api_url: Option<Url>,
     #[arg(
         long,
         env("MPC_CANTON_JSON_API_WS_URL"),
         hide_env_values = true,
         requires = "canton_json_api_url"
     )]
-    pub canton_json_api_ws_url: Option<String>,
+    pub canton_json_api_ws_url: Option<Url>,
     #[arg(
         long,
         env("MPC_CANTON_LEDGER_API_USER"),
@@ -40,7 +41,7 @@ pub struct CantonArgs {
         hide_env_values = true,
         requires = "canton_json_api_url"
     )]
-    pub canton_oidc_token_url: Option<String>,
+    pub canton_oidc_token_url: Option<Url>,
     #[arg(
         long,
         env("MPC_CANTON_OIDC_CLIENT_ID"),

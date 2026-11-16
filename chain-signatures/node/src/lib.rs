@@ -29,6 +29,7 @@ macro_rules! assert_matches {
 }
 
 pub mod backlog;
+pub mod build;
 pub mod cli;
 pub mod config;
 pub mod gcp;

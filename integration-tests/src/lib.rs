@@ -10,6 +10,7 @@ pub mod local;
 pub mod midnight;
 pub mod mpc_fixture;
 mod node_args;
+pub mod redis_harness;
 pub mod utils;
 
 use std::collections::HashMap;
@@ -76,11 +77,7 @@ impl Default for NodeConfig {
         Self {
             nodes: 3,
             threshold: 2,
-            protocol: ProtocolConfig {
-                min_mine_triple_pairs: 16,
-                min_mine_presignatures: 16,
-                max_mine_generations: 2,
-            },
+            protocol: ProtocolConfig::new(16, 16, 2),
             eth: None,
             sol: None,
             hydration: None,
@@ -242,7 +239,6 @@ pub async fn setup(spawner: &mut ClusterSpawner) -> anyhow::Result<Context> {
 
     let sk_share_local_path = spawner.tmp_dir.join("secrets");
     std::fs::create_dir_all(&sk_share_local_path).expect("could not create secrets dir");
-    let sk_share_local_path = sk_share_local_path.to_string_lossy().to_string();
 
     let mut ethereum = None;
     if spawner.use_ethereum {
@@ -270,8 +266,7 @@ pub async fn setup(spawner: &mut ClusterSpawner) -> anyhow::Result<Context> {
             contract_address: contract_address_hex
                 .parse()
                 .context("invalid deployed contract address")?,
-            network: "anvil".to_string(),
-            optimistic_requests: true,
+            network: mpc_chain_ethereum::EthNetwork::Anvil,
             gas: Default::default(),
             indexer: Default::default(),
             publisher: Default::default(),
@@ -391,13 +386,17 @@ pub async fn host(spawner: &mut ClusterSpawner) -> anyhow::Result<Nodes> {
     let cfg = &spawner.cfg;
 
     let spawn_nodes_start = std::time::Instant::now();
+    let node_cfgs = (0..spawner.accounts.len())
+        .map(|index| spawner.node_config(index))
+        .collect::<anyhow::Result<Vec<_>>>()?;
     let node_futures = spawner
         .accounts
         .iter()
         .zip(std::mem::take(&mut spawner.node_binary_sources))
-        .map(|(account, source)| {
+        .zip(&node_cfgs)
+        .map(|((account, source), node_cfg)| {
             let binary_path = source.binary_path().unwrap();
-            local::Node::run_with_binary(&ctx, cfg, account, binary_path)
+            local::Node::run_with_binary(&ctx, node_cfg, account, binary_path)
         });
     let nodes = futures::future::join_all(node_futures)
         .await

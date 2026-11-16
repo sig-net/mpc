@@ -45,8 +45,7 @@ pub async fn create_test_ethereum_client_with_catchup(
         execution_rpc_http_url: url.parse().unwrap(),
         account_sk: test_signer(),
         contract_address: Address::ZERO,
-        network: "".to_string(),
-        optimistic_requests: false,
+        network: crate::config::EthNetwork::Sepolia,
         rpc: RpcConfig {
             catchup,
             ..Default::default()
@@ -80,8 +79,7 @@ impl TestIndexerBuilder {
                 account_sk: test_signer(),
                 execution_rpc_http_url: server_url.parse().unwrap(),
                 contract_address: Address::ZERO,
-                network: "sepolia".to_string(),
-                optimistic_requests: false,
+                network: crate::config::EthNetwork::Sepolia,
                 rpc: Default::default(),
                 gas: Default::default(),
                 publisher: Default::default(),
@@ -121,7 +119,7 @@ mod tests {
     fn builder_defaults_to_finalized_requests() {
         let builder = TestIndexerBuilder::new("http://127.0.0.1:1");
 
-        assert!(!builder.eth.optimistic_requests);
+        assert!(!builder.eth.network.is_optimistic());
     }
 }
 

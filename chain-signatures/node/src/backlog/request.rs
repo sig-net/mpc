@@ -1,6 +1,8 @@
 use super::{Backlog, BacklogError};
 use crate::respond_bidirectional::CompletedTx;
-use crate::sign_bidirectional::{BidirectionalProgress, SignProgress, SignStatus};
+use crate::sign_bidirectional::{
+    BidirectionalProgress, SignBidirectionalEventExt as _, SignProgress, SignStatus,
+};
 use anyhow::Context as _;
 use cait_sith::protocol::Participant;
 use cait_sith::FullSignature;
@@ -199,7 +201,9 @@ impl<State> SignEntry<State> {
         self.map_state(|_| state)
     }
 
-    async fn executing(&self, tx: Arc<BidirectionalTx>) -> Result<(), BacklogError> {
+    /// Record a published signature's transaction; false if the entry was answered meanwhile,
+    /// which keeps its outcome.
+    async fn executing(&self, tx: Arc<BidirectionalTx>) -> Result<bool, BacklogError> {
         let mut pending = self.backlog.pending(&self.chain).write().await;
         let entry = pending
             .requests
@@ -208,8 +212,12 @@ impl<State> SignEntry<State> {
                 chain: self.chain,
                 id: self.request.id,
             })?;
+        entry.add_tx_id(tx.id);
+        if !entry.awaits_execution() {
+            return Ok(false);
+        }
         entry.status = SignStatus::Bidirectional(BidirectionalProgress::Executing(tx));
-        Ok(())
+        Ok(true)
     }
 
     async fn responding(
@@ -224,6 +232,10 @@ impl<State> SignEntry<State> {
                 chain: self.chain,
                 id: self.request.id,
             })?;
+        // Two streams can pick one sibling; the second must not reset the first's progress.
+        if !entry.awaits_execution() {
+            return Err(BacklogError::AlreadyAnswered);
+        }
         entry.status = SignStatus::Bidirectional(BidirectionalProgress::Final {
             respond_request,
             progress: SignProgress::Generating,
@@ -297,8 +309,44 @@ impl SignEntry<Generating> {
         .map_err(|_| BacklogError::InvalidSignature)?;
 
         let publish = Publishing::new(signature, participants, is_proposer);
-        self.record_publishing(&publish).await?;
+        // Stored before the entry shows it, since anything that publishes reads the entry. A store
+        // that fails still publishes, unprotected, as before there were records.
+        let status = self.publishing_status(&publish);
+        let store = self.backlog.checkpoints.storage();
+        if let Err(err) = store.put_local(self.chain, self.request.id, &status).await {
+            tracing::error!(
+                sign_id = ?self.request.id,
+                chain = ?self.chain,
+                error = %format_args!("{err:#}"),
+                "failed to store the signature; publishing it without a record"
+            );
+        }
+        if let Err(err) = self.record_publishing(&publish).await {
+            // The request left while signing and its records were deleted before this one.
+            if matches!(err, BacklogError::NotFound { .. }) {
+                if let Err(err) = store.remove_local(self.chain, &[self.request.id]).await {
+                    tracing::warn!(sign_id = ?self.request.id, ?err, "failed to remove a local record");
+                }
+            }
+            return Err(err);
+        }
         Ok(self.transition(publish))
+    }
+
+    fn publishing_status(&self, publish: &Publishing) -> SignStatus {
+        let progress = SignProgress::Publishing(publish.clone());
+        match &self.request.kind {
+            SignKind::Sign => SignStatus::Sign(progress),
+            SignKind::SignBidirectional(_) => {
+                SignStatus::Bidirectional(BidirectionalProgress::Initial(progress))
+            }
+            SignKind::RespondBidirectional(_) => {
+                SignStatus::Bidirectional(BidirectionalProgress::Final {
+                    respond_request: Arc::clone(&self.request),
+                    progress,
+                })
+            }
+        }
     }
 
     async fn record_publishing(&self, publish: &Publishing) -> Result<(), BacklogError> {
@@ -310,21 +358,24 @@ impl SignEntry<Generating> {
                 chain: self.chain,
                 id: self.request.id,
             })?;
-        match &mut entry.status {
-            SignStatus::Sign(progress)
-            | SignStatus::Bidirectional(BidirectionalProgress::Initial(progress))
-            | SignStatus::Bidirectional(BidirectionalProgress::Final { progress, .. }) => {
-                if !progress.is_generating() {
-                    return Err(BacklogError::InvalidPublishTransition);
-                }
-                *progress = SignProgress::Publishing(publish.clone());
-            }
-            SignStatus::Bidirectional(
-                BidirectionalProgress::Executing(_) | BidirectionalProgress::Parked(_),
-            ) => {
-                return Err(BacklogError::InvalidPublishTransition);
-            }
+        // A round of one leg must not fill the other's progress: a first leg finishing after its
+        // request was answered would publish its signature as the response.
+        let progress = match (&self.request.kind, &mut entry.status) {
+            (SignKind::Sign, SignStatus::Sign(progress))
+            | (
+                SignKind::SignBidirectional(_),
+                SignStatus::Bidirectional(BidirectionalProgress::Initial(progress)),
+            )
+            | (
+                SignKind::RespondBidirectional(_),
+                SignStatus::Bidirectional(BidirectionalProgress::Final { progress, .. }),
+            ) => progress,
+            _ => return Err(BacklogError::InvalidPublishTransition),
+        };
+        if !progress.is_generating() {
+            return Err(BacklogError::InvalidPublishTransition);
         }
+        *progress = SignProgress::Publishing(publish.clone());
         Ok(())
     }
 }
@@ -487,12 +538,14 @@ impl SignEntry<Bidirectional<Initial<Publishing>>> {
         self,
         tx: Arc<BidirectionalTx>,
     ) -> Result<SignEntry<Bidirectional<Executing>>, BacklogError> {
-        self.executing(Arc::clone(&tx)).await?;
+        let awaits = self.executing(Arc::clone(&tx)).await?;
         let entry = self.transition(Bidirectional(Executing(ExecutionWatch::new(
             tx,
             Some(Instant::now()),
         ))));
-        entry.watch_execution().await;
+        if awaits {
+            entry.watch_execution().await;
+        }
         Ok(entry)
     }
 }
@@ -503,12 +556,14 @@ impl SignEntry<Bidirectional<Initial<AnyProgress>>> {
         self,
         tx: Arc<BidirectionalTx>,
     ) -> Result<SignEntry<Bidirectional<Executing>>, BacklogError> {
-        self.executing(Arc::clone(&tx)).await?;
+        let awaits = self.executing(Arc::clone(&tx)).await?;
         let entry = self.transition(Bidirectional(Executing(ExecutionWatch::new(
             tx,
             Some(Instant::now()),
         ))));
-        entry.watch_execution().await;
+        if awaits {
+            entry.watch_execution().await;
+        }
         Ok(entry)
     }
 }
@@ -538,9 +593,10 @@ impl SignEntry<Bidirectional<Executing>> {
         self.state.0 .0.respond_observed_at
     }
 
-    /// Restore the observation time onto an entry rebuilt from a status.
-    pub(crate) fn with_respond_observed_at(mut self, at: Option<Instant>) -> Self {
-        self.state.0 .0.respond_observed_at = at;
+    /// This entry as the watch that found its execution, which may be of a later signature than
+    /// the one its status names.
+    pub(crate) fn with_execution_watch(mut self, watch: ExecutionWatch) -> Self {
+        self.state.0 .0 = watch;
         self
     }
 
@@ -556,18 +612,9 @@ impl SignEntry<Bidirectional<Executing>> {
 
     /// Retain a terminal extraction failure without retrying target-chain execution.
     pub async fn park(self) -> Result<(), BacklogError> {
-        let mut pending = self.backlog.pending(&self.chain).write().await;
-        let entry = pending
-            .requests
-            .get_mut(&self.request.id)
-            .ok_or(BacklogError::NotFound {
-                chain: self.chain,
-                id: self.request.id,
-            })?;
-        entry.status = SignStatus::Bidirectional(BidirectionalProgress::Parked(Arc::clone(
-            self.execution_tx(),
-        )));
-        Ok(())
+        self.backlog
+            .park_execution(self.chain, &self.request.id, self.execution_tx())
+            .await
     }
 
     /// Advance destination-chain `Executing` into Phase 2 response signing based on
@@ -596,6 +643,7 @@ impl SignEntry<Bidirectional<Executing>> {
             chain_ctx,
             origin_indexed_at,
             block_height,
+            self.request.args.entropy,
         );
         let sign_request = match outcome {
             ExecutionOutcome::Success { output } => {
@@ -620,6 +668,49 @@ impl SignEntry<Bidirectional<Executing>> {
             state: Bidirectional(Final(Generating)),
             backlog: self.backlog,
         })
+    }
+}
+
+impl SignEntry<Bidirectional<BidirectionalProgress>> {
+    /// Record a later signature of the request: an execution under it must be found too (#1428).
+    /// Checked against the first leg, as this entry's own request is the response once in Final.
+    /// Returns false if the request was quarantined instead, so its signing must be retired.
+    pub(crate) async fn record_published_transaction_signature(
+        self,
+        signature: Signature,
+        root_pk: PublicKey,
+    ) -> anyhow::Result<bool> {
+        let (sign_id, source_chain) = (self.request.id, self.chain);
+        let Some(stored) = self.backlog.entry(source_chain, &sign_id).await else {
+            return Ok(true);
+        };
+        let first_leg = &stored.request;
+        let SignKind::SignBidirectional(event) = &first_leg.kind else {
+            return Ok(true);
+        };
+        mpc_crypto::verify_signature(
+            root_pk,
+            first_leg.args.epsilon,
+            first_leg.args.payload,
+            &signature,
+        )?;
+        // A first signature, on an entry answered as a sibling: a node that has not answered it
+        // quarantines it (see `advance_bidirectional_to_execution`), so this one must too.
+        if stored.tx_ids.is_empty() {
+            if let Err(err) = event.validate() {
+                tracing::error!(
+                    ?sign_id,
+                    ?source_chain,
+                    ?err,
+                    "quarantining bidirectional request that can never advance"
+                );
+                self.backlog.remove(source_chain, &sign_id).await;
+                return Ok(false);
+            }
+        }
+        let tx = event.to_bidirectional_tx(sign_id.request_id, signature, root_pk)?;
+        self.backlog.add_published_tx(Arc::new(tx)).await;
+        Ok(true)
     }
 }
 
@@ -804,6 +895,15 @@ impl SignState for Bidirectional<Final<AnyProgress>> {
             SignStatus::Bidirectional(BidirectionalProgress::Final { progress, .. }) => {
                 Some(Bidirectional(Final(progress.clone())))
             }
+            _ => None,
+        }
+    }
+}
+
+impl SignState for Bidirectional<BidirectionalProgress> {
+    fn try_from_status(status: &SignStatus) -> Option<Self> {
+        match status {
+            SignStatus::Bidirectional(progress) => Some(Bidirectional(progress.clone())),
             _ => None,
         }
     }
