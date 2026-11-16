@@ -18,7 +18,7 @@ use crate::storage::checkpoint_storage::CheckpointStorage;
 pub use checkpoints::{Checkpoint, CheckpointError, Checkpoints};
 
 use enum_map::EnumMap;
-use mpc_chain_integration_core::{StateManager, WatchKey, WatchedExecution};
+use mpc_chain_integration_core::{ExecutionWatchers, StateManager, WatchKey, WatchedExecution};
 use mpc_primitives::{
     BidirectionalTx, BidirectionalTxId, Chain, IndexedSignRequest, PublicKey, SignId, SignKind,
 };
@@ -119,41 +119,6 @@ impl PendingRequests {
             requests,
             processed_block_height: Some(checkpoint.block_height),
         }
-    }
-}
-
-/// The transactions this node watches, keyed by execution identity —
-/// a pure index over the backlog's `Executing` entries, rebuilt at
-/// checkpoint recovery.
-#[derive(Debug, Clone, Default)]
-struct ExecutionWatchers {
-    watches: HashMap<WatchKey, Arc<BidirectionalTx>>,
-}
-
-impl ExecutionWatchers {
-    fn insert(&mut self, tx: Arc<BidirectionalTx>) {
-        self.watches.insert(WatchKey::of(&tx), tx);
-    }
-
-    fn rebuild(&mut self, source: Chain, entries: impl IntoIterator<Item = Arc<BidirectionalTx>>) {
-        self.watches.retain(|key, _| key.source != source);
-        self.watches
-            .extend(entries.into_iter().map(|tx| (WatchKey::of(&tx), tx)));
-    }
-
-    fn remove(&mut self, key: &WatchKey) -> Option<Arc<BidirectionalTx>> {
-        self.watches.remove(key)
-    }
-
-    fn all(&self) -> HashMap<BidirectionalTxId, Vec<WatchedExecution>> {
-        let mut grouped: HashMap<BidirectionalTxId, Vec<WatchedExecution>> = HashMap::new();
-        for tx in self.watches.values() {
-            grouped
-                .entry(tx.id)
-                .or_default()
-                .push(WatchedExecution::of(Arc::clone(tx)));
-        }
-        grouped
     }
 }
 

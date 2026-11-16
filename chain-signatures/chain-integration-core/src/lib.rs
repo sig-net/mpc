@@ -8,7 +8,7 @@ pub mod utils;
 
 pub use indexer::{unexecutable_outcome, ChainIndexer, ExtractionFailure};
 pub use publish::{ChainPublisher, GatedPublisher, PublishAction};
-pub use state::{MockStateManager, StateManager, WatchKey, WatchedExecution};
+pub use state::{ExecutionWatchers, MockStateManager, StateManager, WatchKey, WatchedExecution};
 pub use telemetry::{
     ChainTelemetry, ExtractionFailureKind, NoopChainTelemetry, NoopPublisherTelemetry,
     PublisherTelemetry,
