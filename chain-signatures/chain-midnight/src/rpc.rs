@@ -1315,9 +1315,12 @@ impl Reads {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::native::SubmitChain as _;
+    use crate::submit_error::SubmitError;
     use jsonrpsee::server::ServerBuilder;
     use jsonrpsee::types::ErrorObjectOwned;
     use jsonrpsee::RpcModule;
+    use mpc_chain_integration_core::utils::retry::is_provider_throttled;
     use serde_json::json;
     use std::io::Write as _;
     use std::net::SocketAddr;
@@ -3259,6 +3262,43 @@ mod tests {
             other => panic!("expected an unsent submit, got {other:?}"),
         }
         assert_eq!(submits.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn real_submit_statuses_follow_the_send_partition() {
+        // The runtime read inside the submit path meets the status first, so
+        // nothing is sent and the typed status rides the refusal's chain.
+        for (status, reason, retryable, throttled) in [
+            (429u16, "Too Many Requests", true, true),
+            (500u16, "Internal Server Error", true, false),
+            (409u16, "Conflict", false, false),
+        ] {
+            let (address, _calls, server) = http_status_server(status, reason).await;
+            let config = http_config(address);
+            let transport = connect_http(&config).unwrap();
+            let rpc = MidnightPublisherRpc {
+                rpc: transport.clone(),
+                legacy: LegacyRpcMethods::<SubstrateConfig>::new(transport),
+                genesis_hash: H256([0x11; 32]),
+                clients: Default::default(),
+                network_id: "undeployed".to_string(),
+            };
+
+            let error = match rpc.submit(&[0x00]).await {
+                Err(SubmitRefusal::Unsent(error)) => error,
+                other => panic!("expected an unsent submit at {status}, got {other:?}"),
+            };
+            server.abort();
+            let _ = server.await;
+            assert_eq!(rejected_http_status(&error), Some(status), "{error:#}");
+
+            let publish = SubmitError::Node {
+                source: error.context("the transaction could not be sent; nothing was posted"),
+            }
+            .into_publish_error();
+            assert_eq!(is_retryable(&publish), retryable, "{publish:#}");
+            assert_eq!(is_provider_throttled(&publish), throttled, "{publish:#}");
+        }
     }
 
     /// Serves the captured block 432 as `0x43`, whose parent `0x42` runs the

@@ -591,6 +591,7 @@ mod tests {
         ContractAction, ContractCall, Intent, ProofPreimageMarker, Signature, INITIAL_PARAMETERS,
     };
     use midnight_transient_crypto::commitment::PedersenRandomness;
+use mpc_chain_integration_core::utils::retry::is_retryable;
 
     use super::*;
     use crate::emissions::{emissions_of_call, Emission, EmissionKind, MISC_PAYLOAD_LEN};
@@ -1136,8 +1137,8 @@ mod tests {
         assert_eq!(*client.wallet.failures.lock().unwrap(), vec![false]);
     }
 
-    #[test]
-    fn malformed_requests_are_refused_before_anything_is_built() {
+    #[tokio::test]
+    async fn malformed_requests_are_refused_before_anything_is_built() {
         let cases: Vec<(&str, IntentRequest)> = vec![
             (
                 "undecodable contract state",
@@ -1156,10 +1157,15 @@ mod tests {
         ];
         let client = client();
         for (case, request) in cases {
-            let error = client.build_intent(&request).unwrap_err();
+            let error = client.build(&request).await.unwrap_err();
+            assert_eq!(
+                crate::submit_error::refusal_code(&error),
+                Some("bad_request"),
+                "{case}: {error:#}"
+            );
             assert!(
-                matches!(error, SubmitError::BadRequest(_)),
-                "{case}: {error}"
+                !is_retryable(&error),
+                "{case}: a malformed request must be terminal: {error:#}"
             );
         }
     }
