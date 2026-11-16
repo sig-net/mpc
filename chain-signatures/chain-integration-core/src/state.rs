@@ -75,6 +75,10 @@ impl ExecutionWatchers {
         self.watches.remove(key)
     }
 
+    pub fn contains(&self, key: &WatchKey) -> bool {
+        self.watches.contains_key(key)
+    }
+
     pub fn all(&self) -> HashMap<BidirectionalTxId, Vec<WatchedExecution>> {
         let mut grouped: HashMap<BidirectionalTxId, Vec<WatchedExecution>> = HashMap::new();
         for (key, tx) in &self.watches {

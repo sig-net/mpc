@@ -1970,3 +1970,23 @@ fn a_record_applies_only_to_an_entry_behind_it() {
         }
     }
 }
+
+#[test]
+fn rebuild_drops_clocks_only_with_their_watches() {
+    use super::WatchedExecutions;
+
+    let mut watches = WatchedExecutions::default();
+    let dropped = mock_bidirectional_tx(SignId::from_u8(1), Chain::Solana);
+    let kept = mock_bidirectional_tx(SignId::from_u8(2), Chain::Ethereum);
+    watches.register(Arc::new(dropped.clone()), Some(Instant::now()));
+    watches.register(Arc::new(kept.clone()), Some(Instant::now()));
+
+    watches.rebuild(Chain::Solana, &[]);
+
+    let dropped_key = WatchKey::of(&dropped);
+    assert_eq!(watches.clock_of(&dropped_key), None);
+    assert!(watches.remove(&dropped_key).is_none());
+    let kept_key = WatchKey::of(&kept);
+    assert!(watches.clock_of(&kept_key).is_some());
+    assert!(watches.remove(&kept_key).is_some());
+}

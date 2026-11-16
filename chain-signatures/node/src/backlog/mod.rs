@@ -22,7 +22,7 @@ use mpc_chain_integration_core::{ExecutionWatchers, StateManager, WatchKey, Watc
 use mpc_primitives::{
     BidirectionalTx, BidirectionalTxId, Chain, IndexedSignRequest, PublicKey, SignId, SignKind,
 };
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
@@ -153,9 +153,7 @@ impl WatchedExecutions {
     /// keeps its first observation.
     fn rebuild(&mut self, source: Chain, entries: &[Arc<BidirectionalTx>]) {
         self.index.rebuild(source, entries.iter().cloned());
-        let fresh: HashSet<WatchKey> = entries.iter().map(|tx| WatchKey::of(tx)).collect();
-        self.wait_starts
-            .retain(|key, _| key.source != source || fresh.contains(key));
+        self.wait_starts.retain(|key, _| self.index.contains(key));
     }
 
     fn all(&self) -> HashMap<BidirectionalTxId, Vec<WatchedExecution>> {
