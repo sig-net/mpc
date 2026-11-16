@@ -33,9 +33,10 @@ test filter="": (setup "")
     cargo nextest run -p integration-tests {{ if filter != "" { "-E 'test(" + filter + ")'" } else { "" } }}
 alias t := test
 
-# Run only lightweight fixture tests (no full cluster or Docker beyond Redis)
+# Run only lightweight fixture tests (no full cluster or Docker beyond Redis).
+# Nodes run in-process, so no setup: neither the contract wasm nor the node binary is needed.
 # Usage: just tf [filter]
-test-fixture filter="": (setup "")
+test-fixture filter="":
     cargo nextest run -p integration-tests --profile fixture {{ if filter != "" { "-E 'test(" + filter + ")'" } else { "" } }}
 alias tf := test-fixture
 
