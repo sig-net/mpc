@@ -438,17 +438,12 @@ impl Backlog {
         target: Chain,
         key: WatchKey,
     ) -> Option<SignEntry<Bidirectional<Executing>>> {
-        let Some((tx, observed_at)) = self.watchers(&target).write().await.remove(&key) else {
-            return None;
-        };
+        let (tx, observed_at) = self.watchers(&target).write().await.remove(&key)?;
 
         // The status names one transaction and no observation time; the watch that fired has both.
-        let Some(entry) = self
+        let entry = self
             .get_by::<Bidirectional<Executing>>(tx.source_chain, &tx.sign_id())
-            .await
-        else {
-            return None;
-        };
+            .await?;
         // Its other transactions can no longer execute, whoever published their signatures.
         let pending = self.pending(&tx.source_chain).read().await;
         let others = pending
