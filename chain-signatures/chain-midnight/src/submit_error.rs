@@ -3,7 +3,6 @@
 //! same backlog bytes; every other class waits on a runtime event the retry may
 //! yet observe.
 
-use http::StatusCode;
 use mpc_chain_integration_core::utils::retry::RpcFailure;
 
 use crate::rpc::rejected_http_status;
@@ -79,9 +78,7 @@ impl SubmitError {
             // The send partition, like ethereum's pre-broadcast nonce fetch:
             // nothing was posted, so a classic 4xx hands the publish to failover.
             Self::Node { source } => {
-                let failure = match rejected_http_status(&source)
-                    .and_then(|status| StatusCode::from_u16(status).ok())
-                {
+                let failure = match rejected_http_status(&source) {
                     Some(status) => RpcFailure::send_status(status, format!("{source:#}")),
                     None => RpcFailure::retryable(format!("{source:#}")),
                 };
@@ -112,35 +109,7 @@ mod tests {
     use subxt::ext::subxt_rpcs::Error as RawRpcError;
 
     #[test]
-    fn every_class_is_counted_under_the_code_its_message_carries() {
-        let classes: [fn() -> SubmitError; 10] = [
-            || SubmitError::BadRequest("reason".to_string()),
-            || SubmitError::ContractMismatch("reason".to_string()),
-            || SubmitError::WalletUnsynced("reason".to_string()),
-            || SubmitError::WalletBusy("reason".to_string()),
-            || SubmitError::WalletUnfunded("reason".to_string()),
-            || SubmitError::ProvingTimeout("reason".to_string()),
-            || SubmitError::StateConflict("reason".to_string()),
-            || SubmitError::Ambiguous("reason".to_string()),
-            || SubmitError::Internal("reason".to_string()),
-            || SubmitError::Node {
-                source: anyhow::anyhow!("reason"),
-            },
-        ];
-        for class in classes {
-            let error = class();
-            let message = error.to_string();
-            let code = error.code();
-            assert_eq!(message, format!("[{code}] reason"));
-            assert_eq!(
-                refusal_code(&error.into_publish_error().context("publishing")),
-                Some(code)
-            );
-        }
-    }
-
-    #[test]
-    fn every_class_carries_the_verdict_its_derivation_names() {
+    fn every_class_is_counted_and_classified_under_its_code() {
         let classes: [(fn() -> SubmitError, bool); 10] = [
             (|| SubmitError::BadRequest("reason".to_string()), false),
             (
@@ -149,20 +118,24 @@ mod tests {
             ),
             (|| SubmitError::WalletUnsynced("reason".to_string()), true),
             (|| SubmitError::WalletBusy("reason".to_string()), true),
-            (|| SubmitError::WalletUnfunded("empty".to_string()), true),
-            (|| SubmitError::ProvingTimeout("budget".to_string()), true),
-            (|| SubmitError::StateConflict("refused".to_string()), true),
-            (|| SubmitError::Ambiguous("unseen".to_string()), true),
-            (|| SubmitError::Internal("bug".to_string()), true),
+            (|| SubmitError::WalletUnfunded("reason".to_string()), true),
+            (|| SubmitError::ProvingTimeout("reason".to_string()), true),
+            (|| SubmitError::StateConflict("reason".to_string()), true),
+            (|| SubmitError::Ambiguous("reason".to_string()), true),
+            (|| SubmitError::Internal("reason".to_string()), true),
             (
                 || SubmitError::Node {
-                    source: anyhow::anyhow!("the node answered 503"),
+                    source: anyhow::anyhow!("reason"),
                 },
                 true,
             ),
         ];
         for (class, retryable) in classes {
-            let error = class().into_publish_error().context("publishing");
+            let error = class();
+            let code = error.code();
+            assert_eq!(error.to_string(), format!("[{code}] reason"));
+            let error = error.into_publish_error().context("publishing");
+            assert_eq!(refusal_code(&error), Some(code));
             assert_eq!(is_retryable(&error), retryable, "{error:#}");
             assert!(!is_provider_throttled(&error), "{error:#}");
         }

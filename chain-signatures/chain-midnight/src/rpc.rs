@@ -1126,7 +1126,10 @@ struct Reads {
     retry: RetryConfig,
 }
 
-pub(crate) fn rejected_http_status(error: &anyhow::Error) -> Option<u16> {
+/// The HTTP status a transport rejection in `error`'s chain carries, if any.
+/// jsonrpsee stores a parsed `StatusCode` as u16 (jsonrpsee-http-client 0.24.10
+/// transport.rs:337), so `from_u16` cannot fail on what it produces.
+pub(crate) fn rejected_http_status(error: &anyhow::Error) -> Option<StatusCode> {
     error.chain().find_map(|cause| {
         let RawRpcError::Client(client_error) = cause.downcast_ref::<RawRpcError>()? else {
             return None;
@@ -1141,7 +1144,7 @@ pub(crate) fn rejected_http_status(error: &anyhow::Error) -> Option<u16> {
         else {
             return None;
         };
-        Some(*status_code)
+        StatusCode::from_u16(*status_code).ok()
     })
 }
 
@@ -1152,7 +1155,7 @@ fn is_read_retryable(error: &anyhow::Error) -> bool {
     if let Some(status) = rejected_http_status(error) {
         // reads stay conservative: a retry reconnects onto a healthy LB
         // backend (#1469), so only classic client errors are terminal
-        return StatusCode::from_u16(status).map_or(true, http_status_read_retryable);
+        return http_status_read_retryable(status);
     }
     if error.chain().any(|cause| {
         matches!(
@@ -2309,7 +2312,7 @@ mod tests {
 
             assert_eq!(
                 rejected_http_status(&err),
-                Some(status),
+                Some(StatusCode::from_u16(status).unwrap()),
                 "status {status} was lost from the typed error chain: {err:#}"
             );
             assert_eq!(
@@ -3267,7 +3270,7 @@ mod tests {
     #[tokio::test]
     async fn real_submit_statuses_follow_the_send_partition() {
         // The runtime read inside the submit path meets the status first, so
-        // nothing is sent and the typed status rides the refusal's chain.
+        // nothing is sent.
         for (status, reason, retryable, throttled) in [
             (429u16, "Too Many Requests", true, true),
             (500u16, "Internal Server Error", true, false),
@@ -3290,7 +3293,11 @@ mod tests {
             };
             server.abort();
             let _ = server.await;
-            assert_eq!(rejected_http_status(&error), Some(status), "{error:#}");
+            assert_eq!(
+                rejected_http_status(&error),
+                Some(StatusCode::from_u16(status).unwrap()),
+                "{error:#}"
+            );
 
             let publish = SubmitError::Node {
                 source: error.context("the transaction could not be sent; nothing was posted"),

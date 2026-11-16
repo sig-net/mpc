@@ -374,8 +374,7 @@ impl ChainPublisher for RecoveringMidnightPublisher {
 }
 
 /// The action as one respond call, or a refusal: every gate is here, ahead of the
-/// first read, so a refused action costs nothing. Refusals are terminal — see
-/// [`terminal_refusal`].
+/// first read, so a refused action costs nothing.
 fn respond_call(action: &PublishAction) -> anyhow::Result<RespondCall> {
     anyhow::ensure!(
         action.request.chain == Chain::Midnight,
