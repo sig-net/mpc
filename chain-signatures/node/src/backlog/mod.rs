@@ -548,7 +548,6 @@ impl Backlog {
                 tracing::error!(sign_id = ?entry.sign_id(), "cannot build a transaction to answer");
                 continue;
             };
-            let watched_txs = entry.watched_txs();
             let mut observed_at = None;
             for watched in entry.watched_txs() {
                 let key = WatchKey::of(&watched);
@@ -766,7 +765,7 @@ impl Backlog {
             "recovering backlog to checkpoint"
         );
 
-        let execution_to_watch = {
+        {
             let mut pending = self.pending(&checkpoint.chain).write().await;
             let previous_height = pending.processed_block_height().unwrap_or(0);
 
@@ -794,11 +793,14 @@ impl Backlog {
                 restored_requests = restored_len,
                 "successfully recovered from checkpoint"
             );
-            pending.execution_watches()
-        };
+        }
 
+        // Under the pending lock, as `add_published_tx` inserts: a
+        // racing publish registers after the rebuild, not into rows it
+        // deletes.
+        let mut pending = self.pending(&chain).write().await;
         let mut by_target: EnumMap<Chain, Vec<Arc<BidirectionalTx>>> = EnumMap::default();
-        for tx in execution_to_watch {
+        for tx in pending.execution_watches() {
             by_target[tx.target_chain].push(tx);
         }
         for destination_chain in Chain::iter() {
@@ -807,6 +809,7 @@ impl Backlog {
                 .await
                 .rebuild(chain, &by_target[destination_chain]);
         }
+        drop(pending);
     }
 }
 

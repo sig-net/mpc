@@ -1986,3 +1986,47 @@ fn rebuild_drops_clocks_only_with_their_watches() {
     assert!(watches.clock_of(&kept_key).is_some());
     assert!(watches.remove(&kept_key).is_some());
 }
+
+/// A signature published while a recovery runs keeps its watch.
+#[tokio::test]
+async fn a_published_tx_during_recovery_keeps_its_watch() {
+    let backlog = Backlog::new();
+    let tx = mock_bidirectional_tx(SignId::from_u8(3), Chain::Solana);
+    backlog.insert_mock_executing(&tx).await;
+    let checkpoint = backlog.checkpoint(Chain::Solana).await.unwrap();
+
+    let target = tx.target_chain;
+    let sibling = Arc::new(BidirectionalTx {
+        id: BidirectionalTxId([0xee; 32]),
+        ..tx.clone()
+    });
+    // Park the recovery before the target's map (`Chain::iter` visits
+    // NEAR first); it holds the pending lock and waits on this guard.
+    let parked = backlog.watchers(Chain::NEAR).write().await;
+    let recovering = {
+        let backlog = backlog.clone();
+        let checkpoint = checkpoint.clone();
+        tokio::spawn(async move {
+            backlog.recover_by_checkpoint(&checkpoint).await;
+        })
+    };
+    tokio::task::yield_now().await;
+    // The publish parks on the pending lock the recovery holds.
+    let publishing = {
+        let backlog = backlog.clone();
+        let sibling = Arc::clone(&sibling);
+        tokio::spawn(async move {
+            backlog.add_published_tx(sibling).await;
+        })
+    };
+    tokio::task::yield_now().await;
+    drop(parked);
+    publishing.await.unwrap();
+    recovering.await.unwrap();
+
+    let watchers = backlog.get_execution_watchers(target).await;
+    assert!(
+        watchers.contains_key(&sibling.id),
+        "the rebuild must not delete a watch registered by a racing publish"
+    );
+}

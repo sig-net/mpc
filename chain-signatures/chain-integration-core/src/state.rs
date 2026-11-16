@@ -58,8 +58,6 @@ impl ExecutionWatchers {
     }
 
     /// Under an explicit key — for a sign id the tx does not derive.
-    /// Refresh and remove see only the namespace used to insert: a row
-    /// inserted here is invisible to derived-key operations.
     pub fn insert_at(&mut self, key: WatchKey, tx: Arc<BidirectionalTx>) {
         self.watches.insert(key, tx);
     }
