@@ -5,12 +5,6 @@ use k256::elliptic_curve::sec1::ToEncodedPoint;
 use mpc_chain_integration_core::{utils::retry::RpcFailure, ChainPublisher, PublishAction};
 use mpc_primitives::SignKind;
 use reqwest::StatusCode;
-use signet_program::accounts::{
-    Respond as SolanaRespondAccount, RespondBidirectional as SolanaRespondBidirectionalAccount,
-};
-use signet_program::instruction::{
-    Respond as SolanaRespond, RespondBidirectional as SolanaRespondBidirectional,
-};
 use solana_client::{
     client_error::ClientErrorKind,
     rpc_custom_error::JSON_RPC_SERVER_ERROR_TRANSACTION_SIGNATURE_VERIFICATION_FAILURE,
@@ -20,6 +14,12 @@ use solana_client::{
 use solana_sdk::{pubkey::Pubkey, signature::Signer as _, transaction::TransactionError};
 
 use crate::client::SolanaClient;
+use crate::solana_signet_program::client::accounts::{
+    Respond as SolanaRespondAccount, RespondBidirectional as SolanaRespondBidirectionalAccount,
+};
+use crate::solana_signet_program::client::args::{
+    Respond as SolanaRespond, RespondBidirectional as SolanaRespondBidirectional,
+};
 use crate::utils::mpc_to_sol_signature;
 
 enum Verdict {
@@ -177,7 +177,7 @@ impl ChainPublisher for SolanaClient {
                     })
                     .args(SolanaRespond {
                         request_ids,
-                        signatures: vec![signature.clone()],
+                        signatures: vec![signature],
                     })
                     .send()
                     .await
@@ -216,7 +216,7 @@ impl ChainPublisher for SolanaClient {
                     .args(SolanaRespondBidirectional {
                         request_id: request_ids[0],
                         serialized_output: respond_bidirectional_serialized_output,
-                        signature: signature.clone(),
+                        signature,
                     })
                     .send()
                     .await

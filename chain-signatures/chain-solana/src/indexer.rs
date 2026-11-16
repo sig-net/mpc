@@ -630,6 +630,7 @@ mod tests {
 
     use super::*;
     use crate::events::SolanaSignEvent;
+    use crate::solana_signet_program::events::{SignatureRequestedEvent, SignatureRespondedEvent};
     use crate::test_utils::sign_bidirectional_ix_data;
     use anchor_lang::{AnchorSerialize, Discriminator};
     use mpc_chain_integration_core::{
@@ -637,7 +638,6 @@ mod tests {
         MockStateManager, NoopChainTelemetry,
     };
     use mpc_primitives::SignId;
-    use signet_program::{SignatureRequestedEvent, SignatureRespondedEvent};
     use solana_client::rpc_custom_error::{
         JSON_RPC_SERVER_ERROR_BLOCK_NOT_AVAILABLE,
         JSON_RPC_SERVER_ERROR_LONG_TERM_STORAGE_SLOT_SKIPPED, JSON_RPC_SERVER_ERROR_SLOT_SKIPPED,
@@ -771,8 +771,8 @@ mod tests {
         SignatureRespondedEvent {
             request_id,
             responder: Pubkey::new_unique(),
-            signature: signet_program::Signature {
-                big_r: signet_program::AffinePoint {
+            signature: crate::solana_signet_program::types::Signature {
+                big_r: crate::solana_signet_program::types::AffinePoint {
                     x: hex::decode(
                         "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
                     )
@@ -1390,12 +1390,12 @@ mod tests {
         let generator = k256::ProjectivePoint::GENERATOR
             .to_affine()
             .to_encoded_point(false);
-        let event = signet_program::RespondBidirectionalEvent {
+        let event = crate::solana_signet_program::events::RespondBidirectionalEvent {
             request_id: [0x31; 32],
             responder: Pubkey::new_from_array([0x32; 32]),
             serialized_output: vec![1, 2, 3],
-            signature: signet_program::Signature {
-                big_r: signet_program::AffinePoint {
+            signature: crate::solana_signet_program::types::Signature {
+                big_r: crate::solana_signet_program::types::AffinePoint {
                     x: coord(generator.x()),
                     y: coord(generator.y()),
                 },

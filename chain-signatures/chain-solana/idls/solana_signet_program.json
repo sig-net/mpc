@@ -1,0 +1,1749 @@
+{
+  "address": "SigTVbfRK9LsXWpSv9KgpabrQcFKr5hDdUwMhYsXyKg",
+  "metadata": {
+    "name": "chain_signatures",
+    "version": "0.4.3",
+    "spec": "0.1.0",
+    "description": "Chain signatures program for cross-chain signing on Solana",
+    "repository": "https://github.com/sig-net/signet-solana-program"
+  },
+  "instructions": [
+    {
+      "name": "get_signature_deposit",
+      "docs": [
+        "Get the current signature deposit amount. View function.",
+        "",
+        "# Returns",
+        "",
+        "Current signature deposit in lamports."
+      ],
+      "discriminator": [
+        45,
+        243,
+        86,
+        86,
+        58,
+        57,
+        172,
+        253
+      ],
+      "accounts": [
+        {
+          "name": "program_state",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  114,
+                  111,
+                  103,
+                  114,
+                  97,
+                  109,
+                  45,
+                  115,
+                  116,
+                  97,
+                  116,
+                  101
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "event_authority",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  95,
+                  95,
+                  101,
+                  118,
+                  101,
+                  110,
+                  116,
+                  95,
+                  97,
+                  117,
+                  116,
+                  104,
+                  111,
+                  114,
+                  105,
+                  116,
+                  121
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "program"
+        }
+      ],
+      "args": [],
+      "returns": "u64"
+    },
+    {
+      "name": "initialize",
+      "docs": [
+        "Initialize the program state.",
+        "",
+        "# Admin Only",
+        "",
+        "This instruction is restricted to program deployment and is **not intended",
+        "for application developers**. It can only be called once to set up the program.",
+        "",
+        "# Arguments",
+        "",
+        "* `signature_deposit` - Required deposit in lamports for signature requests",
+        "* `chain_id` - CAIP-2 chain identifier (e.g., \"solana:mainnet\")",
+        "",
+        "# Accounts",
+        "",
+        "* `program_state` - PDA to store program configuration",
+        "* `admin` - Admin account (becomes program admin)"
+      ],
+      "discriminator": [
+        175,
+        175,
+        109,
+        31,
+        13,
+        152,
+        155,
+        237
+      ],
+      "accounts": [
+        {
+          "name": "program_state",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  114,
+                  111,
+                  103,
+                  114,
+                  97,
+                  109,
+                  45,
+                  115,
+                  116,
+                  97,
+                  116,
+                  101
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "admin",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "signature_deposit",
+          "type": "u64"
+        },
+        {
+          "name": "chain_id",
+          "type": "string"
+        }
+      ]
+    },
+    {
+      "name": "respond",
+      "docs": [
+        "Respond to signature requests with generated signatures.",
+        "",
+        "Called by MPC responders after signature generation. Supports batched",
+        "requests where each signature is linked to its request via `request_id`.",
+        "",
+        "# Security Note",
+        "",
+        "**Any address can call this function.** Clients must verify signature",
+        "validity off-chain before trusting the response.",
+        "",
+        "# Arguments",
+        "",
+        "* `request_ids` - Array of 32-byte request identifiers",
+        "* `signatures` - Corresponding ECDSA signatures",
+        "",
+        "# Emits",
+        "",
+        "* [`SignatureRespondedEvent`] for each signature"
+      ],
+      "discriminator": [
+        72,
+        65,
+        227,
+        97,
+        42,
+        255,
+        147,
+        12
+      ],
+      "accounts": [
+        {
+          "name": "responder",
+          "signer": true
+        },
+        {
+          "name": "event_authority",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  95,
+                  95,
+                  101,
+                  118,
+                  101,
+                  110,
+                  116,
+                  95,
+                  97,
+                  117,
+                  116,
+                  104,
+                  111,
+                  114,
+                  105,
+                  116,
+                  121
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "program"
+        }
+      ],
+      "args": [
+        {
+          "name": "request_ids",
+          "type": {
+            "vec": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          }
+        },
+        {
+          "name": "signatures",
+          "type": {
+            "vec": {
+              "defined": {
+                "name": "Signature"
+              }
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "respond_bidirectional",
+      "docs": [
+        "Finalize a bidirectional flow with execution results from the destination chain.",
+        "",
+        "Called by MPC responders after observing transaction confirmation on the",
+        "destination chain. The signature proves the authenticity of the output.",
+        "",
+        "# Arguments",
+        "",
+        "* `request_id` - Original 32-byte request identifier",
+        "* `serialized_output` - Serialized execution output per `respond_serialization_schema`",
+        "* `signature` - ECDSA signature over `keccak256(request_id || serialized_output)`",
+        "",
+        "# Output Format",
+        "",
+        "For **successful transactions**:",
+        "- Contract call: Serialized return value per schema",
+        "- Simple transfer: Empty success indicator",
+        "",
+        "For **failed transactions**:",
+        "- Magic prefix `0xdeadbeef` followed by failure indicator",
+        "",
+        "# Emits",
+        "",
+        "* [`RespondBidirectionalEvent`]"
+      ],
+      "discriminator": [
+        138,
+        0,
+        45,
+        246,
+        236,
+        211,
+        109,
+        81
+      ],
+      "accounts": [
+        {
+          "name": "responder",
+          "signer": true
+        },
+        {
+          "name": "event_authority",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  95,
+                  95,
+                  101,
+                  118,
+                  101,
+                  110,
+                  116,
+                  95,
+                  97,
+                  117,
+                  116,
+                  104,
+                  111,
+                  114,
+                  105,
+                  116,
+                  121
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "program"
+        }
+      ],
+      "args": [
+        {
+          "name": "request_id",
+          "type": {
+            "array": [
+              "u8",
+              32
+            ]
+          }
+        },
+        {
+          "name": "serialized_output",
+          "type": "bytes"
+        },
+        {
+          "name": "signature",
+          "type": {
+            "defined": {
+              "name": "Signature"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "respond_error",
+      "docs": [
+        "Report signature generation errors from the MPC network.",
+        "",
+        "# Warning: Debugging Only",
+        "",
+        "This function is **solely for debugging purposes** and should not be used",
+        "in production or relied upon for any business logic. Error events are",
+        "informational only and are not cryptographically verified.",
+        "",
+        "# Security Note",
+        "",
+        "**Any address can call this function.** Do not rely on error events",
+        "for business logic decisions.",
+        "",
+        "# Arguments",
+        "",
+        "* `errors` - Array of error responses with request IDs and messages",
+        "",
+        "# Emits",
+        "",
+        "* [`SignatureErrorEvent`] for each error"
+      ],
+      "discriminator": [
+        3,
+        170,
+        41,
+        132,
+        72,
+        184,
+        252,
+        69
+      ],
+      "accounts": [
+        {
+          "name": "responder",
+          "signer": true
+        }
+      ],
+      "args": [
+        {
+          "name": "errors",
+          "type": {
+            "vec": {
+              "defined": {
+                "name": "ErrorResponse"
+              }
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "sign",
+      "docs": [
+        "Request a signature from the MPC network on a 32-byte payload.",
+        "",
+        "The payload is typically a transaction hash that needs to be signed.",
+        "The MPC network will respond with a signature via [`respond`].",
+        "",
+        "# Arguments",
+        "",
+        "* `payload` - 32-byte data to sign (typically a transaction hash)",
+        "* `key_version` - MPC key version to use",
+        "* `path` - Derivation path for the user's key (e.g., `\"my_wallet\"`)",
+        "* `algo` - Reserved for future use (pass empty string `\"\"`)",
+        "* `dest` - Reserved for future use (pass empty string `\"\"`)",
+        "* `params` - Reserved for future use (pass empty string `\"\"`)",
+        "",
+        "# Emits",
+        "",
+        "* [`SignatureRequestedEvent`]",
+        "",
+        "# Example",
+        "",
+        "```typescript,ignore",
+        "await program.methods",
+        ".sign(",
+        "Array.from(txHash),  // [u8; 32] payload to sign",
+        "0,                    // key_version",
+        "\"my_wallet\",          // path (derivation path)",
+        "\"\",                   // algo (reserved, pass empty string)",
+        "\"\",                   // dest (reserved, pass empty string)",
+        "\"\"                    // params (reserved, pass empty string)",
+        ")",
+        ".accounts({ ... })",
+        ".rpc();",
+        "```"
+      ],
+      "discriminator": [
+        5,
+        221,
+        155,
+        46,
+        237,
+        91,
+        28,
+        236
+      ],
+      "accounts": [
+        {
+          "name": "program_state",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  114,
+                  111,
+                  103,
+                  114,
+                  97,
+                  109,
+                  45,
+                  115,
+                  116,
+                  97,
+                  116,
+                  101
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "requester",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "fee_payer",
+          "writable": true,
+          "signer": true,
+          "optional": true
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        },
+        {
+          "name": "event_authority",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  95,
+                  95,
+                  101,
+                  118,
+                  101,
+                  110,
+                  116,
+                  95,
+                  97,
+                  117,
+                  116,
+                  104,
+                  111,
+                  114,
+                  105,
+                  116,
+                  121
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "program"
+        }
+      ],
+      "args": [
+        {
+          "name": "payload",
+          "type": {
+            "array": [
+              "u8",
+              32
+            ]
+          }
+        },
+        {
+          "name": "key_version",
+          "type": "u32"
+        },
+        {
+          "name": "path",
+          "type": "string"
+        },
+        {
+          "name": "algo",
+          "type": "string"
+        },
+        {
+          "name": "dest",
+          "type": "string"
+        },
+        {
+          "name": "params",
+          "type": "string"
+        }
+      ]
+    },
+    {
+      "name": "sign_bidirectional",
+      "docs": [
+        "Initiate a bidirectional cross-chain transaction with execution result callback.",
+        "",
+        "This is the primary entry point for cross-chain transactions. The flow:",
+        "1. User submits unsigned transaction → MPC signs and responds",
+        "2. User broadcasts to destination chain",
+        "3. MPC observes execution via light client",
+        "4. MPC returns execution result via [`respond_bidirectional`]",
+        "",
+        "Chain-agnostic lifecycle reference: <https://docs.sig.network/architecture/sign-bidirectional>",
+        "",
+        "# Arguments",
+        "",
+        "* `serialized_transaction` - serialized unsigned transaction for destination chain",
+        "* `caip2_id` - CAIP-2 chain identifier (e.g., `\"eip155:1\"` for Ethereum mainnet)",
+        "* `key_version` - MPC key version to use",
+        "* `path` - Derivation path for signing key",
+        "* `algo` - Reserved for future use (pass empty string `\"\"`)",
+        "* `dest` - Reserved for future use (pass empty string `\"\"`)",
+        "* `params` - Reserved for future use (pass empty string `\"\"`)",
+        "* `program_id` - Callback program ID (reserved for future use)",
+        "* `output_deserialization_schema` - serialization schema for parsing destination chain output",
+        "* `respond_serialization_schema` - serialization schema for serializing response to source chain",
+        "",
+        "# Emits",
+        "",
+        "* [`SignBidirectionalEvent`]",
+        "",
+        "# Errors",
+        "",
+        "* [`ChainSignaturesError::InvalidTransaction`] - Empty transaction data",
+        "* [`ChainSignaturesError::InsufficientDeposit`] - Insufficient deposit"
+      ],
+      "discriminator": [
+        21,
+        104,
+        182,
+        213,
+        189,
+        143,
+        219,
+        48
+      ],
+      "accounts": [
+        {
+          "name": "program_state",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  114,
+                  111,
+                  103,
+                  114,
+                  97,
+                  109,
+                  45,
+                  115,
+                  116,
+                  97,
+                  116,
+                  101
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "requester",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "fee_payer",
+          "writable": true,
+          "signer": true,
+          "optional": true
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        },
+        {
+          "name": "instructions",
+          "optional": true
+        },
+        {
+          "name": "event_authority",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  95,
+                  95,
+                  101,
+                  118,
+                  101,
+                  110,
+                  116,
+                  95,
+                  97,
+                  117,
+                  116,
+                  104,
+                  111,
+                  114,
+                  105,
+                  116,
+                  121
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "program"
+        }
+      ],
+      "args": [
+        {
+          "name": "serialized_transaction",
+          "type": "bytes"
+        },
+        {
+          "name": "caip2_id",
+          "type": "string"
+        },
+        {
+          "name": "key_version",
+          "type": "u32"
+        },
+        {
+          "name": "path",
+          "type": "string"
+        },
+        {
+          "name": "algo",
+          "type": "string"
+        },
+        {
+          "name": "dest",
+          "type": "string"
+        },
+        {
+          "name": "params",
+          "type": "string"
+        },
+        {
+          "name": "program_id",
+          "type": "pubkey"
+        },
+        {
+          "name": "output_deserialization_schema",
+          "type": "bytes"
+        },
+        {
+          "name": "respond_serialization_schema",
+          "type": "bytes"
+        }
+      ]
+    },
+    {
+      "name": "update_chain_id",
+      "docs": [
+        "Update the CAIP-2 chain identifier.",
+        "",
+        "# Admin Only",
+        "",
+        "This instruction is restricted to the program administrator and is **not intended",
+        "for application developers**. It is used for program maintenance.",
+        "",
+        "# Arguments",
+        "",
+        "* `new_chain_id` - New CAIP-2 chain identifier",
+        "",
+        "# Emits",
+        "",
+        "* [`ChainIdUpdatedEvent`]"
+      ],
+      "discriminator": [
+        108,
+        204,
+        68,
+        170,
+        57,
+        233,
+        92,
+        230
+      ],
+      "accounts": [
+        {
+          "name": "program_state",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  114,
+                  111,
+                  103,
+                  114,
+                  97,
+                  109,
+                  45,
+                  115,
+                  116,
+                  97,
+                  116,
+                  101
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "admin",
+          "writable": true,
+          "signer": true,
+          "relations": [
+            "program_state"
+          ]
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "new_chain_id",
+          "type": "string"
+        }
+      ]
+    },
+    {
+      "name": "update_deposit",
+      "docs": [
+        "Update the required signature deposit amount.",
+        "",
+        "# Admin Only",
+        "",
+        "This instruction is restricted to the program administrator and is **not intended",
+        "for application developers**. It is used for program maintenance.",
+        "",
+        "# Arguments",
+        "",
+        "* `new_deposit` - New deposit amount in lamports",
+        "",
+        "# Emits",
+        "",
+        "* [`DepositUpdatedEvent`]"
+      ],
+      "discriminator": [
+        126,
+        116,
+        15,
+        164,
+        238,
+        179,
+        155,
+        59
+      ],
+      "accounts": [
+        {
+          "name": "program_state",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  114,
+                  111,
+                  103,
+                  114,
+                  97,
+                  109,
+                  45,
+                  115,
+                  116,
+                  97,
+                  116,
+                  101
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "admin",
+          "writable": true,
+          "signer": true,
+          "relations": [
+            "program_state"
+          ]
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "new_deposit",
+          "type": "u64"
+        }
+      ]
+    },
+    {
+      "name": "withdraw_funds",
+      "docs": [
+        "Withdraw accumulated funds from the program.",
+        "",
+        "# Admin Only",
+        "",
+        "This instruction is restricted to the program administrator and is **not intended",
+        "for application developers**. It is used for program maintenance.",
+        "",
+        "# Arguments",
+        "",
+        "* `amount` - Amount to withdraw in lamports",
+        "",
+        "# Errors",
+        "",
+        "* [`ChainSignaturesError::InsufficientFunds`] - Program has insufficient balance",
+        "* [`ChainSignaturesError::InvalidRecipient`] - Recipient is zero address",
+        "",
+        "# Emits",
+        "",
+        "* [`FundsWithdrawnEvent`]"
+      ],
+      "discriminator": [
+        241,
+        36,
+        29,
+        111,
+        208,
+        31,
+        104,
+        217
+      ],
+      "accounts": [
+        {
+          "name": "program_state",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  114,
+                  111,
+                  103,
+                  114,
+                  97,
+                  109,
+                  45,
+                  115,
+                  116,
+                  97,
+                  116,
+                  101
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "admin",
+          "writable": true,
+          "signer": true,
+          "relations": [
+            "program_state"
+          ]
+        },
+        {
+          "name": "recipient",
+          "docs": [
+            "function by checking it is not the zero address."
+          ],
+          "writable": true
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "amount",
+          "type": "u64"
+        }
+      ]
+    }
+  ],
+  "accounts": [
+    {
+      "name": "ProgramState",
+      "discriminator": [
+        77,
+        209,
+        137,
+        229,
+        149,
+        67,
+        167,
+        230
+      ]
+    }
+  ],
+  "events": [
+    {
+      "name": "ChainIdUpdatedEvent",
+      "discriminator": [
+        200,
+        90,
+        188,
+        155,
+        99,
+        98,
+        0,
+        182
+      ]
+    },
+    {
+      "name": "DepositUpdatedEvent",
+      "discriminator": [
+        215,
+        193,
+        53,
+        27,
+        221,
+        101,
+        249,
+        108
+      ]
+    },
+    {
+      "name": "FundsWithdrawnEvent",
+      "discriminator": [
+        86,
+        232,
+        194,
+        4,
+        211,
+        69,
+        172,
+        202
+      ]
+    },
+    {
+      "name": "RespondBidirectionalEvent",
+      "discriminator": [
+        195,
+        195,
+        28,
+        1,
+        102,
+        100,
+        189,
+        234
+      ]
+    },
+    {
+      "name": "SignBidirectionalEvent",
+      "discriminator": [
+        135,
+        205,
+        217,
+        152,
+        96,
+        187,
+        11,
+        124
+      ]
+    },
+    {
+      "name": "SignatureErrorEvent",
+      "discriminator": [
+        42,
+        28,
+        210,
+        105,
+        9,
+        196,
+        189,
+        51
+      ]
+    },
+    {
+      "name": "SignatureRequestedEvent",
+      "discriminator": [
+        171,
+        129,
+        105,
+        91,
+        154,
+        49,
+        160,
+        34
+      ]
+    },
+    {
+      "name": "SignatureRespondedEvent",
+      "discriminator": [
+        118,
+        146,
+        248,
+        151,
+        194,
+        93,
+        18,
+        86
+      ]
+    }
+  ],
+  "errors": [
+    {
+      "code": 6000,
+      "name": "InsufficientDeposit",
+      "msg": "Insufficient deposit amount"
+    },
+    {
+      "code": 6001,
+      "name": "InvalidInputLength",
+      "msg": "Arrays must have the same length"
+    },
+    {
+      "code": 6002,
+      "name": "Unauthorized",
+      "msg": "Unauthorized access"
+    },
+    {
+      "code": 6003,
+      "name": "InsufficientFunds",
+      "msg": "Insufficient funds for withdrawal"
+    },
+    {
+      "code": 6004,
+      "name": "InvalidRecipient",
+      "msg": "Invalid recipient address"
+    },
+    {
+      "code": 6005,
+      "name": "InvalidTransaction",
+      "msg": "Invalid transaction data"
+    },
+    {
+      "code": 6006,
+      "name": "MissingInstructionSysvar",
+      "msg": "Missing instruction sysvar"
+    }
+  ],
+  "types": [
+    {
+      "name": "AffinePoint",
+      "docs": [
+        "A point on the secp256k1 elliptic curve in affine coordinates.",
+        "",
+        "Used to represent the R point in ECDSA signatures.",
+        "",
+        "# Size",
+        "",
+        "64 bytes total (32 bytes x + 32 bytes y)"
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "x",
+            "docs": [
+              "X coordinate (big-endian, 32 bytes)"
+            ],
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          },
+          {
+            "name": "y",
+            "docs": [
+              "Y coordinate (big-endian, 32 bytes)"
+            ],
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "ChainIdUpdatedEvent",
+      "docs": [
+        "Emitted when the admin updates the CAIP-2 chain identifier via",
+        "[`chain_signatures::update_chain_id`]."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "old_chain_id",
+            "docs": [
+              "Previous chain identifier."
+            ],
+            "type": "string"
+          },
+          {
+            "name": "new_chain_id",
+            "docs": [
+              "New chain identifier."
+            ],
+            "type": "string"
+          }
+        ]
+      }
+    },
+    {
+      "name": "DepositUpdatedEvent",
+      "docs": [
+        "Emitted when the admin updates the signature deposit via",
+        "[`chain_signatures::update_deposit`]."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "old_deposit",
+            "docs": [
+              "Previous deposit amount in lamports."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "new_deposit",
+            "docs": [
+              "New deposit amount in lamports."
+            ],
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "ErrorResponse",
+      "docs": [
+        "Error information for failed signature requests."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "request_id",
+            "docs": [
+              "Identifier of the failed request"
+            ],
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          },
+          {
+            "name": "error_message",
+            "docs": [
+              "Human-readable error description"
+            ],
+            "type": "string"
+          }
+        ]
+      }
+    },
+    {
+      "name": "FundsWithdrawnEvent",
+      "docs": [
+        "Emitted when the admin withdraws funds via [`chain_signatures::withdraw_funds`]."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "amount",
+            "docs": [
+              "Amount withdrawn in lamports."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "recipient",
+            "docs": [
+              "Recipient address."
+            ],
+            "type": "pubkey"
+          }
+        ]
+      }
+    },
+    {
+      "name": "ProgramState",
+      "docs": [
+        "Program configuration state stored in a PDA.",
+        "",
+        "Seeds: `[b\"program-state\"]`"
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "admin",
+            "docs": [
+              "Admin account with permission to update settings and withdraw funds."
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "signature_deposit",
+            "docs": [
+              "Required deposit in lamports for signature requests."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "chain_id",
+            "docs": [
+              "CAIP-2 chain identifier (e.g., \"solana:mainnet\")."
+            ],
+            "type": "string"
+          }
+        ]
+      }
+    },
+    {
+      "name": "RespondBidirectionalEvent",
+      "docs": [
+        "Emitted when the MPC network returns execution results for a bidirectional",
+        "request via [`chain_signatures::respond_bidirectional`].",
+        "",
+        "# Event Type",
+        "",
+        "Regular event (emitted via `emit!`)",
+        "",
+        "# Output Format",
+        "",
+        "**Successful transactions:**",
+        "- Contract call: Return value serialized per `respond_serialization_schema`",
+        "- Simple transfer: Empty success indicator",
+        "",
+        "**Failed transactions:**",
+        "- Magic prefix `0xdeadbeef` followed by failure indicator",
+        "",
+        "# Signature Verification",
+        "",
+        "The signature is computed over `keccak256(request_id || serialized_output)` using",
+        "the special derivation path `\"solana response key\"`. See module-level docs for",
+        "verification procedure.",
+        "",
+        "# Security Warning",
+        "",
+        "**Any address can emit this event.** Clients **must** verify the signature",
+        "before trusting the output."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "request_id",
+            "docs": [
+              "Original request identifier."
+            ],
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          },
+          {
+            "name": "responder",
+            "docs": [
+              "Address of the MPC responder. Clients must verify the signature was produced by the MPC."
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "serialized_output",
+            "docs": [
+              "Serialized execution output per `respond_serialization_schema`.",
+              "Check for `0xdeadbeef` prefix to detect failures."
+            ],
+            "type": "bytes"
+          },
+          {
+            "name": "signature",
+            "docs": [
+              "ECDSA signature over `keccak256(request_id || serialized_output)`."
+            ],
+            "type": {
+              "defined": {
+                "name": "Signature"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "SignBidirectionalEvent",
+      "docs": [
+        "Emitted when a bidirectional cross-chain request is made via",
+        "[`chain_signatures::sign_bidirectional`].",
+        "",
+        "# Event Type",
+        "",
+        "CPI event (emitted via `emit_cpi!`)",
+        "",
+        "# Usage",
+        "",
+        "The MPC network listens for this event to:",
+        "1. Sign the transaction and call [`chain_signatures::respond`]",
+        "2. Store the pending tx in backlog for observation",
+        "3. Monitor destination chain for confirmation",
+        "4. Call [`chain_signatures::respond_bidirectional`] with results"
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "sender",
+            "docs": [
+              "Solana address of the requester."
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "serialized_transaction",
+            "docs": [
+              "RLP-encoded unsigned transaction for the destination chain."
+            ],
+            "type": "bytes"
+          },
+          {
+            "name": "caip2_id",
+            "docs": [
+              "CAIP-2 chain identifier of the destination (e.g., \"eip155:1\" for Ethereum)."
+            ],
+            "type": "string"
+          },
+          {
+            "name": "key_version",
+            "docs": [
+              "MPC key version used for signing."
+            ],
+            "type": "u32"
+          },
+          {
+            "name": "deposit",
+            "docs": [
+              "Deposit amount paid in lamports."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "path",
+            "docs": [
+              "Derivation path for the user's signing key."
+            ],
+            "type": "string"
+          },
+          {
+            "name": "algo",
+            "docs": [
+              "Signing algorithm (e.g., \"secp256k1\")."
+            ],
+            "type": "string"
+          },
+          {
+            "name": "dest",
+            "docs": [
+              "Response destination identifier."
+            ],
+            "type": "string"
+          },
+          {
+            "name": "params",
+            "docs": [
+              "Additional JSON parameters."
+            ],
+            "type": "string"
+          },
+          {
+            "name": "program_id",
+            "docs": [
+              "Callback program ID (reserved for future use)."
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "output_deserialization_schema",
+            "docs": [
+              "Schema for parsing destination chain call output (JSON-encoded)."
+            ],
+            "type": "bytes"
+          },
+          {
+            "name": "respond_serialization_schema",
+            "docs": [
+              "Schema for serializing response to source chain (JSON-encoded)."
+            ],
+            "type": "bytes"
+          }
+        ]
+      }
+    },
+    {
+      "name": "Signature",
+      "docs": [
+        "ECDSA signature in affine point representation.",
+        "",
+        "Compatible with secp256k1 curve operations. Can be converted to",
+        "standard RSV format for use with Ethereum and other chains.",
+        "",
+        "# Size",
+        "",
+        "97 bytes total (64 bytes big_r + 32 bytes s + 1 byte recovery_id)",
+        "",
+        "# Conversion to RSV",
+        "",
+        "```typescript,ignore",
+        "const r = Buffer.from(signature.bigR.x).toString('hex');",
+        "const s = Buffer.from(signature.s).toString('hex');",
+        "const v = signature.recoveryId + 27;",
+        "```"
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "big_r",
+            "docs": [
+              "R point of the ECDSA signature (affine coordinates)"
+            ],
+            "type": {
+              "defined": {
+                "name": "AffinePoint"
+              }
+            }
+          },
+          {
+            "name": "s",
+            "docs": [
+              "s scalar of the signature (32 bytes, big-endian)"
+            ],
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          },
+          {
+            "name": "recovery_id",
+            "docs": [
+              "Recovery ID (0 or 1) for public key recovery"
+            ],
+            "type": "u8"
+          }
+        ]
+      }
+    },
+    {
+      "name": "SignatureErrorEvent",
+      "docs": [
+        "Emitted when signature generation fails via [`chain_signatures::respond_error`].",
+        "",
+        "# Warning: Debugging Only",
+        "",
+        "This event is **solely for debugging purposes**. Do not use in production",
+        "or rely upon for any business logic.",
+        "",
+        "# Event Type",
+        "",
+        "Regular event (emitted via `emit!`)",
+        "",
+        "# Security Warning",
+        "",
+        "**Any address can emit this event.** Error events are not cryptographically",
+        "verified and should never be trusted for business logic decisions."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "request_id",
+            "docs": [
+              "Request identifier of the failed request."
+            ],
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          },
+          {
+            "name": "responder",
+            "docs": [
+              "Address of the MPC responder. Error events are not cryptographically verified."
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "error",
+            "docs": [
+              "Human-readable error description."
+            ],
+            "type": "string"
+          }
+        ]
+      }
+    },
+    {
+      "name": "SignatureRequestedEvent",
+      "docs": [
+        "Emitted when a signature is requested via the [`chain_signatures::sign`] instruction.",
+        "",
+        "# Event Type",
+        "",
+        "CPI event (emitted via `emit_cpi!`)"
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "sender",
+            "docs": [
+              "Solana address of the requester."
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "payload",
+            "docs": [
+              "32-byte payload to be signed (typically a transaction hash)."
+            ],
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          },
+          {
+            "name": "key_version",
+            "docs": [
+              "MPC key version used for signing."
+            ],
+            "type": "u32"
+          },
+          {
+            "name": "deposit",
+            "docs": [
+              "Deposit amount paid in lamports."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "chain_id",
+            "docs": [
+              "CAIP-2 chain identifier of this program (e.g., \"solana:mainnet\")."
+            ],
+            "type": "string"
+          },
+          {
+            "name": "path",
+            "docs": [
+              "Derivation path for the user's signing key."
+            ],
+            "type": "string"
+          },
+          {
+            "name": "algo",
+            "docs": [
+              "Signing algorithm (e.g., \"secp256k1\")."
+            ],
+            "type": "string"
+          },
+          {
+            "name": "dest",
+            "docs": [
+              "Response destination chain."
+            ],
+            "type": "string"
+          },
+          {
+            "name": "params",
+            "docs": [
+              "Additional JSON parameters."
+            ],
+            "type": "string"
+          },
+          {
+            "name": "fee_payer",
+            "docs": [
+              "Optional separate fee payer account."
+            ],
+            "type": {
+              "option": "pubkey"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "SignatureRespondedEvent",
+      "docs": [
+        "Emitted when the MPC network returns a signature via [`chain_signatures::respond`].",
+        "",
+        "# Event Type",
+        "",
+        "CPI event (emitted via `emit_cpi!`)",
+        "",
+        "# Security Warning",
+        "",
+        "**Any address can emit this event.** Clients **must** verify signature validity",
+        "by recovering the public key and comparing with the expected derived key."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "request_id",
+            "docs": [
+              "Request identifier linking this response to the original request.",
+              "Computed as `keccak256(sender || payload || ...)` - see module docs."
+            ],
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          },
+          {
+            "name": "responder",
+            "docs": [
+              "Address of the responder. Clients must verify the signature was produced by the MPC."
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "signature",
+            "docs": [
+              "ECDSA signature in affine point format."
+            ],
+            "type": {
+              "defined": {
+                "name": "Signature"
+              }
+            }
+          }
+        ]
+      }
+    }
+  ]
+}

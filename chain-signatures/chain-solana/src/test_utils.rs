@@ -1,6 +1,6 @@
 //! Test-only fixtures shared by the unit tests.
 
-use signet_program::SignBidirectionalEvent;
+use crate::solana_signet_program::events::SignBidirectionalEvent;
 
 /// One entry of a `getSignaturesForAddress` response.
 pub(crate) fn signature_entry(slot: u64, sig: &str) -> serde_json::Value {

@@ -14,16 +14,17 @@ use mpc_primitives::{
 use mpc_utils::time::current_unix_timestamp;
 use sha3::Digest as _;
 use signet_crypto::{derive_epsilon, KeyPurpose, ScalarExt as _};
-use signet_program::{
-    RespondBidirectionalEvent, SignBidirectionalEvent, SignatureRequestedEvent,
-    SignatureRespondedEvent,
-};
 use solana_sdk::signature::Signature;
 use solana_transaction_status::option_serializer::OptionSerializer;
 use solana_transaction_status::{
     EncodedTransaction, EncodedTransactionWithStatusMeta, UiInstruction, UiParsedInstruction,
 };
 use tokio::sync::mpsc;
+
+use crate::solana_signet_program::events::{
+    RespondBidirectionalEvent, SignBidirectionalEvent, SignatureRequestedEvent,
+    SignatureRespondedEvent,
+};
 
 pub enum SolanaSignEvent {
     SignatureRequested(SignatureRequestedEvent),
@@ -344,7 +345,7 @@ pub fn extract_tx_signature(tx: &EncodedTransaction) -> anyhow::Result<Signature
 }
 
 pub fn to_mpc_signature(
-    sig: &signet_program::Signature,
+    sig: &crate::solana_signet_program::types::Signature,
 ) -> anyhow::Result<mpc_primitives::Signature> {
     // Create a 65-byte uncompressed point representation (0x04 || x || y)
     let mut big_r = [0u8; 65];
@@ -373,7 +374,6 @@ pub fn to_mpc_signature(
 mod tests {
     use super::*;
     use crate::test_utils::sign_bidirectional_ix_data;
-    use signet_program::SignatureRequestedEvent;
     use solana_sdk::pubkey::Pubkey;
 
     #[test]
@@ -442,8 +442,8 @@ mod tests {
 
     #[test]
     fn to_mpc_signature_rejects_invalid_curve_point() {
-        let sig = signet_program::Signature {
-            big_r: signet_program::AffinePoint {
+        let sig = crate::solana_signet_program::types::Signature {
+            big_r: crate::solana_signet_program::types::AffinePoint {
                 x: [0x11; 32],
                 y: [0x22; 32],
             },
