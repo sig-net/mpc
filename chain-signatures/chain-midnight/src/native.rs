@@ -591,7 +591,7 @@ mod tests {
         ContractAction, ContractCall, Intent, ProofPreimageMarker, Signature, INITIAL_PARAMETERS,
     };
     use midnight_transient_crypto::commitment::PedersenRandomness;
-use mpc_chain_integration_core::utils::retry::is_retryable;
+    use mpc_chain_integration_core::utils::retry::is_retryable;
 
     use super::*;
     use crate::emissions::{emissions_of_call, Emission, EmissionKind, MISC_PAYLOAD_LEN};
