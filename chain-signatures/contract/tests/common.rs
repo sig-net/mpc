@@ -245,6 +245,23 @@ pub async fn create_response(
     (payload_hash, sign_id, respond_resp)
 }
 
+/// Waits until the contract holds at least `count` pending sign requests, so a
+/// test can act on requests it submitted with `transact_async`.
+pub async fn wait_for_pending_requests(contract: &Contract, count: u32) -> anyhow::Result<()> {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        let pending: u32 = contract.view("pending_requests").await?.json()?;
+        if pending >= count {
+            return Ok(());
+        }
+        anyhow::ensure!(
+            tokio::time::Instant::now() < deadline,
+            "{pending} of {count} sign requests pending after 30s"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+}
+
 pub async fn sign_and_validate(
     request: &SignRequest,
     respond: Option<(&SignId, &Signature)>,
@@ -261,9 +278,9 @@ pub async fn sign_and_validate(
         .await?;
     dbg!(&status);
 
-    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-
     if let Some((sign_id, respond_resp)) = respond {
+        wait_for_pending_requests(contract, 1).await?;
+
         // Call `respond` as if we are the MPC network itself.
         let respond = contract
             .call("respond")
