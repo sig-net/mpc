@@ -702,6 +702,8 @@ mod tests {
         landing_reads: Mutex<VecDeque<u64>>,
         /// A block whose first landing read fails.
         failing_read: Mutex<Option<u64>>,
+        /// A block whose first time read fails.
+        failing_time: Mutex<Option<u64>>,
     }
 
     impl ScriptedChain {
@@ -717,6 +719,7 @@ mod tests {
                 landing,
                 landing_reads: Mutex::new(VecDeque::new()),
                 failing_read: Mutex::new(None),
+                failing_time: Mutex::new(None),
             }
         }
 
@@ -727,6 +730,11 @@ mod tests {
 
         fn failing_once_at(self, number: u64) -> Self {
             *self.failing_read.lock().unwrap() = Some(number);
+            self
+        }
+
+        fn failing_time_once_at(self, number: u64) -> Self {
+            *self.failing_time.lock().unwrap() = Some(number);
             self
         }
 
@@ -777,6 +785,11 @@ mod tests {
         async fn block_time(&self, at_hash_0x: &str) -> anyhow::Result<Timestamp> {
             let number = block_number_of(at_hash_0x);
             self.time_reads.lock().unwrap().push(number);
+            let mut failing = self.failing_time.lock().unwrap();
+            if *failing == Some(number) {
+                *failing = None;
+                anyhow::bail!("the node dropped the time read of block {number}");
+            }
             Ok(Timestamp::from_secs(1000 + 6 * number))
         }
 
@@ -1540,6 +1553,30 @@ mod tests {
             [11, 12],
             "every block after the pin, once"
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_failed_time_read_at_a_standing_head_is_retried() {
+        // The head stands at 12, at 1072: past a 1070 TTL. Its first time read fails,
+        // so the next scan of that same head compares its time again and it expires.
+        let client = client_over(
+            managed_dir(|_, bytes| bytes),
+            ScriptedChain::new(11, 12, None).failing_time_once_at(12),
+        );
+        let error = client
+            .post(
+                b"tx",
+                TX_HASH,
+                &spent(),
+                10,
+                Timestamp::from_secs(1070),
+                deadline(),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(error, SubmitError::StateConflict(_)), "{error}");
+        assert_eq!(*client.wallet.released.lock().unwrap(), vec![spent()]);
+        assert_eq!(*client.chain.time_reads.lock().unwrap(), [12, 12]);
     }
 
     #[tokio::test(start_paused = true)]
