@@ -72,9 +72,9 @@ check_core() {
     fi
     if have node; then
         MAJOR="$(node -v 2>/dev/null | sed 's/^v\([0-9]*\).*/\1/')"
-        if [ -n "$MAJOR" ] && [ "$MAJOR" -ge 18 ]; then ok "node $(node -v)"; else miss "node >= 18 (found $(node -v))"; fi
+        if [ -n "$MAJOR" ] && [ "$MAJOR" -ge 22 ]; then ok "node $(node -v)"; else miss "node >= 22 (found $(node -v))"; fi
     else
-        miss "node >= 18"
+        miss "node >= 22"
     fi
     if have npm; then ok "npm"; else miss "npm (ships with node)"; fi
     if have anvil; then ok "anvil"; else miss "anvil (foundry)"; hint "curl -L https://foundry.paradigm.xyz | bash && foundryup"; fi
@@ -159,7 +159,7 @@ ensure_act() {
 ensure_node() {
     if have node; then
         MAJOR="$(node -v 2>/dev/null | sed 's/^v\([0-9]*\).*/\1/')"
-        if [ -n "$MAJOR" ] && [ "$MAJOR" -ge 18 ]; then return 0; fi
+        if [ -n "$MAJOR" ] && [ "$MAJOR" -ge 22 ]; then return 0; fi
     fi
     case "$OS" in
         Darwin) brew install node ;;

@@ -1,6 +1,6 @@
 FROM redis:7.4.2 AS redis-bin
 
-FROM node:20 AS eth-builder
+FROM node:22 AS eth-builder
 WORKDIR /usr/src/app/contract-eth
 COPY chain-signatures/contract-eth/package.json chain-signatures/contract-eth/package-lock.json ./
 RUN npm install
