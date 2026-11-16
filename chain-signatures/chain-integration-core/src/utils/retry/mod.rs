@@ -447,9 +447,8 @@ mod tests {
         let cancel = CancellationToken::new();
         let calls = Arc::new(AtomicU32::new(0));
         let calls_clone = calls.clone();
-        let operation = "slot 401".to_string();
 
-        retry_until_ok_or_terminal(&cancel, Duration::from_millis(1), &operation, move || {
+        retry_until_ok_or_terminal(&cancel, Duration::from_millis(1), "test_op", move || {
             let calls = calls_clone.clone();
             async move {
                 if calls.fetch_add(1, Ordering::Relaxed) == 0 {
