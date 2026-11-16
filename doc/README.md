@@ -26,6 +26,7 @@ How to write and update these docs: [Documentation conventions](../CONTRIBUTING.
 
 ## Operations
 
+- [Node configuration](node-configuration.md): the principles and rules for the node's parameters: env variables and CLI flags, the contract, feature flags and constants.
 - [Secret management](secret-management.md): how secret material is represented, passed around, logged and stored in the node.
 - [Logging](logging.md): log level policy, what each level means and how to log retries.
 - [Releasing](releasing.md): branches, versioning, the biweekly release flow through testnet to mainnet, and hotfixes.

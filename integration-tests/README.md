@@ -19,9 +19,8 @@ curl -LsSf https://get.nexte.st/latest/mac | tar zxf - -C ~/.cargo/bin
 2. Install the WebAssembly `wasm32-unknown-unknown` target:
 
 ```bash
+# rust-toolchain.toml lists the target, so rustup adds it on the first cargo run. To add it ahead:
 rustup target add wasm32-unknown-unknown
-# The contract build runs under the pinned toolchain, so add the target there too:
-rustup target add wasm32-unknown-unknown --toolchain 1.95.0
 ```
 
 3. Install [just](https://just.systems/man/en/packages.html):

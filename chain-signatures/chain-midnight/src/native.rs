@@ -1625,13 +1625,13 @@ mod live {
     async fn a_respond_and_a_bidirectional_respond_land_and_apply() {
         let _ = tracing_subscriber::fmt().with_env_filter("info").try_init();
         let config = MidnightConfig {
-            node_url: env("MIDNIGHT_LIVE_NODE_URL"),
+            node_url: env("MIDNIGHT_LIVE_NODE_URL").parse().unwrap(),
             // Unread: this test only posts.
             central_address: MidnightAddress::from_bytes([0; 32]),
             responder_address: MidnightAddress::from_hex(&env("MIDNIGHT_LIVE_RESPONDER")).unwrap(),
             publisher: PublisherConfig {
                 funding_seed: env("MIDNIGHT_LIVE_SEED"),
-                indexer_ws_url: env("MIDNIGHT_LIVE_INDEXER_WS_URL"),
+                indexer_ws_url: env("MIDNIGHT_LIVE_INDEXER_WS_URL").parse().unwrap(),
                 contract_artifacts_dir: env("MIDNIGHT_LIVE_ARTIFACTS").into(),
                 zk_params_dir: env("MIDNIGHT_LIVE_ZK_PARAMS").into(),
                 ..Default::default()

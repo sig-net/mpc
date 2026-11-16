@@ -63,7 +63,7 @@ impl Args {
         );
         self.flag("--eth-execution-rpc-http-url", &eth.execution_rpc_http_url);
         self.flag("--eth-contract-address", eth.contract_address);
-        self.flag("--eth-network", &eth.network);
+        self.flag("--eth-network", eth.network);
     }
 
     fn sol(&mut self, sol: &SolConfig) {

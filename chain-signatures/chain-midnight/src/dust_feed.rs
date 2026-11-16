@@ -2,6 +2,7 @@
 //! DUST ledger event, in order, with the newest id the indexer has seen.
 
 use std::time::Duration;
+use url::Url;
 
 use anyhow::Context as _;
 use async_trait::async_trait;
@@ -50,12 +51,12 @@ pub(crate) trait DustEventSource: Send + Sync + 'static {
 }
 
 pub(crate) struct IndexerDustEvents {
-    url: String,
+    url: Url,
 }
 
 impl IndexerDustEvents {
-    pub(crate) fn new(url: impl Into<String>) -> Self {
-        Self { url: url.into() }
+    pub(crate) fn new(url: Url) -> Self {
+        Self { url }
     }
 }
 
@@ -150,8 +151,9 @@ impl DustEventSource for IndexerDustEvents {
 }
 
 /// A `graphql-transport-ws` connection, past its acknowledgement.
-async fn open(url: &str) -> anyhow::Result<Socket> {
+async fn open(url: &Url) -> anyhow::Result<Socket> {
     let mut request = url
+        .as_str()
         .into_client_request()
         .context("the indexer subscription URL is not a websocket URL")?;
     request.headers_mut().insert(
@@ -300,13 +302,15 @@ mod tests {
     /// returned.
     // tungstenite fixes the handshake callback's error type.
     #[allow(clippy::result_large_err)]
-    async fn indexer<F, Fut>(script: F) -> (String, tokio::task::JoinHandle<()>)
+    async fn indexer<F, Fut>(script: F) -> (Url, tokio::task::JoinHandle<()>)
     where
         F: FnOnce(ServerSocket) -> Fut + Send + 'static,
         Fut: std::future::Future<Output = ()> + Send,
     {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let url = format!("ws://{}", listener.local_addr().unwrap());
+        let url = format!("ws://{}", listener.local_addr().unwrap())
+            .parse()
+            .unwrap();
         let server = tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
             let socket = tokio_tungstenite::accept_hdr_async(

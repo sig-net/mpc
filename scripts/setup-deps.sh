@@ -13,7 +13,7 @@
 
 set -u
 
-RUST_VERSION="1.95.0"
+RUST_VERSION="$(sed -n 's/^channel = "\(.*\)"/\1/p' "$(dirname "$0")/../rust-toolchain.toml")"
 WASM_TARGET="wasm32-unknown-unknown"
 REDIS_IMAGE="redis:7.4.2"
 SOLANA_VERSION="2.3.9"
@@ -59,7 +59,7 @@ check_core() {
     if rustup target list --toolchain "$RUST_VERSION" 2>/dev/null | grep -q "${WASM_TARGET} (installed)"; then ok "${WASM_TARGET} target"; else miss "${WASM_TARGET} target"; hint "rustup target add --toolchain ${RUST_VERSION} ${WASM_TARGET}"; fi
     if have cargo-near; then ok "cargo-near $(cargo-near --version 2>/dev/null | head -n 1)"; else miss "cargo-near"; hint "curl --proto '=https' --tlsv1.2 -LsSf https://github.com/near/cargo-near/releases/latest/download/cargo-near-installer.sh | sh"; fi
     if have cargo-nextest; then ok "cargo-nextest $(cargo-nextest --version 2>/dev/null | head -n 1)"; else miss "cargo-nextest"; hint "curl -LsSf https://get.nexte.st/latest/linux | tar zxf - -C ~/.cargo/bin (macos: .../latest/mac)"; fi
-    if have cargo-audit; then ok "cargo-audit $(cargo-audit --version 2>/dev/null | head -n 1)"; else miss "cargo-audit"; hint "cargo install cargo-audit --locked"; fi
+    if have cargo-deny; then ok "$(cargo-deny --version 2>/dev/null | head -n 1)"; else miss "cargo-deny"; hint "cargo install cargo-deny --locked"; fi
     if have just; then ok "just $(just --version)"; else miss "just"; hint "curl --proto '=https' --tlsv1.2 -sSf https://just.systems/install.sh | bash -s -- --to ~/.cargo/bin"; fi
     if have git; then ok "git"; else miss "git"; fi
     if have curl; then ok "curl"; else miss "curl"; fi
@@ -72,9 +72,9 @@ check_core() {
     fi
     if have node; then
         MAJOR="$(node -v 2>/dev/null | sed 's/^v\([0-9]*\).*/\1/')"
-        if [ -n "$MAJOR" ] && [ "$MAJOR" -ge 18 ]; then ok "node $(node -v)"; else miss "node >= 18 (found $(node -v))"; fi
+        if [ -n "$MAJOR" ] && [ "$MAJOR" -ge 22 ]; then ok "node $(node -v)"; else miss "node >= 22 (found $(node -v))"; fi
     else
-        miss "node >= 18"
+        miss "node >= 22"
     fi
     if have npm; then ok "npm"; else miss "npm (ships with node)"; fi
     if have anvil; then ok "anvil"; else miss "anvil (foundry)"; hint "curl -L https://foundry.paradigm.xyz | bash && foundryup"; fi
@@ -135,9 +135,9 @@ ensure_cargo_near() {
     curl --proto '=https' --tlsv1.2 -LsSf https://github.com/near/cargo-near/releases/latest/download/cargo-near-installer.sh | sh
 }
 
-ensure_cargo_audit() {
-    have cargo-audit && return 0
-    cargo install cargo-audit --locked
+ensure_cargo_deny() {
+    have cargo-deny && return 0
+    cargo install cargo-deny --locked
 }
 
 ensure_foundry() {
@@ -159,7 +159,7 @@ ensure_act() {
 ensure_node() {
     if have node; then
         MAJOR="$(node -v 2>/dev/null | sed 's/^v\([0-9]*\).*/\1/')"
-        if [ -n "$MAJOR" ] && [ "$MAJOR" -ge 18 ]; then return 0; fi
+        if [ -n "$MAJOR" ] && [ "$MAJOR" -ge 22 ]; then return 0; fi
     fi
     case "$OS" in
         Darwin) brew install node ;;
@@ -256,7 +256,7 @@ case "$MODE" in
         ensure_rust
         ensure_nextest
         ensure_cargo_near
-        ensure_cargo_audit
+        ensure_cargo_deny
         ensure_node
         ensure_foundry
         ensure_docker || true

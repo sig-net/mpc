@@ -1,5 +1,5 @@
 use crate::protocol::Governance;
-use mpc_chain_integration_core::utils::retry::{retry_rpc, RetryConfig, SharedBackoff};
+use mpc_chain_integration_core::utils::retry::{retry_rpc, RetryConfig, RpcFailure, SharedBackoff};
 use mpc_chain_near::NearRpcGates;
 use mpc_contract::errors::CheckpointError;
 pub use mpc_contract::primitives::{Read, View};
@@ -175,7 +175,13 @@ impl Governance for NearGovernanceClient {
                         }))
                         .deposit(mpc_contract::REQUIRED_JOIN_DEPOSIT)
                         .max_gas();
-                    self.gates.transact(call).await?.into_result()?;
+                    // A contract panic repeats on every retry, and retrying
+                    // blocks the consensus loop. The loop calls join again.
+                    self.gates
+                        .transact(call)
+                        .await?
+                        .into_result()
+                        .map_err(|err| RpcFailure::terminal(err.to_string()))?;
                     Ok(())
                 }
             )

@@ -83,10 +83,12 @@ alias tu := test-unit
 ci: fmt-check lint test-unit
 alias c := ci
 
-# Security audit of dependencies (mirrors CI audit job)
+# Dependency checks (mirrors CI audit job): advisories, licenses, bans, sources, unused dependencies
 audit:
-    @if ! command -v cargo-audit >/dev/null; then cargo install cargo-audit --locked; fi
-    cargo audit
+    @if ! command -v cargo-deny >/dev/null; then cargo install cargo-deny --locked; fi
+    @if ! command -v cargo-machete >/dev/null; then cargo install cargo-machete --locked; fi
+    cargo deny check advisories bans licenses sources -W unmaintained -W unsound --hide-inclusion-graph
+    cargo machete
 
 # Run all tests sequentially (single-threaded)
 # Usage: just ts [filter]
@@ -176,3 +178,7 @@ test-canton filter="canton_stream": (setup "")
 # Release compatibility test (needs `just build compat` output)
 test-compat: (setup "")
     ./scripts/test-prod-compat.sh
+
+# Usage: just bench-redis [args] (e.g. just bench-redis, or just bench-redis "--rounds 2 --items 50" for quick CI)
+bench-redis args="":
+    cargo run --release -p integration-tests --bin redis-bench -- {{args}}

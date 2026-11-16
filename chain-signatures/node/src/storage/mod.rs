@@ -69,6 +69,14 @@ mod tests {
         assert!(parse(&["--sk-share-secret-id", "s", "--gcp-project-id", "p"]).is_ok());
     }
 
+    /// The file store is a test aid: a release build has no flag for it.
+    #[cfg(not(feature = "test-feature"))]
+    #[test]
+    fn release_builds_reject_the_file_store() {
+        let err = parse(&["--sk-share-local-path", "/tmp/share"]).unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument);
+    }
+
     #[cfg(feature = "test-feature")]
     #[test]
     fn test_builds_accept_one_file_store() {

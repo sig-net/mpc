@@ -511,7 +511,7 @@ impl SignatureSpawner {
             SignCommand::AbortChain(chain) => {
                 tracing::warn!(
                     ?chain,
-                    "aborting all in-flight signature tasks on chain regression"
+                    "aborting in-flight signature tasks to rebase onto the consensus checkpoint"
                 );
                 let to_abort: Vec<SignId> = self
                     .requests
@@ -1132,6 +1132,18 @@ mod tests {
         // A completion naming the leg we do track still retires it.
         spawner.leg_completed(sign_id, RequestKind::RespondBidirectional);
         assert!(!spawner.test_requests_contains(&sign_id));
+    }
+
+    /// Round timing every node must share, pinned for both build flavours.
+    #[test]
+    fn round_timeouts_are_pinned() {
+        let (organize_posit, ceiling) = if cfg!(feature = "test-feature") {
+            (5, 30)
+        } else {
+            (20, 600)
+        };
+        assert_eq!(ORGANIZE_POSIT_TIMEOUT, Duration::from_secs(organize_posit));
+        assert_eq!(ROUND_TIMEOUT_CEILING, Duration::from_secs(ceiling));
     }
 
     #[test]

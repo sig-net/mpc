@@ -130,7 +130,7 @@ Three caveats remain: (i) organizing waits for the local active set to reach t (
 *Rationale.* L1 assumes a usable presignature is there to consume, so without supply that precondition eventually fails and signing stops while the network is otherwise perfectly healthy.
 
 *Enforcement*: 
-A node re-proposes every 100 ms while it is below its floor (`min_mine_triple_pairs` for triple pairs, `min_mine_presignatures` for presignatures) and runs fewer than `max_mine_generations` generations of its own; concurrency counters free themselves as generation tasks finish and as proposals expire.  
+A node re-proposes every 100 ms while it is below its floor (`min_mine_triple_pairs` for triple pairs, `min_mine_presignatures` for presignatures) and has fewer than `max_mine_generations` open attempts; an attempt closes when its generation finishes or its proposal expires, not on rejects.  
 A deliberator refuses any proposal while the pool holds more than the network's floors need, or while it runs or has accepted more generations than the network's cap (`max_mine_generations` per node) allows, each with a margin for stale counts and both judged from cached counts, so one node cannot push work onto the rest without bound.  
 Generation is skipped entirely while \< t nodes are in the active set, so the failure detector gates supply though never correctness.
 
@@ -142,7 +142,7 @@ Generation is skipped entirely while \< t nodes are in the active set, so the fa
 
 *Enforcement*: The proposer publishes when generation finishes and retries indefinitely with backoff capped at 60 s. Every other participant holds the same finished signature, and publishes it itself once its own deadline passes without the response being observed on chain: a delay drawn uniformly from `[L, L + m·L/d]`, for `L` the lag until a published response is observed, `m` the participants and `d` the duplicate responses accepted per failover. The `L` offset keeps the happy path at one response; the window costs `d` extra in expectation when the proposer is silent. Duplicates are harmless, since both chains' respond entrypoints are bare event emitters and a repeated response is ignored on every node.
 
-The draw is anchored on a stamp stored with the entry, so it survives a restart rather than restarting the clock, and the sweep runs on block arrival, once the node has caught up: it is the catchup backfill that covers the window being judged, so a node that has not read that window holds fire instead of publishing blind. One participant with a healthy stream is enough.
+The draw counts from the later of a stamp stored with the entry and the node's first catch-up since it started or rebased, so nodes restarting or rebasing together stay spread over the window instead of all publishing at the first block. A stream restart within a process keeps that count, so a stall every node's stream sees can still bring their deadlines together. The sweep runs on block arrival, once the node has caught up, so a node that has not read the window being judged holds fire. One node with a healthy stream is enough, if it stays up for the observe lag plus its draw.
 
 The `1 + d` cost is what a failover pays when the failover response lands, since every node still waiting observes it within `L` and drops the entry. If no response can land at all, each of the `m` participants publishes once as its own deadline passes, spread over the window.
 

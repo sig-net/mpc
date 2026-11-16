@@ -24,3 +24,7 @@ On Midnight, `entropy = Keccak256(block_hash || request_id)`, where `block_hash`
 is the finalized block containing the request. Both inputs are 32 bytes. The
 block hash supplies unpredictability; including the request ID gives requests
 in the same block distinct proposer-election seeds.
+
+## Entropy of a response
+
+For a response to a bidirectional request ([bidirectional-calls.md](bidirectional-calls.md), Section 4.3) its `entropy` is `H(first_leg_entropy || payload || epsilon)`, the hash of the first leg's `entropy`, the message being signed and its key's tweak, so `delta` moves with the first leg's `entropy` and binds the other two. Every node signing that message under that key derives the same `entropy`, whichever way it learned the outcome.

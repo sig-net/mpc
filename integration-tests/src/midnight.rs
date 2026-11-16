@@ -610,7 +610,10 @@ fn responder_config(
     output_storage: Option<OutputStorageConfig>,
 ) -> anyhow::Result<MidnightConfig> {
     Ok(MidnightConfig {
-        node_url: endpoints.node_http_url.clone(),
+        node_url: endpoints
+            .node_http_url
+            .parse()
+            .context("parsing the Midnight node URL")?,
         central_address: MidnightAddress::from_hex(&bootstrap.central_address)
             .context("decoding Midnight central address")?,
         responder_address: MidnightAddress::from_hex(&bootstrap.responder_address)
@@ -618,7 +621,10 @@ fn responder_config(
         publisher: PublisherConfig {
             output_storage,
             funding_seed: bootstrap.publisher_seeds[0].clone(),
-            indexer_ws_url: endpoints.indexer_ws_url.clone(),
+            indexer_ws_url: endpoints
+                .indexer_ws_url
+                .parse()
+                .context("parsing the Midnight indexer websocket URL")?,
             contract_artifacts_dir,
             zk_params_dir,
             ..Default::default()

@@ -10,6 +10,7 @@ pub mod local;
 pub mod midnight;
 pub mod mpc_fixture;
 mod node_args;
+pub mod redis_harness;
 pub mod utils;
 
 use std::collections::HashMap;
@@ -265,8 +266,7 @@ pub async fn setup(spawner: &mut ClusterSpawner) -> anyhow::Result<Context> {
             contract_address: contract_address_hex
                 .parse()
                 .context("invalid deployed contract address")?,
-            network: "anvil".to_string(),
-            optimistic_requests: true,
+            network: mpc_chain_ethereum::EthNetwork::Anvil,
             gas: Default::default(),
             indexer: Default::default(),
             publisher: Default::default(),
