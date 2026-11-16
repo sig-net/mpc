@@ -126,7 +126,11 @@ signet-midnight-serde = "=0.24.0"
 signet-primitives = { path = "./signet-primitives" }
 signet-program = { path = "./chain-signatures/contract-sol" }
 
-# big optimization even in test builds for math heavy crates
+# big optimization even in test builds for math heavy crates; the in-process
+# MPC tests spend most of their time in k256 and cait-sith
+[profile.dev.package."*"]
+opt-level = 2
+
 [profile.dev.package.curve25519-dalek]
 opt-level = 3
 
