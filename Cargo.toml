@@ -148,14 +148,32 @@ debug = 0
 [profile.release]
 debug = 0
 
-# The node the integration tests spawn (`just build test-node`). Workspace
-# crates build at opt-level 1 to cut the rebuild time after a code change;
-# dependencies, which hold the crypto, stay fully optimized.
+# The node the integration tests spawn (`just build test-node`). The workspace
+# crates it links build at opt-level 1 to cut the rebuild time after a code
+# change; dependencies, which hold the crypto, keep the release settings. Listed
+# by name because `package."*"` would also optimize build scripts and proc macros.
 [profile.test-node]
 inherits = "release"
-opt-level = 1
-codegen-units = 256
 
-[profile.test-node.package."*"]
-opt-level = 3
-codegen-units = 16
+[profile.test-node.package]
+mpc-chain-canton = { opt-level = 1, codegen-units = 256 }
+mpc-chain-ethereum = { opt-level = 1, codegen-units = 256 }
+mpc-chain-hydration = { opt-level = 1, codegen-units = 256 }
+mpc-chain-integration-core = { opt-level = 1, codegen-units = 256 }
+mpc-chain-midnight = { opt-level = 1, codegen-units = 256 }
+mpc-chain-near = { opt-level = 1, codegen-units = 256 }
+mpc-chain-solana = { opt-level = 1, codegen-units = 256 }
+mpc-chain-tron = { opt-level = 1, codegen-units = 256 }
+mpc-compact-hashing = { opt-level = 1, codegen-units = 256 }
+mpc-contract = { opt-level = 1, codegen-units = 256 }
+mpc-crypto = { opt-level = 1, codegen-units = 256 }
+mpc-evm-common = { opt-level = 1, codegen-units = 256 }
+mpc-keys = { opt-level = 1, codegen-units = 256 }
+mpc-midnight-respond-codec = { opt-level = 1, codegen-units = 256 }
+mpc-node = { opt-level = 1, codegen-units = 256 }
+mpc-primitives = { opt-level = 1, codegen-units = 256 }
+mpc-tron-wire = { opt-level = 1, codegen-units = 256 }
+mpc-utils = { opt-level = 1, codegen-units = 256 }
+signet-crypto = { opt-level = 1, codegen-units = 256 }
+signet-primitives = { opt-level = 1, codegen-units = 256 }
+signet-program = { opt-level = 1, codegen-units = 256 }
