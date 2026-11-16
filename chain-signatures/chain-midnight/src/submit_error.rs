@@ -107,8 +107,8 @@ pub(crate) fn refusal_code(error: &anyhow::Error) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mpc_chain_integration_core::utils::retry::{is_provider_throttled, is_retryable};
     use jsonrpsee::core::client::Error as JsonrpseeClientError;
+    use mpc_chain_integration_core::utils::retry::{is_provider_throttled, is_retryable};
     use subxt::ext::subxt_rpcs::Error as RawRpcError;
 
     #[test]
@@ -140,10 +140,13 @@ mod tests {
     }
 
     #[test]
-    fn every_class_carries_the_verdict_its_derivation_names() {        
+    fn every_class_carries_the_verdict_its_derivation_names() {
         let classes: [(fn() -> SubmitError, bool); 10] = [
             (|| SubmitError::BadRequest("reason".to_string()), false),
-            (|| SubmitError::ContractMismatch("reason".to_string()), false),
+            (
+                || SubmitError::ContractMismatch("reason".to_string()),
+                false,
+            ),
             (|| SubmitError::WalletUnsynced("reason".to_string()), true),
             (|| SubmitError::WalletBusy("reason".to_string()), true),
             (|| SubmitError::WalletUnfunded("empty".to_string()), true),
@@ -199,7 +202,9 @@ mod tests {
         fn rejected(status: u16) -> anyhow::Error {
             anyhow::Error::new(RawRpcError::Client(Box::new(
                 JsonrpseeClientError::Transport(Box::new(
-                    jsonrpsee::http_client::transport::Error::Rejected { status_code: status },
+                    jsonrpsee::http_client::transport::Error::Rejected {
+                        status_code: status,
+                    },
                 )),
             )))
         }
