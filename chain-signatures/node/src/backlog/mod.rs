@@ -176,7 +176,7 @@ impl ExecutionWatchers {
 /// Backlog manages pending sign-respond requests across multiple chains.
 /// Each chain has its own isolated set of pending requests with their own
 /// publish queues.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Backlog {
     checkpoints: Checkpoints,
     /// Pending requests indexed by chain
@@ -192,6 +192,16 @@ pub struct Backlog {
 impl Default for Backlog {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Shows how many requests are pending. Each `SignEntry` keeps a handle to the whole
+/// backlog, so every logged entry includes this count.
+impl std::fmt::Debug for Backlog {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Backlog")
+            .field("total_pending", &self.total_pending.load(Ordering::Relaxed))
+            .finish_non_exhaustive()
     }
 }
 
