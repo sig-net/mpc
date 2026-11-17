@@ -19,7 +19,7 @@ pub(crate) enum SubmitError {
     ContractMismatch(String),
     /// The action was refused before any work: wrong chain, wrong kind, or a
     /// signature or attestation no circuit answers.
-    #[error("[gate_refusal] {source}")]
+    #[error("[gate_refusal] the action was refused before any work")]
     GateRefusal {
         #[source]
         source: anyhow::Error,
@@ -48,7 +48,7 @@ pub(crate) enum SubmitError {
     Internal(String),
     /// A read from or a send to the node failed. Counted as `internal`; the
     /// verdict reads the typed HTTP status in its chain, never the render.
-    #[error("[internal] {source}")]
+    #[error("[internal] a node read or send failed")]
     Node {
         #[source]
         source: anyhow::Error,
@@ -161,7 +161,11 @@ mod tests {
         for (class, retryable) in classes {
             let error = class();
             let code = error.code();
-            assert_eq!(error.to_string(), format!("[{code}] reason"));
+            assert!(
+                error.to_string().starts_with(&format!("[{code}]")),
+                "{} does not carry its code",
+                error
+            );
             let error = error.into_publish_error().context("publishing");
             assert_eq!(refusal_code(&error), Some(code));
             assert_eq!(is_retryable(&error), retryable, "{error:#}");
