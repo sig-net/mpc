@@ -165,7 +165,7 @@ impl<W: FeePayer, C: SubmitChain> NativeIntentClient<W, C> {
         );
         deployment
             .check_deployed(&state)
-            .map_err(|error| SubmitError::ContractMismatch(error.to_string()))?;
+            .map_err(|error| SubmitError::DeployMismatch(error.to_string()))?;
 
         let call = match &request.circuit {
             RespondCircuit::Respond => minocrab_publisher::respond::<DefaultDB>(
@@ -1009,8 +1009,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_contract_whose_key_is_not_the_packaged_one_is_refused() {
-        // The packaged respond key is another circuit's, so the deployed one differs.
+    async fn a_contract_the_artifacts_do_not_prove_for_is_awaited_not_refused() {
+        // The packaged respond key is another circuit's, so the deployed one differs:
+        // an on-chain upgrade may still be landing, so the publish retries rather
+        // than paying a failover that hits the same mismatch everywhere.
         let dir = managed_dir(|circuit, bytes| {
             if circuit == "respond" {
                 let mut tampered = bytes;
@@ -1025,13 +1027,10 @@ mod tests {
         let error = client.build(&respond_request()).await.unwrap_err();
         assert_eq!(
             crate::submit_error::refusal_code(&error),
-            Some("contract_mismatch"),
+            Some("deploy_mismatch"),
             "{error:#}"
         );
-        assert!(
-            !is_retryable(&error),
-            "a mismatched contract must be terminal: {error:#}"
-        );
+        assert!(is_retryable(&error), "{error:#}");
 
         let mut empty = Vec::new();
         midnight_serialize::tagged_serialize(&ContractState::<DefaultDB>::default(), &mut empty)
@@ -1045,10 +1044,10 @@ mod tests {
             .unwrap_err();
         assert_eq!(
             crate::submit_error::refusal_code(&error),
-            Some("contract_mismatch"),
+            Some("deploy_mismatch"),
             "{error:#}"
         );
-        assert!(!is_retryable(&error), "{error:#}");
+        assert!(is_retryable(&error), "{error:#}");
     }
 
     #[test]

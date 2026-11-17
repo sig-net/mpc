@@ -17,6 +17,12 @@ pub(crate) enum SubmitError {
     /// publisher proves for; only a redeploy changes that.
     #[error("[contract_mismatch] {0}")]
     ContractMismatch(String),
+    /// The deployed contract is not the one the packaged artifacts prove for;
+    /// an on-chain upgrade may still be landing. Retry waits it out — every
+    /// node runs the same artifacts against the same chain, so failover cannot
+    /// help. Nothing was posted.
+    #[error("[deploy_mismatch] {0}")]
+    DeployMismatch(String),
     /// The action was refused before any work: wrong chain, wrong kind, or a
     /// signature or attestation no circuit answers.
     #[error("[gate_refusal] the action was refused before any work")]
@@ -62,6 +68,7 @@ impl SubmitError {
         match self {
             Self::BadRequest(_) => "bad_request",
             Self::ContractMismatch(_) => "contract_mismatch",
+            Self::DeployMismatch(_) => "deploy_mismatch",
             Self::GateRefusal { .. } => "gate_refusal",
             Self::WalletUnsynced(_) => "wallet_unsynced",
             Self::WalletBusy(_) => "wallet_busy",
@@ -134,12 +141,13 @@ mod tests {
 
     #[test]
     fn every_class_is_counted_and_classified_under_its_code() {
-        let classes: [(fn() -> SubmitError, bool); 11] = [
+        let classes: [(fn() -> SubmitError, bool); 12] = [
             (|| SubmitError::BadRequest("reason".to_string()), false),
             (
                 || SubmitError::ContractMismatch("reason".to_string()),
                 false,
             ),
+            (|| SubmitError::DeployMismatch("reason".to_string()), true),
             (
                 || SubmitError::GateRefusal {
                     source: anyhow::anyhow!("reason"),
