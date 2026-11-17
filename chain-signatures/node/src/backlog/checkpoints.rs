@@ -25,6 +25,10 @@ pub struct Checkpoint {
     pub legacy_digest: Option<[u8; 32]>,
 }
 
+/// Above this many requests a checkpoint's `Debug` shows their count instead of their ids,
+/// which keeps a checkpoint log line under about 100 KB.
+const MAX_DEBUG_SIGN_IDS: usize = 1000;
+
 impl fmt::Debug for Checkpoint {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         struct DebugPendingRequests<'a>(&'a [BacklogEntry]);
@@ -38,14 +42,19 @@ impl fmt::Debug for Checkpoint {
             }
         }
 
-        f.debug_struct("Checkpoint")
+        let mut debug = f.debug_struct("Checkpoint");
+        debug
             .field("chain", &self.chain)
-            .field("block_height", &self.block_height)
-            .field(
+            .field("block_height", &self.block_height);
+        if self.pending_requests.len() <= MAX_DEBUG_SIGN_IDS {
+            debug.field(
                 "pending_requests",
                 &DebugPendingRequests(&self.pending_requests),
-            )
-            .finish()
+            );
+        } else {
+            debug.field("pending_request_count", &self.pending_requests.len());
+        }
+        debug.finish()
     }
 }
 
@@ -312,6 +321,41 @@ mod tests {
 
     fn checkpoint(height: u64) -> Checkpoint {
         Checkpoint::reset(Chain::Ethereum, height)
+    }
+
+    fn checkpoint_with_requests(count: usize) -> Checkpoint {
+        let mut checkpoint = checkpoint(100);
+        checkpoint.pending_requests = (0..count)
+            .map(|i| {
+                let mut id = [0u8; 32];
+                id[..8].copy_from_slice(&(i as u64).to_le_bytes());
+                BacklogEntry::new(crate::backlog::mock::mock_sign_request(
+                    mpc_primitives::SignId::new(id),
+                    Chain::Ethereum,
+                ))
+            })
+            .collect();
+        checkpoint
+    }
+
+    #[test]
+    fn debug_lists_sign_ids_up_to_the_limit() {
+        let debug = format!("{:?}", checkpoint_with_requests(MAX_DEBUG_SIGN_IDS));
+        assert_eq!(debug.matches("SignId(").count(), MAX_DEBUG_SIGN_IDS);
+        assert!(debug.len() < 100_000, "{} bytes", debug.len());
+    }
+
+    #[test]
+    fn debug_shows_only_the_count_above_the_limit() {
+        let debug = format!("{:?}", checkpoint_with_requests(MAX_DEBUG_SIGN_IDS + 1));
+        assert!(!debug.contains("SignId("), "{debug}");
+        assert!(
+            debug.contains(&format!(
+                "pending_request_count: {}",
+                MAX_DEBUG_SIGN_IDS + 1
+            )),
+            "{debug}"
+        );
     }
 
     #[tokio::test]

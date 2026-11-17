@@ -839,6 +839,7 @@ pub(crate) async fn process_block_event<T: ChainTelemetry>(
         block,
         %chain,
         tx_count = checkpoint.len(),
+        ?checkpoint,
         ?checkpoint_digest,
         "created checkpoint"
     );
