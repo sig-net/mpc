@@ -4,8 +4,9 @@ use prometheus::CounterVec;
 
 use crate::metrics::try_create_counter_vec_with_node_account_id;
 
-/// Settlement stalls observed in shadow mode, by chain. No rebase is triggered
-/// by these detections yet; the counter lets the signal be validated first.
+/// Settlement stalls detected from checkpoint vote tallies, by chain. Every
+/// detection is counted; a subset (those allowed by the backoff) also trigger
+/// a re-index, counted separately by [`STALL_REBASES`].
 pub(crate) static STALL_DETECTIONS: LazyLock<CounterVec> = LazyLock::new(|| {
     try_create_counter_vec_with_node_account_id(
         "multichain_stall_detections",

@@ -2712,6 +2712,57 @@ async fn live_block_votes_for_checkpoint() {
         .is_err());
 }
 
+/// Casting a vote records the exact checkpoint body voted for, one per height,
+/// so a later stall re-index cannot erase what was actually sent to the contract.
+#[tokio::test]
+async fn voting_persists_the_voted_checkpoint() {
+    let chain = Chain::Ethereum;
+    let (sign_tx, _sign_rx) = mpsc::channel(4);
+    let telemetry = NoopChainTelemetry;
+    let (ctx, mut rpc_rx) = make_test_stream_context_with_rpc(
+        Backlog::new(),
+        sign_tx,
+        true,
+        ProjectivePoint::GENERATOR.to_affine(),
+    );
+    let interval = crate::backlog::checkpoint_interval(chain).unwrap();
+
+    process_block_event(chain, interval, &ctx, &telemetry)
+        .await
+        .unwrap();
+    let action = timeout(Duration::from_secs(1), rpc_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let voted = ctx.backlog.checkpoints().load_voted(chain).await.unwrap();
+    assert_eq!(voted.len(), 1);
+    assert_eq!(voted[0].chain, chain);
+    assert_eq!(voted[0].block_height, interval);
+    match action {
+        RpcAction::VoteCheckpoint { checkpoint, .. } => {
+            assert_eq!(
+                mpc_primitives::CheckpointDigest::from(&voted[0]).digest,
+                checkpoint.digest
+            );
+        }
+        _ => panic!("unexpected rpc action"),
+    }
+
+    // A later boundary adds another record; the first height stays as voted.
+    process_block_event(chain, 2 * interval, &ctx, &telemetry)
+        .await
+        .unwrap();
+    let _ = timeout(Duration::from_secs(1), rpc_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let voted = ctx.backlog.checkpoints().load_voted(chain).await.unwrap();
+    assert_eq!(
+        voted.iter().map(|cp| cp.block_height).collect::<Vec<_>>(),
+        vec![interval, 2 * interval]
+    );
+}
+
 /// The sweep fires each entry once, and the two legs share a sign id, so only
 /// clearing the dispatch flag on re-entry keeps a fired leg 1 from suppressing
 /// leg 2.

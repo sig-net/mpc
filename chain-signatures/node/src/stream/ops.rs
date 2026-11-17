@@ -836,6 +836,22 @@ pub(crate) async fn process_block_event<T: ChainTelemetry>(
 
     let checkpoint_digest = mpc_primitives::CheckpointDigest::from(&checkpoint);
     tracing::info!(block, ?checkpoint, %chain, ?checkpoint_digest, "created checkpoint");
+
+    // Record what we are about to vote for before casting the vote. A later
+    // stall re-index rewrites the pending checkpoint but must not overwrite the
+    // original vote (doc/checkpoints.md §4). Overwriting at `(chain, height)`
+    // makes this idempotent across retries; a storage failure is propagated so
+    // the block event is retried rather than losing the record.
+    ctx.backlog
+        .checkpoints()
+        .persist_voted(&checkpoint)
+        .await
+        .with_context(|| {
+            format!(
+                "failed to persist voted checkpoint at height {} for {chain}",
+                checkpoint.block_height
+            )
+        })?;
     ctx.rpc.vote_checkpoint(checkpoint_digest).await?;
 
     Ok(())

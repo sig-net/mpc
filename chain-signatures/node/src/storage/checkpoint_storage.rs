@@ -421,6 +421,41 @@ impl CheckpointStorage {
         Ok(())
     }
 
+    /// Remove voted checkpoints at or below `height` for `chain`, leaving
+    /// higher heights and other chains untouched. Called on settlement so the
+    /// voted store does not grow without bound (doc/checkpoints.md §4).
+    pub async fn clear_voted_up_to(&self, chain: Chain, height: u64) -> anyhow::Result<()> {
+        match self {
+            CheckpointStorage::Redis(pool, _) => {
+                let mut conn = pool.get().await.context("failed to get redis connection")?;
+                // The voted hash is keyed by height as its field, so settled
+                // records can be trimmed without touching later heights.
+                const CLEAR_UP_TO: &str = r#"
+                    local heights = redis.call('HKEYS', KEYS[1])
+                    for i = 1, #heights do
+                        if tonumber(heights[i]) <= tonumber(ARGV[1]) then
+                            redis.call('HDEL', KEYS[1], heights[i])
+                        end
+                    end
+                "#;
+                let _: () = redis::Script::new(CLEAR_UP_TO)
+                    .key(self.voted_checkpoint_key(chain))
+                    .arg(height)
+                    .invoke_async(&mut conn)
+                    .await
+                    .context("failed to clear settled voted checkpoints from redis")?;
+            }
+            CheckpointStorage::InMemory { voted, .. } => {
+                if let Some(checkpoints) = voted.write().await.get_mut(&chain) {
+                    checkpoints.retain(|h, _| *h > height);
+                }
+            }
+            #[cfg(test)]
+            CheckpointStorage::Failing => anyhow::bail!("failing storage"),
+        }
+        Ok(())
+    }
+
     /// Promote the durable pending checkpoint identified by its digest, or confirm
     /// it if already the latest checkpoint.
     /// Returns `Some(remaining_pending_count)` if confirmed, or `None` if not found.
@@ -971,6 +1006,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn clear_voted_up_to_removes_only_settled_heights_on_the_given_chain(
+    ) -> anyhow::Result<()> {
+        let storage = CheckpointStorage::in_memory();
+        let solana = |height| Checkpoint::reset(Chain::Solana, height);
+        let ethereum = Checkpoint::reset(Chain::Ethereum, 25);
+        for height in [10, 20, 30] {
+            storage.persist_voted(&solana(height)).await?;
+        }
+        storage.persist_voted(&ethereum).await?;
+
+        // Records at or below the settled height go; higher ones stay.
+        storage.clear_voted_up_to(Chain::Solana, 20).await?;
+        assert_eq!(storage.load_voted(Chain::Solana).await?, vec![solana(30)]);
+        // Another chain is untouched even below the same height.
+        assert_eq!(
+            storage.load_voted(Chain::Ethereum).await?,
+            vec![ethereum.clone()]
+        );
+
+        // Idempotent when nothing qualifies, and clears everything at the top.
+        storage.clear_voted_up_to(Chain::Solana, 0).await?;
+        assert_eq!(storage.load_voted(Chain::Solana).await?, vec![solana(30)]);
+        storage.clear_voted_up_to(Chain::Solana, 30).await?;
+        assert!(storage.load_voted(Chain::Solana).await?.is_empty());
+        assert_eq!(storage.load_voted(Chain::Ethereum).await?, vec![ethereum]);
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn voted_store_operations_leave_pending_and_latest_untouched() -> anyhow::Result<()> {
         let storage = CheckpointStorage::in_memory();
         let chain = Chain::Solana;
@@ -998,6 +1062,7 @@ mod tests {
         assert!(storage.persist_voted(&checkpoint).await.is_err());
         assert!(storage.load_voted(chain).await.is_err());
         assert!(storage.clear_voted(chain).await.is_err());
+        assert!(storage.clear_voted_up_to(chain, 1).await.is_err());
     }
 
     #[test]

@@ -458,15 +458,7 @@ The interval is `checkpoint_interval`, a per-chain constant with no per-node ove
 
 ### Settlement stall (Section 4)
 
-Not implemented. The work lands in this order:
+Implemented; this gap is closed. Shadow mode was used first, then the handler was activated.
 
-* Expose the vote tallies from the contract and read them in the node.
-* Enforce one vote per node and height in the contract, newest replacing older.
-* Add the stall predicate as a pure function of the tallies, the base and t.
-* Keep, per height, both the checkpoint the node voted for and the one it rebuilt.
-* Add the rebase-to-base primitive and log stall detections and re-indexes in shadow mode, with no rebase.
-* Activate the handler with the backoff, reset only on a rebase onto a settled checkpoint.
-* Record the proof that the predicate cannot fire for a correct node in the model, and the rollout status.
-
-Now: no tallies are read, the contract accepts several digests per height, and a node at the cap waits for a settlement; there is no stall predicate, rebase to base or backoff.
-Design: the node detects a stall as in Section 4, re-indexes from its base on a backoff that doubles on each stall-triggered re-index and resets only on a rebase onto a settled checkpoint, and votes again on the rebuilt backlog; shadow mode first, then active.
+Now: the contract exposes vote tallies and enforces one vote per node and height, newest replacing older; the node reads them, runs the pure predicate over the tallies, the first boundary above the base and t, retains what it voted for per height, and on detection aborts sign tasks, clears caught-up, rebases to the settled base and re-indexes, voting again on the rebuilt backlog. The backoff starts at 30 s, doubles on each stall-triggered re-index and resets only on a rebase onto a settled checkpoint. The end-to-end path is covered by the `stream::supervisor` tests.
+Design: met (Section 4). The argument that the predicate cannot fire for a correct node is in Section 5 (S1). The other §7 gaps — contract start height (#777), no mainnet `reset_checkpoints`, hydration (#1431) — remain, so the overall status above is unchanged.
