@@ -31,7 +31,8 @@ pub(crate) enum SubmitError {
     #[error("[wallet_busy] {0}")]
     WalletBusy(String),
     /// The wallet cannot pay the fee. Nothing was posted. Topping up the wallet
-    /// is a runtime event, like solana's funds class.
+    /// is a runtime event, like solana's funds class
+    /// (`chain-solana/src/publisher.rs`).
     #[error("[wallet_unfunded] {0}")]
     WalletUnfunded(String),
     /// Proving outlasted the submit budget. Nothing was posted.
@@ -88,7 +89,8 @@ impl SubmitError {
     /// and amounts can include a standalone 429 or 402.
     pub(crate) fn into_publish_error(self) -> anyhow::Error {
         match self {
-            // The send partition, like ethereum's pre-broadcast nonce fetch:
+            // The send partition, like ethereum's pre-broadcast nonce fetch
+            // (`chain-ethereum/src/publisher.rs`):
             // nothing was posted, so a classic 4xx hands the publish to failover.
             // A carrier already inside the source rides as-is (`from_chain`) —
             // its verdict, status and retry_after win over the derivation.
