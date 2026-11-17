@@ -11,6 +11,7 @@ use crate::backlog::mock::{
 };
 use crate::sign_bidirectional::{BidirectionalProgress, SignProgress, SignStatus};
 use crate::storage::checkpoint_storage::CheckpointStorage;
+use crate::types::SignCommand;
 use mpc_chain_integration_core::StateManager;
 use mpc_primitives::{
     BidirectionalTx, BidirectionalTxId, Chain, ExecutionOutcome, IndexedSignRequest, SignId,
@@ -2025,7 +2026,7 @@ fn a_record_applies_only_to_an_entry_behind_it() {
 }
 
 #[tokio::test]
-async fn sign_entry_debug_leaves_out_the_other_pending_requests() {
+async fn sign_command_debug_leaves_out_the_other_pending_requests() {
     let backlog = Backlog::new();
     let entry = backlog
         .insert_mock_sign(SignId::new([1; 32]), Chain::Ethereum)
@@ -2034,7 +2035,7 @@ async fn sign_entry_debug_leaves_out_the_other_pending_requests() {
         .insert_mock_sign(SignId::new([2; 32]), Chain::Solana)
         .await;
 
-    let debug = format!("{entry:?}");
+    let debug = format!("{:?}", SignCommand::Request(entry.into()));
     assert!(debug.contains("total_pending: 2"), "{debug}");
     assert!(
         !debug.contains(&format!("{:?}", other.sign_id())),
