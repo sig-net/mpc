@@ -33,9 +33,10 @@ test filter="": (setup "")
     cargo nextest run -p integration-tests {{ if filter != "" { "-E 'test(" + filter + ")'" } else { "" } }}
 alias t := test
 
-# Run only lightweight fixture tests (no full cluster or Docker beyond Redis)
+# Run only lightweight fixture tests (no full cluster or Docker beyond Redis).
+# Nodes run in-process, so no setup: neither the contract wasm nor the node binary is needed.
 # Usage: just tf [filter]
-test-fixture filter="": (setup "")
+test-fixture filter="":
     cargo nextest run -p integration-tests --profile fixture {{ if filter != "" { "-E 'test(" + filter + ")'" } else { "" } }}
 alias tf := test-fixture
 
@@ -72,11 +73,13 @@ fmt:
 
 # Fast unit tests (mirrors CI: no integration-tests, no Docker). The node
 # gates its test-only stores and flags behind test-feature, so its lib tests
-# run a second time with the feature on.
+# run a second time with the feature on. nextest runs all test binaries in
+# parallel but skips doctests, so those run separately.
 # Usage: just test-unit [filter]
 test-unit filter="":
-    cargo test --workspace --exclude integration-tests {{filter}}
-    cargo test -p mpc-node --lib --features test-feature {{filter}}
+    cargo nextest run --workspace --exclude integration-tests --no-tests=warn {{filter}}
+    cargo nextest run -p mpc-node --lib --features test-feature --no-tests=warn {{filter}}
+    cargo test --workspace --exclude integration-tests --doc {{filter}}
 alias tu := test-unit
 
 # Full CI gate locally: format check + clippy + unit tests
