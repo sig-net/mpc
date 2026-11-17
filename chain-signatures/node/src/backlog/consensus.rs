@@ -231,11 +231,12 @@ pub(crate) async fn find_consensus_checkpoint(
 mod tests {
     use crate::backlog::consensus::{align_backlog_with_consensus, query_peers_checkpoint};
     use crate::backlog::mock::{mock_sign_request, BacklogTestExt};
-    use crate::backlog::{Backlog, BacklogEntry, Checkpoint};
+    use crate::backlog::{Backlog, BacklogEntry, Checkpoint, Checkpoints};
     use crate::mesh::connection::NodeStatus;
     use crate::mesh::MeshState;
     use crate::node_client::NodeClient;
     use crate::protocol::ParticipantInfo;
+    use crate::storage::checkpoint_storage::CheckpointStorage;
     use cait_sith::protocol::Participant;
     use mpc_chain_integration_core::StateManager;
     use mpc_primitives::{Chain, CheckpointDigest, SignId};
@@ -699,6 +700,165 @@ mod tests {
             Some(42),
             "a node that never held a checkpoint must still re-anchor"
         );
+    }
+
+    /// Builds a mockito peer whose `/checkpoint` answer is exactly what the given
+    /// `Checkpoints` can serve by digest — i.e. the real web-endpoint lookup path.
+    async fn mock_peer_serving(
+        checkpoints: &Checkpoints,
+        chain: Chain,
+        digest: [u8; 32],
+    ) -> (mockito::ServerGuard, mockito::Mock) {
+        let mut found = HashMap::new();
+        if let Some(cp) = checkpoints.find(chain, digest).await {
+            found.insert(chain, cp);
+        }
+        let mut body = Vec::new();
+        ciborium::into_writer(
+            &crate::web::CheckpointResponse {
+                version: crate::CHECKPOINT_VERSION,
+                checkpoints: found,
+            },
+            &mut body,
+        )
+        .unwrap();
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("GET", "/checkpoint")
+            .match_query(mockito::Matcher::Any)
+            .expect_at_least(1)
+            .with_status(200)
+            .with_header("content-type", "application/cbor")
+            .with_body(body)
+            .create_async()
+            .await;
+        (server, mock)
+    }
+
+    fn peer_info(url: String) -> (Participant, ParticipantInfo) {
+        let mut info = ParticipantInfo::new(1);
+        info.url = url;
+        (Participant::from(1u32), info)
+    }
+
+    /// A-style test: demonstrates the hazard the orphan store exists to mitigate.
+    ///
+    /// A pending checkpoint is created and its digest recorded as a simulated
+    /// contract vote. Its body is then deleted WITHOUT an orphan store — the naive
+    /// "just drop pending on restart" approach. When that digest settles, no node can
+    /// serve it: the local `find` returns `None` and a peer fetch for the digest
+    /// returns nothing. A correct node that needs the body to rebase stalls forever.
+    /// This is why the discarded bodies must be retained serve-only (doc/checkpoints.md §6).
+    #[tokio::test]
+    async fn naive_discard_without_orphan_store_leaves_settled_digest_unservable() {
+        let chain = Chain::Ethereum;
+        let checkpoints = Checkpoints::new(CheckpointStorage::in_memory());
+        let cp = Checkpoint {
+            chain,
+            block_height: 100,
+            pending_requests: vec![BacklogEntry::new(mock_sign_request(
+                SignId::new([7u8; 32]),
+                chain,
+            ))],
+            legacy_digest: None,
+        };
+        checkpoints.persist_pending(&cp).await.unwrap();
+        let digest = cp.digest();
+
+        // Simulated contract vote recording the digest (in flight at the crash).
+        let (_tx, digest_rx) = watch::channel(Some(CheckpointDigest {
+            chain,
+            height: 100,
+            digest,
+        }));
+        assert_eq!(digest_rx.borrow().unwrap().digest, digest);
+
+        // Naive cleanup: delete the pending body, with no orphan store.
+        checkpoints.clear_pending(chain).await.unwrap();
+        checkpoints.hydrate(chain).await.unwrap();
+
+        // The settled digest can no longer be found locally ...
+        assert_eq!(checkpoints.find(chain, digest).await, None);
+
+        // ... and the peer fetch comes back empty, because its /checkpoint
+        // endpoint delegates to the same `find`.
+        let (server, mock) = mock_peer_serving(&checkpoints, chain, digest).await;
+        let peers = [peer_info(server.url())];
+        assert_eq!(
+            query_peers_checkpoint(&peers, &NodeClient::new(), chain, digest).await,
+            None,
+            "no peer can serve a body that was discarded without an orphan store"
+        );
+        mock.assert_async().await;
+    }
+
+    /// B-style test: the same sequence with the orphan store in place.
+    /// The discarded body is served by `find`, a peer is served, a node that does
+    /// not hold the body aligns via `align_backlog_with_consensus`, and the orphan
+    /// is cleared once a checkpoint at or above its height settles.
+    #[tokio::test]
+    async fn orphan_store_serves_discarded_checkpoint_through_alignment_until_settlement() {
+        let chain = Chain::Ethereum;
+        let checkpoints = Checkpoints::new(CheckpointStorage::in_memory());
+        let cp = Checkpoint {
+            chain,
+            block_height: 100,
+            pending_requests: vec![BacklogEntry::new(mock_sign_request(
+                SignId::new([7u8; 32]),
+                chain,
+            ))],
+            legacy_digest: None,
+        };
+        checkpoints.persist_pending(&cp).await.unwrap();
+        let digest = cp.digest();
+
+        // Startup discard: retain serve-only, then clear pending.
+        checkpoints.persist_orphan(&cp).await.unwrap();
+        checkpoints.clear_pending(chain).await.unwrap();
+        checkpoints.hydrate(chain).await.unwrap();
+        assert_eq!(checkpoints.find(chain, digest).await, Some(cp.clone()));
+
+        // The peer is served from the orphan store.
+        let (server, mock) = mock_peer_serving(&checkpoints, chain, digest).await;
+        let peers = [peer_info(server.url())];
+        let fetched = query_peers_checkpoint(&peers, &NodeClient::new(), chain, digest).await;
+        assert_eq!(fetched, Some(cp.clone()));
+
+        // A fresh node with no local state aligns onto the consensus digest by
+        // fetching the discarded body from the peer.
+        let mut fixture = AlignFixture::new(Some(CheckpointDigest {
+            chain,
+            height: 100,
+            digest,
+        }));
+        let (peer, info) = peer_info(server.url());
+        let mut mesh = MeshState::default();
+        mesh.update(peer, NodeStatus::Active, info);
+        fixture.mesh_tx.send(mesh).unwrap();
+
+        let result = tokio::time::timeout(Duration::from_secs(5), fixture.run())
+            .await
+            .expect("alignment must not block: peer holds the discarded body");
+        assert_eq!(result, Some(100));
+        assert_eq!(
+            fixture
+                .backlog
+                .checkpoints()
+                .storage()
+                .load_latest(chain)
+                .await
+                .unwrap(),
+            Some(cp.clone())
+        );
+
+        // Once a checkpoint at 100 settles locally, the orphan is released.
+        let settler = Checkpoint::reset(chain, 100);
+        checkpoints.persist_pending(&settler).await.unwrap();
+        assert!(checkpoints.confirm(chain, settler.digest()).await.unwrap());
+        assert_eq!(checkpoints.find_orphan(chain, digest).await.unwrap(), None);
+        assert_eq!(checkpoints.find(chain, digest).await, None);
+
+        mock.assert_async().await;
     }
 
     #[tokio::test]

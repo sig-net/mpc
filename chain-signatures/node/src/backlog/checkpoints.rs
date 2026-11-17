@@ -222,6 +222,19 @@ impl Checkpoints {
             return Ok(false);
         };
 
+        // The promotion above is authoritative; read back the height it settled
+        // so serve-only orphans at or below it can be released. This is a cold
+        // path (one settlement per interval), so the extra durable read is cheap.
+        let settled_height = self
+            .storage
+            .load_latest(chain)
+            .await
+            .map_err(|source| CheckpointError::Storage { chain, source })?
+            .map(|cp| cp.block_height);
+        if let Some(height) = settled_height {
+            self.clear_orphan_up_to(chain, height).await?;
+        }
+
         self.pending_counts[chain].store(remaining_count, Ordering::Release);
         self.observe(chain, remaining_count);
         tracing::info!(
@@ -294,9 +307,57 @@ impl Checkpoints {
         self.pending_counts[chain].load(Ordering::Acquire)
     }
 
-    /// Finds a checkpoint by digest, searching durable latest and pending storage.
+    /// Finds a checkpoint by digest, searching pending, then the serve-only orphan
+    /// store, then the durable latest. Used by the peer `/checkpoint` endpoint.
     pub(crate) async fn find(&self, chain: Chain, digest: [u8; 32]) -> Option<Checkpoint> {
         self.storage.find(chain, digest).await.ok().flatten()
+    }
+
+    /// Retains a checkpoint displaced from `pending` at startup, for serving only.
+    pub(crate) async fn persist_orphan(
+        &self,
+        checkpoint: &Checkpoint,
+    ) -> Result<(), CheckpointError> {
+        let chain = checkpoint.chain;
+        self.storage
+            .persist_orphan(checkpoint)
+            .await
+            .map_err(|source| CheckpointError::Storage { chain, source })
+    }
+
+    /// Looks up a serve-only orphan by digest. The peer-serving path uses `find`
+    /// (which includes orphans); this typed accessor is for tests and observability.
+    #[allow(dead_code)]
+    pub(crate) async fn find_orphan(
+        &self,
+        chain: Chain,
+        digest: [u8; 32],
+    ) -> Result<Option<Checkpoint>, CheckpointError> {
+        self.storage
+            .find_orphan(chain, digest)
+            .await
+            .map_err(|source| CheckpointError::Storage { chain, source })
+    }
+
+    /// Drops serve-only orphans at or below `height`.
+    pub(crate) async fn clear_orphan_up_to(
+        &self,
+        chain: Chain,
+        height: u64,
+    ) -> Result<(), CheckpointError> {
+        self.storage
+            .clear_orphan_up_to(chain, height)
+            .await
+            .map_err(|source| CheckpointError::Storage { chain, source })
+    }
+
+    /// Atomically drops every pending checkpoint (and its digest index) for `chain`.
+    /// The caller re-hydrates the counter afterwards.
+    pub(crate) async fn clear_pending(&self, chain: Chain) -> Result<(), CheckpointError> {
+        self.storage
+            .clear_pending(chain)
+            .await
+            .map_err(|source| CheckpointError::Storage { chain, source })
     }
 
     /// Returns the backing storage.
@@ -308,10 +369,26 @@ impl Checkpoints {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::backlog::mock::mock_sign_request;
+    use mpc_primitives::SignId;
     use tokio::sync::Barrier;
 
     fn checkpoint(height: u64) -> Checkpoint {
         Checkpoint::reset(Chain::Ethereum, height)
+    }
+
+    /// A checkpoint at `height` with one request so its digest differs from a reset
+    /// at the same height — needed to tell "cleared by height" from "cleared by digest".
+    fn checkpoint_with_entry(height: u64, id_byte: u8) -> Checkpoint {
+        Checkpoint {
+            chain: Chain::Ethereum,
+            block_height: height,
+            pending_requests: vec![BacklogEntry::new(mock_sign_request(
+                SignId::new([id_byte; 32]),
+                Chain::Ethereum,
+            ))],
+            legacy_digest: None,
+        }
     }
 
     #[tokio::test]
@@ -658,5 +735,179 @@ mod tests {
         for entry in &cp.pending_requests {
             assert!(debug_str.contains(&hex::encode(entry.sign_id().request_id)));
         }
+    }
+
+    // ---- orphan-store behaviour -------------------------------------------------
+
+    #[tokio::test]
+    async fn orphan_body_is_served_by_find_until_a_checkpoint_at_its_height_settles() {
+        let checkpoints = Checkpoints::new(CheckpointStorage::in_memory());
+        let chain = Chain::Ethereum;
+        let discarded = checkpoint_with_entry(110, 7);
+        let digest = discarded.digest();
+
+        checkpoints.persist_orphan(&discarded).await.unwrap();
+        checkpoints.clear_pending(chain).await.unwrap();
+        checkpoints.hydrate(chain).await.unwrap();
+
+        // The body is gone from pending, yet a peer asking by digest is served.
+        assert_eq!(checkpoints.load_pending(chain).await.unwrap(), vec![]);
+        assert_eq!(checkpoints.count(chain), 0);
+        assert_eq!(
+            checkpoints.find_orphan(chain, digest).await.unwrap(),
+            Some(discarded.clone())
+        );
+        assert_eq!(checkpoints.find(chain, digest).await, Some(discarded));
+
+        // A different checkpoint at 120 settles; the orphan at 110 is released.
+        let settled = checkpoint(120);
+        checkpoints.persist_pending(&settled).await.unwrap();
+        assert!(checkpoints.confirm(chain, settled.digest()).await.unwrap());
+        assert_eq!(checkpoints.find_orphan(chain, digest).await.unwrap(), None);
+        assert_eq!(checkpoints.find(chain, digest).await, None);
+    }
+
+    #[tokio::test]
+    async fn confirm_clears_orphans_at_or_below_the_confirmed_height_only() {
+        let checkpoints = Checkpoints::new(CheckpointStorage::in_memory());
+        let chain = Chain::Ethereum;
+        let below = checkpoint(95);
+        let at = checkpoint_with_entry(100, 3);
+        let above = checkpoint(105);
+        for cp in [&below, &at, &above] {
+            checkpoints.persist_orphan(cp).await.unwrap();
+        }
+
+        // Settle a (different) body at height 100 — the boundary is inclusive.
+        let settled = checkpoint(100);
+        checkpoints.persist_pending(&settled).await.unwrap();
+        assert!(checkpoints.confirm(chain, settled.digest()).await.unwrap());
+
+        assert_eq!(
+            checkpoints
+                .find_orphan(chain, below.digest())
+                .await
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            checkpoints.find_orphan(chain, at.digest()).await.unwrap(),
+            None
+        );
+        assert_eq!(
+            checkpoints
+                .find_orphan(chain, above.digest())
+                .await
+                .unwrap(),
+            Some(above)
+        );
+    }
+
+    #[tokio::test]
+    async fn clear_pending_and_hydrate_reset_the_counter() {
+        let storage = CheckpointStorage::in_memory();
+        let checkpoints = Checkpoints::new(storage.clone());
+        let chain = Chain::Ethereum;
+        checkpoints.persist_pending(&checkpoint(100)).await.unwrap();
+        checkpoints.persist_pending(&checkpoint(110)).await.unwrap();
+        assert_eq!(checkpoints.count(chain), 2);
+
+        checkpoints.clear_pending(chain).await.unwrap();
+        assert_eq!(checkpoints.hydrate(chain).await.unwrap(), 0);
+        assert_eq!(checkpoints.count(chain), 0);
+    }
+
+    #[tokio::test]
+    async fn orphan_operations_map_storage_errors() {
+        let checkpoints = Checkpoints::new(CheckpointStorage::failing());
+        let chain = Chain::Ethereum;
+        let cp = checkpoint(100);
+        assert!(matches!(
+            checkpoints.persist_orphan(&cp).await,
+            Err(CheckpointError::Storage { .. })
+        ));
+        assert!(matches!(
+            checkpoints.find_orphan(chain, cp.digest()).await,
+            Err(CheckpointError::Storage { .. })
+        ));
+        assert!(matches!(
+            checkpoints.clear_orphan_up_to(chain, 100).await,
+            Err(CheckpointError::Storage { .. })
+        ));
+        assert!(matches!(
+            checkpoints.clear_pending(chain).await,
+            Err(CheckpointError::Storage { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn mixed_rollout_threshold_settlement_clears_discarded_orphans() {
+        // Deterministic two-node unit simulation with a fake contract view: there is
+        // no networking and no real threshold signing. The "contract" is a local vote
+        // tally we drive explicitly; both nodes observe the same settled digest.
+        let chain = Chain::Ethereum;
+        let base = checkpoint(100);
+        let old_pending = checkpoint_with_entry(110, 9);
+
+        // Node A upgrades first: its pending body is moved to the orphan store.
+        let storage_a = CheckpointStorage::in_memory();
+        storage_a.persist(&base).await.unwrap();
+        storage_a.persist_pending(&old_pending).await.unwrap();
+        let a = Checkpoints::new(storage_a);
+        a.hydrate(chain).await.unwrap();
+        a.persist_orphan(&old_pending).await.unwrap();
+        a.clear_pending(chain).await.unwrap();
+        a.hydrate(chain).await.unwrap();
+        assert_eq!(a.count(chain), 0);
+        assert!(a
+            .find_orphan(chain, old_pending.digest())
+            .await
+            .unwrap()
+            .is_some());
+
+        // Node B has not restarted: it still holds the pending body and keeps voting
+        // for it. Both nodes now build their next body on the settled base (100).
+        let storage_b = CheckpointStorage::in_memory();
+        storage_b.persist(&base).await.unwrap();
+        storage_b.persist_pending(&old_pending).await.unwrap();
+        let b = Checkpoints::new(storage_b);
+        assert_eq!(
+            b.load_pending(chain).await.unwrap(),
+            vec![old_pending.clone()]
+        );
+
+        let next = checkpoint(120);
+        a.persist_pending(&next).await.unwrap();
+        b.persist_pending(&next).await.unwrap();
+        assert_eq!(a.find(chain, next.digest()).await, Some(next.clone()));
+        assert_eq!(b.find(chain, next.digest()).await, Some(next.clone()));
+
+        // Fake contract: threshold = 2, both nodes vote `next` at the next boundary.
+        let mut votes: std::collections::HashMap<[u8; 32], usize> = Default::default();
+        *votes.entry(next.digest()).or_default() += 1; // A
+        *votes.entry(next.digest()).or_default() += 1; // B
+        assert_eq!(votes[&next.digest()], 2, "threshold reached");
+
+        // Until settlement, A can still serve the discarded cohort to a peer.
+        assert_eq!(
+            a.find(chain, old_pending.digest()).await,
+            Some(old_pending.clone())
+        );
+
+        // Both nodes confirm; A's orphan at 110 is cleared, B's stale pending at 110
+        // is pruned by promotion through 120. Neither node serves the old body.
+        assert!(a.confirm(chain, next.digest()).await.unwrap());
+        assert!(b.confirm(chain, next.digest()).await.unwrap());
+        assert_eq!(
+            a.find_orphan(chain, old_pending.digest()).await.unwrap(),
+            None
+        );
+        assert_eq!(a.find(chain, old_pending.digest()).await, None);
+        assert_eq!(b.find(chain, old_pending.digest()).await, None);
+        assert_eq!(
+            a.storage().load_latest(chain).await.unwrap(),
+            Some(next.clone())
+        );
+        assert_eq!(b.storage().load_latest(chain).await.unwrap(), Some(next));
     }
 }
