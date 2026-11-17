@@ -676,7 +676,8 @@ impl Backlog {
         drop(pending);
         let checkpoint = self.snapshot(chain).await;
         // A boundary passed without a stored checkpoint is never voted for,
-        // so storing it is retried until it succeeds.
+        // so storing it is retried until it succeeds. A conflict lasts until
+        // the stored checkpoint is dropped; passing it would be unsafe.
         let mut retry_delay = PERSIST_RETRY_DELAY;
         loop {
             match self.checkpoints.persist_pending(&checkpoint).await {
@@ -690,6 +691,15 @@ impl Backlog {
                     );
                     return None;
                 }
+                Err(err @ CheckpointError::Conflict { .. }) => {
+                    tracing::error!(
+                        ?chain,
+                        height,
+                        %err,
+                        ?retry_delay,
+                        "conflicting pending checkpoint: chain halted until it is dropped"
+                    );
+                }
                 Err(err @ CheckpointError::Storage { .. }) => {
                     tracing::error!(
                         ?chain,
@@ -698,10 +708,10 @@ impl Backlog {
                         ?retry_delay,
                         "failed to persist checkpoint; retrying"
                     );
-                    tokio::time::sleep(retry_delay).await;
-                    retry_delay = (retry_delay * 2).min(MAX_PERSIST_RETRY_DELAY);
                 }
             }
+            tokio::time::sleep(retry_delay).await;
+            retry_delay = (retry_delay * 2).min(MAX_PERSIST_RETRY_DELAY);
         }
         tracing::info!(
             ?chain,
