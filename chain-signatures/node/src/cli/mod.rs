@@ -23,7 +23,7 @@ use crate::storage::presignature_storage::PresignatureStorage;
 use crate::storage::triple_storage::{TriplePair, TripleStorage};
 use crate::storage::Initializing;
 use crate::stream::{supervisor::run_supervised, StreamContext};
-use crate::types::SignCommand;
+use crate::types::{CheckpointVoteTallyWatcher, SignCommand};
 use crate::{logs, storage, web};
 #[cfg(feature = "test-feature")]
 pub use args::ethereum::mock_indexer_config;
@@ -46,6 +46,7 @@ use mpc_chain_midnight::{
 use mpc_chain_near::{NearClient, NearRpcGates};
 use mpc_chain_solana::{SolConfig, SolanaClient, SolanaIndexer};
 use mpc_chain_tron::{TronConfig, TronWatcher};
+use mpc_contract::primitives::CheckpointVoteTally;
 use mpc_keys::hpke;
 use mpc_primitives::{Chain, CheckpointDigest};
 use near_account_id::AccountId;
@@ -306,6 +307,8 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 config_tx,
                 checkpoints_tx,
                 checkpoints_rx,
+                checkpoint_votes_tx,
+                checkpoint_votes_rx,
             } = ProtocolHandles::new(
                 &account_id,
                 network.clone(),
@@ -329,6 +332,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 contract_state_tx,
                 config_tx.clone(),
                 checkpoints_tx,
+                checkpoint_votes_tx,
             ));
             tasks.spawn(mesh.run(contract_watcher.clone()));
             // A blocking loop; `main` shuts the runtime down in the background
@@ -362,6 +366,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 mesh_state.clone(),
                 node_client.clone(),
                 checkpoints_rx,
+                checkpoint_votes_rx,
             )
             .await?;
             tracing::info!("node tasks spawned");
@@ -436,6 +441,17 @@ fn checkpoint_watchers() -> (
     let checkpoints_tx = EnumMap::from_fn(|chain| channels[chain].0.clone());
     let checkpoints_rx = EnumMap::from_fn(|chain| channels[chain].1.clone());
     (checkpoints_tx, checkpoints_rx)
+}
+
+#[allow(clippy::type_complexity)]
+fn checkpoint_vote_tally_watchers() -> (
+    EnumMap<Chain, watch::Sender<Vec<CheckpointVoteTally>>>,
+    EnumMap<Chain, CheckpointVoteTallyWatcher>,
+) {
+    let channels = EnumMap::from_fn(|_| watch::channel(Vec::new()));
+    let tx = EnumMap::from_fn(|chain| channels[chain].0.clone());
+    let rx = EnumMap::from_fn(|chain| channels[chain].1.clone());
+    (tx, rx)
 }
 
 /// Validated per-chain indexer configs. A `None` entry means the chain is not configured.
@@ -764,6 +780,8 @@ struct ProtocolHandles {
     config_tx: watch::Sender<Config>,
     checkpoints_tx: EnumMap<Chain, watch::Sender<Option<CheckpointDigest>>>,
     checkpoints_rx: EnumMap<Chain, watch::Receiver<Option<CheckpointDigest>>>,
+    checkpoint_votes_tx: EnumMap<Chain, watch::Sender<Vec<CheckpointVoteTally>>>,
+    checkpoint_votes_rx: EnumMap<Chain, CheckpointVoteTallyWatcher>,
 }
 
 impl ProtocolHandles {
@@ -783,6 +801,7 @@ impl ProtocolHandles {
     ) -> Self {
         let (config_tx, config_rx) = Config::channel();
         let (checkpoints_tx, checkpoints_rx) = checkpoint_watchers();
+        let (checkpoint_votes_tx, checkpoint_votes_rx) = checkpoint_vote_tally_watchers();
         let node = Node::new();
         let node_watcher = node.watch();
 
@@ -825,6 +844,8 @@ impl ProtocolHandles {
             config_tx,
             checkpoints_tx,
             checkpoints_rx,
+            checkpoint_votes_tx,
+            checkpoint_votes_rx,
         }
     }
 }
@@ -840,6 +861,7 @@ async fn spawn_indexers(
     mesh_state: watch::Receiver<MeshState>,
     node_client: NodeClient,
     checkpoints_rx: EnumMap<Chain, watch::Receiver<Option<CheckpointDigest>>>,
+    checkpoint_votes_rx: EnumMap<Chain, CheckpointVoteTallyWatcher>,
 ) -> anyhow::Result<()> {
     let ChainStack { configs, gates, .. } = stack;
     let ChainConfigs {
@@ -900,6 +922,7 @@ async fn spawn_indexers(
                 mesh_state.clone(),
                 node_client.clone(),
                 checkpoints_rx[Chain::Ethereum].clone(),
+                checkpoint_votes_rx[Chain::Ethereum].clone(),
             )
             .with_ethereum_chain_id(ethereum_chain_id),
             eth_telemetry,
@@ -926,6 +949,7 @@ async fn spawn_indexers(
                 mesh_state.clone(),
                 node_client.clone(),
                 checkpoints_rx[Chain::Solana].clone(),
+                checkpoint_votes_rx[Chain::Solana].clone(),
             )
             .with_ethereum_chain_id(ethereum_chain_id),
             sol_telemetry,
@@ -949,6 +973,7 @@ async fn spawn_indexers(
                 mesh_state.clone(),
                 node_client.clone(),
                 checkpoints_rx[Chain::Hydration].clone(),
+                checkpoint_votes_rx[Chain::Hydration].clone(),
             )
             .with_ethereum_chain_id(ethereum_chain_id),
             hydration_telemetry,
@@ -976,6 +1001,7 @@ async fn spawn_indexers(
                 mesh_state.clone(),
                 node_client.clone(),
                 checkpoints_rx[Chain::Canton].clone(),
+                checkpoint_votes_rx[Chain::Canton].clone(),
             )
             .with_ethereum_chain_id(ethereum_chain_id),
             canton_telemetry,
@@ -997,6 +1023,7 @@ async fn spawn_indexers(
             mesh_state.clone(),
             node_client.clone(),
             checkpoints_rx[Chain::Midnight].clone(),
+            checkpoint_votes_rx[Chain::Midnight].clone(),
         )
         .with_ethereum_chain_id(ethereum_chain_id);
         let backlog = backlog.clone();
@@ -1038,6 +1065,7 @@ async fn spawn_indexers(
                 mesh_state.clone(),
                 node_client.clone(),
                 checkpoints_rx[Chain::Tron].clone(),
+                checkpoint_votes_rx[Chain::Tron].clone(),
             )
             .with_ethereum_chain_id(ethereum_chain_id),
             tron_telemetry,

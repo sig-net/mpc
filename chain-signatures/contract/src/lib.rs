@@ -25,12 +25,13 @@ use near_sdk::{
     PublicKey,
 };
 use primitives::{
-    CandidateEntry, CandidateInfo, Candidates, CheckpointReset, CheckpointVotes,
-    InternalSignRequest, Participants, PendingRequest, PkVotes, Read, ReshareProposal,
-    ReshareVotes, SignPoll, SignRequest, StorageKey, ThresholdVotes, View, YieldIndex,
+    CandidateEntry, CandidateInfo, Candidates, CheckpointReset, CheckpointVoteTally,
+    CheckpointVotes, InternalSignRequest, Participants, PendingRequest, PkVotes, Read,
+    ReshareProposal, ReshareVotes, SignPoll, SignRequest, StorageKey, ThresholdVotes, View,
+    YieldIndex,
 };
 use signet_primitives::{Chain, SignId, Signature, LATEST_MPC_KEY_VERSION};
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use crate::config::ProtocolConfig;
 use crate::errors::Error;
@@ -896,11 +897,46 @@ impl MpcContract {
                         .filter_map(|chain| self.latest_checkpoint(chain).map(|cp| (chain, *cp)))
                         .collect(),
                 ),
+                Read::CheckpointVotes => View::CheckpointVotes(self.checkpoint_vote_tallies()),
             };
             views.push(view);
         }
 
         views
+    }
+
+    /// Group outstanding checkpoint votes by `(chain, height)` into tallies.
+    ///
+    /// Reuses the existing `checkpoint_votes` storage without changing it. The
+    /// returned digests are sorted by their bytes, and the heights are sorted
+    /// ascending, so the view is deterministic across nodes.
+    fn checkpoint_vote_tallies(&self) -> HashMap<Chain, Vec<CheckpointVoteTally>> {
+        let mut by_chain: HashMap<Chain, HashMap<u64, HashMap<[u8; 32], usize>>> = HashMap::new();
+        for (checkpoint, voters) in &self.checkpoint_votes.votes {
+            *by_chain
+                .entry(checkpoint.chain)
+                .or_default()
+                .entry(checkpoint.height)
+                .or_default()
+                .entry(checkpoint.digest)
+                .or_default() += voters.len();
+        }
+
+        by_chain
+            .into_iter()
+            .map(|(chain, heights)| {
+                let mut tallies: Vec<CheckpointVoteTally> = heights
+                    .into_iter()
+                    .map(|(height, digests)| {
+                        let mut votes: Vec<([u8; 32], usize)> = digests.into_iter().collect();
+                        votes.sort_unstable_by(|(a, _), (b, _)| a.cmp(b));
+                        CheckpointVoteTally { height, votes }
+                    })
+                    .collect();
+                tallies.sort_unstable_by_key(|tally| tally.height);
+                (chain, tallies)
+            })
+            .collect()
     }
 
     /// Vote for a checkpoint digest.
@@ -1385,6 +1421,79 @@ mod tests {
             .expect("read(Checkpoints) should not rely on IterableMap::iter()");
         assert_eq!(stored.height, checkpoint.height);
         assert_eq!(stored.digest, checkpoint.digest);
+    }
+
+    #[test]
+    fn checkpoint_votes_view_groups_by_chain_height_and_digest() {
+        testing_env!(VMContextBuilder::new()
+            .current_account_id("contract.near".parse().unwrap())
+            .build());
+
+        let mut contract = MpcContract {
+            protocol_state: ProtocolContractState::NotInitialized,
+            pending_requests: IterableMap::new(StorageKey::PendingRequests),
+            proposed_updates: ProposedUpdates::default(),
+            config: ProtocolConfig::default(),
+            latest_checkpoints: IterableMap::new(StorageKey::LatestCheckpointDigests),
+            checkpoint_votes: CheckpointVotes::new(),
+        };
+
+        let alice: AccountId = "alice.near".parse().unwrap();
+        let bob: AccountId = "bob.near".parse().unwrap();
+        // Two competing digests at Solana height 10, one at height 11, and one
+        // on a different chain.
+        let sol_low = CheckpointDigest::new(Chain::Solana, 10, [2u8; 32]);
+        let sol_high = CheckpointDigest::new(Chain::Solana, 10, [1u8; 32]);
+        let sol_next = CheckpointDigest::new(Chain::Solana, 11, [9u8; 32]);
+        let eth = CheckpointDigest::new(Chain::Ethereum, 10, [3u8; 32]);
+
+        contract
+            .checkpoint_votes_mut()
+            .entry(sol_low)
+            .insert(alice.clone());
+        contract
+            .checkpoint_votes_mut()
+            .entry(sol_high)
+            .insert(alice.clone());
+        contract
+            .checkpoint_votes_mut()
+            .entry(sol_high)
+            .insert(bob.clone());
+        contract
+            .checkpoint_votes_mut()
+            .entry(sol_next)
+            .insert(alice.clone());
+        contract.checkpoint_votes_mut().entry(eth).insert(alice);
+
+        let tallies = contract
+            .read(vec![Read::CheckpointVotes])
+            .into_iter()
+            .find_map(|view| match view {
+                View::CheckpointVotes(tallies) => Some(tallies),
+                _ => None,
+            })
+            .expect("read should return a CheckpointVotes view");
+
+        // Chains are isolated: only the two we voted on appear.
+        assert_eq!(tallies.len(), 2);
+
+        let solana = tallies.get(&Chain::Solana).expect("solana tallies");
+        // Heights sorted ascending.
+        assert_eq!(solana.len(), 2);
+        assert_eq!(solana[0].height, 10);
+        // Digests sorted by bytes; the higher-voted digest sorts first here.
+        assert_eq!(solana[0].votes, vec![([1u8; 32], 2), ([2u8; 32], 1)]);
+        assert_eq!(solana[1].height, 11);
+        assert_eq!(solana[1].votes, vec![([9u8; 32], 1)]);
+
+        let ethereum = tallies.get(&Chain::Ethereum).expect("ethereum tallies");
+        assert_eq!(
+            ethereum,
+            &vec![CheckpointVoteTally {
+                height: 10,
+                votes: vec![([3u8; 32], 1)],
+            }]
+        );
     }
 
     // A Running-state contract with `alice.near` as sole participant, so that

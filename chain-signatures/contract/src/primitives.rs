@@ -54,6 +54,7 @@ pub enum Read {
     State,
     Config,
     Checkpoints,
+    CheckpointVotes,
 }
 
 #[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize, Debug)]
@@ -62,6 +63,19 @@ pub enum View {
     State(Box<ProtocolContractStateView>),
     Config(ProtocolConfig),
     Checkpoints(HashMap<Chain, CheckpointDigest>),
+    CheckpointVotes(HashMap<Chain, Vec<CheckpointVoteTally>>),
+}
+
+/// The outstanding votes for checkpoints at a given height on a chain.
+///
+/// `votes` pairs a checkpoint digest with the number of participants that
+/// voted for it. Entries are sorted by digest so the view is deterministic.
+#[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[borsh(crate = "near_sdk::borsh")]
+#[serde(crate = "near_sdk::serde")]
+pub struct CheckpointVoteTally {
+    pub height: u64,
+    pub votes: Vec<([u8; 32], usize)>,
 }
 
 /// The index into calling the YieldResume feature of NEAR. This will allow to resume

@@ -15,6 +15,7 @@ use k256::{AffinePoint, ProjectivePoint, Scalar};
 use mockito::Server;
 use mpc_chain_canton::CantonChainCtx;
 use mpc_chain_integration_core::{ChainIndexer, NoopChainTelemetry};
+use mpc_contract::primitives::CheckpointVoteTally;
 use mpc_primitives::{
     BidirectionalTx, BidirectionalTxId, Chain, CheckpointDigest, IndexedSignRequest,
     RespondBidirectionalEvent, SignArgs, SignBidirectionalEvent, SignId, Signature,
@@ -155,6 +156,7 @@ pub fn make_test_stream_context(
         mesh_rx,
         node_client,
         cp_rx,
+        watch::channel(Vec::<CheckpointVoteTally>::new()).1,
     );
     set_caught_up(&mut ctx, caught_up);
     (ctx, cp_tx, mesh_tx, rpc_rx)
@@ -181,6 +183,7 @@ pub fn make_test_stream_context_with_rpc(
         mesh_rx,
         node_client,
         cp_rx,
+        watch::channel(Vec::<CheckpointVoteTally>::new()).1,
     );
     set_caught_up(&mut ctx, caught_up);
     (ctx, rpc_rx)
@@ -257,6 +260,7 @@ pub async fn run_stream_with_two_node_mesh<I: ChainIndexer>(
             mesh_state_rx,
             node_client,
             cp_rx,
+            watch::channel(Vec::<CheckpointVoteTally>::new()).1,
         ),
         NoopChainTelemetry,
     )
