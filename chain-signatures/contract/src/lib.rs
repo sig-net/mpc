@@ -907,19 +907,20 @@ impl MpcContract {
 
     /// Group outstanding checkpoint votes by `(chain, height)` into tallies.
     ///
-    /// Reuses the existing `checkpoint_votes` storage without changing it. The
-    /// returned digests are sorted by their bytes, and the heights are sorted
-    /// ascending, so the view is deterministic across nodes.
+    /// Votes are stored one per `(chain, height, voter)`, so each voter counts
+    /// at most once per height. The returned digests are sorted by their bytes,
+    /// and the heights are sorted ascending, so the view is deterministic
+    /// across nodes.
     fn checkpoint_vote_tallies(&self) -> HashMap<Chain, Vec<CheckpointVoteTally>> {
         let mut by_chain: HashMap<Chain, HashMap<u64, HashMap<[u8; 32], usize>>> = HashMap::new();
-        for (checkpoint, voters) in &self.checkpoint_votes.votes {
+        for ((chain, height, _), digest) in &self.checkpoint_votes.votes {
             *by_chain
-                .entry(checkpoint.chain)
+                .entry(*chain)
                 .or_default()
-                .entry(checkpoint.height)
+                .entry(*height)
                 .or_default()
-                .entry(checkpoint.digest)
-                .or_default() += voters.len();
+                .entry(*digest)
+                .or_default() += 1;
         }
 
         by_chain
@@ -956,8 +957,11 @@ impl MpcContract {
     /// - If the contract already has a checkpoint at the same height with a
     ///   different digest, the request is rejected as conflicting.
     /// - If the submitted height is greater than the current checkpoint, the
-    ///   caller votes for the submitted digest. Competing digests at the same
-    ///   unfinalized height may retain overlapping voters.
+    ///   caller votes for the submitted digest. Each voter holds at most one
+    ///   vote per `(chain, height)`: voting again at that height replaces its
+    ///   earlier digest, so a single node cannot inflate a height's tally by
+    ///   casting several digests. Competing digests can only be supported by
+    ///   distinct voters.
     /// - If the resulting vote count is below the threshold, the vote remains
     ///   stored and the latest checkpoint is unchanged.
     /// - If the resulting vote count reaches the threshold, the submitted
@@ -996,11 +1000,14 @@ impl MpcContract {
             }
         }
 
-        let vote_count = {
-            let voters = self.checkpoint_votes.entry(checkpoint);
-            voters.insert(voter);
-            voters.len()
-        };
+        // A second vote at the same height by this voter replaces its earlier
+        // digest, so the tally can never be inflated by one node.
+        let vote_count = self.checkpoint_votes.vote(
+            checkpoint.chain,
+            checkpoint.height,
+            voter,
+            checkpoint.digest,
+        );
 
         if vote_count < threshold {
             return Ok(false);
@@ -1009,21 +1016,14 @@ impl MpcContract {
 
         // Remove stale votes where candidate checkpoint is less than or equal to
         // this voted in consensus checkpoint.
-        self.checkpoint_votes_mut().votes.retain(|candidate, _| {
-            candidate.chain != checkpoint.chain || candidate.height > checkpoint.height
+        self.checkpoint_votes.votes.retain(|(chain, height, _), _| {
+            *chain != checkpoint.chain || *height > checkpoint.height
         });
         Ok(true)
     }
 
     pub fn checkpoint_votes(&self, chain: Chain) -> Vec<(CheckpointDigest, usize)> {
-        let votes = &self.checkpoint_votes;
-
-        votes
-            .votes
-            .iter()
-            .filter(|(checkpoint, _)| checkpoint.chain == chain)
-            .map(|(checkpoint, voters)| (*checkpoint, voters.len()))
-            .collect()
+        self.checkpoint_votes.for_chain(chain)
     }
 
     pub fn system_load(&self) -> u32 {
@@ -1208,10 +1208,9 @@ impl MpcContract {
 
     fn drop_non_member_checkpoint_votes(&mut self) {
         let state = &self.protocol_state;
-        self.checkpoint_votes.votes.retain(|_, voters| {
-            voters.retain(|account| state.is_voter(account));
-            !voters.is_empty()
-        });
+        self.checkpoint_votes
+            .votes
+            .retain(|(_, _, account), _| state.is_voter(account));
     }
 
     /// Get our own account id as a voter. Check to see if we are a participant in the protocol.
@@ -1235,10 +1234,6 @@ impl MpcContract {
     /// the value's chain consistent by construction.
     fn insert_checkpoint(&mut self, checkpoint: CheckpointDigest) {
         self.latest_checkpoints.insert(checkpoint.chain, checkpoint);
-    }
-
-    fn checkpoint_votes_mut(&mut self) -> &mut CheckpointVotes {
-        &mut self.checkpoint_votes
     }
 
     /// Settle each chain's *canonical reset checkpoint*: the one asserting an
@@ -1278,9 +1273,9 @@ impl MpcContract {
                 .to_string(),
             );
         }
-        self.checkpoint_votes_mut()
+        self.checkpoint_votes
             .votes
-            .retain(|checkpoint, _| !chains.contains(&checkpoint.chain));
+            .retain(|(chain, _, _), _| !chains.contains(chain));
     }
 }
 
@@ -1339,7 +1334,7 @@ mod tests {
             proposed_updates: ProposedUpdates::default(),
             config: ProtocolConfig::default().into(),
             latest_checkpoints: IterableMap::new(StorageKey::LatestCheckpointDigests),
-            checkpoint_votes: CheckpointVotes::new(),
+            checkpoint_votes: migration::PreviousCheckpointVotes::new(),
         };
         let prev_bytes = borsh::to_vec(&previous_contract).unwrap();
         env::storage_write(b"STATE", &prev_bytes);
@@ -1440,30 +1435,28 @@ mod tests {
 
         let alice: AccountId = "alice.near".parse().unwrap();
         let bob: AccountId = "bob.near".parse().unwrap();
-        // Two competing digests at Solana height 10, one at height 11, and one
-        // on a different chain.
+        let carol: AccountId = "carol.near".parse().unwrap();
+        // Two competing digests at Solana height 10 (distinct voters), one at
+        // height 11, and one on a different chain.
         let sol_low = CheckpointDigest::new(Chain::Solana, 10, [2u8; 32]);
         let sol_high = CheckpointDigest::new(Chain::Solana, 10, [1u8; 32]);
         let sol_next = CheckpointDigest::new(Chain::Solana, 11, [9u8; 32]);
         let eth = CheckpointDigest::new(Chain::Ethereum, 10, [3u8; 32]);
 
-        contract
-            .checkpoint_votes_mut()
-            .entry(sol_low)
-            .insert(alice.clone());
-        contract
-            .checkpoint_votes_mut()
-            .entry(sol_high)
-            .insert(alice.clone());
-        contract
-            .checkpoint_votes_mut()
-            .entry(sol_high)
-            .insert(bob.clone());
-        contract
-            .checkpoint_votes_mut()
-            .entry(sol_next)
-            .insert(alice.clone());
-        contract.checkpoint_votes_mut().entry(eth).insert(alice);
+        for (checkpoint, voter) in [
+            (sol_high, alice.clone()),
+            (sol_high, bob.clone()),
+            (sol_low, carol.clone()),
+            (sol_next, alice.clone()),
+            (eth, alice),
+        ] {
+            contract.checkpoint_votes.vote(
+                checkpoint.chain,
+                checkpoint.height,
+                voter,
+                checkpoint.digest,
+            );
+        }
 
         let tallies = contract
             .read(vec![Read::CheckpointVotes])
@@ -1538,6 +1531,115 @@ mod tests {
         }
     }
 
+    fn running_contract_with_voters(threshold: usize, names: &[&str]) -> MpcContract {
+        use std::str::FromStr;
+
+        testing_env!(VMContextBuilder::new()
+            .current_account_id("contract.near".parse().unwrap())
+            .signer_account_id("alice.near".parse().unwrap())
+            .build());
+
+        let public_key =
+            PublicKey::from_str("ed25519:J75xXmF7WUPS3xCm3hy2tgwLCKdYM1iJd4BWF8sWVnae").unwrap();
+        let mut participants = Participants::new();
+        for name in names {
+            let account: AccountId = format!("{name}.near").parse().unwrap();
+            participants.insert(
+                account.clone(),
+                primitives::ParticipantInfo {
+                    account_id: account,
+                    url: format!("https://{name}.example"),
+                    cipher_pk: [7; 32],
+                    sign_pk: public_key.clone(),
+                },
+            );
+        }
+
+        MpcContract {
+            protocol_state: ProtocolContractState::Running(RunningContractState {
+                epoch: 0,
+                participants,
+                threshold,
+                public_key,
+                candidates: Candidates::new(),
+                threshold_votes: ThresholdVotes::new(),
+                reshare_votes: ReshareVotes::new(),
+            }),
+            pending_requests: IterableMap::new(StorageKey::PendingRequests),
+            proposed_updates: ProposedUpdates::default(),
+            config: ProtocolConfig::default(),
+            latest_checkpoints: IterableMap::new(StorageKey::LatestCheckpointDigests),
+            checkpoint_votes: CheckpointVotes::new(),
+        }
+    }
+
+    #[test]
+    fn checkpoint_votes_are_one_per_node_per_height() {
+        let mut contract = running_contract_with_voters(3, &["alice", "bob", "carol"]);
+        let alice: AccountId = "alice.near".parse().unwrap();
+        let bob: AccountId = "bob.near".parse().unwrap();
+        let carol: AccountId = "carol.near".parse().unwrap();
+
+        let a = CheckpointDigest::new(Chain::Solana, 100, [1u8; 32]);
+        let b = CheckpointDigest::new(Chain::Solana, 100, [2u8; 32]);
+
+        // First vote for a.
+        act_as(&alice);
+        assert!(!contract.vote_checkpoint(a).unwrap());
+        assert_eq!(contract.checkpoint_votes(Chain::Solana), vec![(a, 1)]);
+
+        // Voting again at the same height replaces the digest, not adds a vote.
+        assert!(!contract.vote_checkpoint(b).unwrap());
+        assert_eq!(contract.checkpoint_votes(Chain::Solana), vec![(b, 1)]);
+
+        // Re-voting the same digest is a no-op.
+        assert!(!contract.vote_checkpoint(b).unwrap());
+        assert_eq!(contract.checkpoint_votes(Chain::Solana), vec![(b, 1)]);
+
+        // Distinct voters can back competing digests at the same height.
+        act_as(&bob);
+        assert!(!contract.vote_checkpoint(a).unwrap());
+        act_as(&carol);
+        assert!(!contract.vote_checkpoint(a).unwrap());
+        assert_eq!(
+            contract.checkpoint_votes(Chain::Solana),
+            vec![(a, 2), (b, 1)]
+        );
+
+        // The view groups by height with digest counts, deterministically sorted.
+        let tallies = contract
+            .read(vec![Read::CheckpointVotes])
+            .into_iter()
+            .find_map(|view| match view {
+                View::CheckpointVotes(tallies) => Some(tallies),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(
+            tallies.get(&Chain::Solana),
+            Some(&vec![CheckpointVoteTally {
+                height: 100,
+                votes: vec![([1u8; 32], 2), ([2u8; 32], 1)],
+            }])
+        );
+
+        // A third distinct voter switches to b, reaching the threshold: b settles
+        // and all votes at or below height 100 are pruned.
+        act_as(&bob);
+        assert!(!contract.vote_checkpoint(b).unwrap());
+        act_as(&carol);
+        assert!(contract.vote_checkpoint(b).unwrap());
+        assert_eq!(contract.latest_checkpoint(Chain::Solana), Some(&b));
+        assert!(contract.checkpoint_votes(Chain::Solana).is_empty());
+
+        // Votes at the settled height are rejected, whether same or other digest.
+        act_as(&alice);
+        assert!(contract.vote_checkpoint(a).is_err());
+        assert!(contract
+            .vote_checkpoint(CheckpointDigest::new(Chain::Solana, 100, [9u8; 32]))
+            .is_err());
+    }
+
     #[test]
     fn reset_settles_the_canonical_checkpoint_and_clears_votes() {
         let mut contract = MpcContract {
@@ -1552,15 +1654,20 @@ mod tests {
         let solana_checkpoint = CheckpointDigest::new(Chain::Solana, 10, [1u8; 32]);
         let ethereum_checkpoint = CheckpointDigest::new(Chain::Ethereum, 20, [2u8; 32]);
 
+        let voter: AccountId = "voter.near".parse().unwrap();
         contract.insert_checkpoint(solana_checkpoint);
-        contract
-            .checkpoint_votes_mut()
-            .entry(solana_checkpoint)
-            .insert("voter.near".parse().unwrap());
-        contract
-            .checkpoint_votes_mut()
-            .entry(ethereum_checkpoint)
-            .insert("voter.near".parse().unwrap());
+        contract.checkpoint_votes.vote(
+            solana_checkpoint.chain,
+            solana_checkpoint.height,
+            voter.clone(),
+            solana_checkpoint.digest,
+        );
+        contract.checkpoint_votes.vote(
+            ethereum_checkpoint.chain,
+            ethereum_checkpoint.height,
+            voter,
+            ethereum_checkpoint.digest,
+        );
 
         contract.reset_checkpoints(vec![CheckpointReset {
             chain: Chain::Solana,
@@ -1755,7 +1862,10 @@ mod tests {
     #[test]
     fn migrate_drops_non_member_checkpoint_votes() {
         let (mut contract, [.., dave, _], far, _) = kick_dave_and_erin_after_votes();
-        contract.checkpoint_votes.entry(far).insert(dave);
+        contract
+            .checkpoint_votes
+            .votes
+            .insert((far.chain, far.height, dave), far.digest);
         assert_eq!(contract.checkpoint_votes(Chain::Solana), vec![(far, 2)]);
         env::storage_write(b"STATE", &borsh::to_vec(&contract).unwrap());
 

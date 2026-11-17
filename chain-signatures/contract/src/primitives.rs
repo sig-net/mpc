@@ -491,11 +491,17 @@ pub enum SignPoll {
     Timeout,
 }
 
-/// Manages votes for checkpoints
+/// Manages votes for checkpoints.
+///
+/// There is at most one vote per `(chain, height, voter)`: voting again at the
+/// same height replaces the voter's earlier digest instead of adding a second
+/// vote. This is the byzantine guard for stall detection — a faulty node cannot
+/// inflate a height's tally by casting several digests at that height.
 #[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize, Debug, Clone)]
 #[borsh(crate = "near_sdk::borsh")]
 pub struct CheckpointVotes {
-    pub votes: HashMap<CheckpointDigest, HashSet<AccountId>>,
+    /// `(chain, height, voter) -> digest bytes the voter currently supports`.
+    pub votes: HashMap<(Chain, u64, AccountId), [u8; 32]>,
 }
 
 impl Default for CheckpointVotes {
@@ -511,7 +517,36 @@ impl CheckpointVotes {
         }
     }
 
-    pub fn entry(&mut self, checkpoint: CheckpointDigest) -> &mut HashSet<AccountId> {
-        self.votes.entry(checkpoint).or_default()
+    /// Record `voter`'s vote for `digest` at `(chain, height)`, replacing any
+    /// prior vote by that voter at the same height. Returns how many voters now
+    /// support `digest` at that height.
+    pub fn vote(&mut self, chain: Chain, height: u64, voter: AccountId, digest: [u8; 32]) -> usize {
+        self.votes.insert((chain, height, voter), digest);
+        self.count(chain, height, digest)
+    }
+
+    /// Number of voters supporting `digest` at `(chain, height)`.
+    pub fn count(&self, chain: Chain, height: u64, digest: [u8; 32]) -> usize {
+        self.votes
+            .iter()
+            .filter(|((c, h, _), d)| *c == chain && *h == height && **d == digest)
+            .count()
+    }
+
+    /// All outstanding votes for `chain` as `(checkpoint, voter count)` pairs,
+    /// sorted by `(height, digest)` so callers get a deterministic result.
+    pub fn for_chain(&self, chain: Chain) -> Vec<(CheckpointDigest, usize)> {
+        let mut counts: HashMap<(u64, [u8; 32]), usize> = HashMap::new();
+        for ((c, height, _), digest) in &self.votes {
+            if *c == chain {
+                *counts.entry((*height, *digest)).or_default() += 1;
+            }
+        }
+        let mut result: Vec<(CheckpointDigest, usize)> = counts
+            .into_iter()
+            .map(|((height, digest), count)| (CheckpointDigest::new(chain, height, digest), count))
+            .collect();
+        result.sort_unstable();
+        result
     }
 }
