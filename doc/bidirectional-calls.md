@@ -109,10 +109,6 @@ Happy path:
   nothing, stops watching the request and logs why (Section 4.3). A node
   cannot tell a wrong schema from a changed contract, and the contract
   could not act on bytes it cannot decode.
-* *Attestation key*: the key the MPC derives for a contract at a key
-  version under the attestation [purpose](glossary.md#purpose)
-  (account-derivation.md), used for nothing but attestations to that
-  contract.
 * *Attestation*: a statement (rid, height, outcome) signed with the
   attestation key of rid's contract at the request's key version. The MPC
   nodes sign `attestationDigest(rid, att)` as defined in
@@ -125,6 +121,10 @@ Happy path:
   req.tx for Executed and Failed, the transaction that used up its replay
   protection for Unviable, or for an expired req.tx the first final
   block at or past the expiry.
+* *Attestation key*: the key the MPC derives for a contract at a key
+  version, used for nothing but attestations to that contract: under the
+  attestation [purpose](glossary.md#purpose) from key version 2, under a
+  reserved path before it (account-derivation.md).
 * *Response*: an attestation delivered to the contract that made rid's
   request.
 
@@ -541,8 +541,12 @@ Properties:
   could have a transaction signed that uses up a bidirectional request's
   replay protection unnoticed (Section 6). The MPC picks a key's purpose
   from the signing API a request comes on, never from its fields (Distinct
-  keys, Section 5). Key version 1 has no purposes, so there `processable`
-  refuses the reserved paths instead.
+  keys, Section 5). Key version 1 has no purposes: there the attestation
+  key lies under a reserved path that no request on any signing API may
+  name (`processable` covers this one), and where another signing API on
+  the source chain maps the same contract, path and key version to the
+  same key, a bidirectional request's path lies in a namespace that no
+  request on that API may name.
 * M2 The MPC drops a request that is not authentic, that it cannot
   process, or whose rid is already in the backlog, and keeps nothing for
   it. A rid already in the backlog is the same transaction, already being
@@ -594,8 +598,10 @@ correct, with a signing threshold t, f+1 <= t <= n - f.
   deployment watches one network per family (Section 3.3), so within it
   the key still names one contract. So an executed transaction's account tells the MPC
   which contract and key parameters asked for it. Assumed here: two
-  signing schemes never share a key. Key versions share the root key and
-  differ by their derivation paths.
+  signing schemes never share a key. Key versions 0, 1 and 2 share a root
+  key and differ by their derivation paths; every later key version has a
+  root key of its own, and `processable` refuses a key version without
+  its root key.
 
 * G1, in short: an execution this contract has already accepted is at or below
   last_seen, so a request made later records it as known and C3c drops any
@@ -749,8 +755,8 @@ a path from B48 through A15; the first at A12 has none.
 * A key version can be retired only once no entry that recorded it is
   outstanding, and an unanswered request is outstanding forever. Until
   then a compromised key can forge responses to the requests made under
-  it (C3b). Key versions share the root key, so retiring one does not
-  take a compromised root key out of the others. A forged response with a
+  it (C3b). Key versions 0, 1 and 2 share a root key, so retiring one of
+  them does not take a compromised root key out of the others. A forged response with a
   large height also raises `last_seen` for its target, so the library
   then drops genuine responses on that target for requests of every key
   version (C3c, C3d).
@@ -1148,6 +1154,7 @@ Still to change:
 * Refusing non-canonical request fields, and the reserved paths on every
   source.
 * Key version 2, with purposes (account-derivation.md).
+* A root key of its own for each key version after 2.
 * Catch-up for Hydration.
 * Hydration and Canton: source block time, so §4.3's expiry bound
   anchors for them too.

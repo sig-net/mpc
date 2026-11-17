@@ -32,7 +32,7 @@ A key's derivation path names the key version and the key's purpose, which is wh
 | Plain | [plain sign requests](glossary.md#plain-sign-request) | `plain` | `{SIGNET_DERIVATION_PREFIX}:{KEY_VERSION}:{PURPOSE}:{CAIP2_CHAIN_ID}:{SENDER}:{DERIVATION_PATH}` |
 | Bidirectional | [bidirectional requests](glossary.md#bidirectional-request) | `bidirectional` | `{SIGNET_DERIVATION_PREFIX}:{KEY_VERSION}:{PURPOSE}:{CAIP2_CHAIN_ID}:{SENDER}:{DERIVATION_PATH}` |
 | Attestation | [attestations](glossary.md#attestation) of bidirectional requests | `attestation` | `{SIGNET_DERIVATION_PREFIX}:{KEY_VERSION}:{PURPOSE}:{CAIP2_CHAIN_ID}:{SENDER}` |
-| System account | transactions of an account the MPC network itself controls, such as the Ethereum contract's admin | `system` | `{SIGNET_DERIVATION_PREFIX}:{KEY_VERSION}:{PURPOSE}:{CAIP2_CHAIN_ID}:{DERIVATION_PATH}` |
+| System account | transactions of a [system account](glossary.md#system-account) | `system` | `{SIGNET_DERIVATION_PREFIX}:{KEY_VERSION}:{PURPOSE}:{CAIP2_CHAIN_ID}:{DERIVATION_PATH}` |
 
 Where:
 - **SIGNET_DERIVATION_PREFIX** = `sig.network derivation`
@@ -46,7 +46,7 @@ Two purposes never derive the same key, whatever the sender and path: neither th
 
 The attestation key has no `DERIVATION_PATH`: a contract has one per key version, used for all its attestations.
 
-Every key version derives from the same MPC root key: keys of two versions differ by their derivation paths. A plain key at key version 2 is a different key from the same sender and path at key version 1, so an application keeps the key version its users' accounts are under.
+Key versions 0, 1 and 2 derive from the same MPC root key, so keys of two of them differ by their derivation paths. Every key version after 2 has a root key of its own. A plain key at key version 2 is a different key from the same sender and path at key version 1, so an application keeps the key version its users' accounts are under.
 
 ### Earlier Key Versions
 
@@ -55,7 +55,7 @@ Every key version derives from the same MPC root key: keys of two versions diffe
 | 1 | `sig.network v2.0.0 epsilon derivation:{CAIP2_CHAIN_ID}:{SENDER}:{DERIVATION_PATH}` |
 | 0 | `sig.network v1.0.0 epsilon derivation,{CHAIN_ID},{SENDER},{DERIVATION_PATH}`, with `CHAIN_ID` in a legacy format (`0x1` for Ethereum) |
 
-They have no purpose. A system account derives with the sender `%admin#`, and bidirectional requests need key version 1 or later ([bidirectional-calls.md §7.1](bidirectional-calls.md#71-request-signbidirectionaleventv1)). At key version 1 a bidirectional key derives as a plain key, and the attestation key as a plain key under a reserved path (`<chain> response key`, for example `solana response key`), which `processable` keeps requests from naming ([bidirectional-calls.md §4.3](bidirectional-calls.md#43-mpc-network)).
+They have no purpose. A [system account](glossary.md#system-account) derives with the sender `%admin#`, and bidirectional requests need key version 1 or later ([bidirectional-calls.md §7.1](bidirectional-calls.md#71-request-signbidirectionaleventv1)). At key version 1 a bidirectional key derives as a plain key, and the attestation key as a plain key under a reserved path (`<chain> response key`, for example `solana response key`) that no request on any signing API may name ([bidirectional-calls.md §4.3](bidirectional-calls.md#43-mpc-network), M1).
 
 ### Contract-Based Derivation
 

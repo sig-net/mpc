@@ -303,7 +303,8 @@ chain](#source-chain). See
 
 What a key signs: [plain sign requests](#plain-sign-request),
 [bidirectional requests](#bidirectional-request),
-[attestations](#attestation) or a system account's transactions. From key
+[attestations](#attestation) or a [system account](#system-account)'s
+transactions. From key
 version 2 the derivation path names it, so two purposes never derive the
 same key. Key versions 0 and 1 have no purpose. See
 [account-derivation.md](account-derivation.md#derivation-path-structure).
@@ -379,6 +380,17 @@ It runs whenever a node connects or reconnects to a peer, and when a sign
 [presignature](#presignature) as missing (`MissingArtifact`) are synced again
 (`protocol/sync/`, `protocol/request/posit.rs`). See
 [state-sync.md](state-sync.md).
+
+## System account
+
+An account the MPC network itself controls on a chain, rather than one a
+[request](#request)'s sender controls: the admin of the Ethereum contract
+(`ChainSignatures.sol`), for instance, derived at key version 0 with the
+path `signing_contract_control`. From key version 2 it derives under the
+`system` [purpose](#purpose), with no sender; earlier versions derive it as
+a plain key with the sender `%admin#` (`DerivationParams::SystemAccount`,
+`signet-crypto/src/kdf.rs`). See
+[account-derivation.md](account-derivation.md#derivation-path-structure).
 
 ## Take
 
