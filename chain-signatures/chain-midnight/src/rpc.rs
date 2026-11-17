@@ -337,8 +337,16 @@ pub struct BlockRef {
     pub parent_hash: BlockHash,
 }
 
-fn hex_0x(hash: H256) -> String {
-    format!("0x{}", hex::encode(hash.as_bytes()))
+impl From<H256> for BlockHash {
+    fn from(hash: H256) -> Self {
+        BlockHash::from_bytes(hash.0)
+    }
+}
+
+impl From<BlockHash> for H256 {
+    fn from(hash: BlockHash) -> Self {
+        H256(*hash.as_bytes())
+    }
 }
 
 fn connect_http(config: &MidnightConfig) -> anyhow::Result<RpcClient> {
@@ -398,7 +406,7 @@ impl MidnightRpc {
     /// kept for [`block_emissions`](Self::block_emissions) of that head.
     pub async fn finalized_block_ref(&self) -> anyhow::Result<BlockRef> {
         let head = self.reads.finalized_head().await?;
-        let hash = BlockHash::from_bytes(head.0);
+        let hash: BlockHash = head.into();
         if let Some(known) = self.head().as_ref() {
             if known.block_ref.hash == hash {
                 return Ok(known.block_ref.clone());
@@ -411,7 +419,7 @@ impl MidnightRpc {
         let block_ref = BlockRef {
             number,
             hash,
-            parent_hash: BlockHash::from_bytes(parent_hash.0),
+            parent_hash: parent_hash.into(),
         };
         *self.head() = Some(FinalizedHead {
             block_ref: block_ref.clone(),
@@ -443,7 +451,7 @@ impl MidnightRpc {
         if let Some(count) = mpc_utils::throttle::check("midnight:block-unread") {
             tracing::warn!(
                 count,
-                block_hash = %hex_0x(hash),
+                block_hash = %BlockHash::from(hash),
                 error,
                 "midnight: a block could not be read; reading its header"
             );
@@ -487,8 +495,8 @@ impl MidnightRpc {
         );
         let block_ref = BlockRef {
             number: returned_number,
-            hash: BlockHash::from_bytes(hash.0),
-            parent_hash: BlockHash::from_bytes(parent_hash.0),
+            hash: hash.into(),
+            parent_hash: parent_hash.into(),
         };
         *self.walked() = block.map(|block| (block_ref.hash, block));
         Ok(block_ref)
@@ -500,7 +508,7 @@ impl MidnightRpc {
         singleton: &MidnightAddress,
         responder: &MidnightAddress,
     ) -> anyhow::Result<Option<BlockEmissions>> {
-        let hash = H256(*block_ref.hash.as_bytes());
+        let hash = H256::from(block_ref.hash);
         let read = self
             .head()
             .as_mut()
@@ -813,7 +821,9 @@ impl MidnightPublisherRpc {
             .chain_get_header(Some(hash))
             .await
             .context("failed to fetch a midnight block header")?
-            .with_context(|| format!("midnight node has no header for {}", hex_0x(hash)))?;
+            .with_context(|| {
+                format!("midnight node has no header for {}", BlockHash::from(hash))
+            })?;
         remember(&mut self.blocks().headers, hash, header.clone());
         Ok(header)
     }
@@ -875,7 +885,7 @@ impl PinnedReads for MidnightPublisherRpc {
             .chain_get_finalized_head()
             .await
             .context("failed to fetch the midnight finalized head")?;
-        Ok(BlockHash::from_bytes(finalized.0))
+        Ok(finalized.into())
     }
 
     async fn contract_state(
@@ -887,7 +897,7 @@ impl PinnedReads for MidnightPublisherRpc {
     }
 
     async fn ledger_parameters(&self, at_hash: &BlockHash) -> anyhow::Result<Vec<u8>> {
-        let at = H256(*at_hash.as_bytes());
+        let at = H256::from(*at_hash);
         let answer = self
             .legacy
             .state_call(LEDGER_PARAMETERS_ENTRY, Some(&[]), Some(at))
@@ -949,7 +959,7 @@ fn classify_submit_reply(
 #[async_trait::async_trait]
 impl crate::native::SubmitChain for MidnightPublisherRpc {
     async fn block_number(&self, at: &BlockHash) -> anyhow::Result<u64> {
-        let header = self.header(H256(*at.as_bytes())).await?;
+        let header = self.header(H256::from(*at)).await?;
         Ok(u64::from(header.number))
     }
 
@@ -959,14 +969,14 @@ impl crate::native::SubmitChain for MidnightPublisherRpc {
             .chain_get_block_hash(Some(NumberOrHex::Number(number)))
             .await
             .context("failed to fetch a midnight block hash by number")?
-            .map(|hash| BlockHash::from_bytes(hash.0)))
+            .map(BlockHash::from))
     }
 
     async fn block_time(
         &self,
         at: &BlockHash,
     ) -> anyhow::Result<midnight_base_crypto::time::Timestamp> {
-        let at = H256(*at.as_bytes());
+        let at = H256::from(*at);
         if let Some(time) = recall(&self.blocks().times, at) {
             return Ok(time);
         }
@@ -1023,7 +1033,7 @@ impl crate::native::SubmitChain for MidnightPublisherRpc {
         at: &BlockHash,
         tx_hash: LedgerTxHash,
     ) -> anyhow::Result<Option<Landing>> {
-        let at = H256(*at.as_bytes());
+        let at = H256::from(*at);
         let events = self
             .client_for_block(at)
             .await?
@@ -2308,7 +2318,7 @@ mod tests {
             .block_ref_at(height)
             .await
             .expect("resolve capture block");
-        let block_hash = H256(*block_ref.hash.as_bytes());
+        let block_hash = H256::from(block_ref.hash);
         let block = rpc
             .client
             .blocks()
@@ -2565,7 +2575,7 @@ mod tests {
         stale.expect_err("the first connection reaches the stale backend");
         for read in [recovered, kept] {
             let head = read.expect("a request after the failure reached the stale backend again");
-            assert_eq!(hex_0x(head), hash_of_byte(0x22));
+            assert_eq!(BlockHash::from(head).to_string(), hash_of_byte(0x22));
         }
         assert_eq!(
             connections.load(Ordering::SeqCst),
@@ -2587,7 +2597,7 @@ mod tests {
         server.abort();
 
         let head = head.expect("the retry reached the stale backend again");
-        assert_eq!(hex_0x(head), hash_of_byte(0x22));
+        assert_eq!(BlockHash::from(head).to_string(), hash_of_byte(0x22));
         assert_eq!(connections.load(Ordering::SeqCst), 2);
     }
 
