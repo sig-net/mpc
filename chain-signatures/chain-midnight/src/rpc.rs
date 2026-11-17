@@ -3418,13 +3418,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn real_submit_statuses_follow_the_send_partition() {
+    async fn real_submit_statuses_follow_the_read_partition() {
         // The runtime read inside the submit path meets the status first, so
         // nothing is sent.
         for (status, reason, retryable, throttled) in [
             (429u16, "Too Many Requests", true, true),
             (500u16, "Internal Server Error", true, false),
-            (409u16, "Conflict", false, false),
+            // A shared provider's transient conflict retries, like midnight's
+            // other reads; a classic client error hands off to failover.
+            (409u16, "Conflict", true, false),
+            (404u16, "Not Found", false, false),
         ] {
             let (address, _calls, server) = http_status_server(status, reason).await;
             let config = http_config(address);

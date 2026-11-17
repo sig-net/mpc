@@ -1,8 +1,8 @@
 //! Why a build or submit failed, in the classes the retry logic and the logs tell
 //! apart. Terminal are malformed inputs, refused gates, and a read inside the
-//! submit the transport refused with a status other than 402, 408, 429 or 5xx —
-//! every retry would replay them unchanged. Every other class waits on a runtime
-//! event the retry may yet observe.
+//! submit the transport refused with a classic client error — every retry
+//! would replay them unchanged. Every other class waits on a runtime event the
+//! retry may yet observe.
 
 use mpc_chain_integration_core::utils::retry::RpcFailure;
 
@@ -89,16 +89,16 @@ impl SubmitError {
     /// and amounts can include a standalone 429 or 402.
     pub(crate) fn into_publish_error(self) -> anyhow::Error {
         match self {
-            // The send partition, like ethereum's pre-broadcast nonce fetch
-            // (`chain-ethereum/src/publisher.rs`):
-            // nothing was posted, so a classic 4xx hands the publish to failover.
+            // The read partition, as midnight's other reads (#1469): a retry
+            // may land on a healthy LB backend, so only classic client errors
+            // (400, 401, 403, 404, 405) go to failover.
             // A carrier already inside the source rides as-is (`from_chain`) —
             // its verdict, status and retry_after win over the derivation.
             Self::Node { source } => {
                 let failure = match RpcFailure::from_chain(&source) {
                     Some(failure) => failure,
                     None => match rejected_http_status(&source) {
-                        Some(status) => RpcFailure::send_status(status, format!("{source:#}")),
+                        Some(status) => RpcFailure::read_status(status, format!("{source:#}")),
                         None => RpcFailure::retryable(format!("{source:#}")),
                     },
                 };
@@ -234,7 +234,7 @@ mod tests {
     }
 
     #[test]
-    fn node_statuses_classify_by_the_send_partition() {
+    fn node_statuses_classify_by_the_read_partition() {
         fn rejected(status: u16) -> anyhow::Error {
             anyhow::Error::new(RawRpcError::Client(Box::new(
                 JsonrpseeClientError::Transport(Box::new(
@@ -253,8 +253,17 @@ mod tests {
         assert!(is_retryable(&throttled), "{throttled:#}");
         assert!(is_provider_throttled(&throttled), "{throttled:#}");
 
-        let terminal = SubmitError::Node {
+        // A shared provider's transient conflict retries, like midnight's other
+        // reads — the send table would hand the publish to failover here.
+        let conflict = SubmitError::Node {
             source: rejected(409),
+        }
+        .into_publish_error();
+        assert!(is_retryable(&conflict), "{conflict:#}");
+        assert!(!is_provider_throttled(&conflict), "{conflict:#}");
+
+        let terminal = SubmitError::Node {
+            source: rejected(404),
         }
         .into_publish_error();
         assert!(!is_retryable(&terminal), "{terminal:#}");
