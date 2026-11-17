@@ -368,7 +368,8 @@ async fn test_ethereum_stream_resume_starts_after_checkpoint_height() -> Result<
 
     seeded_backlog
         .set_processed_block(Chain::Ethereum, processed_height)
-        .await;
+        .await
+        .unwrap();
     let checkpoint = seeded_backlog.checkpoint(Chain::Ethereum).await.unwrap();
     assert!(matches!(
         seeded_backlog
@@ -501,7 +502,8 @@ async fn test_ethereum_stream_linear_catchup_from_checkpoint() -> Result<()> {
         .await;
     seeded_backlog
         .set_processed_block(Chain::Ethereum, checkpoint_height)
-        .await;
+        .await
+        .unwrap();
     let checkpoint = seeded_backlog.checkpoint(Chain::Ethereum).await.unwrap();
     assert!(matches!(
         seeded_backlog
@@ -906,6 +908,7 @@ async fn test_ethereum_stream_checkpointing() -> Result<()> {
                     if let Some(checkpoint) = backlog
                         .set_processed_block_interval(Chain::Ethereum, height, INTERVAL)
                         .await
+                        .unwrap()
                     {
                         // With block events now emitted even for empty blocks, it's possible to
                         // hit a checkpoint boundary before any requests have been indexed.
@@ -954,6 +957,7 @@ async fn test_ethereum_stream_checkpointing() -> Result<()> {
                 if backlog
                     .set_processed_block_interval(Chain::Ethereum, height, INTERVAL)
                     .await
+                    .unwrap()
                     .is_some()
                 {
                     saw_new_checkpoint = true;
