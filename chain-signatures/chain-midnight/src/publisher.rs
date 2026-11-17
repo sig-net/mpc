@@ -25,7 +25,7 @@ use crate::intent::{IntentRequest, RespondCircuit, Submitted};
 use crate::native::{NativeIntentClient, Provers};
 use crate::output_storage::{OutputStore, RecoveringOutputStore};
 use crate::rpc::{MidnightPublisherRpc, PinnedReads};
-use crate::submit_error::refusal_code;
+use crate::submit_error::{refusal_code, SubmitError};
 
 const SPECK_PER_DUST: f64 = 1e15;
 
@@ -149,7 +149,7 @@ impl MidnightPublisher {
         }
     }
 
-    /// Counts a failed build or submit by its error class.
+    /// Counts a failed publish by its error class.
     fn record_refusal(&self, error: &anyhow::Error) {
         if let Some(code) = refusal_code(error) {
             self.telemetry.publish_refused(code);
@@ -191,12 +191,12 @@ impl MidnightPublisher {
     }
 }
 
-#[async_trait]
-impl ChainPublisher for MidnightPublisher {
+impl MidnightPublisher {
     // TODO: Batch responses if one-response-per-transaction publication becomes a bottleneck.
     // Retries currently operate per request.
-    async fn publish_signature(&self, action: &PublishAction) -> anyhow::Result<()> {
-        let call = respond_call(action).map_err(terminal_refusal)?;
+    async fn publish(&self, action: &PublishAction) -> anyhow::Result<()> {
+        let call = respond_call(action)
+            .map_err(|refusal| SubmitError::GateRefusal { source: refusal }.into_publish_error())?;
         if let (Some(store), SignKind::RespondBidirectional(response)) =
             (&self.output_store, &action.request.kind)
         {
@@ -252,11 +252,7 @@ impl ChainPublisher for MidnightPublisher {
             ttl_seconds: ttl_seconds(&self.config, current_unix_timestamp()),
         };
         let building = Instant::now();
-        let bytes = self
-            .client
-            .build(&request)
-            .await
-            .inspect_err(|error| self.record_refusal(error))?;
+        let bytes = self.client.build(&request).await?;
         let build_took = building.elapsed();
         if !self.still_awaited(action, "built").await? {
             return Ok(());
@@ -264,19 +260,14 @@ impl ChainPublisher for MidnightPublisher {
 
         // Both proofs and the wait for finality run inside submit.
         let submitting = Instant::now();
-        let submitted = self
-            .client
-            .submit(&bytes)
-            .await
-            .inspect_err(|error| self.record_refusal(error))
-            .with_context(|| {
-                format!(
-                    "submitting the midnight respond intent built over the chain at {} \
+        let submitted = self.client.submit(&bytes).await.with_context(|| {
+            format!(
+                "submitting the midnight respond intent built over the chain at {} \
                      failed after {:?}",
-                    chain.at_hash,
-                    submitting.elapsed()
-                )
-            })?;
+                chain.at_hash,
+                submitting.elapsed()
+            )
+        })?;
         let submit_took = submitting.elapsed();
         self.telemetry
             .funding_wallet_observed(submitted.dust_balance as f64 / SPECK_PER_DUST);
@@ -293,6 +284,17 @@ impl ChainPublisher for MidnightPublisher {
         );
         self.telemetry.record_publish_metrics(action);
         Ok(())
+    }
+}
+
+#[async_trait]
+impl ChainPublisher for MidnightPublisher {
+    async fn publish_signature(&self, action: &PublishAction) -> anyhow::Result<()> {
+        let result = self.publish(action).await;
+        if let Err(error) = &result {
+            self.record_refusal(error);
+        }
+        result
     }
 }
 
@@ -418,14 +420,6 @@ fn respond_call(action: &PublishAction) -> anyhow::Result<RespondCall> {
             "midnight publisher serves SignBidirectional and RespondBidirectional only, not Sign"
         ),
     }
-}
-
-/// Wrap a gate refusal as the publisher's terminal error.
-fn terminal_refusal(refusal: anyhow::Error) -> anyhow::Error {
-    anyhow::Error::new(RpcFailure::terminal(
-        "a retry replays the action's fixed inputs unchanged".to_string(),
-    ))
-    .context(refusal)
 }
 
 /// The signature in the shape the circuit pushes. Nothing re-encodes downstream, so a
@@ -1179,7 +1173,8 @@ mod tests {
     #[tokio::test]
     async fn publish_signature_rejects_actions_neither_circuit_answers() {
         // Four gates, one property: a refused action must not reach the node, the
-        // builder or the submitter, and its verdict is terminal.
+        // builder or the submitter, its verdict is terminal, and it is counted.
+        let telemetry = Arc::new(WalletTelemetry::default());
         let cases = [
             (
                 make_publish_action(
@@ -1213,7 +1208,15 @@ mod tests {
         for (action, named) in cases {
             let reads = StubReads::new();
             let client = StubClient::new();
-            let publisher = publisher(reads.clone(), client.clone());
+            let publisher = MidnightPublisher::new(
+                &config(),
+                MidnightAddress::from_hex(RESPONDER).expect("RESPONDER is a 32-byte hex address"),
+                reads.clone(),
+                client.clone(),
+                None,
+                telemetry.clone(),
+                ScriptedAwaiter::new(&[]),
+            );
 
             let err = publisher
                 .publish_signature(&action)
@@ -1231,6 +1234,7 @@ mod tests {
             );
             assert_eq!(client.submissions(), 0);
         }
+        assert_eq!(*telemetry.refusals.lock().unwrap(), vec!["gate_refusal"; 4]);
     }
 
     #[tokio::test]

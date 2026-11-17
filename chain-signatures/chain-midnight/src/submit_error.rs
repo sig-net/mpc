@@ -16,6 +16,13 @@ pub(crate) enum SubmitError {
     /// publisher proves for; only a redeploy changes that.
     #[error("[contract_mismatch] {0}")]
     ContractMismatch(String),
+    /// The action was refused before any work: wrong chain, wrong kind, or a
+    /// signature or attestation no circuit answers.
+    #[error("[gate_refusal] {source}")]
+    GateRefusal {
+        #[source]
+        source: anyhow::Error,
+    },
     /// The DUST replay has not caught up. Nothing was posted.
     #[error("[wallet_unsynced] {0}")]
     WalletUnsynced(String),
@@ -53,6 +60,7 @@ impl SubmitError {
         match self {
             Self::BadRequest(_) => "bad_request",
             Self::ContractMismatch(_) => "contract_mismatch",
+            Self::GateRefusal { .. } => "gate_refusal",
             Self::WalletUnsynced(_) => "wallet_unsynced",
             Self::WalletBusy(_) => "wallet_busy",
             Self::WalletUnfunded(_) => "wallet_unfunded",
@@ -63,11 +71,14 @@ impl SubmitError {
         }
     }
 
-    /// Whether a retry of this publish can still succeed. Only malformed or
-    /// mismatched inputs are terminal: the backlog action pins their bytes, so
+    /// Whether a retry of this publish can still succeed. Only the action's own
+    /// inputs are terminal — malformed or mismatched bytes, or a gate refusal:
     /// every retry replays them; failover covers delivery while a fix lands.
     fn terminal(&self) -> bool {
-        matches!(self, Self::BadRequest(_) | Self::ContractMismatch(_))
+        matches!(
+            self,
+            Self::BadRequest(_) | Self::ContractMismatch(_) | Self::GateRefusal { .. }
+        )
     }
 
     /// As the publisher's error, the class's verdict riding as a carrier so the
@@ -83,6 +94,10 @@ impl SubmitError {
                     None => RpcFailure::retryable(format!("{source:#}")),
                 };
                 anyhow::Error::new(failure).context(Self::Node { source })
+            }
+            Self::GateRefusal { source } => {
+                let failure = RpcFailure::terminal(format!("{source:#}"));
+                anyhow::Error::new(failure).context(Self::GateRefusal { source })
             }
             local => {
                 let failure = if local.terminal() {
@@ -110,10 +125,16 @@ mod tests {
 
     #[test]
     fn every_class_is_counted_and_classified_under_its_code() {
-        let classes: [(fn() -> SubmitError, bool); 10] = [
+        let classes: [(fn() -> SubmitError, bool); 11] = [
             (|| SubmitError::BadRequest("reason".to_string()), false),
             (
                 || SubmitError::ContractMismatch("reason".to_string()),
+                false,
+            ),
+            (
+                || SubmitError::GateRefusal {
+                    source: anyhow::anyhow!("reason"),
+                },
                 false,
             ),
             (|| SubmitError::WalletUnsynced("reason".to_string()), true),
