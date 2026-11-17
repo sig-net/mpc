@@ -3119,6 +3119,41 @@ mod tests {
         (Reads::new(rpc, READ_TIMEOUT, retry), calls)
     }
 
+    /// Pins the wire pair both transports send: the address bare 64-hex, the block
+    /// hash `0x`-prefixed — the one seam where the two conventions meet.
+    #[tokio::test]
+    async fn contract_state_params_pin_the_bare_address_and_prefixed_hash() {
+        let server = ServerBuilder::default()
+            .build("127.0.0.1:0")
+            .await
+            .expect("bind HTTP rpc server");
+        let address = server.local_addr().expect("HTTP rpc server address");
+        let mut module = RpcModule::new(());
+        module
+            .register_method("midnight_contractState", |params, _, _| {
+                assert_eq!(
+                    params.parse::<Vec<String>>().unwrap(),
+                    [ADDRESS, AT_HASH],
+                    "the address must be bare 64-hex and the block hash 0x-prefixed"
+                );
+                "0xcafe"
+            })
+            .expect("register state method");
+        let _handle = server.start(module);
+
+        let rpc = connect_http(&http_config(address)).expect("build transport");
+        let reads = Reads::new(rpc.clone(), READ_TIMEOUT, attempts(1));
+        reads
+            .contract_state(&test_address(), &test_at_hash())
+            .await
+            .expect("the reader must succeed against the stub")
+            .expect("the stub serves a state");
+        publisher_contract_state(&rpc, &test_address(), &test_at_hash())
+            .await
+            .expect("the publisher must succeed against the stub")
+            .expect("the stub serves a state");
+    }
+
     #[tokio::test]
     async fn contract_state_reply_policy_is_typed_and_budgeted() {
         const DATA: &str = r#"{"detail":"recover me"}"#;
