@@ -109,10 +109,10 @@ Happy path:
   nothing, stops watching the request and logs why (Section 4.3). A node
   cannot tell a wrong schema from a changed contract, and the contract
   could not act on bytes it cannot decode.
-* *Attestation key*: a signing key the MPC derives from its root key, the
-  source chain, the contract and the request's key version under the
-  attestation key kind (account-derivation.md), used for nothing but
-  attestations to that contract.
+* *Attestation key*: the key the MPC derives for a contract at a key
+  version under the attestation [purpose](glossary.md#purpose)
+  (account-derivation.md), used for nothing but attestations to that
+  contract.
 * *Attestation*: a statement (rid, height, outcome) signed with the
   attestation key of rid's contract at the request's key version. The MPC
   nodes sign `attestationDigest(rid, att)` as defined in
@@ -420,11 +420,12 @@ authentic(rid, req): bool
 processable(req): bool
     req.target parses to a chain this MPC can watch
     key derivation is valid: parameters canonical, key derivable for the
-      source chain, key version with a root key of its own (Section 5)
-    req.key's path is not the attestation key's (M1)
-    if another signing API on the source chain maps the same sender,
-      path and key version to the same key as sign_bidirectional:
-        req.key's path lies in the bidirectional namespace (M1)
+      source chain, a key version the MPC supports
+    at key version 1, which has no purposes (M1):
+      req.key's path is not the attestation key's
+      if another signing API on the source chain maps the same sender,
+        path and key version to the same key as sign_bidirectional:
+          req.key's path lies in the bidirectional namespace
     req.tx is non-empty, parses as an unsigned transaction in target's
       format, commits to the network this MPC watches for target (EVM:
       carries that network's chain id; not required on Tron, which has
@@ -532,16 +533,16 @@ request a second time.
 Properties:
 
 * M1 The MPC signs a request only if it provably comes from the contract it
-  names, with a key derived from that contract under the bidirectional key
-  kind. No request's key is derived under the attestation kind; otherwise a
-  contract could have its own attestation key sign an arbitrary hash and
-  forge a response to itself. Likewise no other signing API derives under
-  the bidirectional kind; otherwise a request on it could have a
-  transaction signed that uses up a bidirectional request's replay
-  protection unnoticed (Section 6). Both hold because the MPC picks a key's
-  kind from the signing API a request comes on, never from its fields, and
-  two kinds never derive the same key (account-derivation.md), whatever
-  path a request names.
+  names, with a key derived from that contract under the bidirectional
+  [purpose](glossary.md#purpose). No request is signed with an attestation
+  key; otherwise a contract could have its own attestation key sign an
+  arbitrary hash and forge a response to itself. No request on another
+  signing API is signed with a bidirectional request's key; otherwise it
+  could have a transaction signed that uses up a bidirectional request's
+  replay protection unnoticed (Section 6). The MPC picks a key's purpose
+  from the signing API a request comes on, never from its fields (Distinct
+  keys, Section 5). Key version 1 has no purposes, so there `processable`
+  refuses the reserved paths instead.
 * M2 The MPC drops a request that is not authentic, that it cannot
   process, or whose rid is already in the backlog, and keeps nothing for
   it. A rid already in the backlog is the same transaction, already being
@@ -587,15 +588,14 @@ correct, with a signing threshold t, f+1 <= t <= n - f.
 * Distinct keys (account-derivation.md). The derivation path contains the
   source chain's id and the requesting contract, so different (source
   chain, contract, key parameters) derive different keys, where the key
-  parameters are a request's key kind, derivation path, key version and
-  signing scheme. The id names a chain family, so the same contract address on
-  two networks of one family derives the same key; a deployment watches
-  one network per family (Section 3.3), so within it the key still names
-  one contract. So an executed transaction's account tells the MPC
+  parameters are a key's purpose, a request's derivation path, key version
+  and signing scheme. The id names a chain family, so the same contract
+  address on two networks of one family derives the same key; a
+  deployment watches one network per family (Section 3.3), so within it
+  the key still names one contract. So an executed transaction's account tells the MPC
   which contract and key parameters asked for it. Assumed here: two
-  signing schemes never share a key, and two key versions never share a
-  root key; `processable` refuses a key version without a root key of its
-  own.
+  signing schemes never share a key. Key versions share the root key and
+  differ by their derivation paths.
 
 * G1, in short: an execution this contract has already accepted is at or below
   last_seen, so a request made later records it as known and C3c drops any
@@ -731,23 +731,12 @@ a path from B48 through A15; the first at A12 has none.
   request for instance, names only a payload hash, so the MPC could not
   find a transaction it signed. With the same key as a bidirectional
   request, it could use up that request's replay protection and leave it
-  unanswered. Separate key kinds (M1) keep the keys apart. A transaction
-  signed earlier stays valid until its replay protection is used, but none
-  is under a bidirectional key, since the kind is new. A reserved path
-  namespace was considered instead
-  ([#1558](https://github.com/sig-net/mpc/pull/1558)): the MPC would have
-  to refuse plain sign requests inside it and require bidirectional
-  requests to be inside it wherever it admits or signs a request, and a
-  chain that gains plain sign would have to add both checks.
-* Moving to key kinds. Before them, bidirectional and attestation keys
-  derived under the plain kind, the attestation key under a reserved
-  path (`<chain> response key`). The move changes every bidirectional
-  key and every attestation key, so it applies from a source height the
-  upgrade names (see the next note). A contract that stores its
-  attestation key, as a Midnight contract does once in `initialise`,
-  accepts no response to a request made after the move: it is replaced by
-  one deployed with the new key, after its funds leave the accounts of
-  its old bidirectional keys.
+  unanswered. From key version 2, separate purposes (M1) keep the keys
+  apart, and no key under the bidirectional purpose signed anything
+  earlier. At key version 1 the reserved path namespace (M1) keeps them
+  apart. It has to be one that no path accepted before the rule took
+  effect lies in: a transaction signed then stays valid until its replay
+  protection is used.
 * Agreement has no enforcement point. A change to `authentic`,
   `processable` or the attestation function must apply only to requests
   made at or after a source height the upgrade names; applied to requests
@@ -760,9 +749,11 @@ a path from B48 through A15; the first at A12 has none.
 * A key version can be retired only once no entry that recorded it is
   outstanding, and an unanswered request is outstanding forever. Until
   then a compromised key can forge responses to the requests made under
-  it (C3b). A forged response with a large height also raises
-  `last_seen` for its target, so the library then drops genuine responses
-  on that target for requests of every key version (C3c, C3d).
+  it (C3b). Key versions share the root key, so retiring one does not
+  take a compromised root key out of the others. A forged response with a
+  large height also raises `last_seen` for its target, so the library
+  then drops genuine responses on that target for requests of every key
+  version (C3c, C3d).
 * The MPC's backlog and the library's `outstanding` can grow without
   bound. An entry lives until a verified Response, and a request whose
   signature nobody broadcasts, or whose output does not decode (M3),
@@ -844,9 +835,9 @@ stay out.
 
 | field | type | in rid | meaning |
 |---|---|---|---|
-| `keyVersion` | `u8` | yes | MPC root key version, at least 1 |
+| `keyVersion` | `u8` | yes | MPC key version, at least 1 |
 | `sender` | `address` | yes | the requesting contract |
-| `path` | `bytes(32)` | yes | key derivation path, under the bidirectional key kind |
+| `path` | `bytes(32)` | yes | key derivation path; at key version 1 the reserved response-key path is refused |
 | `algo` | `enum MPCSignatureAlgorithm` | yes | signing scheme |
 | `txParamType` | `enum TxParamType` | yes | which transaction structure `txParams` holds |
 | `txParams` | per `txParamType` (7.3, 7.4) | as its digest | the transaction |
@@ -1156,7 +1147,7 @@ Still to change:
 * Unviable from another request's response, on Solana, Hydration and Canton.
 * Refusing non-canonical request fields, and the reserved paths on every
   source.
-* One key per key version, before a second version.
+* Key version 2, with purposes (account-derivation.md).
 * Catch-up for Hydration.
 * Hydration and Canton: source block time, so §4.3's expiry bound
   anchors for them too.

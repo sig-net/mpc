@@ -203,18 +203,6 @@ for a signature: (sign id, [presignature](#presignature) id). The sign id
 (`SignId`, `signet-primitives/src/crypto.rs`) wraps the [request
 id](#request-id), the same 32 bytes.
 
-## Key kind
-
-What a key signs: [plain sign requests](#plain-sign-request),
-[bidirectional requests](#bidirectional-request) or
-[attestations](#attestation). Every kind but plain adds a `KEY_KIND` field
-to the derivation path, so two kinds never derive the same key
-(`derive_epsilon`, `signet-crypto/src/kdf.rs`). See
-[account-derivation.md](account-derivation.md#derivation-path-structure).
-
-*Code today:* no `KEY_KIND` field, with the attestation key kept apart by a
-reserved path ([#1425](https://github.com/sig-net/mpc/issues/1425)).
-
 ## Mesh
 
 A node's connections to its peers, each `Offline` (no answer), `Inactive`
@@ -310,6 +298,21 @@ contract](#signet-contract), which anyone may do. A signature or attestation
 counts as published once the event carrying it is final on the [source
 chain](#source-chain). See
 [bidirectional-calls.md §2](bidirectional-calls.md#2-vocabulary).
+
+## Purpose
+
+What a key signs: [plain sign requests](#plain-sign-request),
+[bidirectional requests](#bidirectional-request),
+[attestations](#attestation) or a system account's transactions. From key
+version 2 the derivation path names it, so two purposes never derive the
+same key. Key versions 0 and 1 have no purpose. See
+[account-derivation.md](account-derivation.md#derivation-path-structure).
+Not the `Purpose` of a system key (`DerivationParams::SystemKey`,
+`signet-crypto/src/kdf.rs`), which names what one of the MPC's own keys
+is for.
+
+*Code today:* the latest key version is 1 (`LATEST_MPC_KEY_VERSION`,
+`signet-primitives/src/lib.rs`), so no key has a purpose.
 
 ## Request
 
