@@ -165,7 +165,7 @@ impl<W: FeePayer, C: SubmitChain> NativeIntentClient<W, C> {
         );
         deployment
             .check_deployed(&state)
-            .map_err(|error| SubmitError::ContractMismatch(error.to_string()))?;
+            .map_err(|error| SubmitError::DeployMismatch(error.to_string()))?;
 
         let call = match &request.circuit {
             RespondCircuit::Respond => minocrab_publisher::respond::<DefaultDB>(
@@ -375,9 +375,13 @@ impl<W: FeePayer, C: SubmitChain> NativeIntentClient<W, C> {
             }
             Err(SubmitRefusal::Unsent(error)) => {
                 self.wallet.release(spent);
-                return Err(SubmitError::Node(format!(
-                    "the transaction could not be sent: {error:#}; nothing was posted"
-                )));
+                return Err(SubmitError::Node {
+                    source: error.context("the transaction could not be sent; nothing was posted"),
+                });
+            }
+            Err(SubmitRefusal::Mismatch(error)) => {
+                self.wallet.release(spent);
+                return Err(SubmitError::ContractMismatch(error.to_string()));
             }
             Err(SubmitRefusal::Unanswered(error)) => {
                 tracing::warn!(
@@ -588,7 +592,7 @@ where
 }
 
 fn node(error: anyhow::Error) -> SubmitError {
-    SubmitError::Node(format!("{error:#}"))
+    SubmitError::Node { source: error }
 }
 
 #[cfg(test)]
@@ -601,6 +605,7 @@ mod tests {
         ContractAction, ContractCall, Intent, ProofPreimageMarker, Signature, INITIAL_PARAMETERS,
     };
     use midnight_transient_crypto::commitment::PedersenRandomness;
+    use mpc_chain_integration_core::utils::retry::is_retryable;
 
     use super::*;
     use crate::emissions::{emissions_of_call, Emission, EmissionKind, MISC_PAYLOAD_LEN};
@@ -1003,9 +1008,11 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_contract_whose_key_is_not_the_packaged_one_is_refused() {
-        // The packaged respond key is another circuit's, so the deployed one differs.
+    #[tokio::test]
+    async fn a_contract_the_artifacts_do_not_prove_for_is_awaited_not_refused() {
+        // The packaged respond key is another circuit's, so the deployed one differs:
+        // an on-chain upgrade may still be landing, so the publish retries rather
+        // than paying a failover that hits the same mismatch everywhere.
         let dir = managed_dir(|circuit, bytes| {
             if circuit == "respond" {
                 let mut tampered = bytes;
@@ -1017,19 +1024,30 @@ mod tests {
             }
         });
         let client = client_over(dir, ScriptedChain::new(0, 0, None));
-        let error = client.build_intent(&respond_request()).unwrap_err();
-        assert!(matches!(error, SubmitError::ContractMismatch(_)), "{error}");
+        let error = client.build(&respond_request()).await.unwrap_err();
+        assert_eq!(
+            crate::submit_error::refusal_code(&error),
+            Some("deploy_mismatch"),
+            "{error:#}"
+        );
+        assert!(is_retryable(&error), "{error:#}");
 
         let mut empty = Vec::new();
         midnight_serialize::tagged_serialize(&ContractState::<DefaultDB>::default(), &mut empty)
             .unwrap();
         let error = client
-            .build_intent(&IntentRequest {
+            .build(&IntentRequest {
                 contract_state: empty,
                 ..respond_request()
             })
+            .await
             .unwrap_err();
-        assert!(matches!(error, SubmitError::ContractMismatch(_)), "{error}");
+        assert_eq!(
+            crate::submit_error::refusal_code(&error),
+            Some("deploy_mismatch"),
+            "{error:#}"
+        );
+        assert!(is_retryable(&error), "{error:#}");
     }
 
     #[test]
@@ -1178,8 +1196,8 @@ mod tests {
         assert_eq!(*client.wallet.failures.lock().unwrap(), vec![false]);
     }
 
-    #[test]
-    fn malformed_requests_are_refused_before_anything_is_built() {
+    #[tokio::test]
+    async fn malformed_requests_are_refused_before_anything_is_built() {
         let cases: Vec<(&str, IntentRequest)> = vec![
             (
                 "undecodable contract state",
@@ -1198,10 +1216,15 @@ mod tests {
         ];
         let client = client();
         for (case, request) in cases {
-            let error = client.build_intent(&request).unwrap_err();
+            let error = client.build(&request).await.unwrap_err();
+            assert_eq!(
+                crate::submit_error::refusal_code(&error),
+                Some("bad_request"),
+                "{case}: {error:#}"
+            );
             assert!(
-                matches!(error, SubmitError::BadRequest(_)),
-                "{case}: {error}"
+                !is_retryable(&error),
+                "{case}: a malformed request must be terminal: {error:#}"
             );
         }
     }
@@ -1298,9 +1321,42 @@ mod tests {
             )
             .await
             .unwrap_err();
-        assert!(matches!(error, SubmitError::Node(_)), "{error}");
+        assert!(matches!(error, SubmitError::Node { .. }), "{error}");
         assert_eq!(*client.wallet.released.lock().unwrap(), vec![spent()]);
         assert!(client.chain.landing_reads.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_runtime_without_the_call_is_a_contract_mismatch() {
+        let client = client_over(
+            managed_dir(|_, bytes| bytes),
+            ScriptedChain::new(10, 20, None).refusing(SubmitRefusal::Mismatch(anyhow::anyhow!(
+                "send_mn_transaction did not match the node's metadata"
+            ))),
+        );
+        let error = client
+            .post(
+                b"tx",
+                TX_HASH,
+                &spent(),
+                10,
+                Timestamp::from_secs(5000),
+                deadline(),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(*client.wallet.released.lock().unwrap(), vec![spent()]);
+
+        let error = error.into_publish_error();
+        assert_eq!(
+            crate::submit_error::refusal_code(&error),
+            Some("contract_mismatch"),
+            "{error:#}"
+        );
+        assert!(
+            !is_retryable(&error),
+            "a node without the call must be terminal: {error:#}"
+        );
     }
 
     #[tokio::test(start_paused = true)]

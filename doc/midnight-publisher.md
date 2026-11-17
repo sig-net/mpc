@@ -30,12 +30,14 @@ The indexer is trusted for liveness only. A replay that disagrees with the chain
 
 ## Budget and failures
 
-A submit has one budget, `PublisherConfig::submit_timeout` (420 s): waiting for the wallet may use all but the last 120 s, and everything after that, proving, pricing and the landing, shares what is left. The publish loop retries every failure. A failed build or submit carries a class in its error message, which says what the retry may assume:
+A submit has one budget, `PublisherConfig::submit_timeout` (420 s): waiting for the wallet may use all but the last 120 s, and everything after that, proving, pricing and the landing, shares what is left. Four refusals are terminal — the publish goes to failover — and everything else is retried: `bad_request` and `contract_mismatch` (a retry would send the same bytes again), `gate_refusal` (the request cannot be answered at all), and a read inside the submit that the transport refused with a classic client error — 400, 401, 403, 404 or 405 (nothing was posted). Requests the publisher cannot serve — a request or event for another chain, `Sign`, an identity-point signature, a `recovery_id` other than 0 or 1, a failed attestation check — are refused before any read, as `gate_refusal`. A failed publish carries a class in its error message, for the logs and the refusal metric; the retry decision itself reads a typed verdict, not the message:
 
 | Class | Meaning |
 |---|---|
 | `bad_request` | The request or intent is malformed. |
-| `contract_mismatch` | The deployed contract or the packaged artifacts are not the ones this node proves for. |
+| `contract_mismatch` | The packaged artifacts are not the ones this node proves for, or the node's runtime has no such call. |
+| `deploy_mismatch` | The deployed contract is not the one the packaged artifacts prove for; an on-chain upgrade may still be landing. Nothing was posted. |
+| `gate_refusal` | The action was refused before any work: wrong chain, wrong kind, or an unanswerable signature or attestation. |
 | `wallet_unsynced` | The DUST replay has not caught up. Nothing was posted. |
 | `wallet_busy` | The fee needs UTXOs held by a submit that may still land. Nothing was posted. |
 | `wallet_unfunded` | The wallet cannot pay the fee. Nothing was posted. |
@@ -44,7 +46,9 @@ A submit has one budget, `PublisherConfig::submit_timeout` (420 s): waiting for 
 | `ambiguous_submit` | The transaction was not seen finalized within the budget and may still land. A retry may post the response again; duplicate responses are harmless. |
 | `internal` | Anything else. |
 
-The node counts each failed build or submit by its class in `multichain_publish_refusals`. A landed publish sets `multichain_funding_wallet_balance` to the spendable DUST its fee was planned from.
+A node failure (`internal`) is terminal only when the transport refused a read inside the submit — the runtime-metadata fetch, or the fee's head and parameter reads — with a classic client error (400, 401, 403, 404 or 405); any other status retries, like the publisher's other reads: another backend may serve it, so a shared provider's transient 409 does not drop the publish. A failure carrying no status retries. The submit call itself never lands here: its transport failures are watched for landing and end `ambiguous_submit`, so they retry.
+
+The node counts each failed publish that carries a class in `multichain_publish_refusals`; the publisher's own reads (`finalized_head`, the state pin, the awaited check) carry none. A landed publish sets `multichain_funding_wallet_balance` to the spendable DUST its fee was planned from.
 
 ## Configuration and artifacts
 

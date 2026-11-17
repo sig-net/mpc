@@ -782,12 +782,16 @@ pub async fn execute_publish(
     );
 
     // TODO: Consider adding a metric update for failed publish attempts here, if needed.
-    // Log error if the publish failed after all retries
-    if publish_res.is_err() {
+    // Errors out only on a terminal verdict, on any attempt — `usize::MAX` never
+    // exhausts a retryable one, and backon skips notify for predicate-rejected errors.
+    // TODO: type the retry exit (terminal vs exhausted vs timed out) and match on it,
+    // so the message cannot describe an exit that did not fire.
+    if let Err(error) = publish_res {
         tracing::error!(
             ?sign_id,
+            ?chain,
             elapsed = ?action.timestamp.elapsed(),
-            "exceeded max retries, trashing publish request"
+            "publish refused terminally, leaving it for failover ({error:#})"
         );
     }
 }
@@ -910,6 +914,7 @@ mod tests {
     use crate::protocol::contract::primitives::{ParticipantInfo, Participants};
     use crate::protocol::contract::{ResharingContractState, RunningContractState};
     use crate::protocol::ProtocolState;
+    use mpc_chain_integration_core::utils::retry::RpcFailure;
     use mpc_chain_integration_core::utils::test::make_publish_action;
     use mpc_chain_integration_core::GatedPublisher;
     use mpc_primitives::{SignId, SignKind};
@@ -1307,6 +1312,22 @@ mod tests {
         }
     }
 
+    /// A publisher that refuses every action terminally, as midnight now does
+    /// for malformed inputs.
+    struct TerminalPublisher {
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl ChainPublisher for TerminalPublisher {
+        async fn publish_signature(&self, _action: &PublishAction) -> anyhow::Result<()> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Err(anyhow::Error::new(RpcFailure::terminal(
+                "bad input".to_string(),
+            )))
+        }
+    }
+
     fn publish_action_for(request: &IndexedSignRequest) -> PublishAction {
         make_publish_action(request.chain, request.kind.clone(), request.id)
     }
@@ -1382,6 +1403,31 @@ mod tests {
         execute_publish(publisher, Some(backlog), action).await;
 
         assert_eq!(call_count.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn execute_publish_ends_a_terminal_refusal_after_one_attempt() {
+        let backlog = Backlog::new();
+        let sign_id = SignId::new([8u8; 32]);
+        backlog.insert_mock_sign(sign_id, Chain::Midnight).await;
+        let calls = Arc::new(AtomicUsize::new(0));
+        let publisher: Arc<dyn ChainPublisher> = Arc::new(TerminalPublisher {
+            calls: calls.clone(),
+        });
+
+        let action = publish_action_for(&mock_sign_request(sign_id, Chain::Midnight));
+        tokio::time::timeout(
+            Duration::from_millis(500),
+            execute_publish(publisher, Some(backlog.clone()), action.clone()),
+        )
+        .await
+        .expect("a terminal refusal ends the publish without a backoff sleep");
+
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(
+            publish_still_awaited(&backlog, &action).await.unwrap(),
+            "a refused publish stays in the backlog for the failover sweep"
+        );
     }
 
     fn test_participants() -> Participants {
