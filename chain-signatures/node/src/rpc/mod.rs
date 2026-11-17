@@ -782,7 +782,7 @@ pub async fn execute_publish(
     );
 
     // TODO: Consider adding a metric update for failed publish attempts here, if needed.
-    // The only error out is a first-attempt terminal refusal — `usize::MAX` never
+    // Errors out only on a terminal verdict, on any attempt — `usize::MAX` never
     // exhausts a retryable one, and backon skips notify for predicate-rejected errors.
     // TODO: type the retry exit (terminal vs exhausted vs timed out) and match on it,
     // so the message cannot describe an exit that did not fire.
