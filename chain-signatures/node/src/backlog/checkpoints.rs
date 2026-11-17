@@ -133,15 +133,7 @@ impl From<&Checkpoint> for mpc_primitives::CheckpointDigest {
 #[derive(Debug, Clone)]
 pub struct Checkpoints {
     storage: CheckpointStorage,
-    counts: Arc<PendingCounts>,
-}
-
-/// Per-chain counts of pending checkpoints.
-#[derive(Debug, Default)]
-struct PendingCounts {
-    pending: EnumMap<Chain, AtomicUsize>,
-    /// Held across a storage call and the count it returns, so counts apply in storage order.
-    locks: EnumMap<Chain, tokio::sync::Mutex<()>>,
+    pending_counts: Arc<EnumMap<Chain, AtomicUsize>>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -163,7 +155,7 @@ impl Checkpoints {
     pub(crate) fn new(storage: CheckpointStorage) -> Self {
         Self {
             storage,
-            counts: Arc::default(),
+            pending_counts: Arc::default(),
         }
     }
 
@@ -180,7 +172,6 @@ impl Checkpoints {
         checkpoint: &Checkpoint,
     ) -> Result<(), CheckpointError> {
         let chain = checkpoint.chain;
-        let _count = self.counts.locks[chain].lock().await;
         if !self.has_slot(chain) {
             return Err(CheckpointError::PendingCap {
                 chain,
@@ -199,7 +190,7 @@ impl Checkpoints {
             })?;
 
         // The count comes from storage: a write whose reply was lost is still counted.
-        self.counts.pending[chain].store(count, Ordering::Release);
+        self.pending_counts[chain].store(count, Ordering::Release);
         self.observe(chain, count);
         Ok(())
     }
@@ -220,7 +211,6 @@ impl Checkpoints {
     /// Promotes a pending checkpoint when its digest reaches consensus, or
     /// confirms it if already promoted.
     pub async fn confirm(&self, chain: Chain, digest: [u8; 32]) -> Result<bool, CheckpointError> {
-        let _count = self.counts.locks[chain].lock().await;
         let outcome = self
             .storage
             .promote_pending(chain, digest)
@@ -237,7 +227,7 @@ impl Checkpoints {
             return Ok(false);
         };
 
-        self.counts.pending[chain].store(remaining_count, Ordering::Release);
+        self.pending_counts[chain].store(remaining_count, Ordering::Release);
         self.observe(chain, remaining_count);
         tracing::info!(
             ?chain,
@@ -250,13 +240,12 @@ impl Checkpoints {
 
     /// Hydrates the pending checkpoint count from storage into the local counter.
     pub(crate) async fn hydrate(&self, chain: Chain) -> Result<usize, CheckpointError> {
-        let _count = self.counts.locks[chain].lock().await;
         let count = self
             .storage
             .pending_count(chain)
             .await
             .map_err(|source| CheckpointError::Storage { chain, source })?;
-        self.counts.pending[chain].store(count, Ordering::Release);
+        self.pending_counts[chain].store(count, Ordering::Release);
         self.observe(chain, count);
         Ok(count)
     }
@@ -264,12 +253,11 @@ impl Checkpoints {
     /// Replaces durable checkpoint state with a consensus checkpoint after regression.
     pub(crate) async fn regress(&self, checkpoint: &Checkpoint) -> Result<(), CheckpointError> {
         let chain = checkpoint.chain;
-        let _count = self.counts.locks[chain].lock().await;
         self.storage
             .reset_to_latest(checkpoint)
             .await
             .map_err(|source| CheckpointError::Storage { chain, source })?;
-        self.counts.pending[chain].store(0, Ordering::Release);
+        self.pending_counts[chain].store(0, Ordering::Release);
         self.observe(chain, 0);
         Ok(())
     }
@@ -308,7 +296,7 @@ impl Checkpoints {
 
     /// Returns the number of locally pending checkpoints for `chain`.
     pub(crate) fn count(&self, chain: Chain) -> usize {
-        self.counts.pending[chain].load(Ordering::Acquire)
+        self.pending_counts[chain].load(Ordering::Acquire)
     }
 
     /// Finds a checkpoint by digest, searching durable latest and pending storage.

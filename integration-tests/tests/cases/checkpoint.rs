@@ -38,7 +38,6 @@ async fn test_web_server_serves_checkpoint() {
         .backlog
         .set_processed_block(chain, interval)
         .await
-        .unwrap()
         .expect("auto-checkpoint");
     let digest = cp.digest();
     let hex_digest = hex::encode(digest);
@@ -112,7 +111,6 @@ async fn test_consensus_alignment_peer_fetch() {
         .backlog
         .set_processed_block(chain, interval)
         .await
-        .unwrap()
         .expect("auto-checkpoint");
     let digest = cp.digest();
     let expected_height = cp.block_height;
@@ -323,8 +321,7 @@ async fn test_reset_converges_divergent_nodes() {
         node.backlog.insert_mock_sign(sign_id, chain).await;
         node.backlog
             .set_processed_block(chain, interval * (index as u64 + 3))
-            .await
-            .unwrap();
+            .await;
     }
 
     let digests_before: HashSet<[u8; 32]> = {
@@ -407,8 +404,7 @@ async fn test_reset_converges_divergent_nodes() {
     for node in &network.nodes {
         node.backlog
             .set_processed_block(chain, resume_after + interval)
-            .await
-            .unwrap();
+            .await;
         next_digests.insert(node.backlog.checkpoint(chain).await.unwrap().digest());
     }
     assert_eq!(

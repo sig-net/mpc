@@ -4,7 +4,7 @@
 use super::recovery::recover_backlog;
 use super::{handle_chain_event, StreamContext};
 
-use crate::backlog::{Backlog, Checkpoint, CheckpointError};
+use crate::backlog::{Backlog, Checkpoint};
 use crate::types::CheckpointWatcher;
 use crate::types::SignCommand;
 use mpc_chain_integration_core::utils::stream::chain_event_channel;
@@ -102,18 +102,6 @@ async fn detect_regression(
 
     // No match → regression detected.
     true
-}
-
-/// Aborts `chain`'s checkpoint votes and sign tasks before its backlog is replaced.
-async fn abort_chain_work(ctx: &StreamContext, chain: Chain) {
-    // Before the abort, so a second leg queued after it can't survive it. One
-    // sent just before the clear is still held at publish until the source
-    // catches up.
-    ctx.backlog.set_caught_up(chain, false);
-    ctx.rpc.abort_checkpoints(chain).await;
-    if let Err(err) = ctx.sign_tx.send(SignCommand::AbortChain(chain)).await {
-        tracing::error!(?err, %chain, "failed to abort sign tasks before replacing the backlog");
-    }
 }
 
 /// Re-emits votes for the checkpoints pending in durable storage.
@@ -316,20 +304,21 @@ async fn run_supervised_with_watchdog<I: ChainIndexer, T: ChainTelemetry>(
                         handle_chain_event(event, &mut ctx, &telemetry, root_pk, chain).await
                     {
                         tracing::error!(error = %format_args!("{err:#}"), %chain, "failed to process chain event");
-                        if matches!(err.downcast_ref(), Some(CheckpointError::Conflict { .. })) {
-                            // The stored checkpoint is the one voted for: resume
-                            // from it, as on a restart.
-                            abort_chain_work(&ctx, chain).await;
-                            load_local = true;
-                            resubmit_votes = true;
-                            break Exit::Restart;
-                        }
                     }
                 }
                 result = wait_detected_regression(&mut ctx.checkpoints_rx, &ctx.backlog, chain) => {
                     match result {
                         RegressionOutcome::Recovery => {
-                            abort_chain_work(&ctx, chain).await;
+                            // Before the abort, so a second leg queued after it can't
+                            // survive it. One sent just before the clear is still held
+                            // at publish until the source catches up.
+                            ctx.backlog.set_caught_up(chain, false);
+                            ctx.rpc.abort_checkpoints(chain).await;
+                            if let Err(err) =
+                                ctx.sign_tx.send(SignCommand::AbortChain(chain)).await
+                            {
+                                tracing::error!(?err, %chain, "failed to abort sign tasks on regression");
+                            }
                             break Exit::Restart;
                         }
                         RegressionOutcome::Aligned => {}
@@ -473,11 +462,7 @@ mod tests {
         let backlog = Backlog::new();
         let chain = Chain::Ethereum;
 
-        backlog
-            .set_processed_block(chain, 100)
-            .await
-            .unwrap()
-            .unwrap();
+        backlog.set_processed_block(chain, 100).await.unwrap();
         let cp = backlog.checkpoint(chain).await.unwrap();
         let digest = cp.digest();
 
@@ -504,17 +489,9 @@ mod tests {
         let backlog = Backlog::new();
         let chain = Chain::Ethereum;
 
-        backlog
-            .set_processed_block(chain, 100)
-            .await
-            .unwrap()
-            .unwrap();
+        backlog.set_processed_block(chain, 100).await.unwrap();
         let cp1 = backlog.checkpoint(chain).await.unwrap();
-        backlog
-            .set_processed_block(chain, 200)
-            .await
-            .unwrap()
-            .unwrap();
+        backlog.set_processed_block(chain, 200).await.unwrap();
         backlog.checkpoint(chain).await.unwrap();
 
         let digest1 = cp1.digest();
@@ -538,11 +515,7 @@ mod tests {
         let backlog = Backlog::new();
         let chain = Chain::Ethereum;
 
-        backlog
-            .set_processed_block(chain, 100)
-            .await
-            .unwrap()
-            .unwrap();
+        backlog.set_processed_block(chain, 100).await.unwrap();
         backlog.checkpoint(chain).await.unwrap();
 
         let different_digest = [0xabu8; 32];
@@ -589,7 +562,7 @@ mod tests {
 
         // The state a node is left in once it has applied the reset: an empty
         // backlog confirmed at the reset height.
-        backlog.set_processed_block(chain, 42).await.unwrap();
+        backlog.set_processed_block(chain, 42).await;
         let applied = backlog.checkpoint(chain).await.unwrap();
         assert_eq!(
             applied.digest(),
@@ -618,11 +591,7 @@ mod tests {
         let backlog = Backlog::new();
         let chain = Chain::Ethereum;
 
-        backlog
-            .set_processed_block(chain, 100)
-            .await
-            .unwrap()
-            .unwrap();
+        backlog.set_processed_block(chain, 100).await.unwrap();
         backlog.checkpoint(chain).await.unwrap();
 
         let (mut _tx, mut rx) = make_digest(chain, 200, [0xabu8; 32]);
@@ -646,11 +615,7 @@ mod tests {
         let backlog = Backlog::new();
         let chain = Chain::Ethereum;
 
-        backlog
-            .set_processed_block(chain, 100)
-            .await
-            .unwrap()
-            .unwrap();
+        backlog.set_processed_block(chain, 100).await.unwrap();
         let cp = backlog.checkpoint(chain).await.unwrap();
         let matching_digest = cp.digest();
 
@@ -725,11 +690,7 @@ mod tests {
         let backlog = Backlog::new();
         let mut expected = Vec::new();
         for height in [100, 200] {
-            let checkpoint = backlog
-                .set_processed_block(chain, height)
-                .await
-                .unwrap()
-                .unwrap();
+            let checkpoint = backlog.set_processed_block(chain, height).await.unwrap();
             expected.push(CheckpointDigest {
                 chain,
                 height,
@@ -797,11 +758,7 @@ mod tests {
         let chain = Chain::Ethereum;
         let storage = CheckpointStorage::in_memory();
         let backlog = Backlog::persisted(storage.clone());
-        let checkpoint = backlog
-            .set_processed_block(chain, 100)
-            .await
-            .unwrap()
-            .unwrap();
+        let checkpoint = backlog.set_processed_block(chain, 100).await.unwrap();
         let expected = CheckpointDigest {
             chain,
             height: 100,
@@ -1011,11 +968,7 @@ mod tests {
     async fn regression_cancels_and_restarts_run() {
         let chain = Chain::Ethereum;
         let backlog = Backlog::new();
-        backlog
-            .set_processed_block(chain, 100)
-            .await
-            .unwrap()
-            .unwrap();
+        backlog.set_processed_block(chain, 100).await.unwrap();
         backlog.checkpoint(chain).await.unwrap();
 
         let attempts = Arc::new(AtomicUsize::new(0));
@@ -1085,11 +1038,7 @@ mod tests {
     async fn reset_cancels_restarts_and_settles_without_peers() {
         let chain = Chain::Ethereum;
         let backlog = Backlog::new();
-        backlog
-            .set_processed_block(chain, 100)
-            .await
-            .unwrap()
-            .unwrap();
+        backlog.set_processed_block(chain, 100).await.unwrap();
         let stale = backlog.checkpoint(chain).await.unwrap();
         assert!(backlog
             .checkpoints()
@@ -1211,81 +1160,6 @@ mod tests {
         assert_eq!(attempts.load(Ordering::SeqCst), 1);
     }
 
-    /// A conflict with the stored checkpoint reloads the backlog from it.
-    #[tokio::test(start_paused = true)]
-    async fn conflicting_checkpoint_resumes_from_the_stored_one() {
-        /// First `run()` emits `Block(height)` once released; later runs idle.
-        struct BlockOnceIndexer {
-            attempts: Arc<AtomicUsize>,
-            release: Arc<Notify>,
-            height: u64,
-        }
-
-        #[async_trait::async_trait]
-        impl ChainIndexer for BlockOnceIndexer {
-            const CHAIN: Chain = Chain::Ethereum;
-
-            async fn run(
-                &self,
-                events_tx: mpsc::Sender<ChainEvent>,
-                cancel: CancellationToken,
-            ) -> anyhow::Result<()> {
-                if self.attempts.fetch_add(1, Ordering::SeqCst) == 0 {
-                    self.release.notified().await;
-                    events_tx.send(ChainEvent::Block(self.height)).await?;
-                }
-                cancel.cancelled().await;
-                Ok(())
-            }
-        }
-
-        let chain = Chain::Ethereum;
-        let height = crate::backlog::checkpoint_interval(chain).unwrap();
-        let storage = CheckpointStorage::in_memory();
-        let backlog = Backlog::persisted(storage.clone());
-        let attempts = Arc::new(AtomicUsize::new(0));
-        let release = Arc::new(Notify::new());
-        let indexer = BlockOnceIndexer {
-            attempts: attempts.clone(),
-            release: release.clone(),
-            height,
-        };
-        let (sign_tx, _sign_rx) = mpsc::channel(8);
-        let (ctx, _cp_tx, _mesh_tx, _rpc_rx) = test_ctx(backlog.clone(), sign_tx);
-        let task = tokio::spawn(run_supervised_with_watchdog(
-            indexer,
-            ctx,
-            NoopChainTelemetry,
-            Duration::from_secs(3600),
-        ));
-        while attempts.load(Ordering::SeqCst) == 0 {
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
-
-        // Stored after startup: a checkpoint at `height` holding one request,
-        // where the node's own backlog is empty.
-        let stored = Backlog::persisted(storage);
-        stored
-            .insert(crate::backlog::mock::mock_sign_request(
-                mpc_primitives::SignId::new([1; 32]),
-                chain,
-            ))
-            .await;
-        stored
-            .set_processed_block(chain, height)
-            .await
-            .unwrap()
-            .unwrap();
-        release.notify_one();
-
-        while attempts.load(Ordering::SeqCst) < 2 {
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-        assert_eq!(backlog.len_by_chain(chain).await, 1);
-        assert_eq!(backlog.get_processed_block(chain).await, Some(height));
-        task.abort();
-    }
-
     #[tokio::test]
     async fn full_checkpoint_cap_pauses_exit_and_watchdog_restarts() {
         let chain = Chain::Ethereum;
@@ -1313,11 +1187,7 @@ mod tests {
         let interval = crate::backlog::checkpoint_interval(chain).unwrap();
         for i in 1..=crate::backlog::MAX_PENDING_CHECKPOINTS {
             let h = (i as u64) * interval;
-            assert!(backlog
-                .set_processed_block(chain, h)
-                .await
-                .unwrap()
-                .is_some());
+            assert!(backlog.set_processed_block(chain, h).await.is_some());
         }
         assert!(!backlog.checkpoints().has_slot(chain));
 

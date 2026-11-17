@@ -246,7 +246,7 @@ async fn test_automatic_checkpoint_on_interval() {
 
         // Heights before interval should not create checkpoints
         for i in 1..interval {
-            let cp = backlog.set_processed_block(chain, i).await.unwrap();
+            let cp = backlog.set_processed_block(chain, i).await;
             assert!(
                 cp.is_none(),
                 "Block {i} should not make checkpoint for {chain}"
@@ -257,7 +257,6 @@ async fn test_automatic_checkpoint_on_interval() {
         let cp = backlog
             .set_processed_block(chain, interval)
             .await
-            .unwrap()
             .expect("should checkpoint at interval");
         assert_eq!(cp.block_height, interval);
         assert_eq!(cp.chain, chain);
@@ -267,14 +266,12 @@ async fn test_automatic_checkpoint_on_interval() {
         assert!(backlog
             .set_processed_block(chain, interval + 1)
             .await
-            .unwrap()
             .is_none());
 
         // At 2 * interval, creates next checkpoint
         let cp2 = backlog
             .set_processed_block(chain, 2 * interval)
             .await
-            .unwrap()
             .expect("should checkpoint at 2*interval");
         assert_eq!(cp2.block_height, 2 * interval);
     }
@@ -290,29 +287,25 @@ async fn test_boundary_crossing_rules() {
     // 1. Within first bucket (50 / 120 == 0 == prev default 0): no checkpoint
     let cp = backlog
         .set_processed_block_interval(Chain::Solana, 50, 120)
-        .await
-        .unwrap();
+        .await;
     assert!(cp.is_none());
 
     // 2. Exact boundary multiple (120 crosses to bucket 1): triggers checkpoint
     let cp = backlog
         .set_processed_block_interval(Chain::Solana, 120, 120)
-        .await
-        .unwrap();
+        .await;
     assert_eq!(cp.expect("exact multiple checkpoints").block_height, 120);
 
     // 3. Same bucket (130 / 120 == 1): no new boundary crossed
     let cp = backlog
         .set_processed_block_interval(Chain::Solana, 130, 120)
-        .await
-        .unwrap();
+        .await;
     assert!(cp.is_none());
 
     // 4. Sparse jump across multiple buckets (500 is in bucket 4): triggers checkpoint
     let cp = backlog
         .set_processed_block_interval(Chain::Solana, 500, 120)
         .await
-        .unwrap()
         .expect("jump to bucket 4 checkpoints");
     assert_eq!(cp.block_height, 500);
     assert_eq!(cp.pending_requests.len(), 1);
@@ -320,15 +313,13 @@ async fn test_boundary_crossing_rules() {
     // 5. Another query in same bucket 4 (480 / 120 == 4): no checkpoint
     let cp = backlog
         .set_processed_block_interval(Chain::Solana, 480, 120)
-        .await
-        .unwrap();
+        .await;
     assert!(cp.is_none());
 
     // 6. Crosses from bucket 4 to bucket 5 (600 / 120 == 5): triggers checkpoint
     let cp = backlog
         .set_processed_block_interval(Chain::Solana, 600, 120)
         .await
-        .unwrap()
         .expect("jump to bucket 5 checkpoints");
     assert_eq!(cp.block_height, 600);
 }
@@ -346,7 +337,6 @@ async fn a_checkpoint_that_cannot_be_stored_is_retried() {
         let checkpoint = backlog
             .set_processed_block_interval(Chain::Solana, boundary * 120, 120)
             .await
-            .unwrap()
             .expect("stored once storage recovers");
         assert_eq!(checkpoint.block_height, boundary * 120);
     }
@@ -360,30 +350,32 @@ async fn a_checkpoint_that_cannot_be_stored_is_retried() {
     assert!(backlog
         .set_processed_block_interval(Chain::Solana, (cap + 1) * 120, 120)
         .await
-        .unwrap()
         .is_none());
 }
 
-/// A boundary where storage holds a different checkpoint is reported, not retried.
+/// A boundary where storage holds a different checkpoint keeps the stored one
+/// and is passed without a vote.
 #[tokio::test]
-async fn a_conflicting_stored_checkpoint_is_reported() {
+async fn a_conflicting_stored_checkpoint_is_kept() {
     let storage = CheckpointStorage::in_memory();
     let stored = Backlog::persisted(storage.clone());
     stored
         .insert_mock_bidirectional(SignId::from_u8(1), Chain::Solana)
         .await;
-    stored
+    let kept = stored
         .set_processed_block_interval(Chain::Solana, 120, 120)
         .await
-        .unwrap()
         .unwrap();
 
-    let backlog = Backlog::persisted(storage);
-    assert_matches!(
-        backlog
-            .set_processed_block_interval(Chain::Solana, 120, 120)
-            .await,
-        Err(super::CheckpointError::Conflict { height: 120, .. })
+    let backlog = Backlog::persisted(storage.clone());
+    assert!(backlog
+        .set_processed_block_interval(Chain::Solana, 120, 120)
+        .await
+        .is_none());
+    let pending = storage.load_pending(Chain::Solana).await.unwrap();
+    assert_eq!(
+        pending.iter().map(Checkpoint::digest).collect::<Vec<_>>(),
+        [kept.digest()]
     );
 }
 
@@ -400,10 +392,7 @@ async fn test_checkpoint_creation() {
 
     backlog.insert_mock_executing(&tx1).await;
     backlog.insert_mock_final(&tx2).await;
-    backlog
-        .set_processed_block(Chain::Solana, 100)
-        .await
-        .unwrap();
+    backlog.set_processed_block(Chain::Solana, 100).await;
 
     let checkpoint = backlog.checkpoint(Chain::Solana).await.unwrap();
 
@@ -442,10 +431,7 @@ async fn old_format_body() -> Checkpoint {
     backlog
         .insert_mock_final(&mock_bidirectional_tx(SignId::from_u8(2), Chain::Solana))
         .await;
-    backlog
-        .set_processed_block(Chain::Solana, 100)
-        .await
-        .unwrap();
+    backlog.set_processed_block(Chain::Solana, 100).await;
     let current = backlog.checkpoint(Chain::Solana).await.unwrap();
     let old = OldCheckpoint {
         chain: current.chain,
@@ -1053,10 +1039,7 @@ async fn test_recovery_restores_state_and_watchers() {
     let sign_id = tx.sign_id();
 
     backlog.insert_mock_executing(&tx).await;
-    backlog
-        .set_processed_block(Chain::Solana, 10)
-        .await
-        .unwrap();
+    backlog.set_processed_block(Chain::Solana, 10).await;
     let checkpoint = backlog.checkpoint(Chain::Solana).await.unwrap();
 
     let recovered = Backlog::new();
@@ -1123,10 +1106,7 @@ async fn test_recovery_requeues_completed_bidirectional_requests() {
     let tx = mock_tx(42);
 
     backlog.insert_mock_final(&tx).await;
-    backlog
-        .set_processed_block(Chain::Solana, 10)
-        .await
-        .unwrap();
+    backlog.set_processed_block(Chain::Solana, 10).await;
     let checkpoint = backlog.checkpoint(Chain::Solana).await.unwrap();
 
     let recovered = Backlog::new();
@@ -1146,15 +1126,10 @@ async fn test_recovery_preserves_pending_checkpoints() {
     let chain = Chain::Ethereum;
     let interval = checkpoint_interval(chain).unwrap();
 
-    backlog
-        .set_processed_block(chain, interval)
-        .await
-        .unwrap()
-        .unwrap();
+    backlog.set_processed_block(chain, interval).await.unwrap();
     backlog
         .set_processed_block(chain, 2 * interval)
         .await
-        .unwrap()
         .unwrap();
     assert_eq!(backlog.checkpoints().count(chain), 2);
 
@@ -1172,10 +1147,7 @@ async fn test_total_pending_on_recovery() {
             .insert_mock_sign(SignId::from_u8(i), Chain::Ethereum)
             .await;
     }
-    backlog
-        .set_processed_block(Chain::Ethereum, 10)
-        .await
-        .unwrap();
+    backlog.set_processed_block(Chain::Ethereum, 10).await;
     let checkpoint = backlog.checkpoint(Chain::Ethereum).await.unwrap();
 
     // Clean recovery updates count from 0 to 3

@@ -260,7 +260,6 @@ async fn test_canton_stream_checkpoint_persistence() -> Result<()> {
                     if let Some(persisted_checkpoint) = backlog
                         .set_processed_block_interval(Chain::Canton, height, INTERVAL)
                         .await
-                        .unwrap()
                     {
                         if saw_sign_request && !persisted_checkpoint.pending_requests.is_empty() {
                             break Some(persisted_checkpoint);
@@ -320,7 +319,6 @@ async fn test_canton_stream_checkpoint_persistence() -> Result<()> {
                 if backlog
                     .set_processed_block_interval(Chain::Canton, height, INTERVAL)
                     .await
-                    .unwrap()
                     .is_some()
                 {
                     saw_new_checkpoint = true;

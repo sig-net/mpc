@@ -629,15 +629,8 @@ impl Backlog {
 
     /// Set the processed block height for a specific chain.
     /// Returns Some(Checkpoint) if a checkpoint should be created and submitted at this block height.
-    /// Fails only with [`CheckpointError::Conflict`].
-    pub async fn set_processed_block(
-        &self,
-        chain: Chain,
-        height: u64,
-    ) -> Result<Option<Checkpoint>, CheckpointError> {
-        let Some(interval) = checkpoint_interval(chain) else {
-            return Ok(None);
-        };
+    pub async fn set_processed_block(&self, chain: Chain, height: u64) -> Option<Checkpoint> {
+        let interval = checkpoint_interval(chain)?;
         self.set_processed_block_interval(chain, height, interval)
             .await
     }
@@ -648,7 +641,7 @@ impl Backlog {
         chain: Chain,
         height: u64,
         interval: u64,
-    ) -> Result<Option<Checkpoint>, CheckpointError> {
+    ) -> Option<Checkpoint> {
         let mut pending = self.pending(&chain).write().await;
         let prev = pending.processed_block_height().unwrap_or(0);
         pending.set_processed_block(height);
@@ -661,7 +654,7 @@ impl Backlog {
         );
 
         if interval == 0 {
-            return Ok(None);
+            return None;
         }
 
         // Create a checkpoint when crossing an interval boundary, not only
@@ -677,7 +670,7 @@ impl Backlog {
         // confirmed checkpoint and replays only the post-checkpoint same-bucket
         // tail.
         if height / interval <= prev / interval {
-            return Ok(None);
+            return None;
         }
 
         drop(pending);
@@ -695,10 +688,19 @@ impl Backlog {
                         tx_count,
                         "checkpoint creation stalled (pending cap reached)"
                     );
-                    return Ok(None);
+                    return None;
                 }
-                // Not passed either: the caller reloads the stored checkpoint.
-                Err(err @ CheckpointError::Conflict { .. }) => return Err(err),
+                // The stored one keeps its vote (doc/checkpoints.md, Section 4).
+                Err(err @ CheckpointError::Conflict { .. }) => {
+                    tracing::error!(
+                        ?chain,
+                        height,
+                        %err,
+                        "keeping the stored checkpoint: expected once after an upgrade that \
+                         changes the digest, otherwise a bug"
+                    );
+                    return None;
+                }
                 Err(err @ CheckpointError::Storage { .. }) => {
                     tracing::error!(
                         ?chain,
@@ -719,7 +721,7 @@ impl Backlog {
             ?checkpoint,
             "creating checkpoint"
         );
-        Ok(Some(checkpoint))
+        Some(checkpoint)
     }
 
     /// Captures the current backlog state of `chain` as a checkpoint.

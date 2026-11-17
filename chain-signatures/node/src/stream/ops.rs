@@ -828,7 +828,7 @@ pub(crate) async fn process_block_event<T: ChainTelemetry>(
 
     // Runs while catching up too: a node votes at every boundary it passes,
     // and only acting waits for the head (doc/checkpoints.md, Section 4).
-    let Some(checkpoint) = ctx.backlog.set_processed_block(chain, block).await? else {
+    let Some(checkpoint) = ctx.backlog.set_processed_block(chain, block).await else {
         return Ok(());
     };
 
