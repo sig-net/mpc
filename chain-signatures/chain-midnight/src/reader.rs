@@ -521,7 +521,7 @@ where
     T::Error: std::error::Error + Send + Sync + 'static,
 {
     let value = uint::<u8>(cursor, 1, what)?;
-    T::try_from(value).map_err(|err| anyhow::Error::new(err).context(what))
+    T::try_from(value).map_err(anyhow::Error::new)
 }
 
 fn decode_sign_bidirectional(

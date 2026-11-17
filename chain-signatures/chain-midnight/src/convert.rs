@@ -13,7 +13,9 @@ use mpc_primitives::{
     Chain, IndexedSignRequest, SignArgs, SignBidirectionalEvent, SignId, TxParams,
 };
 
-use crate::records::{MpcDestination, MpcSignatureAlgorithm, SignBidirectionalRecord};
+use crate::records::{
+    MpcDestination, MpcSignatureAlgorithm, RecordDiscriminantError, SignBidirectionalRecord,
+};
 use crate::tx::serialized_transaction;
 use crate::types::MidnightAddress;
 
@@ -46,14 +48,14 @@ pub fn generate_sign_request(
     let algo = match record.algo {
         MpcSignatureAlgorithm::Ecdsa => "ECDSA".to_string(),
         MpcSignatureAlgorithm::Reserved => {
-            anyhow::bail!("unsupported algo: ecdsa (0) is the only real variant")
+            anyhow::bail!(RecordDiscriminantError::Algo(record.algo as u8))
         }
     };
     let dest = match record.signature_dest {
         MpcDestination::Unused => String::new(),
-        MpcDestination::Reserved => {
-            anyhow::bail!("unsupported signature_dest: unused (0) is the only real variant")
-        }
+        MpcDestination::Reserved => anyhow::bail!(RecordDiscriminantError::Destination(
+            record.signature_dest as u8
+        )),
     };
 
     let mut response_key_path = [0; 32];
