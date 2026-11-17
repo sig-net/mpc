@@ -1013,15 +1013,26 @@ impl<A: ProtocolArtifact, Phase> ProtocolStorage<A, Phase> {
             local owner_keys = redis.call("SMEMBERS", KEYS[1])
             local artifact_ids = redis.call("HKEYS", artifact_key)
 
-            -- One UNLINK per key: unpack() of a large table fails in Redis Lua.
-            for _, key in ipairs(KEYS) do
-                redis.call("UNLINK", key)
+            -- The owners registry, the artifact hash and the per-owner sets are
+            -- few keys, so they can be unlinked directly.
+            redis.call("UNLINK", KEYS[1], KEYS[2])
+            if #owner_keys > 0 then
+                redis.call("UNLINK", unpack(owner_keys))
             end
-            for _, key in ipairs(owner_keys) do
-                redis.call("UNLINK", key)
-            end
+
+            -- Holder sets are one key per artifact. Delete them in bounded
+            -- batches: unpack() of a large table fails in Redis Lua.
+            local BATCH = 1024
+            local batch = {}
             for _, id in ipairs(artifact_ids) do
-                redis.call("UNLINK", artifact_key .. ':holders:' .. id)
+                batch[#batch + 1] = artifact_key .. ':holders:' .. id
+                if #batch >= BATCH then
+                    redis.call("UNLINK", unpack(batch))
+                    batch = {}
+                end
+            end
+            if #batch > 0 then
+                redis.call("UNLINK", unpack(batch))
             end
         "#;
 
