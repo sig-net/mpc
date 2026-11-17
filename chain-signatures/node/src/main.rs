@@ -1,4 +1,3 @@
-use clap::Parser;
 use mpc_node::cli::Cli;
 
 fn main() -> anyhow::Result<()> {
@@ -14,7 +13,7 @@ fn main() -> anyhow::Result<()> {
         .enable_all()
         .build()?;
 
-    let result = rt.block_on(mpc_node::cli::run(Cli::parse()));
+    let result = rt.block_on(mpc_node::cli::run(Cli::parse_redacted()));
     // Dropping the runtime would wait for blocking tasks such as the system
     // metrics loop, which never ends. Detach them so the process can exit.
     rt.shutdown_background();

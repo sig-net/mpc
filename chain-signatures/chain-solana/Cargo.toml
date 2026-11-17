@@ -13,13 +13,12 @@ anchor-lang.workspace = true
 # TODO: replace with thiserror
 anyhow.workspace = true
 async-trait.workspace = true
-borsh.workspace = true
 futures-util.workspace = true
 hex.workspace = true
 k256.workspace = true
 mpc-chain-integration-core.workspace = true
-mpc-crypto.workspace = true
 mpc-primitives.workspace = true
+signet-crypto.workspace = true
 mpc-utils.workspace = true
 reqwest.workspace = true
 serde.workspace = true
@@ -33,6 +32,7 @@ solana-client.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
 tracing.workspace = true
+url.workspace = true
 
 [features]
 bench = []

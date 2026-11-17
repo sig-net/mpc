@@ -20,13 +20,15 @@ plumbed through from the node's config, not constructed by hand.
 
 ## Configuration
 
-`EthConfig` fields, typically populated from environment variables:
+The node builds `EthConfig` from its `--eth-*` parameters, which
+`mpc-node start --help` lists.
 
-| field                     | env var             | required? | notes |
-|---------------------------|---------------------|-----------|-------|
-| `execution_rpc_http_url`  | `MPC_ETH_EXECUTION_RPC_HTTP_URL` | yes | execution-layer JSON-RPC endpoint (Alchemy, Infura, OnFinality, …) |
-| `contract_address`        | `MPC_ETH_CONTRACT_ADDRESS` | yes | MPC contract address, with or without the `0x` prefix |
-| `network`                 | `MPC_ETH_NETWORK` | no | default `sepolia`; `run()` fails unless the RPC serves this network's chain id. Every node of a deployment must name the same network, since admission checks transactions against it. Decides finality handling too: `sepolia` and `mainnet` wait for finalized blocks; `anvil` emits requests optimistically, since it never reports finalized blocks and never reorgs |
+`network` is the network the RPC must serve: `run()` fails unless the RPC
+serves this network's chain id. Every node of a deployment must name the same
+network, since admission checks transactions against it. It decides finality
+handling too: `sepolia` and `mainnet` wait for finalized blocks; `anvil` emits
+requests optimistically, since it never reports finalized blocks and never
+reorgs.
 
 ### Stall budget
 

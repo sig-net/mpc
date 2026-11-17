@@ -20,8 +20,13 @@ How to write and update these docs: [Documentation conventions](../CONTRIBUTING.
 - [Account derivation](account-derivation.md): how per-chain accounts and keys are derived from the root key.
 - [Delta derivation](delta-derivation.md): requirements for the per-request re-randomization scalar and its inputs, in particular the chain entropy.
 
+## Chains
+
+- [Midnight publisher](midnight-publisher.md): how the node builds, proves, pays for and posts its Midnight responses, and which events the reader supports.
+
 ## Operations
 
+- [Node configuration](node-configuration.md): the principles and rules for the node's parameters: env variables and CLI flags, the contract, feature flags and constants.
 - [Secret management](secret-management.md): how secret material is represented, passed around, logged and stored in the node.
 - [Logging](logging.md): log level policy, what each level means and how to log retries.
 - [Releasing](releasing.md): branches, versioning, the biweekly release flow through testnet to mainnet, and hotfixes.

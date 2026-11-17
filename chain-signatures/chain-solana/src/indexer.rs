@@ -9,16 +9,16 @@ use async_trait::async_trait;
 use futures_util::stream::{self, StreamExt};
 use futures_util::Stream;
 use mpc_chain_integration_core::{
-    utils::retry::SharedBackoff, ChainIndexer, ChainTelemetry, NoopPublisherTelemetry, StateManager,
+    utils::retry::{is_retryable_typed, retry_until_ok_or_terminal, SharedBackoff},
+    ChainIndexer, ChainTelemetry, NoopPublisherTelemetry, StateManager,
 };
 use mpc_primitives::{Chain, ChainConfig as _, ChainEvent};
-use mpc_utils::task::retry_until_ok;
 use solana_sdk::{pubkey::Pubkey, signature::Signature};
 use solana_transaction_status::{EncodedTransactionWithStatusMeta, UiConfirmedBlock};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use crate::client::{SolanaCatchupBlock, CATCHUP_PAGE_SIZE};
+use crate::client::{skipped_code, SolanaCatchupBlock, CATCHUP_PAGE_SIZE};
 use crate::config::SolIndexerConfig;
 use crate::events::emit_events;
 use crate::{SolConfig, SolanaClient};
@@ -138,22 +138,15 @@ impl<S: StateManager, T: ChainTelemetry> SolanaIndexer<S, T> {
         telemetry: T,
         shared_backoff: SharedBackoff,
     ) -> anyhow::Result<Self> {
-        let program_id = Pubkey::from_str(&config.program_address).with_context(|| {
-            format!(
-                "failed to parse solana program address: {}",
-                config.program_address
-            )
-        })?;
-
         let client = SolanaClient::for_indexer(
             config.rpc_http_url.clone(),
-            program_id,
+            config.program_address,
             Arc::new(NoopPublisherTelemetry), // Indexer does not publish
             shared_backoff,
         );
 
         Ok(Self {
-            program_id,
+            program_id: config.program_address,
             client,
             config: config.indexer,
             slot_stall_timeout: Duration::from_secs(Chain::Solana.feed_stall_timeout_secs()),
@@ -349,7 +342,7 @@ impl<S: StateManager, T: ChainTelemetry> SolanaIndexer<S, T> {
                 let client = client.clone();
                 async move {
                     let slots = res?;
-                    let mut blocks = client.fetch_blocks_for_slots(slots.clone()).await;
+                    let mut blocks = client.fetch_blocks_for_slots(slots.clone()).await?;
                     let items: Vec<CatchupBlockItem> = slots
                         .into_iter()
                         .map(|s| {
@@ -384,7 +377,30 @@ impl<S: StateManager, T: ChainTelemetry> SolanaIndexer<S, T> {
             SolanaCatchupBlock::Missing => {
                 #[cfg(feature = "bench")]
                 let started_at = Instant::now();
-                let block = self.client.get_block(slot).await?;
+                let block = match self.client.get_block(slot).await {
+                    Ok(block) => block,
+                    Err(err) => {
+                        let Some(code) = skipped_code(&err) else {
+                            return Err(err);
+                        };
+                        // Slot-unavailable on this backend: consumed as
+                        // least-loss (false advance loses one slot, a
+                        // false stall loses everything after it).
+                        tracing::warn!(
+                            slot,
+                            code,
+                            "signature walk claimed activity but this backend reports the slot skipped or missing; advancing as least-loss"
+                        );
+                        events_tx
+                            .send(ChainEvent::Block(slot))
+                            .await
+                            .context("failed to send solana block marker event")?;
+                        self.telemetry.block_indexed(slot);
+                        #[cfg(feature = "bench")]
+                        crate::bench::inc_marker();
+                        return Ok(());
+                    }
+                };
                 #[cfg(feature = "bench")]
                 crate::bench::add_refetch_time(started_at.elapsed());
                 self.process_block(events_tx, slot, &block).await
@@ -392,22 +408,35 @@ impl<S: StateManager, T: ChainTelemetry> SolanaIndexer<S, T> {
         }
     }
 
-    /// Retries `process_catchup_item` with `RETRY_DELAY` backoff until it
-    /// succeeds or `cancel` fires.
+    /// Retries `process_catchup_item` at fixed `RETRY_DELAY` intervals until it
+    /// succeeds, `cancel` fires, or a terminal error is returned to the caller.
     async fn process_catchup_retrying(
         &self,
         events_tx: &mpsc::Sender<ChainEvent>,
         slot: u64,
         block: &SolanaCatchupBlock,
         cancel: &CancellationToken,
-    ) {
-        retry_until_ok(
+    ) -> anyhow::Result<()> {
+        // The first attempt uses the captured block; retries re-fetch live data
+        // (a transient fault like a served-null `blockTime` may heal).
+        match self.process_catchup_item(events_tx, slot, block).await {
+            Ok(()) => return Ok(()),
+            Err(err) if !is_retryable_typed(&err) => {
+                return Err(err.context(format!("slot {slot}")))
+            }
+            Err(_) => {}
+        }
+        retry_until_ok_or_terminal(
             cancel,
             Self::RETRY_DELAY,
-            &format!("solana catchup block processing (slot {slot})"),
-            || async { self.process_catchup_item(events_tx, slot, block).await },
+            "solana catchup block processing",
+            || async {
+                self.process_catchup_item(events_tx, slot, &SolanaCatchupBlock::Missing)
+                    .await
+                    .with_context(|| format!("slot {slot}"))
+            },
         )
-        .await;
+        .await
     }
 
     /// Drain `[start_slot, anchor)`: process active slots in order and emit a
@@ -457,7 +486,7 @@ impl<S: StateManager, T: ChainTelemetry> SolanaIndexer<S, T> {
             crate::bench::add_marker_time(marker_started_at.elapsed());
             let Some(block) = block else { break };
             self.process_catchup_retrying(events_tx, landmark, &block, cancel)
-                .await;
+                .await?;
             next_marker = landmark + 1;
         }
         Ok(())
@@ -497,8 +526,9 @@ impl<S: StateManager, T: ChainTelemetry> SolanaIndexer<S, T> {
 
         if let Some(transactions) = &block.transactions {
             let program_id = self.program_id.to_string();
+            let block_time = block.block_time.and_then(|t| u64::try_from(t).ok());
             for tx in transactions {
-                process_transaction(events_tx, &program_id, tx).await?;
+                process_transaction(events_tx, &program_id, block_time, tx).await?;
             }
         }
 
@@ -525,6 +555,7 @@ impl<S: StateManager, T: ChainTelemetry> SolanaIndexer<S, T> {
 async fn process_transaction(
     events_tx: &mpsc::Sender<ChainEvent>,
     program_id: &str,
+    block_time: Option<u64>,
     tx: &EncodedTransactionWithStatusMeta,
 ) -> anyhow::Result<()> {
     let Some(meta) = tx.meta.as_ref() else {
@@ -533,7 +564,7 @@ async fn process_transaction(
     if meta.err.is_some() {
         return Ok(());
     }
-    emit_events(events_tx, program_id, tx).await
+    emit_events(events_tx, program_id, block_time, tx).await
 }
 
 #[async_trait]
@@ -599,12 +630,18 @@ mod tests {
 
     use super::*;
     use crate::events::SolanaSignEvent;
+    use crate::test_utils::sign_bidirectional_ix_data;
     use anchor_lang::{AnchorSerialize, Discriminator};
     use mpc_chain_integration_core::{
-        utils::retry::SharedBackoff, MockStateManager, NoopChainTelemetry,
+        utils::retry::{is_retryable, SharedBackoff},
+        MockStateManager, NoopChainTelemetry,
     };
     use mpc_primitives::SignId;
     use signet_program::{SignatureRequestedEvent, SignatureRespondedEvent};
+    use solana_client::rpc_custom_error::{
+        JSON_RPC_SERVER_ERROR_BLOCK_NOT_AVAILABLE,
+        JSON_RPC_SERVER_ERROR_LONG_TERM_STORAGE_SLOT_SKIPPED, JSON_RPC_SERVER_ERROR_SLOT_SKIPPED,
+    };
     use solana_commitment_config::CommitmentLevel;
     use solana_sdk::pubkey::Pubkey;
     use solana_transaction_status::{
@@ -616,9 +653,17 @@ mod tests {
         url: &str,
         state_manager: MockStateManager,
     ) -> SolanaIndexer<MockStateManager, NoopChainTelemetry> {
+        test_indexer_with_telemetry(url, state_manager, NoopChainTelemetry)
+    }
+
+    fn test_indexer_with_telemetry<T: ChainTelemetry>(
+        url: &str,
+        state_manager: MockStateManager,
+        telemetry: T,
+    ) -> SolanaIndexer<MockStateManager, T> {
         let program_id = Pubkey::new_unique();
         let client = SolanaClient::for_indexer(
-            url.to_string(),
+            url.parse().unwrap(),
             program_id,
             Arc::new(NoopPublisherTelemetry),
             SharedBackoff::new(),
@@ -630,7 +675,27 @@ mod tests {
             config: SolIndexerConfig::default(),
             slot_stall_timeout: Duration::from_secs(30),
             state_manager,
-            telemetry: NoopChainTelemetry,
+            telemetry,
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct RecordingTelemetry {
+        indexed: Arc<std::sync::Mutex<Vec<u64>>>,
+    }
+
+    impl ChainTelemetry for RecordingTelemetry {
+        fn block_indexed(&self, block_number: u64) {
+            self.indexed.lock().unwrap().push(block_number);
+        }
+        fn block_finalized(&self, _block_number: u64) {}
+        fn checkpoint_created(&self, _block_number: u64) {}
+        fn request_indexed_at(&self, _block_timestamp: u64, _kind: mpc_primitives::RequestKind) {}
+        fn request_indexed(&self, _kind: mpc_primitives::RequestKind) {}
+        fn bidirectional_extraction_failed(
+            &self,
+            _kind: mpc_chain_integration_core::ExtractionFailureKind,
+        ) {
         }
     }
 
@@ -769,16 +834,26 @@ mod tests {
             slot_stall_timeout: Duration,
         ) -> Self {
             let server = mockito::Server::new_async().await;
-            Self::spawn_with_server(server, slots, processed, config, slot_stall_timeout).await
+            Self::spawn_with_server(
+                server,
+                slots,
+                processed,
+                config,
+                slot_stall_timeout,
+                Pubkey::new_unique(),
+            )
+            .await
         }
 
-        /// Variant taking a pre-built mockito server
+        /// Variant taking a pre-built mockito server; the indexer watches
+        /// `program_id`.
         async fn spawn_with_server(
             mut server: mockito::ServerGuard,
             slots: &[u64],
             processed: Option<u64>,
             config: impl Into<Option<SolIndexerConfig>>,
             slot_stall_timeout: Duration,
+            program_id: Pubkey,
         ) -> Self {
             // Serve the slots in order, repeating the last one forever
             let bodies = Arc::new(std::sync::Mutex::new(
@@ -814,6 +889,9 @@ mod tests {
                     .await;
             }
             let mut indexer = test_indexer(&server.url(), state_manager);
+            // Test bodies embed CPI instructions under this program; the
+            // client's only feeds request URLs the mocks ignore.
+            indexer.program_id = program_id;
             indexer.config = config.into().unwrap_or(SolIndexerConfig {
                 poll_interval: Duration::from_millis(5),
             });
@@ -1067,7 +1145,8 @@ mod tests {
             let (slot, block) = res.unwrap();
             indexer
                 .process_catchup_retrying(&events_tx, slot, &block, &cancel)
-                .await;
+                .await
+                .unwrap();
         }
 
         // Verify that the events were emitted in order
@@ -1236,13 +1315,152 @@ mod tests {
 
         assert!(matches!(
             events_rx.recv().await,
-            Some(ChainEvent::SignRequest { request, .. }) if request.id == SignId::new(request_id)
+            Some(ChainEvent::SignRequest { request, block_timestamp: None, .. })
+                if request.id == SignId::new(request_id)
         ));
         assert!(matches!(
             events_rx.recv().await,
             Some(ChainEvent::Respond(event)) if event.request_id == request_id
         ));
         assert!(matches!(events_rx.recv().await, Some(ChainEvent::Block(7))));
+    }
+
+    #[tokio::test]
+    async fn emits_block_time_with_a_bidirectional_request() {
+        let indexer = test_indexer("http://localhost:1", MockStateManager::new());
+        let transaction = event_transaction(
+            indexer.program_id,
+            Signature::new_unique(),
+            sign_bidirectional_ix_data("eip155:1"),
+        );
+        let mut response = event_block_response(0, 7, transaction);
+        response["result"]["blockTime"] = serde_json::json!(1_700_000_000);
+        let block: UiConfirmedBlock = serde_json::from_value(response["result"].clone()).unwrap();
+        let (events_tx, mut events_rx) = mpsc::channel(8);
+
+        indexer.process_block(&events_tx, 7, &block).await.unwrap();
+
+        assert!(matches!(
+            events_rx.recv().await,
+            Some(ChainEvent::SignRequest {
+                block_timestamp: Some(1_700_000_000),
+                ..
+            })
+        ));
+        assert!(matches!(events_rx.recv().await, Some(ChainEvent::Block(7))));
+    }
+
+    #[tokio::test]
+    async fn holds_a_bidirectional_block_without_block_time() {
+        let indexer = test_indexer("http://localhost:1", MockStateManager::new());
+        let transaction = event_transaction(
+            indexer.program_id,
+            Signature::new_unique(),
+            sign_bidirectional_ix_data("eip155:1"),
+        );
+        let (events_tx, mut events_rx) = mpsc::channel(8);
+
+        for block_time in [serde_json::json!(null), serde_json::json!(-1)] {
+            let mut response = event_block_response(0, 7, transaction.clone());
+            response["result"]["blockTime"] = block_time;
+            let block: UiConfirmedBlock =
+                serde_json::from_value(response["result"].clone()).unwrap();
+
+            let err = indexer
+                .process_block(&events_tx, 7, &block)
+                .await
+                .unwrap_err();
+
+            assert_eq!(
+                format!("{err:#}"),
+                "block carries a bidirectional request but no block time"
+            );
+            assert!(events_rx.try_recv().is_err());
+        }
+    }
+
+    /// One `RespondBidirectional` Anchor CPI event under the generator key.
+    fn respond_bidirectional_ix_data() -> String {
+        use k256::elliptic_curve::sec1::ToEncodedPoint as _;
+        fn coord(bytes: Option<&k256::FieldBytes>) -> [u8; 32] {
+            let mut out = [0u8; 32];
+            out.copy_from_slice(bytes.expect("the generator has both coordinates"));
+            out
+        }
+        let generator = k256::ProjectivePoint::GENERATOR
+            .to_affine()
+            .to_encoded_point(false);
+        let event = signet_program::RespondBidirectionalEvent {
+            request_id: [0x31; 32],
+            responder: Pubkey::new_from_array([0x32; 32]),
+            serialized_output: vec![1, 2, 3],
+            signature: signet_program::Signature {
+                big_r: signet_program::AffinePoint {
+                    x: coord(generator.x()),
+                    y: coord(generator.y()),
+                },
+                s: [0x33; 32],
+                recovery_id: 0,
+            },
+        };
+        cpi_event_instruction(&event)
+    }
+
+    #[tokio::test]
+    async fn respond_bidirectional_events_do_not_hold_a_time_less_block() {
+        let indexer = test_indexer("http://localhost:1", MockStateManager::new());
+        let transaction = event_transaction(
+            indexer.program_id,
+            Signature::new_unique(),
+            respond_bidirectional_ix_data(),
+        );
+        let response = event_block_response(0, 7, transaction);
+        let block: UiConfirmedBlock = serde_json::from_value(response["result"].clone()).unwrap();
+        let (events_tx, mut events_rx) = mpsc::channel(8);
+
+        indexer.process_block(&events_tx, 7, &block).await.unwrap();
+
+        assert!(matches!(
+            events_rx.recv().await,
+            Some(ChainEvent::RespondBidirectional(_))
+        ));
+        assert!(matches!(events_rx.recv().await, Some(ChainEvent::Block(7))));
+    }
+
+    #[tokio::test]
+    async fn reports_block_time_for_plain_sign_requests() {
+        let indexer = test_indexer("http://localhost:1", MockStateManager::new());
+        let request = SignatureRequestedEvent {
+            sender: Pubkey::new_unique(),
+            payload: [1; 32],
+            key_version: 0,
+            deposit: 1,
+            chain_id: "solana".to_string(),
+            path: "test".to_string(),
+            algo: "secp256k1".to_string(),
+            dest: "test".to_string(),
+            params: String::new(),
+            fee_payer: None,
+        };
+        let transaction = event_transaction(
+            indexer.program_id,
+            Signature::new_unique(),
+            cpi_event_instruction(&request),
+        );
+        let mut response = event_block_response(0, 7, transaction);
+        response["result"]["blockTime"] = serde_json::json!(1_700_000_000);
+        let block: UiConfirmedBlock = serde_json::from_value(response["result"].clone()).unwrap();
+        let (events_tx, mut events_rx) = mpsc::channel(8);
+
+        indexer.process_block(&events_tx, 7, &block).await.unwrap();
+
+        assert!(matches!(
+            events_rx.recv().await,
+            Some(ChainEvent::SignRequest {
+                block_timestamp: Some(1_700_000_000),
+                ..
+            })
+        ));
     }
 
     #[tokio::test]
@@ -1613,6 +1831,7 @@ mod tests {
             Some(9),
             None,
             Duration::from_secs(30),
+            Pubkey::new_unique(),
         )
         .await;
 
@@ -1634,6 +1853,177 @@ mod tests {
         );
 
         f.cancel_and_join().await;
+    }
+
+    /// A captured null `blockTime` holds the block; the retry re-fetches,
+    /// and once the provider serves the time the drain advances.
+    #[tokio::test]
+    async fn drain_range_refetches_until_a_time_less_block_is_served() {
+        let mut server = mockito::Server::new_async().await;
+
+        // Program activity at 10 and 11; slot 9 (< start 10) ends pagination.
+        let entries: Vec<_> = [11, 10, 9].into_iter().map(signature_entry).collect();
+        let _signatures = server
+            .mock("POST", "/")
+            .match_body(mockito::Matcher::Regex(
+                "getSignaturesForAddress".to_string(),
+            ))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(signatures_response(&entries))
+            .create_async()
+            .await;
+
+        let indexer = test_indexer(&server.url(), MockStateManager::new());
+        let transaction = event_transaction(
+            indexer.program_id,
+            Signature::new_unique(),
+            sign_bidirectional_ix_data("eip155:1"),
+        );
+        // The batched fetch (array body) captures slot 10 without a time;
+        // the retry's single-slot re-fetch (object body, `jsonrpc` envelope
+        // for `solana_client`) serves one.
+        let mut null_time = event_block_response(0, 10, transaction.clone());
+        null_time["result"]["blockTime"] = serde_json::json!(null);
+        let _batch = server
+            .mock("POST", "/")
+            .match_body(mockito::Matcher::Regex(r#"^\["#.to_string()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(serde_json::json!([null_time, block_response(1, 11)]).to_string())
+            .expect(1)
+            .create_async()
+            .await;
+        let mut served = event_block_response(0, 10, transaction);
+        served["result"]["blockTime"] = serde_json::json!(1_700_000_000);
+        let refetch = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": served["result"],
+        })
+        .to_string();
+        let _refetch = server
+            .mock("POST", "/")
+            .match_body(mockito::Matcher::Regex(r#"^\{.*getBlock"#.to_string()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(refetch)
+            .expect(1)
+            .create_async()
+            .await;
+
+        let (events_tx, mut events_rx) = mpsc::channel(16);
+        indexer
+            .drain_range(&events_tx, 12, 10, &CancellationToken::new())
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            events_rx.recv().await,
+            Some(ChainEvent::SignRequest {
+                block_timestamp: Some(_),
+                ..
+            })
+        ));
+        assert!(matches!(
+            events_rx.recv().await,
+            Some(ChainEvent::Block(10))
+        ));
+        assert!(matches!(
+            events_rx.recv().await,
+            Some(ChainEvent::Block(11))
+        ));
+        assert!(events_rx.try_recv().is_err());
+        // `.expect(1)` pins one batch fetch and one re-fetch.
+    }
+
+    /// The time-less block fixture at slot 401: the `slot 401` context
+    /// must read as retryable, not as HTTP 401.
+    #[tokio::test]
+    async fn drain_range_retries_a_time_less_block_at_slot_401() {
+        let mut server = mockito::Server::new_async().await;
+
+        let entries: Vec<_> = [401, 400].into_iter().map(signature_entry).collect();
+        let _signatures = server
+            .mock("POST", "/")
+            .match_body(mockito::Matcher::Regex(
+                "getSignaturesForAddress".to_string(),
+            ))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(signatures_response(&entries))
+            .create_async()
+            .await;
+
+        let indexer = test_indexer(&server.url(), MockStateManager::new());
+        let transaction = event_transaction(
+            indexer.program_id,
+            Signature::new_unique(),
+            sign_bidirectional_ix_data("eip155:1"),
+        );
+        let mut null_time = event_block_response(0, 401, transaction.clone());
+        null_time["result"]["blockTime"] = serde_json::json!(null);
+        let _batch = server
+            .mock("POST", "/")
+            .match_body(mockito::Matcher::Regex(r#"^\["#.to_string()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(serde_json::json!([null_time.clone()]).to_string())
+            .create_async()
+            .await;
+        // refetch time-less once so the `slot 401` bail reaches the loop,
+        // then served; mockito answers the first unmet stub
+        let null_envelope = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": null_time["result"],
+        })
+        .to_string();
+        let _refetch_null = server
+            .mock("POST", "/")
+            .match_body(mockito::Matcher::Regex(r#"^\{.*getBlock"#.to_string()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(null_envelope)
+            .expect(1)
+            .create_async()
+            .await;
+        let mut served = event_block_response(0, 401, transaction);
+        served["result"]["blockTime"] = serde_json::json!(1_700_000_000);
+        let refetch = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": served["result"],
+        })
+        .to_string();
+        let _refetch = server
+            .mock("POST", "/")
+            .match_body(mockito::Matcher::Regex(r#"^\{.*getBlock"#.to_string()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(refetch)
+            .expect(1)
+            .create_async()
+            .await;
+
+        let (events_tx, mut events_rx) = mpsc::channel(16);
+        indexer
+            .drain_range(&events_tx, 402, 401, &CancellationToken::new())
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            events_rx.recv().await,
+            Some(ChainEvent::SignRequest {
+                block_timestamp: Some(_),
+                ..
+            })
+        ));
+        assert!(matches!(
+            events_rx.recv().await,
+            Some(ChainEvent::Block(401))
+        ));
+        assert!(events_rx.try_recv().is_err());
     }
 
     #[tokio::test]
@@ -1688,6 +2078,278 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn drain_range_marks_each_slot_once_across_gap_skip_and_block() {
+        let mut server = mockito::Server::new_async().await;
+
+        // Program activity at 10 and 12; slot 9 (< start 10) ends pagination
+        let entries: Vec<_> = [12, 10, 9].into_iter().map(signature_entry).collect();
+        let _signatures = server
+            .mock("POST", "/")
+            .match_body(mockito::Matcher::Regex(
+                "getSignaturesForAddress".to_string(),
+            ))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(signatures_response(&entries))
+            .expect(1)
+            .create_async()
+            .await;
+
+        // the batch serves neither slot (legal null results → Missing)
+        let _batch = server
+            .mock("POST", "/")
+            .match_body(mockito::Matcher::Regex(r"^\[\{.*getBlock".to_string()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::json!([
+                    { "id": 0, "result": null },
+                    { "id": 1, "result": null }
+                ])
+                .to_string(),
+            )
+            .expect(1)
+            .create_async()
+            .await;
+
+        // refetch: slot 10 skipped on this backend, slot 12 served
+        let _skipped = server
+            .mock("POST", "/")
+            .match_body(mockito::Matcher::Regex(
+                r#"^\{.*"params":\[10,"#.to_string(),
+            ))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::json!({
+                    "jsonrpc": "2.0", "id": 1,
+                    "error": {
+                        "code": JSON_RPC_SERVER_ERROR_SLOT_SKIPPED,
+                        "message": "Slot was skipped"
+                    }
+                })
+                .to_string(),
+            )
+            .expect(1)
+            .create_async()
+            .await;
+        let _served = server
+            .mock("POST", "/")
+            .match_body(mockito::Matcher::Regex(
+                r#"^\{.*"params":\[12,"#.to_string(),
+            ))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::json!({
+                    "jsonrpc": "2.0", "id": 1,
+                    "result": block_response(0, 12)["result"]
+                })
+                .to_string(),
+            )
+            .expect(1)
+            .create_async()
+            .await;
+
+        let indexer = test_indexer(&server.url(), MockStateManager::new());
+        let (events_tx, mut events_rx) = mpsc::channel(16);
+        let cancel = CancellationToken::new();
+
+        tokio::time::timeout(
+            Duration::from_secs(30),
+            indexer.drain_range(&events_tx, 13, 10, &cancel),
+        )
+        .await
+        .expect("drain must finish")
+        .unwrap();
+
+        _batch.assert_async().await;
+        _skipped.assert_async().await;
+        _served.assert_async().await;
+
+        // exactly one marker per slot in [10, 12]: 10 consumed-skip, 11 gap,
+        // 12 block — pins the next_marker bookkeeping across all emitters
+        let mut seen = Vec::new();
+        loop {
+            match tokio::time::timeout(Duration::from_secs(2), events_rx.recv()).await {
+                Ok(Some(ChainEvent::Block(slot))) => seen.push(slot),
+                Ok(Some(other)) => panic!("expected a Block marker, got {other:?}"),
+                Ok(None) | Err(_) => break,
+            }
+        }
+        assert_eq!(
+            seen,
+            vec![10, 11, 12],
+            "markers must be exactly-once, in order"
+        );
+        assert!(events_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn terminal_batch_failures_hand_the_drain_to_the_supervisor() {
+        let mut server = mockito::Server::new_async().await;
+
+        // walk claims slot 10; slot 9 ends pagination
+        let entries: Vec<_> = [10, 9].into_iter().map(signature_entry).collect();
+        let _signatures = server
+            .mock("POST", "/")
+            .match_body(mockito::Matcher::Regex(
+                "getSignaturesForAddress".to_string(),
+            ))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(signatures_response(&entries))
+            .expect(1)
+            .create_async()
+            .await;
+
+        let batch = server
+            .mock("POST", "/")
+            .match_body(mockito::Matcher::Regex(r"^\[\{.*getBlock".to_string()))
+            .with_status(401)
+            // terminal aborts after the first attempt
+            .expect(1)
+            .create_async()
+            .await;
+
+        let indexer = test_indexer(&server.url(), MockStateManager::new());
+        let (events_tx, mut events_rx) = mpsc::channel(16);
+        let cancel = CancellationToken::new();
+
+        let err = tokio::time::timeout(
+            Duration::from_secs(30),
+            indexer.drain_range(&events_tx, 11, 10, &cancel),
+        )
+        .await
+        .expect("drain must fail fast")
+        .unwrap_err();
+        assert!(!is_retryable(&err), "{err:#}");
+        // nothing emitted: the supervisor restart decides what happens next
+        assert!(events_rx.try_recv().is_err());
+        batch.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn terminal_refetch_errors_hand_the_drain_to_the_supervisor() {
+        let mut server = mockito::Server::new_async().await;
+
+        // walk claims slot 10; slot 9 ends pagination
+        let entries: Vec<_> = [10, 9].into_iter().map(signature_entry).collect();
+        let _signatures = server
+            .mock("POST", "/")
+            .match_body(mockito::Matcher::Regex(
+                "getSignaturesForAddress".to_string(),
+            ))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(signatures_response(&entries))
+            .expect(1)
+            .create_async()
+            .await;
+
+        // the batch serves slot 10 as a legal null → Missing → single-slot refetch
+        let _batch = server
+            .mock("POST", "/")
+            .match_body(mockito::Matcher::Regex(r"^\[\{.*getBlock".to_string()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(serde_json::json!([{ "id": 0, "result": null }]).to_string())
+            .expect(1)
+            .create_async()
+            .await;
+
+        // 401 refetch: terminal after one attempt, must not spin the outer loop
+        let refetch = server
+            .mock("POST", "/")
+            .match_body(mockito::Matcher::Regex(
+                r#"^\{.*"params":\[10,"#.to_string(),
+            ))
+            .with_status(401)
+            .expect(1)
+            .create_async()
+            .await;
+
+        let indexer = test_indexer(&server.url(), MockStateManager::new());
+        let (events_tx, mut events_rx) = mpsc::channel(16);
+        let cancel = CancellationToken::new();
+
+        let err = tokio::time::timeout(
+            Duration::from_secs(30),
+            indexer.drain_range(&events_tx, 11, 10, &cancel),
+        )
+        .await
+        .expect("drain must fail fast instead of retrying at fixed pace")
+        .unwrap_err();
+        assert!(!is_retryable(&err), "{err:#}");
+        assert!(format!("{err:#}").contains("slot 10"), "{err:#}");
+        assert!(events_rx.try_recv().is_err(), "no marker for slot 10");
+        refetch.assert_async().await;
+    }
+
+    /// Retry-arm terminal exit: retryable first attempt, terminal refetch.
+    #[tokio::test]
+    async fn a_terminal_refetch_on_the_retry_arm_hands_the_drain_to_the_supervisor() {
+        let mut server = mockito::Server::new_async().await;
+
+        let entries: Vec<_> = [10, 9].into_iter().map(signature_entry).collect();
+        let _signatures = server
+            .mock("POST", "/")
+            .match_body(mockito::Matcher::Regex(
+                "getSignaturesForAddress".to_string(),
+            ))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(signatures_response(&entries))
+            .expect(1)
+            .create_async()
+            .await;
+
+        // time-less block: first attempt fails retryable, refetch is terminal
+        let indexer = test_indexer(&server.url(), MockStateManager::new());
+        let transaction = event_transaction(
+            indexer.program_id,
+            Signature::new_unique(),
+            sign_bidirectional_ix_data("eip155:1"),
+        );
+        let mut null_time = event_block_response(0, 10, transaction);
+        null_time["result"]["blockTime"] = serde_json::json!(null);
+        let _batch = server
+            .mock("POST", "/")
+            .match_body(mockito::Matcher::Regex(r"^\[\{.*getBlock".to_string()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(serde_json::json!([null_time]).to_string())
+            .expect(1)
+            .create_async()
+            .await;
+
+        let refetch = server
+            .mock("POST", "/")
+            .match_body(mockito::Matcher::Regex(
+                r#"^\{.*"params":\[10,"#.to_string(),
+            ))
+            .with_status(401)
+            .expect(1)
+            .create_async()
+            .await;
+
+        let (events_tx, mut events_rx) = mpsc::channel(16);
+        let cancel = CancellationToken::new();
+
+        let err = tokio::time::timeout(
+            Duration::from_secs(30),
+            indexer.drain_range(&events_tx, 11, 10, &cancel),
+        )
+        .await
+        .expect("drain must fail fast instead of retrying at fixed pace")
+        .unwrap_err();
+        assert!(!is_retryable(&err), "{err:#}");
+        assert!(format!("{err:#}").contains("slot 10"), "{err:#}");
+        assert!(events_rx.try_recv().is_err(), "no events");
+        refetch.assert_async().await;
+    }
+
+    #[tokio::test]
     async fn run_block_sequence_is_poll_phase_invariant() {
         // Identical chain content drained under different tick phases must
         // emit identical Block heights. Activity at 10 and 12 leaves an
@@ -1722,6 +2384,7 @@ mod tests {
                 Some(9),
                 None,
                 Duration::from_secs(30),
+                Pubkey::new_unique(),
             )
             .await;
             let mut heights = Vec::new();
@@ -1739,6 +2402,120 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn skipped_missing_slots_emit_a_marker_and_advance() {
+        for (code, message) in [
+            (JSON_RPC_SERVER_ERROR_SLOT_SKIPPED, "Slot was skipped"),
+            (
+                JSON_RPC_SERVER_ERROR_LONG_TERM_STORAGE_SLOT_SKIPPED,
+                "Slot was skipped because it is in long-term storage",
+            ),
+        ] {
+            let mut server = mockito::Server::new_async().await;
+            let mock = server
+                .mock("POST", "/")
+                .with_status(200)
+                .with_header("content-type", "application/json")
+                .with_body(
+                    serde_json::json!({
+                        "jsonrpc": "2.0", "id": 1,
+                        "error": {"code": code, "message": message}
+                    })
+                    .to_string(),
+                )
+                // the skipped verdict is consumed, not retried
+                .expect(1)
+                .create_async()
+                .await;
+
+            let indexer = test_indexer(&server.url(), MockStateManager::new());
+            let (events_tx, mut events_rx) = mpsc::channel(16);
+
+            indexer
+                .process_catchup_item(&events_tx, 7, &SolanaCatchupBlock::Missing)
+                .await
+                .unwrap();
+
+            assert!(
+                matches!(events_rx.recv().await, Some(ChainEvent::Block(slot)) if slot == 7),
+                "code {code} must consume into a marker"
+            );
+            mock.assert_async().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn skipped_slots_advance_the_indexed_gauge_with_the_marker() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::json!({
+                    "jsonrpc": "2.0", "id": 1,
+                    "error": {"code": JSON_RPC_SERVER_ERROR_SLOT_SKIPPED, "message": "Slot was skipped"}
+                })
+                .to_string(),
+            )
+            .create_async()
+            .await;
+
+        let telemetry = RecordingTelemetry::default();
+        let indexer =
+            test_indexer_with_telemetry(&server.url(), MockStateManager::new(), telemetry.clone());
+        let (events_tx, _events_rx) = mpsc::channel(16);
+
+        indexer
+            .process_catchup_item(&events_tx, 7, &SolanaCatchupBlock::Missing)
+            .await
+            .unwrap();
+
+        // The consume pairs the marker with telemetry, like every other emitter.
+        assert_eq!(*telemetry.indexed.lock().unwrap(), vec![7]);
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn node_local_missing_slots_propagate_for_retry() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::json!({
+                    "jsonrpc": "2.0", "id": 1,
+                    "error": {
+                        "code": JSON_RPC_SERVER_ERROR_BLOCK_NOT_AVAILABLE,
+                        "message": "Block not available for slot 7"
+                    }
+                })
+                .to_string(),
+            )
+            // production retries node-local absence inside get_block
+            // (usize::MAX); the finite budget here pins only the exhausted
+            // handoff — still retryable for the catchup loop
+            .expect(3)
+            .create_async()
+            .await;
+
+        let indexer = test_indexer(&server.url(), MockStateManager::new());
+        let (events_tx, mut events_rx) = mpsc::channel(16);
+
+        let err = indexer
+            .process_catchup_item(&events_tx, 7, &SolanaCatchupBlock::Missing)
+            .await
+            .unwrap_err();
+
+        assert!(is_retryable(&err), "{err:#}");
+        assert!(
+            events_rx.try_recv().is_err(),
+            "no marker for a retryable slot"
+        );
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
     async fn process_catchup_retrying_stops_on_cancel() {
         // No mock: any RPC attempt fails after fast retries; cancel must
         // interrupt the retry loop without waiting for it.
@@ -1752,85 +2529,7 @@ mod tests {
             indexer.process_catchup_retrying(&events_tx, 7, &SolanaCatchupBlock::Missing, &cancel),
         )
         .await
-        .expect("process_catchup_retrying should stop promptly on cancel");
-    }
-
-    // Very expensive test in terms of RPC usage.
-    #[tokio::test]
-    #[ignore]
-    async fn test_solana_pipeline_devnet() {
-        let _ = tracing_subscriber::fmt::try_init();
-
-        let api_key = match std::env::var("MPC_TEST_API_KEY") {
-            Ok(key) if !key.is_empty() => key,
-            _ => {
-                tracing::debug!("Skipping devnet test: MPC_TEST_API_KEY not set");
-                return;
-            }
-        };
-
-        let sol_addr = std::env::var("MPC_TEST_SOL_ADDR")
-            .unwrap_or_else(|_| "SigDHT99hPznk4d9SAxWLoBnKWT8jcob5pV8X7ti8SM".to_string());
-
-        let http_url = format!("https://solana-devnet.g.alchemy.com/v2/{api_key}");
-
-        let state_manager = MockStateManager::new();
-        let (events_tx, mut events_rx) = mpsc::channel(1_000_000);
-
-        let client = SolanaClient::for_indexer(
-            http_url.clone(),
-            Pubkey::from_str(&sol_addr).unwrap(),
-            Arc::new(NoopPublisherTelemetry),
-            SharedBackoff::new(),
-        );
-
-        let indexer = SolanaIndexer {
-            program_id: Pubkey::from_str(&sol_addr).unwrap(),
-            client,
-            config: SolIndexerConfig::default(),
-            slot_stall_timeout: Duration::from_secs(30),
-            state_manager,
-            telemetry: NoopChainTelemetry,
-        };
-
-        // Resolve anchor slot
-        let anchor_height = indexer
-            .client
-            .get_slot_finalized()
-            .await
-            .expect("Failed to fetch current slot");
-
-        tracing::debug!("Resolved anchor slot: {anchor_height}");
-
-        // Start from a checkpoint ~1 week behind (assuming ~2.5 slots per second => 1,512,000 slots per week)
-        let start_slot = anchor_height.saturating_sub(1_512_000);
-        tracing::debug!("Starting catchup from slot: {start_slot} (~1 week behind)");
-
-        indexer
-            .state_manager
-            .set_processed_block(Chain::Solana, start_slot.saturating_sub(1))
-            .await;
-
-        // Start the indexer in a separate task
-        let cancel = CancellationToken::new();
-        let run_handle = tokio::spawn({
-            let cancel = cancel.clone();
-            async move { indexer.run(events_tx, cancel).await }
-        });
-
-        // Drain events until catchup completes
-        loop {
-            match events_rx.recv().await {
-                Some(ChainEvent::CatchupCompleted) => {
-                    tracing::debug!("Solana catchup complete");
-                    break;
-                }
-                Some(event) => tracing::debug!("Received event: {:?}", event),
-                None => break,
-            }
-        }
-
-        cancel.cancel();
-        run_handle.abort();
+        .expect("process_catchup_retrying should stop promptly on cancel")
+        .unwrap();
     }
 }

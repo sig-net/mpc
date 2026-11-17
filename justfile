@@ -33,9 +33,10 @@ test filter="": (setup "")
     cargo nextest run -p integration-tests {{ if filter != "" { "-E 'test(" + filter + ")'" } else { "" } }}
 alias t := test
 
-# Run only lightweight fixture tests (no full cluster or Docker beyond Redis)
+# Run only lightweight fixture tests (no full cluster or Docker beyond Redis).
+# Nodes run in-process, so no setup: neither the contract wasm nor the node binary is needed.
 # Usage: just tf [filter]
-test-fixture filter="": (setup "")
+test-fixture filter="":
     cargo nextest run -p integration-tests --profile fixture {{ if filter != "" { "-E 'test(" + filter + ")'" } else { "" } }}
 alias tf := test-fixture
 
@@ -72,21 +73,25 @@ fmt:
 
 # Fast unit tests (mirrors CI: no integration-tests, no Docker). The node
 # gates its test-only stores and flags behind test-feature, so its lib tests
-# run a second time with the feature on.
+# run a second time with the feature on. nextest runs all test binaries in
+# parallel but skips doctests, so those run separately.
 # Usage: just test-unit [filter]
 test-unit filter="":
-    cargo test --workspace --exclude integration-tests {{filter}}
-    cargo test -p mpc-node --lib --features test-feature {{filter}}
+    cargo nextest run --workspace --exclude integration-tests --no-tests=warn {{filter}}
+    cargo nextest run -p mpc-node --lib --features test-feature --no-tests=warn {{filter}}
+    cargo test --workspace --exclude integration-tests --doc {{filter}}
 alias tu := test-unit
 
 # Full CI gate locally: format check + clippy + unit tests
 ci: fmt-check lint test-unit
 alias c := ci
 
-# Security audit of dependencies (mirrors CI audit job)
+# Dependency checks (mirrors CI audit job): advisories, licenses, bans, sources, unused dependencies
 audit:
-    @if ! command -v cargo-audit >/dev/null; then cargo install cargo-audit --locked; fi
-    cargo audit
+    @if ! command -v cargo-deny >/dev/null; then cargo install cargo-deny --locked; fi
+    @if ! command -v cargo-machete >/dev/null; then cargo install cargo-machete --locked; fi
+    cargo deny check advisories bans licenses sources -W unmaintained -W unsound --hide-inclusion-graph
+    cargo machete
 
 # Run all tests sequentially (single-threaded)
 # Usage: just ts [filter]
@@ -97,7 +102,7 @@ alias ts := test-seq
 # Build artifacts: `just build` = whole Rust workspace (via setup),
 # `just build eth` = EVM artifacts, `just build contract` = NEAR contract wasm,
 # `just build test-node` = mpc-node with test-feature, the binary the integration harness spawns (not the release build),
-# `just build midnight` = midnight-publisher-ts fixtures,
+# `just build midnight` = midnight-devtools real-stack fixtures,
 # `just build tests` = integration test binaries without running them,
 # `just build compat` = latest release node binary for the compat test
 # Usage: just build [target] (target="" | eth | contract | test-node | midnight | tests | compat)
@@ -109,7 +114,7 @@ build target="":
     elif [ "{{target}}" = "test-node" ]; then \
       cargo build -p mpc-node --release --features test-feature,debug-page; \
     elif [ "{{target}}" = "midnight" ]; then \
-      cd chain-signatures/midnight-publisher-ts && npm ci && npm run build && npm run compile:real-stack-caller && npm run compile:real-stack-vault && npm run typecheck:real-stack; \
+      cd chain-signatures/midnight-devtools && npm ci && npm run compile:real-stack-caller && npm run compile:real-stack-vault && npm run typecheck:real-stack; \
     elif [ "{{target}}" = "tests" ]; then \
       cargo build -p integration-tests --tests; \
     elif [ "{{target}}" = "compat" ]; then \
@@ -169,10 +174,6 @@ test-tron-tre:
 test-midnight test="": (build "eth") (setup "")
     cargo nextest run -p integration-tests --test lib --run-ignored only --no-capture -E '{{ if test == "" { "test(/^cases::midnight_stream::/)" } else { "test(=cases::midnight_stream::" + test + ")" } }}'
 
-# Midnight TS/Rust seam differential (needs dist/ built via npm test in midnight-publisher-ts)
-test-midnight-seam:
-    cargo nextest run -p mpc-chain-midnight --run-ignored all -E 'binary(intent_seam)'
-
 # Canton tests (default: stream; e2e via `just test-canton cases::canton`)
 test-canton filter="canton_stream": (setup "")
     cargo test -p integration-tests --test lib -- {{filter}} --ignored --nocapture --test-threads 1
@@ -180,3 +181,7 @@ test-canton filter="canton_stream": (setup "")
 # Release compatibility test (needs `just build compat` output)
 test-compat: (setup "")
     ./scripts/test-prod-compat.sh
+
+# Usage: just bench-redis [args] (e.g. just bench-redis, or just bench-redis "--rounds 2 --items 50" for quick CI)
+bench-redis args="":
+    cargo run --release -p integration-tests --bin redis-bench -- {{args}}

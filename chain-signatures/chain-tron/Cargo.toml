@@ -12,6 +12,7 @@ async-trait.workspace = true
 futures-util.workspace = true
 hex.workspace = true
 mpc-chain-integration-core.workspace = true
+mpc-evm-common.workspace = true
 mpc-primitives.workspace = true
 mpc-tron-wire.workspace = true
 reqwest.workspace = true
@@ -25,6 +26,6 @@ url.workspace = true
 
 [dev-dependencies]
 k256.workspace = true
-prost-types = "0.14.4"
-sha2 = "0.11.0"
+prost-types.workspace = true
+sha2.workspace = true
 mockito.workspace = true

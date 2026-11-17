@@ -5,4 +5,4 @@ cargo build -p mpc-contract --release --features "bench" --target wasm32-unknown
 cargo build -p mpc-node --release --features "bench"
 
 cd ../integration-tests
-MPC_TEST_BUILD_DISABLED=1 cargo bench
+cargo bench
