@@ -5,8 +5,8 @@ use std::time::{Duration, Instant};
 use anyhow::Context as _;
 use cait_sith::FullSignature;
 use k256::{AffinePoint, Secp256k1};
-use mpc_crypto::kdf::derive_secret_key;
 use mpc_primitives::{Chain, ChainEvent, IndexedSignRequest, SignArgs, SignId, SignKind};
+use signet_crypto::{derive_key, reconstruct_signature};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio::time::timeout;
@@ -28,7 +28,8 @@ pub fn make_signature(
     payload: k256::Scalar,
 ) -> FullSignature<Secp256k1> {
     use k256::elliptic_curve::point::DecompressPoint;
-    let signing_key = k256::ecdsa::SigningKey::from(&derive_secret_key(sk, epsilon));
+    let derived_sk = k256::SecretKey::new((epsilon + sk.to_nonzero_scalar().as_ref()).into());
+    let signing_key = k256::ecdsa::SigningKey::from(&derived_sk);
     let (ecdsa_sig, _): (k256::ecdsa::Signature, _) =
         <k256::ecdsa::SigningKey as k256::ecdsa::signature::hazmat::PrehashSigner<_>>::sign_prehash(
             &signing_key,
@@ -89,13 +90,9 @@ pub fn make_publish_action_for(
     let sk = k256::SecretKey::random(&mut rand::thread_rng());
     let pk: AffinePoint = sk.public_key().into();
     let output = make_signature(&sk, epsilon, payload);
-    let signature = mpc_crypto::reconstruct_signature(
-        &mpc_crypto::derive_key(pk, epsilon),
-        &output.big_r,
-        &output.s,
-        payload,
-    )
-    .expect("valid signature should reconstruct");
+    let signature =
+        reconstruct_signature(&derive_key(pk, epsilon), &output.big_r, &output.s, payload)
+            .expect("valid signature should reconstruct");
     PublishAction {
         request: Arc::new(make_indexed(chain, epsilon, payload, kind, sign_id)),
         signature,
