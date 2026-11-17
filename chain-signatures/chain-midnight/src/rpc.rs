@@ -1066,9 +1066,10 @@ fn decode_network_id(answer: &[u8]) -> anyhow::Result<NetworkId> {
     NetworkId::try_from(reported.as_str()).context("the midnight node reported an unknown network")
 }
 
-/// The network id of the node at `node_http_url` once it has imported block 1, or `None`
-/// while it has not. Dials afresh on every call, so a sandbox that is still booting
-/// answers with a connection error and the caller keeps polling.
+/// The network id of the node at `node_http_url` once it has imported block 1, or
+/// `None` while it has not; an unlisted id is an error naming it, never a reported
+/// value. Dials afresh on every call, so a sandbox that is still booting answers with
+/// a connection error and the caller keeps polling.
 #[cfg(feature = "sandbox")]
 pub async fn probe_network_id(node_http_url: &str) -> anyhow::Result<Option<NetworkId>> {
     let rpc = connect_http_endpoint(node_http_url, &RpcConfig::default())?;
@@ -3262,8 +3263,6 @@ mod tests {
 
     #[test]
     fn network_id_decoder_consumes_the_whole_scale_value() {
-        use subxt::ext::codec::Encode as _;
-
         let encoded = "preview".to_string().encode();
         assert_eq!(decode_network_id(&encoded).unwrap(), NetworkId::Preview);
 
@@ -3280,8 +3279,6 @@ mod tests {
 
     #[test]
     fn an_unknown_network_id_fails_the_decode_boundary_with_the_reported_id() {
-        use subxt::ext::codec::Encode as _;
-
         let err = decode_network_id(&"devnet".to_string().encode())
             .expect_err("the publisher builds for no unknown network");
         assert!(
@@ -3290,9 +3287,42 @@ mod tests {
         );
     }
 
+    /// An unlisted id errors, never `None`, which a readiness loop would keep polling.
+    #[cfg(feature = "sandbox")]
+    #[tokio::test]
+    async fn probing_a_node_on_an_unlisted_network_errors_with_the_reported_id() {
+        let server = ServerBuilder::default()
+            .build("127.0.0.1:0")
+            .await
+            .expect("bind HTTP rpc server");
+        let address = server.local_addr().expect("HTTP rpc server address");
+        let mut module = RpcModule::new(());
+        module
+            .register_method("chain_getBlockHash", |_, _, _| hash_of_byte(0x43))
+            .expect("register block-hash method");
+        module
+            .register_method("chain_getFinalizedHead", |_, _, _| hash_of_byte(0x43))
+            .expect("register finalized-head method");
+        let devnet = "devnet".to_string().encode();
+        module
+            .register_method("state_call", move |params, _, _| {
+                let (method, _, _) = params.parse::<(String, String, String)>().unwrap();
+                assert_eq!(method, NETWORK_ID_ENTRY);
+                format!("0x{}", hex::encode(&devnet))
+            })
+            .expect("register state-call method");
+        let _handle = server.start(module);
+
+        let error = probe_network_id(&format!("http://{address}"))
+            .await
+            .expect_err("an unlisted network is a probe error, never a reported id");
+        let rendered = format!("{error:#}");
+        assert!(rendered.contains("'devnet'"), "{rendered}");
+        assert!(rendered.contains("unknown network"), "{rendered}");
+    }
+
     #[test]
     fn runtime_api_result_envelope_unwraps_ok_err_and_garbage() {
-        use subxt::ext::codec::Encode as _;
         // Ok(vec![0xaa, 0xbb]): discriminant 0, then a SCALE Vec<u8>.
         let mut ok = vec![0u8];
         ok.extend(vec![0xaau8, 0xbb].encode());
