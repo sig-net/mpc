@@ -1,7 +1,8 @@
 //! Why a build or submit failed, in the classes the retry logic and the logs tell
-//! apart. Malformed or mismatched inputs are terminal — every retry replays the
-//! same backlog bytes; every other class waits on a runtime event the retry may
-//! yet observe.
+//! apart. Terminal are malformed inputs, refused gates, and a node send the
+//! transport refused with a status other than 402, 408, 429 or 5xx — every retry
+//! would replay them unchanged. Every other class waits on a runtime event the
+//! retry may yet observe.
 
 use mpc_chain_integration_core::utils::retry::RpcFailure;
 
@@ -71,9 +72,10 @@ impl SubmitError {
         }
     }
 
-    /// Whether a retry of this publish can still succeed. Only the action's own
-    /// inputs are terminal — malformed or mismatched bytes, or a gate refusal:
-    /// every retry replays them; failover covers delivery while a fix lands.
+    /// Whether this class is terminal on its own — `Node` is not: its verdict
+    /// comes from the HTTP status its source carries. The action's own inputs
+    /// are: every retry replays them, so failover covers delivery while a fix
+    /// lands.
     fn terminal(&self) -> bool {
         matches!(
             self,
