@@ -518,10 +518,10 @@ fn boolean(cursor: &mut AtomCursor, what: &'static str) -> anyhow::Result<bool> 
 fn one_byte_enum<T>(cursor: &mut AtomCursor, what: &'static str) -> anyhow::Result<T>
 where
     T: TryFrom<u8>,
-    T::Error: std::fmt::Display,
+    T::Error: std::error::Error + Send + Sync + 'static,
 {
     let value = uint::<u8>(cursor, 1, what)?;
-    T::try_from(value).map_err(|err| anyhow::anyhow!("{what}: {err}"))
+    T::try_from(value).map_err(|err| anyhow::Error::new(err).context(what))
 }
 
 fn decode_sign_bidirectional(
@@ -672,7 +672,7 @@ fn decode_tron_tx_params(
 mod tests {
     use super::*;
     use crate::emissions::{emissions_in, DecodedTransaction, Emission, EmissionKind};
-    use crate::records::SignBidirectionalEventNotification;
+    use crate::records::{RecordDiscriminantError, SignBidirectionalEventNotification};
     use crate::test_utils::{
         aligned_cell, alignment_of, array_of, atoms_from_record, cell_from_atoms, cell_from_record,
         hex_32, key_of, map_of, minimal_record, sample_record,
@@ -1091,6 +1091,34 @@ mod tests {
             .expect_err("an unknown tx_param_type must fail by name, not as capacity arithmetic")
             .to_string();
         assert!(err.contains("tx_param_type 2"), "err: {err}");
+    }
+
+    /// The refusal keeps its type in the chain: the field names the atom, the typed
+    /// error carries the byte, and both survive the composition.
+    #[test]
+    fn decode_record_refuses_unknown_discriminants_with_the_typed_cause_intact() {
+        let record = sample_record();
+        for (atom, field, typed) in [
+            (3usize, "algo", RecordDiscriminantError::Algo(2)),
+            (
+                atoms_from_record(&record).len() - 4,
+                "signature_dest",
+                RecordDiscriminantError::Destination(2),
+            ),
+        ] {
+            let mut atoms = atoms_from_record(&record);
+            atoms[atom] = vec![2];
+            let err = decode_record(&cell_from_atoms(&atoms, &widths_from_record(&record)))
+                .expect_err("an out-of-family discriminant must not decode");
+            let rendered = format!("{err:#}");
+            assert!(rendered.contains(field), "{rendered}");
+            assert!(rendered.contains("unsupported"), "{rendered}");
+            assert!(
+                err.chain()
+                    .any(|cause| cause.downcast_ref::<RecordDiscriminantError>() == Some(&typed)),
+                "the typed refusal must survive as a cause: {rendered}"
+            );
+        }
     }
 
     #[test]
