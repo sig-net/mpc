@@ -1918,4 +1918,343 @@ mod tests {
         task.abort();
         let _ = task.await;
     }
+
+    /// An indexer for the full convergence path: run 1 reports caught-up and
+    /// waits to be cancelled by the stall handler; run 2 waits on `rebuild_gate`
+    /// so the test can assert the re-anchored state before it rebuilds past the
+    /// base to the next boundary, votes there, then waits. `rebuilt` is signalled
+    /// once the block event is queued.
+    struct ConvergenceIndexer {
+        attempts: Arc<AtomicUsize>,
+        rebuild_gate: Arc<Notify>,
+        rebuilt: Arc<Notify>,
+        /// The first checkpoint boundary above the settled base.
+        new_boundary: u64,
+    }
+
+    #[async_trait::async_trait]
+    impl ChainIndexer for ConvergenceIndexer {
+        const CHAIN: Chain = Chain::Ethereum;
+
+        async fn run(
+            &self,
+            events_tx: mpsc::Sender<ChainEvent>,
+            cancel: CancellationToken,
+        ) -> anyhow::Result<()> {
+            let run = self.attempts.fetch_add(1, Ordering::SeqCst);
+            events_tx.send(ChainEvent::CatchupCompleted).await.unwrap();
+            if run > 0 {
+                self.rebuild_gate.notified().await;
+                events_tx
+                    .send(ChainEvent::Block(self.new_boundary))
+                    .await
+                    .unwrap();
+                self.rebuilt.notify_one();
+            }
+            cancel.cancelled().await;
+            Ok(())
+        }
+    }
+
+    /// End-to-end settlement-stall convergence (doc/checkpoints.md §7).
+    ///
+    /// The contract is simulated through the two watch channels the supervisor
+    /// already consumes — `checkpoint_votes_rx` for contract vote tallies and
+    /// `checkpoints_rx` for the settled checkpoint the contract published — so
+    /// no on-chain contract round trip runs in this unit test.
+    #[tokio::test]
+    async fn settlement_stall_converges_then_healthy_settlement_confirms() {
+        let _guard = STALL_TEST_LOCK.lock().unwrap();
+        let chain = Chain::Ethereum;
+        let (backlog, base) = stall_test_backlog(chain).await;
+
+        // Simulate the per-height voted-record retention a real node keeps: it
+        // voted for the pending checkpoint at the first boundary (100).
+        let pending = backlog
+            .checkpoints()
+            .storage()
+            .load_pending(chain)
+            .await
+            .unwrap();
+        let voted = pending[0].clone();
+        backlog.checkpoints().persist_voted(&voted).await.unwrap();
+        assert!(!backlog
+            .checkpoints()
+            .load_voted(chain)
+            .await
+            .unwrap()
+            .is_empty());
+
+        let new_boundary = base.block_height + checkpoint_interval(chain).unwrap();
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let rebuild_gate = Arc::new(Notify::new());
+        let rebuilt = Arc::new(Notify::new());
+        let indexer = ConvergenceIndexer {
+            attempts: attempts.clone(),
+            rebuild_gate: rebuild_gate.clone(),
+            rebuilt: rebuilt.clone(),
+            new_boundary,
+        };
+        let (sign_tx, mut sign_rx) = mpsc::channel(8);
+        // Start not caught up: run 1 emits CatchupCompleted so the stall can be
+        // observed clearing it.
+        let (mut ctx, cp_tx, mesh_tx, mut rpc_rx) = make_test_stream_context(
+            backlog.clone(),
+            sign_tx,
+            false,
+            ProjectivePoint::GENERATOR.to_affine(),
+            5,
+        );
+        mesh_tx.send(stall_test_mesh()).unwrap();
+        let (votes_tx, votes_rx) = watch::channel(Vec::<CheckpointVoteTally>::new());
+        ctx.checkpoint_votes_rx = votes_rx;
+
+        let rebases_before = stall_rebase_count(chain);
+        let detections_before = stall_detection_count(chain);
+        let task = tokio::spawn(run_supervised_with_watchdog(
+            indexer,
+            ctx,
+            NoopChainTelemetry,
+            Duration::from_secs(60),
+        ));
+        wait_for_runs_count(&attempts, 1).await;
+
+        // Run 1 reports caught up before the stall arrives.
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !backlog.is_caught_up(chain) {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("run 1 should report caught up");
+
+        // Contract tallies (simulated): > 2f votes split across digests at the
+        // first boundary (100), no digest at t = 5.
+        votes_tx
+            .send(vec![stall_tally(100, &[(1, 3), (2, 2)])])
+            .unwrap();
+
+        // Skip the startup vote resubmission to reach the stall's aborts. The
+        // handler clears caught-up before sending them.
+        let abort = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                match rpc_rx.recv().await {
+                    Some(RpcAction::VoteCheckpoint { .. }) => continue,
+                    other => break other,
+                }
+            }
+        })
+        .await
+        .expect("a stall should abort checkpoint work");
+        assert!(matches!(
+            abort,
+            Some(RpcAction::AbortCheckpoints(Chain::Ethereum))
+        ));
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_secs(5), sign_rx.recv())
+                .await
+                .expect("a stall should abort sign tasks"),
+            Some(SignCommand::AbortChain(Chain::Ethereum))
+        ));
+        assert!(!backlog.is_caught_up(chain), "the stall clears caught-up");
+
+        // The restart re-anchors at the settled base: pending count zero,
+        // processed height and backlog back at the base, voted records cleared.
+        wait_for_runs_count(&attempts, 2).await;
+        assert_eq!(
+            backlog.get_processed_block(chain).await,
+            Some(base.block_height)
+        );
+        assert!(backlog
+            .checkpoints()
+            .load_pending(chain)
+            .await
+            .unwrap()
+            .is_empty());
+        assert_eq!(backlog.checkpoints().count(chain), 0);
+        assert!(backlog
+            .checkpoints()
+            .load_voted(chain)
+            .await
+            .unwrap()
+            .is_empty());
+        assert_eq!(stall_rebase_count(chain), rebases_before + 1);
+
+        // Allow run 2 to rebuild past the base to the new boundary and vote
+        // again.
+        rebuild_gate.notify_one();
+        rebuilt.notified().await;
+        let rebuilt_vote = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                match rpc_rx.recv().await {
+                    Some(RpcAction::VoteCheckpoint { checkpoint, .. })
+                        if checkpoint.height == new_boundary =>
+                    {
+                        break checkpoint;
+                    }
+                    _ => continue,
+                }
+            }
+        })
+        .await
+        .expect("rebuilt indexer should vote at the new boundary");
+        assert_eq!(rebuilt_vote.height, new_boundary);
+        let rebuilt_pending = backlog.checkpoints().load_pending(chain).await.unwrap();
+        assert!(
+            rebuilt_pending
+                .iter()
+                .any(|cp| cp.block_height == new_boundary),
+            "a checkpoint should be created from the rebuilt backlog"
+        );
+
+        // Healthy tallies (simulated): one digest reaches t = 5, so the new
+        // boundary is settling, not stalling.
+        votes_tx
+            .send(vec![stall_tally(new_boundary, &[(1, 5)])])
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(
+            stall_detection_count(chain),
+            detections_before + 1,
+            "only the first snapshot is a detection"
+        );
+
+        // The contract settles that checkpoint: simulate it on the
+        // settled-checkpoint watch channel. A matching digest confirms the
+        // pending checkpoint rather than triggering a regression/rebase.
+        cp_tx
+            .send(Some(CheckpointDigest {
+                chain,
+                height: new_boundary,
+                digest: rebuilt_vote.digest,
+            }))
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Some(settled) = backlog
+                    .checkpoints()
+                    .storage()
+                    .load_latest(chain)
+                    .await
+                    .unwrap()
+                {
+                    if settled.block_height == new_boundary {
+                        break;
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the settled checkpoint should be confirmed at the new boundary");
+        assert!(backlog
+            .checkpoints()
+            .load_pending(chain)
+            .await
+            .unwrap()
+            .is_empty());
+
+        // The stall cleared: no third run and no second rebase.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(attempts.load(Ordering::SeqCst), 2, "no third run");
+        assert_eq!(
+            stall_rebase_count(chain),
+            rebases_before + 1,
+            "no second rebase"
+        );
+
+        task.abort();
+        let _ = task.await;
+    }
+
+    /// Companion case: tallies healthy from the start never trip the stall —
+    /// no aborts, no rebase, no restart, and the pending checkpoint is intact.
+    #[tokio::test]
+    async fn healthy_tallies_from_the_start_never_rebase_or_abort() {
+        let _guard = STALL_TEST_LOCK.lock().unwrap();
+        let chain = Chain::Ethereum;
+        let (backlog, _base) = stall_test_backlog(chain).await;
+
+        let pending = backlog
+            .checkpoints()
+            .storage()
+            .load_pending(chain)
+            .await
+            .unwrap();
+        backlog
+            .checkpoints()
+            .persist_voted(&pending[0])
+            .await
+            .unwrap();
+
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let indexer = AlwaysStallIndexer {
+            attempts: attempts.clone(),
+        };
+        let (sign_tx, mut sign_rx) = mpsc::channel(8);
+        let (mut ctx, _cp_tx, mesh_tx, mut rpc_rx) = make_test_stream_context(
+            backlog.clone(),
+            sign_tx,
+            true,
+            ProjectivePoint::GENERATOR.to_affine(),
+            5,
+        );
+        mesh_tx.send(stall_test_mesh()).unwrap();
+        let (votes_tx, votes_rx) = watch::channel(Vec::<CheckpointVoteTally>::new());
+        ctx.checkpoint_votes_rx = votes_rx;
+
+        let rebases_before = stall_rebase_count(chain);
+        let detections_before = stall_detection_count(chain);
+        let task = tokio::spawn(run_supervised_with_watchdog(
+            indexer,
+            ctx,
+            NoopChainTelemetry,
+            Duration::from_secs(60),
+        ));
+        wait_for_runs_count(&attempts, 1).await;
+
+        // Drain the startup vote resubmission.
+        while let Ok(Some(action)) =
+            tokio::time::timeout(Duration::from_millis(50), rpc_rx.recv()).await
+        {
+            if matches!(action, RpcAction::VoteCheckpoint { .. }) {
+                break;
+            }
+        }
+
+        // Healthy tally at the first boundary (100): one digest at t = 5.
+        votes_tx.send(vec![stall_tally(100, &[(1, 5)])]).unwrap();
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        assert_eq!(stall_detection_count(chain), detections_before);
+        assert_eq!(stall_rebase_count(chain), rebases_before);
+        assert_eq!(attempts.load(Ordering::SeqCst), 1, "no restart");
+        assert_eq!(backlog.get_processed_block(chain).await, Some(100));
+        assert_eq!(backlog.checkpoints().count(chain), 1, "pending intact");
+        assert!(!backlog
+            .checkpoints()
+            .load_voted(chain)
+            .await
+            .unwrap()
+            .is_empty());
+        while let Ok(Some(action)) =
+            tokio::time::timeout(Duration::from_millis(50), rpc_rx.recv()).await
+        {
+            assert!(
+                !matches!(action, RpcAction::AbortCheckpoints(_)),
+                "no checkpoint abort on a healthy tally"
+            );
+        }
+        while let Ok(Some(cmd)) =
+            tokio::time::timeout(Duration::from_millis(50), sign_rx.recv()).await
+        {
+            assert!(
+                !matches!(cmd, SignCommand::AbortChain(_)),
+                "no sign abort on a healthy tally"
+            );
+        }
+
+        task.abort();
+        let _ = task.await;
+    }
 }
