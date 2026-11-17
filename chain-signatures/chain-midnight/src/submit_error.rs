@@ -90,10 +90,15 @@ impl SubmitError {
         match self {
             // The send partition, like ethereum's pre-broadcast nonce fetch:
             // nothing was posted, so a classic 4xx hands the publish to failover.
+            // A carrier already inside the source rides as-is (`from_chain`) —
+            // its verdict, status and retry_after win over the derivation.
             Self::Node { source } => {
-                let failure = match rejected_http_status(&source) {
-                    Some(status) => RpcFailure::send_status(status, format!("{source:#}")),
-                    None => RpcFailure::retryable(format!("{source:#}")),
+                let failure = match RpcFailure::from_chain(&source) {
+                    Some(failure) => failure,
+                    None => match rejected_http_status(&source) {
+                        Some(status) => RpcFailure::send_status(status, format!("{source:#}")),
+                        None => RpcFailure::retryable(format!("{source:#}")),
+                    },
                 };
                 anyhow::Error::new(failure).context(Self::Node { source })
             }
@@ -191,6 +196,35 @@ mod tests {
         assert!(!is_provider_throttled(&error), "{error:#}");
         assert!(is_retryable(&error), "{error:#}");
         assert_eq!(refusal_code(&error), Some("internal"));
+    }
+
+    #[test]
+    fn upstream_carriers_win_over_the_derived_verdict() {
+        use http::StatusCode;
+
+        let terminal = SubmitError::Node {
+            source: anyhow::Error::new(RpcFailure::terminal("upstream refused".to_string()))
+                .context("upstream"),
+        }
+        .into_publish_error();
+        assert!(!is_retryable(&terminal), "{terminal:#}");
+
+        // The carrier's verdict wins over the send partition its status implies.
+        let retryable = SubmitError::Node {
+            source: anyhow::Error::new(RpcFailure::retryable_with_status(
+                StatusCode::from_u16(409).unwrap(),
+                "upstream retry".to_string(),
+            ))
+            .context("upstream"),
+        }
+        .into_publish_error();
+        assert!(is_retryable(&retryable), "{retryable:#}");
+        let carrier = retryable
+            .chain()
+            .find_map(|cause| cause.downcast_ref::<RpcFailure>())
+            .expect("the carrier survives the boundary");
+        assert_eq!(carrier.status(), StatusCode::from_u16(409).ok());
+        assert!(!carrier.is_terminal());
     }
 
     #[test]
