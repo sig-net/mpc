@@ -488,7 +488,8 @@ async fn test_pending_checkpoint_persistence() -> anyhow::Result<()> {
                 conflicting.chain,
             ),
         ));
-    assert!(restarted.persist_pending(&conflicting).await.is_err());
+    assert_eq!(restarted.persist_pending(&conflicting).await?, None);
+    assert_eq!(restarted.persist_pending(&second).await?, Some(1));
     assert!(restarted
         .promote_pending(Chain::Solana, [99; 32])
         .await?
