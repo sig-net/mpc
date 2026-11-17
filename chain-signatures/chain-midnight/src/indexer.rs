@@ -217,7 +217,7 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
                                 .process_entry(
                                     source,
                                     notification,
-                                    caller,
+                                    caller.map(MidnightAddress::from_bytes),
                                     &block.hash,
                                     block.number,
                                     block_entropy,
@@ -344,7 +344,7 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
         &self,
         source: &C,
         notification: SignBidirectionalEventNotification,
-        direct_caller: Option<[u8; 32]>,
+        direct_caller: Option<MidnightAddress>,
         at_hash: &BlockHash,
         height: u64,
         block_entropy: [u8; 32],
@@ -372,22 +372,18 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
                 ));
             }
         };
-        let caller = MidnightAddress::from_bytes(unpacked.caller_address);
-        let caller_hex = caller.to_hex();
+        let notified = MidnightAddress::from_bytes(unpacked.caller_address);
 
         // `caller_address` is producer-supplied, since a Midnight callee cannot see its caller.
         // Bind it to the ledger-recorded direct caller so no contract can notify as another.
         match direct_caller {
-            Some(caller) if caller == unpacked.caller_address => {}
-            Some(caller) => {
+            Some(direct) if direct == notified => {}
+            Some(direct) => {
                 return Ok(drop_entry(
                     "caller-mismatch",
                     height,
                     Some(rid),
-                    &format!(
-                        "notification names {caller_hex}, direct caller is {}",
-                        hex::encode(caller)
-                    ),
+                    &format!("notification names {notified}, direct caller is {direct}"),
                 ));
             }
             None => {
@@ -395,23 +391,21 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
                     "caller-absent",
                     height,
                     Some(rid),
-                    &format!(
-                        "notification names {caller_hex}, singleton call has no direct caller"
-                    ),
+                    &format!("notification names {notified}, singleton call has no direct caller"),
                 ));
             }
         }
 
         // Authority: the caller's own ledger at the SAME finalized hash the
         // notification was read at.
-        let caller_tree = match source.contract_state_tree(&caller, at_hash).await {
+        let caller_tree = match source.contract_state_tree(&notified, at_hash).await {
             Ok(ContractState::Tree(tree)) => tree,
             Ok(ContractState::Absent) => {
                 return Ok(drop_entry(
                     "caller-contract-absent",
                     height,
                     Some(rid),
-                    &caller_hex,
+                    &notified.to_string(),
                 ));
             }
             Ok(ContractState::Undecodable(err)) => {
@@ -419,7 +413,7 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
                     "caller-state-undecodable",
                     height,
                     Some(rid),
-                    &format!("{caller_hex}: {err:#}"),
+                    &format!("{notified}: {err:#}"),
                 ));
             }
             Err(err) if is_oversized_contract_state(&err) => {
@@ -427,11 +421,11 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
                     "caller-state-too-large",
                     height,
                     Some(rid),
-                    &format!("{caller_hex}: {err:#}"),
+                    &format!("{notified}: {err:#}"),
                 ));
             }
             Err(err) => {
-                return Err(err.context(format!("failed to read caller state {caller_hex}")));
+                return Err(err.context(format!("failed to read caller state {notified}")));
             }
         };
         let field = match signet_field_node_by_path(&caller_tree, &unpacked.requests_path) {
@@ -469,7 +463,7 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
         // transaction wrote. Only a record new in this block was written by a committed
         // segment of this block.
         if let Some(parent_hash) = rolled_back_parent {
-            let parent_tree = match source.contract_state_tree(&caller, parent_hash).await {
+            let parent_tree = match source.contract_state_tree(&notified, parent_hash).await {
                 Ok(ContractState::Tree(tree)) => Some(tree),
                 Ok(ContractState::Absent) => None,
                 Ok(ContractState::Undecodable(err)) => {
@@ -477,7 +471,7 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
                         "parent-state-undecodable",
                         height,
                         Some(rid),
-                        &format!("{caller_hex}: {err:#}"),
+                        &format!("{notified}: {err:#}"),
                     ));
                 }
                 Err(err) if is_oversized_contract_state(&err) => {
@@ -485,12 +479,12 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
                         "parent-state-too-large",
                         height,
                         Some(rid),
-                        &format!("{caller_hex}: {err:#}"),
+                        &format!("{notified}: {err:#}"),
                     ));
                 }
                 Err(err) => {
                     return Err(err.context(format!(
-                        "failed to read caller state {caller_hex} at the parent block"
+                        "failed to read caller state {notified} at the parent block"
                     )));
                 }
             };
@@ -514,7 +508,7 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
                             height,
                             Some(rid),
                             &format!(
-                                "{caller_hex} held the record before this block, and this \
+                                "{notified} held the record before this block, and this \
                                  fallible notification of a partial success may have rolled back"
                             ),
                         ));
@@ -532,7 +526,7 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
         }
         match generate_sign_request(
             &record,
-            &caller,
+            &notified,
             rid,
             block_entropy,
             indexed_ts,
@@ -1679,7 +1673,7 @@ mod tests {
             .process_entry(
                 &source,
                 notification.clone(),
-                call.caller,
+                call.caller.map(MidnightAddress::from_bytes),
                 &capture_block_hash(),
                 CAPTURE_HEIGHT,
                 [0x55; 32],
@@ -1741,7 +1735,7 @@ mod tests {
             .process_entry(
                 &source,
                 notification,
-                call.caller,
+                call.caller.map(MidnightAddress::from_bytes),
                 &capture_block_hash(),
                 CAPTURE_HEIGHT,
                 [0x55; 32],
