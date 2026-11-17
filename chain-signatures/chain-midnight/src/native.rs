@@ -160,7 +160,7 @@ impl<W: FeePayer, C: SubmitChain> NativeIntentClient<W, C> {
             .verifier_key_hash(circuit)
             .map_err(|error| SubmitError::ContractMismatch(error.to_string()))?;
         let deployment = Deployment::new(
-            ContractAddress(HashOutput(request.contract_address)),
+            ContractAddress(HashOutput(*request.contract_address.as_bytes())),
             [(circuit.to_string(), packaged)],
         );
         deployment
@@ -593,6 +593,7 @@ fn node(error: anyhow::Error) -> SubmitError {
 
 #[cfg(test)]
 mod tests {
+    use crate::MidnightAddress;
     use std::collections::VecDeque;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Mutex;
@@ -760,7 +761,11 @@ mod tests {
             Ok(block_hash(*head))
         }
 
-        async fn contract_state(&self, _: &str, _: &str) -> anyhow::Result<Option<Vec<u8>>> {
+        async fn contract_state(
+            &self,
+            _: &MidnightAddress,
+            _: &str,
+        ) -> anyhow::Result<Option<Vec<u8>>> {
             unimplemented!("the post path reads no contract state")
         }
 
@@ -904,7 +909,7 @@ mod tests {
     pub(super) fn respond_request() -> IntentRequest {
         IntentRequest {
             circuit: RespondCircuit::Respond,
-            contract_address: hex32(RESPONDER),
+            contract_address: MidnightAddress::from_bytes(hex32(RESPONDER)),
             request_id: hex32(REQUEST_ID),
             signature: EcdsaSignature {
                 big_r_x: [0x11; 32],
@@ -1799,7 +1804,7 @@ mod live {
             rpc.network_id(),
             config.publisher.submit_timeout,
         );
-        let responder = config.responder_address.to_hex();
+        let responder = config.responder_address;
         let bidirectional = RespondCircuit::RespondBidirectional(Attestation {
             block_height: 123_456,
             output_kind: 0,
@@ -1821,7 +1826,7 @@ mod live {
             let parameters = rpc.ledger_parameters(&head).await.unwrap();
             let request = IntentRequest {
                 circuit,
-                contract_address: *config.responder_address.as_bytes(),
+                contract_address: config.responder_address,
                 request_id: rand::random(),
                 signature: EcdsaSignature {
                     big_r_x: [0x11; 32],

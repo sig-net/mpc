@@ -1,6 +1,6 @@
 //! The node reads the indexer consumes: the [`ChainSource`] seam and its subxt implementation.
 
-use crate::config::MidnightConfig;
+use crate::config::{MidnightAddress, MidnightConfig};
 use crate::emissions::ContractCallEmissions;
 use crate::reader::Node;
 use crate::rpc::{BlockRef, MidnightRpc};
@@ -58,13 +58,13 @@ pub(crate) trait ChainSource: Send + Sync {
     async fn block_emissions(
         &self,
         block: &BlockRef,
-        singleton: &[u8; 32],
-        responder: &[u8; 32],
+        singleton: &MidnightAddress,
+        responder: &MidnightAddress,
     ) -> anyhow::Result<Option<BlockEmissions>>;
-    /// The decoded state tree of `address_64hex` at `at_hash`.
+    /// The decoded state tree of `address` at `at_hash`.
     async fn contract_state_tree(
         &self,
-        address_64hex: &str,
+        address: &MidnightAddress,
         at_hash: &str,
     ) -> anyhow::Result<ContractState>;
 }
@@ -94,18 +94,18 @@ impl ChainSource for LiveSource {
     async fn block_emissions(
         &self,
         block: &BlockRef,
-        singleton: &[u8; 32],
-        responder: &[u8; 32],
+        singleton: &MidnightAddress,
+        responder: &MidnightAddress,
     ) -> anyhow::Result<Option<BlockEmissions>> {
         self.rpc.block_emissions(block, singleton, responder).await
     }
 
     async fn contract_state_tree(
         &self,
-        address_64hex: &str,
+        address: &MidnightAddress,
         at_hash: &str,
     ) -> anyhow::Result<ContractState> {
-        match self.rpc.contract_state(address_64hex, at_hash).await? {
+        match self.rpc.contract_state(address, at_hash).await? {
             None => Ok(ContractState::Absent),
             Some(state) => Ok(match decode_contract_state(&state) {
                 Ok(tree) => ContractState::Tree(tree),

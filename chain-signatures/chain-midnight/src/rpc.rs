@@ -22,7 +22,7 @@ use subxt::ext::subxt_rpcs::{rpc_params, Error as RawRpcError, UserError};
 use subxt::utils::H256;
 use subxt::SubstrateConfig;
 
-use crate::config::{MidnightConfig, RpcConfig};
+use crate::config::{MidnightAddress, MidnightConfig, RpcConfig};
 use crate::emissions::{emissions_in, partial_success_emissions_in, DecodedTransaction};
 use crate::indexer::BlockHold;
 use crate::source::{BlockEmissions, BlockProofSeed, CandidateTransactionEmissions};
@@ -390,16 +390,14 @@ impl MidnightRpc {
         })
     }
 
-    /// Raw contract state of `address_64hex` (64 hex chars, no `0x`) at
-    /// `at_block_hash_0x` (`0x`-prefixed), via the `midnight_contractState` JSON-RPC.
+    /// Raw contract state of `address` at `at_block_hash_0x` (`0x`-prefixed), via the
+    /// `midnight_contractState` JSON-RPC.
     pub async fn contract_state(
         &self,
-        address_64hex: &str,
+        address: &MidnightAddress,
         at_block_hash_0x: &str,
     ) -> anyhow::Result<Option<Vec<u8>>> {
-        self.reads
-            .contract_state(address_64hex, at_block_hash_0x)
-            .await
+        self.reads.contract_state(address, at_block_hash_0x).await
     }
 
     /// The finalized head as a [`BlockRef`]: the head hash, then, when it moved, its
@@ -504,8 +502,8 @@ impl MidnightRpc {
     pub(crate) async fn block_emissions(
         &self,
         block_ref: &BlockRef,
-        singleton: &[u8; 32],
-        responder: &[u8; 32],
+        singleton: &MidnightAddress,
+        responder: &MidnightAddress,
     ) -> anyhow::Result<Option<BlockEmissions>> {
         let hash = parse_block_hash(&block_ref.hash)?;
         let read = self
@@ -546,8 +544,8 @@ impl MidnightRpc {
                 )
             })?;
             let tx = &found.value.midnight_tx;
-            if memchr::memmem::find(tx, singleton).is_some()
-                || memchr::memmem::find(tx, responder).is_some()
+            if memchr::memmem::find(tx, singleton.as_bytes()).is_some()
+                || memchr::memmem::find(tx, responder.as_bytes()).is_some()
             {
                 candidates.push(found);
             }
@@ -620,7 +618,7 @@ impl MidnightRpc {
                     )
                 },
             )?;
-            let decode = |contract: &[u8; 32]| {
+            let decode = |contract: &MidnightAddress| {
                 let schema_hold = |err: anyhow::Error| {
                     BlockHold::new(
                         "emission-schema-hold",
@@ -629,15 +627,18 @@ impl MidnightRpc {
                             "candidate extrinsic {} transaction {} emissions of contract {}",
                             found.details.index(),
                             hex::encode(ledger_tx_hash),
-                            hex::encode(contract)
+                            contract
                         )),
                     )
                 };
                 anyhow::Ok(match status {
-                    AppliedStatus::Applied => emissions_in(&tx, contract).map_err(schema_hold)?,
+                    AppliedStatus::Applied => {
+                        emissions_in(&tx, contract.as_bytes()).map_err(schema_hold)?
+                    }
                     AppliedStatus::PartialSuccess => {
                         let (calls, skipped) =
-                            partial_success_emissions_in(&tx, contract).map_err(schema_hold)?;
+                            partial_success_emissions_in(&tx, contract.as_bytes())
+                                .map_err(schema_hold)?;
                         for skipped in skipped {
                             tracing::warn!(
                                 reason = "partial-success-fallible-skipped",
@@ -645,7 +646,7 @@ impl MidnightRpc {
                                 height,
                                 block_hash = %block_ref.hash,
                                 extrinsic_index = found.details.index(),
-                                contract = %hex::encode(contract),
+                                contract = %contract,
                                 call_index = skipped.call_index,
                                 physical_segment = skipped.physical_segment,
                                 error = %format_args!("{:#}", skipped.reason),
@@ -671,8 +672,8 @@ impl MidnightRpc {
                 reported_genesis_hash: *self.client.genesis_hash().as_fixed_bytes(),
                 reported_block_number: height,
                 reported_block_hash: *hash.as_fixed_bytes(),
-                singleton_address: *singleton,
-                responder_address: *responder,
+                singleton_address: *singleton.as_bytes(),
+                responder_address: *responder.as_bytes(),
                 scale_header: header.encode(),
                 scale_body: extrinsics
                     .iter()
@@ -870,7 +871,7 @@ pub(crate) trait PinnedReads: Send + Sync {
     /// nothing above this trait may reintroduce the distinction.
     async fn contract_state(
         &self,
-        address_64hex: &str,
+        address: &MidnightAddress,
         at_hash_0x: &str,
     ) -> anyhow::Result<Option<Vec<u8>>>;
     async fn ledger_parameters(&self, at_hash_0x: &str) -> anyhow::Result<Vec<u8>>;
@@ -889,10 +890,10 @@ impl PinnedReads for MidnightPublisherRpc {
 
     async fn contract_state(
         &self,
-        address_64hex: &str,
+        address: &MidnightAddress,
         at_hash_0x: &str,
     ) -> anyhow::Result<Option<Vec<u8>>> {
-        publisher_contract_state(&self.rpc, address_64hex, at_hash_0x).await
+        publisher_contract_state(&self.rpc, address, at_hash_0x).await
     }
 
     async fn ledger_parameters(&self, at_hash_0x: &str) -> anyhow::Result<Vec<u8>> {
@@ -1093,9 +1094,11 @@ pub async fn probe_network_id(node_http_url: &str) -> anyhow::Result<Option<Stri
 
 async fn publisher_contract_state(
     rpc: &RpcClient,
-    address_64hex: &str,
+    address: &MidnightAddress,
     at_block_hash_0x: &str,
 ) -> anyhow::Result<Option<Vec<u8>>> {
+    // The one surface that takes the address bare: 64 hex chars, no `0x`.
+    let address_64hex = address.to_hex();
     let response = rpc
         .request::<String>(
             "midnight_contractState",
@@ -1426,9 +1429,10 @@ impl Reads {
 
     async fn contract_state(
         &self,
-        address_64hex: &str,
+        address: &MidnightAddress,
         at_block_hash_0x: &str,
     ) -> anyhow::Result<Option<Vec<u8>>> {
+        let address_64hex = address.to_hex();
         retry_read(
             self.request_timeout,
             self.retry,
@@ -1438,7 +1442,7 @@ impl Reads {
                     .rpc
                     .request(
                         "midnight_contractState",
-                        rpc_params![address_64hex, at_block_hash_0x],
+                        rpc_params![address_64hex.as_str(), at_block_hash_0x],
                     )
                     .await;
 
@@ -1746,7 +1750,11 @@ mod tests {
         };
         let result = tokio::time::timeout(
             Duration::from_secs(5),
-            rpc.block_emissions(&block, &singleton, &responder),
+            rpc.block_emissions(
+                &block,
+                &MidnightAddress::from_bytes(singleton),
+                &MidnightAddress::from_bytes(responder),
+            ),
         )
         .await;
         handle.stop()?;
@@ -2364,9 +2372,8 @@ mod tests {
                 .expect("MIDNIGHT_CAPTURE_CALLER must be hex")
                 .try_into()
                 .expect("MIDNIGHT_CAPTURE_CALLER must be exactly 32 bytes");
-            let caller_hex = hex::encode(caller);
             let caller_state = rpc
-                .contract_state(&caller_hex, &block_ref.hash)
+                .contract_state(&MidnightAddress::from_bytes(caller), &block_ref.hash)
                 .await
                 .expect("read caller state at capture block")
                 .expect("caller contract must exist at capture block");
@@ -2730,7 +2737,7 @@ mod tests {
         );
         let reads = Reads::new(capped_rpc, READ_TIMEOUT, attempts(2));
         let capped_error = reads
-            .contract_state(ADDRESS, AT_HASH)
+            .contract_state(&test_address(), AT_HASH)
             .await
             .expect_err("oversized response must be refused");
         assert!(
@@ -2770,7 +2777,7 @@ mod tests {
             };
             let reads = Reads::new(RpcClient::new(counted), READ_TIMEOUT, attempts(2));
             let err = reads
-                .contract_state(ADDRESS, AT_HASH)
+                .contract_state(&test_address(), AT_HASH)
                 .await
                 .expect_err("the server refuses the response");
             assert_eq!(
@@ -2810,7 +2817,7 @@ mod tests {
         };
         let reads = Reads::new(RpcClient::new(counted), READ_TIMEOUT, attempts(2));
         let err = reads
-            .contract_state(ADDRESS, AT_HASH)
+            .contract_state(&test_address(), AT_HASH)
             .await
             .expect_err("one byte over the limit");
         assert!(is_oversized_contract_state(&err), "{err:#}");
@@ -2836,7 +2843,7 @@ mod tests {
         let _handle = server.start(module);
 
         let rpc = connect_http(&http_config(address)).expect("build transport");
-        let err = publisher_contract_state(&rpc, ADDRESS, AT_HASH)
+        let err = publisher_contract_state(&rpc, &test_address(), AT_HASH)
             .await
             .expect_err("the server refuses the response");
         assert!(!is_oversized_contract_state(&err), "{err:#}");
@@ -2887,7 +2894,7 @@ mod tests {
         );
         let reads = Reads::new(rpc, READ_TIMEOUT, attempts(2));
         let err = reads
-            .contract_state(ADDRESS, AT_HASH)
+            .contract_state(&test_address(), AT_HASH)
             .await
             .expect_err("the streamed body overflows the client cap");
         assert!(
@@ -3047,6 +3054,10 @@ mod tests {
 
     const ADDRESS: &str = "abababababababababababababababababababababababababababababababab";
     const AT_HASH: &str = "0x5555555555555555555555555555555555555555555555555555555555555555";
+
+    fn test_address() -> MidnightAddress {
+        MidnightAddress::from_hex(ADDRESS).expect("test address is 64 hex chars")
+    }
     const READ_TIMEOUT: Duration = Duration::from_secs(5);
     const NOT_PRESENT_MSG: &str = "Contract not present at the requested address";
     const UNSERVABLE_MSG: &str = "Unable to get requested contract state";
@@ -3112,7 +3123,7 @@ mod tests {
             UNSERVABLE_MSG,
             DATA,
         ));
-        let publisher_error = publisher_contract_state(&publisher_rpc, ADDRESS, AT_HASH)
+        let publisher_error = publisher_contract_state(&publisher_rpc, &test_address(), AT_HASH)
             .await
             .expect_err("the node reply is a publisher read failure");
         let publisher_cause = publisher_error
@@ -3135,7 +3146,7 @@ mod tests {
         );
         assert_eq!(
             reads
-                .contract_state(ADDRESS, AT_HASH)
+                .contract_state(&test_address(), AT_HASH)
                 .await
                 .expect("contract-not-present is a value"),
             None
@@ -3183,7 +3194,7 @@ mod tests {
         ] {
             let (reads, calls) = stub_reads(reply, attempts(2));
             let err = reads
-                .contract_state(ADDRESS, AT_HASH)
+                .contract_state(&test_address(), AT_HASH)
                 .await
                 .expect_err("the canned node answer is a failure");
 
@@ -3757,6 +3768,10 @@ mod tests {
         (rpc, handle, log)
     }
 
+    fn addr(byte: u8) -> MidnightAddress {
+        MidnightAddress::from_bytes([byte; 32])
+    }
+
     fn numbered_block_ref(byte: u8) -> BlockRef {
         BlockRef {
             number: 0x1b0 + u64::from(byte) - 0x43,
@@ -3774,10 +3789,10 @@ mod tests {
             rpc.finalized_block_ref().await.unwrap(),
             numbered_block_ref(0x43)
         );
-        rpc.block_emissions(&numbered_block_ref(0x42), &[0xab; 32], &[0xcd; 32])
+        rpc.block_emissions(&numbered_block_ref(0x42), &addr(0xab), &addr(0xcd))
             .await
             .unwrap();
-        rpc.block_emissions(&numbered_block_ref(0x43), &[0xab; 32], &[0xcd; 32])
+        rpc.block_emissions(&numbered_block_ref(0x43), &addr(0xab), &addr(0xcd))
             .await
             .unwrap();
         assert_eq!(
@@ -3861,10 +3876,10 @@ mod tests {
             rpc.block_ref_at(0x1af).await.unwrap(),
             numbered_block_ref(0x42)
         );
-        rpc.block_emissions(&numbered_block_ref(0x41), &[0xab; 32], &[0xcd; 32])
+        rpc.block_emissions(&numbered_block_ref(0x41), &addr(0xab), &addr(0xcd))
             .await
             .unwrap();
-        rpc.block_emissions(&numbered_block_ref(0x42), &[0xab; 32], &[0xcd; 32])
+        rpc.block_emissions(&numbered_block_ref(0x42), &addr(0xab), &addr(0xcd))
             .await
             .unwrap();
         assert_eq!(
@@ -3874,7 +3889,7 @@ mod tests {
                 ("chain_getBlock", hash_of_byte(0x41))
             ]
         );
-        rpc.block_emissions(&numbered_block_ref(0x42), &[0xab; 32], &[0xcd; 32])
+        rpc.block_emissions(&numbered_block_ref(0x42), &addr(0xab), &addr(0xcd))
             .await
             .unwrap();
         assert_eq!(
@@ -3918,7 +3933,7 @@ mod tests {
             ]
         );
         let error = rpc
-            .block_emissions(&numbered_block_ref(0x43), &[0xab; 32], &[0xcd; 32])
+            .block_emissions(&numbered_block_ref(0x43), &addr(0xab), &addr(0xcd))
             .await
             .unwrap_err();
         assert!(format!("{error:#}").contains("has no block"), "{error:#}");
@@ -3995,7 +4010,7 @@ mod tests {
             1,
             "a standing head reads no block"
         );
-        rpc.block_emissions(&at_0x43, &[0xab; 32], &[0xcd; 32])
+        rpc.block_emissions(&at_0x43, &addr(0xab), &addr(0xcd))
             .await
             .expect_err("the block still cannot be read");
         assert_eq!(
@@ -4081,7 +4096,7 @@ mod tests {
         assert_eq!(rpc.finalized_block_ref().await.unwrap(), at_0x43);
         assert_eq!(*blocks.lock().unwrap(), [hash_of_byte(0x43)]);
         assert_eq!(
-            rpc.block_emissions(&at_0x43, &[0xab; 32], &[0xcd; 32])
+            rpc.block_emissions(&at_0x43, &addr(0xab), &addr(0xcd))
                 .await
                 .unwrap(),
             None
@@ -4091,7 +4106,7 @@ mod tests {
             [hash_of_byte(0x43)],
             "the head's emissions take the block its head read fetched"
         );
-        rpc.block_emissions(&at_0x43, &[0xab; 32], &[0xcd; 32])
+        rpc.block_emissions(&at_0x43, &addr(0xab), &addr(0xcd))
             .await
             .unwrap();
         assert_eq!(

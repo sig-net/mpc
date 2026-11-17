@@ -144,7 +144,7 @@ impl fmt::Debug for PublisherConfig {
 /// A Midnight contract address in its native 32-byte representation.
 ///
 /// Text input is normalized to 64 lowercase hex characters without a `0x` prefix.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct MidnightAddress([u8; 32]);
 
 impl MidnightAddress {
@@ -164,6 +164,12 @@ impl MidnightAddress {
 
     pub fn to_hex(&self) -> String {
         hex::encode(self.0)
+    }
+}
+
+impl fmt::Display for MidnightAddress {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.to_hex())
     }
 }
 

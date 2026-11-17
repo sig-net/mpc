@@ -1,5 +1,6 @@
 //! Mirrors of the Midnight Signet contract's on-chain record types.
 
+use crate::config::MidnightAddress;
 use mpc_primitives::TxParams;
 
 /// `MPCSignatureAlgorithm`, one byte on the wire: ecdsa = 0, reserved = 1.
@@ -73,7 +74,7 @@ pub struct SignBidirectionalRecord {
     /// `Uint<8>`: the first field of the record and request-id preimage.
     pub key_version: u8,
     /// `ContractAddress { bytes: Bytes<32> }`, a single-field wrapper.
-    pub sender: [u8; 32],
+    pub sender: MidnightAddress,
     pub path: [u8; 32],
     pub algo: MpcSignatureAlgorithm,
     /// `txParamType` with `txParams` (§7.1): the discriminant names the payload's

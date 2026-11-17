@@ -5,6 +5,7 @@ use midnight_base_crypto::fab::{AlignedValue, AlignmentAtom, AlignmentSegment, V
 use midnight_onchain_state::state::StateValue;
 use midnight_storage::DefaultDB;
 
+use crate::config::MidnightAddress;
 use crate::hashing::compute_request_id;
 use crate::records::{SignBidirectionalEventNotification, SignBidirectionalRecord};
 use mpc_primitives::{
@@ -538,7 +539,7 @@ fn decode_sign_bidirectional(
     // `decode_tx_params` likewise mirrors the layout the discriminant names.
     let record = SignBidirectionalRecord {
         key_version: uint::<u8>(cursor, 1, "key_version")?,
-        sender: bytes_n::<32>(cursor, "sender")?,
+        sender: MidnightAddress::from_bytes(bytes_n::<32>(cursor, "sender")?),
         path: bytes_n::<32>(cursor, "path")?,
         algo: one_byte_enum(cursor, "algo")?,
         tx_params: {

@@ -13,6 +13,7 @@ use mpc_primitives::{
     Chain, IndexedSignRequest, SignArgs, SignBidirectionalEvent, SignId, TxParams,
 };
 
+use crate::config::MidnightAddress;
 use crate::records::{MpcDestination, MpcSignatureAlgorithm, SignBidirectionalRecord};
 use crate::tx::serialized_transaction;
 
@@ -22,7 +23,7 @@ use crate::tx::serialized_transaction;
 /// never carried by the record.
 pub fn generate_sign_request(
     record: &SignBidirectionalRecord,
-    read_address: &[u8; 32],
+    read_address: &MidnightAddress,
     request_id: [u8; 32],
     block_hash: [u8; 32],
     indexed_ts: u64,
@@ -33,8 +34,8 @@ pub fn generate_sign_request(
     anyhow::ensure!(
         record.sender == *read_address,
         "record sender {} does not match the address it was read from {}: dropping the request",
-        hex::encode(record.sender),
-        hex::encode(read_address),
+        record.sender,
+        read_address,
     );
 
     anyhow::ensure!(
@@ -74,7 +75,7 @@ pub fn generate_sign_request(
     );
 
     // The one render of the requester.
-    let requester = hex::encode(read_address);
+    let requester = read_address.to_hex();
     let epsilon = signet_crypto::derive_epsilon_midnight(key_version, &requester, &path)?;
 
     let serialized = serialized_transaction(record, root_pk, epsilon)?;
@@ -110,7 +111,7 @@ pub fn generate_sign_request(
         Chain::Midnight,
         indexed_ts,
         SignBidirectionalEvent {
-            sender: *read_address,
+            sender: *read_address.as_bytes(),
             serialized_transaction: serialized,
             caip2_id,
             key_version,
@@ -164,7 +165,7 @@ mod tests {
     use mpc_primitives::{Chain, SignKind};
     use mpc_tron_wire::TronAddress;
 
-    const READ_ADDRESS: [u8; 32] = [0xab; 32];
+    const READ_ADDRESS: MidnightAddress = MidnightAddress::from_bytes([0xab; 32]);
     const REQUEST_ID: [u8; 32] = [0x77; 32];
     const BLOCK_HASH: [u8; 32] = [0x88; 32];
     const INDEXED_TS: u64 = 1_753_000_000;
@@ -228,8 +229,7 @@ mod tests {
         // `owned_by_requester` recomputes the owner from the same public
         // inputs; pinning it here keeps the two crates on one formula.
         let epsilon =
-            signet_crypto::derive_epsilon_midnight(1, &hex::encode(READ_ADDRESS), &event.path)
-                .unwrap();
+            signet_crypto::derive_epsilon_midnight(1, &READ_ADDRESS.to_hex(), &event.path).unwrap();
         let owner = TronAddress::from_evm(derive_user_address(test_root_pk(), epsilon));
         assert_eq!(raw.owner_address().unwrap(), owner.as_bytes().to_vec());
 
@@ -326,7 +326,7 @@ mod tests {
             request.args.epsilon,
             signet_crypto::derive_epsilon_midnight(
                 request.args.key_version,
-                &hex::encode(READ_ADDRESS),
+                &READ_ADDRESS.to_hex(),
                 reserved,
             )
             .unwrap(),
@@ -382,7 +382,7 @@ mod tests {
         // read from must be dropped, because `sender` is caller-controlled and the
         // derived key space follows the requester.
         let record = caller_record();
-        let elsewhere = [0xcd; 32];
+        let elsewhere = MidnightAddress::from_bytes([0xcd; 32]);
         let err = generate_sign_request(
             &record,
             &elsewhere,

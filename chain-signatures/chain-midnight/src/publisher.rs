@@ -173,7 +173,11 @@ impl MidnightPublisher {
     }
 
     /// The contract state and ledger parameters at one finalized hash.
-    async fn pin(&self, responder_address: &str, at_hash: String) -> anyhow::Result<PinnedState> {
+    async fn pin(
+        &self,
+        responder_address: &MidnightAddress,
+        at_hash: String,
+    ) -> anyhow::Result<PinnedState> {
         let contract_state = self
             .reads
             .contract_state(responder_address, &at_hash)
@@ -226,7 +230,7 @@ impl ChainPublisher for MidnightPublisher {
         if !self.still_awaited(action, "queued").await? {
             return Ok(());
         }
-        let responder_address = self.responder_address.to_hex();
+        let responder_address = self.responder_address;
         let sign_id = action.request.id;
         tracing::info!(
             ?sign_id,
@@ -243,7 +247,7 @@ impl ChainPublisher for MidnightPublisher {
         let chain = self.pin(&responder_address, at_hash).await?;
         let request = IntentRequest {
             circuit: call.circuit,
-            contract_address: *self.responder_address.as_bytes(),
+            contract_address: responder_address,
             request_id: call.request_id,
             signature: call.signature,
             contract_state: chain.contract_state,
@@ -536,13 +540,13 @@ mod tests {
 
         async fn contract_state(
             &self,
-            address: &str,
+            address: &MidnightAddress,
             at_hash: &str,
         ) -> anyhow::Result<Option<Vec<u8>>> {
             self.contract_addresses
                 .lock()
                 .unwrap()
-                .push(address.to_string());
+                .push(address.to_hex());
             self.record("contract_state", at_hash);
             Ok(self.contract_present.then(|| CONTRACT_STATE.to_vec()))
         }
@@ -1658,7 +1662,7 @@ mod tests {
 
         let [request] = client.built().try_into().expect("one build per publish");
         assert_eq!(request.circuit, RespondCircuit::Respond);
-        assert_eq!(hex::encode(request.contract_address), RESPONDER);
+        assert_eq!(request.contract_address.to_hex(), RESPONDER);
         assert_eq!(reads.contract_addresses(), [RESPONDER]);
         assert_eq!(request.request_id, REQUEST_ID);
         assert_eq!(request.contract_state, CONTRACT_STATE);
@@ -1696,7 +1700,7 @@ mod tests {
             .expect("granted");
 
         let [request] = client.built().try_into().expect("one build per publish");
-        assert_eq!(hex::encode(request.contract_address), RESPONDER);
+        assert_eq!(request.contract_address.to_hex(), RESPONDER);
         assert_eq!(request.request_id, REQUEST_ID);
         assert_eq!(
             request.circuit,
