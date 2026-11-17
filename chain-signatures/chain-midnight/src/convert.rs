@@ -399,6 +399,26 @@ mod tests {
         );
     }
 
+    /// The one refusal arm no other test reaches.
+    #[test]
+    fn generate_sign_request_refuses_a_reserved_signature_dest() {
+        let mut record = caller_record();
+        record.signature_dest = MpcDestination::Reserved;
+        let err = generate_sign_request(
+            &record,
+            &READ_ADDRESS,
+            REQUEST_ID,
+            BLOCK_HASH,
+            INDEXED_TS,
+            test_root_pk(),
+        )
+        .expect_err("a reserved signature_dest must not sign");
+        assert!(
+            format!("{err:#}").contains("unsupported signature_dest"),
+            "the refusal must name the reserved destination: {err:#}"
+        );
+    }
+
     #[test]
     fn generate_sign_request_bounds_key_versions() {
         let mut record = caller_record();

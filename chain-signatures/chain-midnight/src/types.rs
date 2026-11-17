@@ -41,10 +41,14 @@ pub struct UnsupportedNetwork(pub String);
 
 impl fmt::Display for UnsupportedNetwork {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let supported = NetworkId::ALL
+            .iter()
+            .map(|network| network.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
         write!(
             formatter,
-            "unsupported midnight network id '{}': the publisher builds for undeployed, \
-             stagenet, preview, preprod and mainnet",
+            "unsupported midnight network id '{}': the publisher builds for {supported}",
             self.0
         )
     }
@@ -161,7 +165,12 @@ mod tests {
         }
         let err = NetworkId::try_from("devnet").unwrap_err();
         assert_eq!(err.0, "devnet");
-        assert!(err.to_string().contains("'devnet'"), "{}", err);
+        let refusal = err.to_string();
+        assert!(refusal.contains("'devnet'"), "{refusal}");
+        // Derived from ALL, the refusal cannot omit a member.
+        for network in NetworkId::ALL {
+            assert!(refusal.contains(network.as_str()), "{refusal}");
+        }
     }
 
     #[test]

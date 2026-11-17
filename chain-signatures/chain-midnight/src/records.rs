@@ -99,3 +99,46 @@ pub struct SignBidirectionalEventNotification {
     pub request_id: [u8; 32],
     pub payload: [u8; 128],
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Pins the wire bytes as identity, not just admission: `compute_request_id`
+    /// folds the discriminants with `as u8`, and a field reverted to raw `u8` would
+    /// slip through `one_byte_enum` via identity `TryFrom`.
+    #[test]
+    fn try_from_u8_partitions_the_whole_byte_domain() {
+        for byte in 0..=u8::MAX {
+            assert_eq!(
+                MpcSignatureAlgorithm::try_from(byte),
+                match byte {
+                    0 => Ok(MpcSignatureAlgorithm::Ecdsa),
+                    1 => Ok(MpcSignatureAlgorithm::Reserved),
+                    other => Err(RecordDiscriminantError::Algo(other)),
+                },
+                "algo byte {byte}"
+            );
+            assert_eq!(
+                MpcDestination::try_from(byte),
+                match byte {
+                    0 => Ok(MpcDestination::Unused),
+                    1 => Ok(MpcDestination::Reserved),
+                    other => Err(RecordDiscriminantError::Destination(other)),
+                },
+                "signature_dest byte {byte}"
+            );
+        }
+        for (algo, byte) in [
+            (MpcSignatureAlgorithm::Ecdsa, 0),
+            (MpcSignatureAlgorithm::Reserved, 1),
+        ] {
+            assert_eq!(algo as u8, byte);
+            assert_eq!(MpcSignatureAlgorithm::try_from(algo as u8), Ok(algo));
+        }
+        for (dest, byte) in [(MpcDestination::Unused, 0), (MpcDestination::Reserved, 1)] {
+            assert_eq!(dest as u8, byte);
+            assert_eq!(MpcDestination::try_from(dest as u8), Ok(dest));
+        }
+    }
+}
