@@ -15,9 +15,7 @@ use mpc_utils::task::AbortOnDrop;
 use mpc_utils::time::current_unix_timestamp;
 
 use crate::attestation::validate_attestation_response;
-use crate::config::{
-    validate_publisher_network_id, MidnightAddress, MidnightConfig, PublisherConfig,
-};
+use crate::config::{MidnightAddress, MidnightConfig, PublisherConfig};
 use crate::dust_feed::IndexerDustEvents;
 use crate::funding::{dust_secret_key, parse_seed, DustCheckpointStore, FundingWallet};
 use crate::intent::{IntentRequest, RespondCircuit, Submitted};
@@ -89,6 +87,8 @@ impl MidnightPublisher {
         checkpoints: Option<Arc<dyn DustCheckpointStore>>,
     ) -> anyhow::Result<Self> {
         config.publisher.validate_output_storage()?;
+        // The refusal an unsupported network meets: connect() fails on the id the
+        // node reports, before anything starts.
         let rpc = Arc::new(MidnightPublisherRpc::connect(config).await?);
         let output_store = RecoveringOutputStore::start(
             config.publisher.output_storage.as_ref(),
@@ -96,7 +96,6 @@ impl MidnightPublisher {
             config.central_address,
         )?
         .map(|store| Arc::new(store) as Arc<dyn OutputStore>);
-        validate_publisher_network_id(rpc.network_id())?;
         // Before the wallet starts: a failed connect leaves nothing replaying.
         let provers = Arc::new(Provers::new(
             &config.publisher.contract_artifacts_dir,
@@ -465,6 +464,7 @@ mod tests {
     use std::time::Duration;
 
     use crate::output_storage::GcsOutputStore;
+    use crate::types::NetworkId;
     use mpc_chain_integration_core::utils::test::make_publish_action;
     use mpc_chain_integration_core::NoopPublisherTelemetry;
     use mpc_primitives::{
@@ -906,7 +906,7 @@ mod tests {
             .unwrap();
         GcsOutputStore::new(
             &crate::config::OutputStorageConfig::new("outputs".into(), "v1".into(), timeout),
-            "preprod",
+            NetworkId::Preprod,
             MidnightAddress::from_hex(CENTRAL).unwrap(),
             client,
         )

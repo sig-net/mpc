@@ -6,10 +6,6 @@ use std::path::PathBuf;
 use std::time::Duration;
 use url::Url;
 
-/// The network ids the publisher builds transactions for; it refuses to connect to a
-/// node that reports another.
-const PUBLISHER_NETWORK_IDS: &[&str] = &["undeployed", "stagenet", "preview", "preprod", "mainnet"];
-
 /// Timeouts and retry budget for the subxt node RPC client.
 #[derive(Clone, Debug, PartialEq)]
 pub struct RpcConfig {
@@ -242,14 +238,6 @@ fn validate_funding_seed(value: &str) -> anyhow::Result<()> {
     anyhow::ensure!(
         crate::funding::parse_seed(value).is_ok_and(|seed| (16..=64).contains(&seed.len())),
         "midnight config: publisher.funding_seed must be 16 to 64 bytes of hex"
-    );
-    Ok(())
-}
-
-pub(crate) fn validate_publisher_network_id(value: &str) -> anyhow::Result<()> {
-    anyhow::ensure!(
-        PUBLISHER_NETWORK_IDS.contains(&value),
-        "midnight config: network_id is not supported by the publisher"
     );
     Ok(())
 }
@@ -529,14 +517,5 @@ mod tests {
                 "the rejected seed reached its error: {error}"
             );
         }
-    }
-
-    #[test]
-    fn publisher_network_ids_are_the_only_ones_accepted() {
-        for network_id in PUBLISHER_NETWORK_IDS {
-            validate_publisher_network_id(network_id).expect("a listed network is accepted");
-        }
-        let error = validate_publisher_network_id("unknown-network").unwrap_err();
-        assert!(error.to_string().contains("network_id"), "{error:#}");
     }
 }

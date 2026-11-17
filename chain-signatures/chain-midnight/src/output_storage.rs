@@ -9,6 +9,7 @@ use mpc_primitives::AttestationMetadata;
 use mpc_utils::task::AbortOnDrop;
 
 use crate::config::{MidnightAddress, OutputStorageConfig};
+use crate::types::NetworkId;
 
 #[async_trait]
 pub(crate) trait OutputStore: Send + Sync {
@@ -29,7 +30,7 @@ pub(crate) struct RecoveringOutputStore {
 impl RecoveringOutputStore {
     pub(crate) fn start(
         config: Option<&OutputStorageConfig>,
-        network_id: &str,
+        network_id: NetworkId,
         central_address: MidnightAddress,
     ) -> anyhow::Result<Option<Self>> {
         let Some(config) = config else {
@@ -37,14 +38,12 @@ impl RecoveringOutputStore {
         };
         config.validate()?;
         let config = config.clone();
-        let network_id = network_id.to_owned();
         Ok(Some(Self::spawn(
             config.bucket.clone(),
             config.timeout,
             move || {
                 let config = config.clone();
-                let network_id = network_id.clone();
-                async move { GcsOutputStore::connect(&config, &network_id, central_address).await }
+                async move { GcsOutputStore::connect(&config, network_id, central_address).await }
             },
         )))
     }
@@ -116,7 +115,7 @@ pub(crate) struct GcsOutputStore {
 impl GcsOutputStore {
     async fn connect(
         config: &OutputStorageConfig,
-        network_id: &str,
+        network_id: NetworkId,
         central_address: MidnightAddress,
     ) -> anyhow::Result<Self> {
         #[cfg(feature = "sandbox")]
@@ -130,7 +129,7 @@ impl GcsOutputStore {
     #[cfg(feature = "sandbox")]
     async fn connect_emulator(
         config: &OutputStorageConfig,
-        network_id: &str,
+        network_id: NetworkId,
         central_address: MidnightAddress,
         endpoint: &str,
     ) -> anyhow::Result<Self> {
@@ -144,7 +143,7 @@ impl GcsOutputStore {
 
     pub(crate) fn new(
         config: &OutputStorageConfig,
-        network_id: &str,
+        network_id: NetworkId,
         central_address: MidnightAddress,
         client: Storage,
     ) -> anyhow::Result<Self> {
@@ -155,7 +154,7 @@ impl GcsOutputStore {
             prefix: format!(
                 "{}/{}/{}",
                 config.prefix.trim_matches('/'),
-                network_id,
+                network_id.as_str(),
                 central_address.to_hex(),
             ),
             timeout: config.timeout,
@@ -241,7 +240,7 @@ mod tests {
                 "v1/test-deployment".into(),
                 Duration::from_secs(2),
             ),
-            "preprod",
+            NetworkId::Preprod,
             MidnightAddress::from_bytes([0xab; 32]),
             client,
         )
@@ -362,7 +361,7 @@ mod tests {
             .unwrap();
         let store = GcsOutputStore::new(
             &OutputStorageConfig::new("outputs".into(), "v1".into(), Duration::from_millis(100)),
-            "preprod",
+            NetworkId::Preprod,
             MidnightAddress::from_bytes([0xab; 32]),
             client,
         )
@@ -376,9 +375,12 @@ mod tests {
 
     #[test]
     fn no_bucket_disables_storage_before_client_initialization() {
-        let store =
-            RecoveringOutputStore::start(None, "preprod", MidnightAddress::from_bytes([0xab; 32]))
-                .unwrap();
+        let store = RecoveringOutputStore::start(
+            None,
+            NetworkId::Preprod,
+            MidnightAddress::from_bytes([0xab; 32]),
+        )
+        .unwrap();
         assert!(store.is_none());
     }
 
@@ -391,7 +393,7 @@ mod tests {
         ] {
             assert!(RecoveringOutputStore::start(
                 Some(&config),
-                "preprod",
+                NetworkId::Preprod,
                 MidnightAddress::from_bytes([0xab; 32]),
             )
             .is_err());
@@ -489,10 +491,12 @@ mod tests {
             OutputStorageConfig::new("outputs".into(), "v1".into(), Duration::from_secs(2));
         config.emulator_endpoint = Some("http://[invalid".into());
         let address = MidnightAddress::from_bytes([0xab; 32]);
-        assert!(GcsOutputStore::connect(&config, "preprod", address)
-            .await
-            .is_err());
-        let store = RecoveringOutputStore::start(Some(&config), "preprod", address)
+        assert!(
+            GcsOutputStore::connect(&config, NetworkId::Preprod, address)
+                .await
+                .is_err()
+        );
+        let store = RecoveringOutputStore::start(Some(&config), NetworkId::Preprod, address)
             .unwrap()
             .unwrap();
         tokio::task::yield_now().await;

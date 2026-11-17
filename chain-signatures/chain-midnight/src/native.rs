@@ -34,7 +34,7 @@ use crate::intent::{IntentRequest, RespondCircuit, Submitted};
 use crate::publisher::IntentClient;
 use crate::rpc::{Landing, PinnedReads, SubmitRefusal};
 use crate::submit_error::SubmitError;
-use crate::types::{BlockHash, LedgerTxHash};
+use crate::types::{BlockHash, LedgerTxHash, NetworkId};
 
 /// The respond intent's segment; the fee intent takes the next free one.
 const RESPOND_SEGMENT: u16 = 1;
@@ -125,7 +125,7 @@ pub(crate) struct NativeIntentClient<W, C> {
     chain: Arc<C>,
     wallet: W,
     provers: Arc<Provers>,
-    network_id: String,
+    network_id: NetworkId,
     submit_timeout: Duration,
 }
 
@@ -134,14 +134,14 @@ impl<W: FeePayer, C: SubmitChain> NativeIntentClient<W, C> {
         chain: Arc<C>,
         wallet: W,
         provers: Arc<Provers>,
-        network_id: impl Into<String>,
+        network_id: NetworkId,
         submit_timeout: Duration,
     ) -> Self {
         Self {
             chain,
             wallet,
             provers,
-            network_id: network_id.into(),
+            network_id,
             submit_timeout,
         }
     }
@@ -268,7 +268,7 @@ impl<W: FeePayer, C: SubmitChain> NativeIntentClient<W, C> {
             &parameters,
             ctime,
             ttl,
-            &self.network_id,
+            self.network_id.as_str(),
             &mut StdRng::from_entropy(),
         );
         *wallet_used = plan_used_wallet(&plan);
@@ -321,7 +321,7 @@ impl<W: FeePayer, C: SubmitChain> NativeIntentClient<W, C> {
         intent: PreimageIntent<DefaultDB>,
         deadline: Instant,
     ) -> Result<SealedTx, SubmitError> {
-        let respond = preimage_tx(&self.network_id, RESPOND_SEGMENT, intent);
+        let respond = preimage_tx(self.network_id.as_str(), RESPOND_SEGMENT, intent);
         let provers = self.provers.clone();
         let proven = prove_blocking(deadline, move || async move {
             let prover = InProcessProver {
@@ -890,7 +890,7 @@ mod tests {
                 Arc::new(chain),
                 RecordingWallet::default(),
                 Arc::new(Provers::new(dir.path(), dir.path()).unwrap()),
-                "undeployed",
+                NetworkId::Undeployed,
                 Duration::from_secs(420),
             ),
             _dir: dir,
@@ -1689,7 +1689,7 @@ mod bench {
                 )
                 .unwrap(),
             ),
-            "undeployed",
+            NetworkId::Undeployed,
             Duration::from_secs(3600),
         );
         let deadline = Instant::now() + Duration::from_secs(3600);

@@ -3,6 +3,70 @@
 
 use std::fmt;
 
+/// The Midnight networks the publisher builds transactions for. The wire name is
+/// [`Self::as_str`], used only at the SDK and storage edges that take text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum NetworkId {
+    Undeployed,
+    Stagenet,
+    Preview,
+    Preprod,
+    Mainnet,
+}
+
+impl NetworkId {
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Undeployed => "undeployed",
+            Self::Stagenet => "stagenet",
+            Self::Preview => "preview",
+            Self::Preprod => "preprod",
+            Self::Mainnet => "mainnet",
+        }
+    }
+
+    /// Every supported network, the closed family this type admits.
+    pub const ALL: [Self; 5] = [
+        Self::Undeployed,
+        Self::Stagenet,
+        Self::Preview,
+        Self::Preprod,
+        Self::Mainnet,
+    ];
+}
+
+/// The network id a node reported, which the publisher does not support.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnsupportedNetwork(pub String);
+
+impl fmt::Display for UnsupportedNetwork {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "unsupported midnight network id '{}': the publisher builds for undeployed, \
+             stagenet, preview, preprod and mainnet",
+            self.0
+        )
+    }
+}
+
+impl std::error::Error for UnsupportedNetwork {}
+
+impl TryFrom<&str> for NetworkId {
+    type Error = UnsupportedNetwork;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        Ok(match value {
+            "undeployed" => Self::Undeployed,
+            "stagenet" => Self::Stagenet,
+            "preview" => Self::Preview,
+            "preprod" => Self::Preprod,
+            "mainnet" => Self::Mainnet,
+            other => return Err(UnsupportedNetwork(other.to_owned())),
+        })
+    }
+}
+
 /// A 32-byte Midnight block hash. Canonical text is the `0x`-prefixed lowercase
 /// hex every pinned read is addressed by; parse and format happen only at the
 /// RPC edge.
@@ -83,5 +147,46 @@ impl LedgerTxHash {
 impl fmt::Display for LedgerTxHash {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(formatter, "{}", hex::encode(self.0))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn network_ids_round_trip_the_whole_family_and_refuse_the_unknown() {
+        for network in NetworkId::ALL {
+            assert_eq!(NetworkId::try_from(network.as_str()), Ok(network));
+        }
+        let err = NetworkId::try_from("devnet").unwrap_err();
+        assert_eq!(err.0, "devnet");
+        assert!(err.to_string().contains("'devnet'"), "{}", err);
+    }
+
+    #[test]
+    fn block_hash_parses_canonical_hex_and_refuses_other_shapes() {
+        let hash = BlockHash::from_bytes([0xab; 32]);
+        assert_eq!(BlockHash::from_0x_hex(&hash.to_string()), Ok(hash));
+        for malformed in [
+            "ab".repeat(32),
+            format!("0x{}", "ab".repeat(31)),
+            format!("0x{}", "ab".repeat(33)),
+            format!("0x{}", "zz".repeat(32)),
+        ] {
+            assert!(BlockHash::from_0x_hex(&malformed).is_err(), "{malformed}");
+        }
+        assert_eq!(
+            BlockHash::from_0x_hex("0xzz").unwrap_err(),
+            BlockHashError::NotHex
+        );
+        assert_eq!(
+            BlockHash::from_0x_hex(&format!("0x{}", "ab".repeat(31))).unwrap_err(),
+            BlockHashError::Not32Bytes(31)
+        );
+        assert_eq!(
+            BlockHash::from_0x_hex("deadbeef").unwrap_err(),
+            BlockHashError::Not0xPrefixed
+        );
     }
 }

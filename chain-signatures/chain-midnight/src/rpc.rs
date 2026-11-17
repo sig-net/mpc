@@ -26,7 +26,7 @@ use crate::config::{MidnightAddress, MidnightConfig, RpcConfig};
 use crate::emissions::{emissions_in, partial_success_emissions_in, DecodedTransaction};
 use crate::indexer::BlockHold;
 use crate::source::{BlockEmissions, BlockProofSeed, CandidateTransactionEmissions};
-use crate::types::{BlockHash, LedgerTxHash};
+use crate::types::{BlockHash, LedgerTxHash, NetworkId};
 
 /// Runtime API name from Midnight node 2.0.0-rc.4 metadata.
 const LEDGER_PARAMETERS_ENTRY: &str = "MidnightRuntimeApi_get_ledger_parameters";
@@ -688,7 +688,7 @@ pub(crate) struct MidnightPublisherRpc {
         std::collections::HashMap<RuntimeVersionKey, OnlineClient<SubstrateConfig>>,
     >,
     blocks: std::sync::Mutex<BlockMemo>,
-    network_id: String,
+    network_id: NetworkId,
 }
 
 /// `(spec_version, transaction_version)`.
@@ -751,8 +751,8 @@ impl MidnightPublisherRpc {
         .context("timed out connecting the midnight publisher to the node")?
     }
 
-    pub fn network_id(&self) -> &str {
-        &self.network_id
+    pub fn network_id(&self) -> NetworkId {
+        self.network_id
     }
 
     /// The subxt client for the runtime in `at`'s state, or the best block's when
@@ -1047,7 +1047,7 @@ impl crate::native::SubmitChain for MidnightPublisherRpc {
     }
 }
 
-async fn network_id(legacy: &LegacyRpcMethods<SubstrateConfig>) -> anyhow::Result<String> {
+async fn network_id(legacy: &LegacyRpcMethods<SubstrateConfig>) -> anyhow::Result<NetworkId> {
     let finalized = legacy
         .chain_get_finalized_head()
         .await
@@ -1059,16 +1059,18 @@ async fn network_id(legacy: &LegacyRpcMethods<SubstrateConfig>) -> anyhow::Resul
     decode_network_id(&answer)
 }
 
-fn decode_network_id(answer: &[u8]) -> anyhow::Result<String> {
+fn decode_network_id(answer: &[u8]) -> anyhow::Result<NetworkId> {
     let mut payload = answer;
-    String::decode_all(&mut payload).context("midnight runtime returned a malformed network id")
+    let reported = String::decode_all(&mut payload)
+        .context("midnight runtime returned a malformed network id")?;
+    NetworkId::try_from(reported.as_str()).context("the midnight node reported an unknown network")
 }
 
 /// The network id of the node at `node_http_url` once it has imported block 1, or `None`
 /// while it has not. Dials afresh on every call, so a sandbox that is still booting
 /// answers with a connection error and the caller keeps polling.
 #[cfg(feature = "sandbox")]
-pub async fn probe_network_id(node_http_url: &str) -> anyhow::Result<Option<String>> {
+pub async fn probe_network_id(node_http_url: &str) -> anyhow::Result<Option<NetworkId>> {
     let rpc = connect_http_endpoint(node_http_url, &RpcConfig::default())?;
     let legacy = LegacyRpcMethods::<SubstrateConfig>::new(rpc);
     let block_one = legacy
@@ -3228,7 +3230,7 @@ mod tests {
         use subxt::ext::codec::Encode as _;
 
         let encoded = "preview".to_string().encode();
-        assert_eq!(decode_network_id(&encoded).unwrap(), "preview");
+        assert_eq!(decode_network_id(&encoded).unwrap(), NetworkId::Preview);
 
         let mut trailing = encoded;
         trailing.push(0xff);
@@ -3238,6 +3240,18 @@ mod tests {
             err.to_string()
                 .contains("midnight runtime returned a malformed network id"),
             "the decoder boundary must identify the malformed network id: {err:#}"
+        );
+    }
+
+    #[test]
+    fn an_unknown_network_id_fails_the_decode_boundary_with_the_reported_id() {
+        use subxt::ext::codec::Encode as _;
+
+        let err = decode_network_id(&"devnet".to_string().encode())
+            .expect_err("the publisher builds for no unknown network");
+        assert!(
+            format!("{err:#}").contains("'devnet'"),
+            "the refusal must name the node's answer: {err:#}"
         );
     }
 
@@ -3343,7 +3357,7 @@ mod tests {
             genesis_hash: H256([0x11; 32]),
             clients: Default::default(),
             blocks: Default::default(),
-            network_id: "undeployed".to_string(),
+            network_id: NetworkId::Undeployed,
         };
 
         let submit = rpc.client_at(None).await.unwrap();
@@ -3412,7 +3426,7 @@ mod tests {
             genesis_hash: H256([0x11; 32]),
             clients: Default::default(),
             blocks: Default::default(),
-            network_id: "undeployed".to_string(),
+            network_id: NetworkId::Undeployed,
         };
 
         match rpc.submit(&[0x00]).await {
@@ -3533,7 +3547,7 @@ mod tests {
             genesis_hash: H256([0x11; 32]),
             clients: Default::default(),
             blocks: Default::default(),
-            network_id: "undeployed".to_string(),
+            network_id: NetworkId::Undeployed,
         };
         (rpc, handle, log)
     }
@@ -3658,7 +3672,7 @@ mod tests {
             genesis_hash: H256([0x11; 32]),
             clients: Default::default(),
             blocks: Default::default(),
-            network_id: "undeployed".to_string(),
+            network_id: NetworkId::Undeployed,
         };
         (rpc, handle, reads)
     }
