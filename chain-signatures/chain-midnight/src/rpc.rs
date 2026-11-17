@@ -3434,6 +3434,7 @@ mod tests {
                 legacy: LegacyRpcMethods::<SubstrateConfig>::new(transport),
                 genesis_hash: H256([0x11; 32]),
                 clients: Default::default(),
+                blocks: Default::default(),
                 network_id: "undeployed".to_string(),
             };
 
