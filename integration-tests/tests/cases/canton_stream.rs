@@ -13,6 +13,7 @@ use mpc_chain_integration_core::{
 use mpc_node::backlog::Backlog;
 use mpc_node::protocol::{Chain, IndexedSignRequest};
 use mpc_node::sign_bidirectional::SignBidirectionalEventExt;
+use mpc_node::util::cadence::Cadence;
 use mpc_primitives::{ChainEvent, ScalarExt, SignKind, Signature, LATEST_MPC_KEY_VERSION};
 use serde_json::json;
 use serial_test::serial;
@@ -59,7 +60,7 @@ async fn wait_for_sign_request(
 #[test(tokio::test)]
 async fn test_canton_stream_parse_sign_event() -> Result<()> {
     let sandbox = CantonSandbox::run().await?;
-    let backlog = Backlog::new();
+    let backlog = Backlog::new(Cadence::default());
     let mut indexer = run_canton_indexer(&sandbox, backlog).await?;
 
     let expected_case = test_evm_type2_anvil_cases()[0].clone();
@@ -108,7 +109,7 @@ async fn test_canton_stream_parse_sign_event() -> Result<()> {
 #[test(tokio::test)]
 async fn test_canton_stream_emits_blocks() -> Result<()> {
     let sandbox = CantonSandbox::run().await?;
-    let backlog = Backlog::new();
+    let backlog = Backlog::new(Cadence::default());
     let mut indexer = run_canton_indexer(&sandbox, backlog).await?;
 
     sandbox.submit_sign_request(None).await?;
@@ -139,7 +140,7 @@ async fn test_canton_stream_emits_blocks() -> Result<()> {
 #[test(tokio::test)]
 async fn test_canton_stream_concurrent_events() -> Result<()> {
     let sandbox = CantonSandbox::run().await?;
-    let backlog = Backlog::new();
+    let backlog = Backlog::new(Cadence::default());
     let mut indexer = run_canton_indexer(&sandbox, backlog).await?;
 
     // Distinct EVM nonces produce distinct request_ids, which is what this
@@ -177,7 +178,7 @@ async fn test_canton_stream_catchup_linear() -> Result<()> {
     let sandbox = CantonSandbox::run().await?;
 
     // Phase 1: indexer1 sees events
-    let backlog1 = Backlog::new();
+    let backlog1 = Backlog::new(Cadence::default());
     let mut indexer1 = run_canton_indexer(&sandbox, backlog1).await?;
 
     sandbox.submit_sign_request(None).await?;
@@ -203,7 +204,7 @@ async fn test_canton_stream_catchup_linear() -> Result<()> {
     drop(indexer1);
 
     // Phase 2: indexer2 should catch up and see new events
-    let backlog2 = Backlog::new();
+    let backlog2 = Backlog::new(Cadence::default());
     let mut indexer2 = run_canton_indexer(&sandbox, backlog2).await?;
 
     sandbox.submit_sign_request(None).await?;
@@ -238,7 +239,7 @@ async fn test_canton_stream_checkpoint_persistence() -> Result<()> {
     const INTERVAL: u64 = 1;
 
     let sandbox = CantonSandbox::run().await?;
-    let backlog = Backlog::new();
+    let backlog = Backlog::new(Cadence::default());
     let mut indexer = run_canton_indexer(&sandbox, backlog.clone()).await?;
 
     sandbox.submit_sign_request(None).await?;
@@ -363,7 +364,7 @@ async fn test_canton_stream_checkpoint_persistence() -> Result<()> {
 #[test(tokio::test)]
 async fn test_canton_stream_sign_and_respond_flow() -> Result<()> {
     let sandbox = CantonSandbox::run().await?;
-    let backlog = Backlog::new();
+    let backlog = Backlog::new(Cadence::default());
     let mut indexer = run_canton_indexer(&sandbox, backlog).await?;
 
     sandbox.submit_sign_request(None).await?;
@@ -442,7 +443,7 @@ async fn test_canton_stream_sign_and_respond_flow() -> Result<()> {
 #[test(tokio::test)]
 async fn test_canton_stream_parse_sign_bidirectional_fields() -> Result<()> {
     let sandbox = CantonSandbox::run().await?;
-    let backlog = Backlog::new();
+    let backlog = Backlog::new(Cadence::default());
     let mut indexer = run_canton_indexer(&sandbox, backlog).await?;
 
     let expected_case = test_evm_type2_anvil_cases()[0].clone();

@@ -14,6 +14,7 @@ use mpc_node::mesh::MeshState;
 use mpc_node::node_client::NodeClient;
 use mpc_node::protocol::contract::primitives::{ParticipantInfo, Participants};
 use mpc_node::rpc::{ContractStateWatcher, RpcAction, RpcChannel};
+use mpc_node::util::cadence::Cadence;
 
 use mpc_node::storage::checkpoint_storage::CheckpointStorage;
 use mpc_node::stream::{supervisor::run_supervised, StreamContext};
@@ -43,7 +44,7 @@ async fn solana_sandbox() -> Result<Solana> {
 }
 
 fn test_dependencies() -> (Backlog, watch::Receiver<MeshState>, NodeClient) {
-    let backlog = Backlog::new();
+    let backlog = Backlog::new(Cadence::default());
     let (_mesh_tx, mesh_rx) = watch::channel(MeshState::default());
     let node_client = NodeClient::new();
     (backlog, mesh_rx, node_client)
@@ -521,7 +522,7 @@ async fn test_solana_stream_republishes_pending_publish_after_checkpoint_recover
     let config = solana.get_config(program_address);
 
     let storage = CheckpointStorage::in_memory();
-    let seeded_backlog = Backlog::persisted(storage.clone());
+    let seeded_backlog = Backlog::persisted(storage.clone(), Cadence::default());
     let sign_id = SignId::new([77u8; 32]);
     let checkpoint_slot = solana.rpc_client.get_slot().await?;
     let entry = seeded_backlog
@@ -548,7 +549,7 @@ async fn test_solana_stream_republishes_pending_publish_after_checkpoint_recover
         Ok(true)
     ));
 
-    let recovered_backlog = Backlog::persisted(storage);
+    let recovered_backlog = Backlog::persisted(storage, Cadence::default());
     let indexer = SolanaIndexer::new(
         config,
         recovered_backlog.clone(),
@@ -788,7 +789,7 @@ async fn test_solana_stream_resumes_gap_free_after_outage() -> Result<()> {
     let program_address = solana.program_keypair.pubkey();
     let config = solana.get_config(program_address);
 
-    let backlog = Backlog::new();
+    let backlog = Backlog::new(Cadence::default());
     let (run_handle, mut sign_rx) = spawn_supervised_stream(config, backlog.clone()).await?;
 
     let payload_a = [0xA1; 32];
@@ -901,7 +902,7 @@ async fn test_solana_stream_backfills_requests_missed_during_downtime() -> Resul
     let program_address = solana.program_keypair.pubkey();
     let config = solana.get_config(program_address);
 
-    let backlog = Backlog::new();
+    let backlog = Backlog::new(Cadence::default());
     let (run1, mut sign_rx1) = spawn_supervised_stream(config.clone(), backlog.clone()).await?;
 
     let payload_a = [0xA1; 32];

@@ -9,6 +9,7 @@ use mpc_node::mesh::MeshState;
 use mpc_node::node_client::NodeClient;
 use mpc_node::protocol::ParticipantInfo;
 use mpc_node::storage::CheckpointStorage;
+use mpc_node::util::cadence::Cadence;
 use mpc_primitives::{Chain, CheckpointDigest, SignId};
 use near_sdk::AccountId;
 use std::collections::HashSet;
@@ -31,7 +32,7 @@ async fn test_web_server_serves_checkpoint() {
         .await;
 
     let chain = Chain::Ethereum;
-    let interval = mpc_node::backlog::checkpoint_interval(chain).unwrap();
+    let interval = Cadence::test().checkpoint_interval(chain).unwrap();
 
     // Create checkpoint on node 0
     let cp = network.nodes[0]
@@ -104,7 +105,7 @@ async fn test_consensus_alignment_peer_fetch() {
         .await;
 
     let chain = Chain::Ethereum;
-    let interval = mpc_node::backlog::checkpoint_interval(chain).unwrap();
+    let interval = Cadence::test().checkpoint_interval(chain).unwrap();
 
     // Node 0: create checkpoint
     let cp = network.nodes[0]
@@ -160,7 +161,7 @@ async fn test_consensus_alignment_peer_fetch() {
 
     // Fresh persisted backlog (simulates a node that just started)
     let fresh_storage = CheckpointStorage::in_memory();
-    let fresh_backlog = Backlog::persisted(fresh_storage.clone());
+    let fresh_backlog = Backlog::persisted(fresh_storage.clone(), Cadence::default());
 
     let node_client = NodeClient::new();
     let my_account_id: AccountId = "fresh-node.near".parse().unwrap();
@@ -244,7 +245,7 @@ async fn test_consensus_alignment_consensus_changes_while_fetching() {
     let (_mesh_tx, mut mesh_rx) = tokio::sync::watch::channel(mesh_state);
 
     let fresh_storage = CheckpointStorage::in_memory();
-    let fresh_backlog = Backlog::persisted(fresh_storage.clone());
+    let fresh_backlog = Backlog::persisted(fresh_storage.clone(), Cadence::default());
     let fresh_backlog2 = fresh_backlog.clone();
 
     let node_client = NodeClient::new();
@@ -302,7 +303,7 @@ async fn test_consensus_alignment_consensus_changes_while_fetching() {
 #[test(tokio::test(flavor = "multi_thread"))]
 async fn test_reset_converges_divergent_nodes() {
     let chain = Chain::Ethereum;
-    let interval = mpc_node::backlog::checkpoint_interval(chain).unwrap();
+    let interval = Cadence::test().checkpoint_interval(chain).unwrap();
     let resume_after = interval * 2;
 
     let network = MpcFixtureBuilder::default()

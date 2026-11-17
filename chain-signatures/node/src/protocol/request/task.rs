@@ -287,11 +287,12 @@ impl SignTask {
         entry: SignEntry<Generating>,
         mesh_state: watch::Receiver<MeshState>,
         mailbox: Arc<PositMailbox>,
+        cadence: Arc<Cadence>,
     ) -> Result<(), SignError> {
         let sign_id = self.sign_id;
         tracing::info!(?sign_id, governance = ?self.governance, "signature task starting...");
 
-        let mut state = SignState::new(entry, mesh_state, Arc::clone(&self.round));
+        let mut state = SignState::new(entry, mesh_state, Arc::clone(&self.round), cadence);
         let mut phase = SignPhase::Organizing(OrganizingPhase);
 
         // Sum per-phase time across loop attempts; emit on Complete(Ok) only.

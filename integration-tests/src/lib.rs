@@ -212,7 +212,7 @@ pub struct EthereumContext {
 pub struct Context {
     pub docker_network: String,
     pub release: bool,
-
+    pub test_cadence: bool,
     pub worker: Worker<Sandbox>,
     pub mpc_contract: Contract,
     pub redis: containers::Redis,
@@ -318,6 +318,7 @@ pub async fn setup(spawner: &mut ClusterSpawner) -> anyhow::Result<Context> {
     Ok(Context {
         docker_network: spawner.network.clone(),
         release: spawner.release,
+        test_cadence: spawner.test_cadence,
         worker,
         mpc_contract,
         redis,

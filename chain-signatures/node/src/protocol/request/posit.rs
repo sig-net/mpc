@@ -433,6 +433,7 @@ pub(crate) mod tests {
     use crate::protocol::presignature::Presignature;
     use crate::protocol::sync::SyncReportReceiver;
     use crate::rpc::RpcAction;
+    use crate::util::cadence::Cadence;
     use deadpool_redis::Runtime;
 
     /// A posit-phase harness; the unused channel ends are held alive so sends
@@ -485,9 +486,9 @@ pub(crate) mod tests {
         let (_mesh_tx, mesh_rx) = watch::channel(MeshState::default());
         let entry = backlog::SignEntry::generating(
             crate::backlog::mock::mock_sign_request(ctx.sign_id, Chain::Ethereum),
-            &Backlog::new(),
+            &Backlog::new(Cadence::default()),
         );
-        let state = SignState::new(entry, mesh_rx, Arc::clone(&ctx.round));
+        let state = SignState::new(entry, mesh_rx, Arc::clone(&ctx.round), Cadence::default());
 
         TestSetup {
             ctx,

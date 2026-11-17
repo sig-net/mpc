@@ -910,6 +910,7 @@ mod tests {
     use crate::protocol::contract::primitives::{ParticipantInfo, Participants};
     use crate::protocol::contract::{ResharingContractState, RunningContractState};
     use crate::protocol::ProtocolState;
+    use crate::util::cadence::Cadence;
     use mpc_chain_integration_core::utils::test::make_publish_action;
     use mpc_chain_integration_core::GatedPublisher;
     use mpc_primitives::{SignId, SignKind};
@@ -1313,7 +1314,7 @@ mod tests {
 
     #[tokio::test]
     async fn publish_is_awaited_only_while_its_leg_is_pending() {
-        let backlog = Backlog::new();
+        let backlog = Backlog::new(Cadence::default());
         let sign_id = SignId::new([3u8; 32]);
         let sign = publish_action_for(&mock_sign_request(sign_id, Chain::Solana));
         assert!(!publish_still_awaited(&backlog, &sign).await.unwrap());
@@ -1356,7 +1357,7 @@ mod tests {
     async fn backlog_awaiter_answers_from_the_backlog() {
         use mpc_chain_midnight::ResponseAwaiter as _;
 
-        let backlog = Backlog::new();
+        let backlog = Backlog::new(Cadence::default());
         let sign_id = SignId::new([6u8; 32]);
         let action = publish_action_for(&mock_sign_request(sign_id, Chain::Midnight));
         let awaiter = BacklogAwaiter::new(backlog.clone());
@@ -1369,7 +1370,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn publish_retry_stops_once_the_response_is_observed() {
-        let backlog = Backlog::new();
+        let backlog = Backlog::new(Cadence::default());
         let sign_id = SignId::new([5u8; 32]);
         backlog.insert_mock_sign(sign_id, Chain::Midnight).await;
         let call_count = Arc::new(AtomicUsize::new(0));

@@ -3,25 +3,12 @@ use anyhow::Context as _;
 use clap::builder::{PossibleValuesParser, TypedValueParser as _};
 use mpc_chain_ethereum::{EthConfig, EthNetwork, IndexerConfig};
 use secrecy::{ExposeSecret, SecretString};
+use std::time::Duration;
 use url::Url;
 
-/// The indexer's production cadence, as `mpc-chain-ethereum` defines it.
-#[cfg(not(feature = "test-feature"))]
-fn indexer_config() -> IndexerConfig {
-    IndexerConfig::default()
-}
-
-/// Test builds run the mock cadence so finality-gated tests finish in seconds.
-#[cfg(feature = "test-feature")]
-fn indexer_config() -> IndexerConfig {
-    mock_indexer_config()
-}
-
-/// Polls the finalized head every 100ms instead of the production cadence.
-#[cfg(any(test, feature = "test-feature"))]
-pub fn mock_indexer_config() -> IndexerConfig {
+fn indexer_config(eth_refresh: Duration) -> IndexerConfig {
     IndexerConfig {
-        refresh_interval: std::time::Duration::from_millis(100),
+        refresh_interval: eth_refresh,
         ..Default::default()
     }
 }
@@ -66,7 +53,7 @@ pub struct EthArgs {
 }
 
 impl EthArgs {
-    pub fn into_config(self) -> anyhow::Result<Option<EthConfig>> {
+    pub fn into_config(self, eth_refresh: Duration) -> anyhow::Result<Option<EthConfig>> {
         let Some(account_sk) = self.eth_account_sk else {
             return Ok(None);
         };
@@ -91,7 +78,7 @@ impl EthArgs {
             rpc: Default::default(),
             gas: Default::default(),
             publisher: Default::default(),
-            indexer: indexer_config(),
+            indexer: indexer_config(eth_refresh),
         }))
     }
 }
@@ -99,6 +86,7 @@ impl EthArgs {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::util::cadence::Cadence;
     use clap::Parser as _;
 
     const ACCOUNT_SK: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
@@ -121,15 +109,16 @@ mod tests {
     #[test]
     fn unconfigured_yields_no_config() {
         assert!(EthArgs::parse_from(["test"])
-            .into_config()
+            .into_config(Cadence::default().eth_refresh())
             .unwrap()
             .is_none());
     }
 
     #[test]
     fn into_config_parses_the_configured_fields() {
+        let refresh = Cadence::default().eth_refresh();
         let config = configured(&["--eth-network", "mainnet"])
-            .into_config()
+            .into_config(refresh)
             .unwrap()
             .expect("configured chain");
         assert_eq!(
@@ -141,10 +130,7 @@ mod tests {
             CONTRACT.parse::<Address>().unwrap()
         );
         assert_eq!(config.network, EthNetwork::Mainnet);
-        assert_eq!(
-            config.indexer.refresh_interval,
-            indexer_config().refresh_interval
-        );
+        assert_eq!(config.indexer.refresh_interval, refresh);
     }
 
     /// Only anvil skips finality; it never reports finalized blocks.
@@ -152,7 +138,7 @@ mod tests {
     fn only_anvil_is_optimistic() {
         for (network, optimistic) in [("sepolia", false), ("mainnet", false), ("anvil", true)] {
             let config = configured(&["--eth-network", network])
-                .into_config()
+                .into_config(Cadence::default().eth_refresh())
                 .unwrap()
                 .expect("configured chain");
             assert_eq!(config.network.is_optimistic(), optimistic, "{network}");
@@ -205,33 +191,7 @@ mod tests {
     /// tests use, so a change here must be made there too.
     #[test]
     fn cadences_are_pinned() {
-        assert_eq!(
-            mock_indexer_config().refresh_interval,
-            std::time::Duration::from_millis(100)
-        );
-        assert_eq!(
-            IndexerConfig::default().refresh_interval,
-            std::time::Duration::from_secs(10)
-        );
-    }
-
-    /// A production build runs the library's cadence.
-    #[cfg(not(feature = "test-feature"))]
-    #[test]
-    fn production_builds_run_the_default_cadence() {
-        assert_eq!(
-            indexer_config().refresh_interval,
-            IndexerConfig::default().refresh_interval
-        );
-    }
-
-    /// A test build runs the mock cadence.
-    #[cfg(feature = "test-feature")]
-    #[test]
-    fn test_builds_run_the_mock_cadence() {
-        assert_eq!(
-            indexer_config().refresh_interval,
-            mock_indexer_config().refresh_interval
-        );
+        assert_eq!(Cadence::test().eth_refresh(), Duration::from_millis(100));
+        assert_eq!(Cadence::default().eth_refresh(), Duration::from_secs(10));
     }
 }

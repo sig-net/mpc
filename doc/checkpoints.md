@@ -32,7 +32,7 @@ Requests, signatures, executions, attestations and the source and destination ch
 Vocabulary, per node per source chain:
 
 * **Boundary**: heights fall into intervals of a fixed length; a boundary is where a new interval starts.
-  Every correct node uses the same interval: it is a per-chain constant in the node (`backlog::checkpoint_interval`), never a per-node setting, since a node on its own interval would vote at boundaries nobody else has.
+  Every correct node uses the same interval: it is a per-chain constant in the node (`Cadence::checkpoint_interval`), never a per-node setting, since a node on its own interval would vote at boundaries nobody else has.
   Changing it for a network would belong in the contract config, which every node reads.
 
 * **Checkpoint height**: the first processed height in a new interval, so the boundary itself unless the chain skipped that height.

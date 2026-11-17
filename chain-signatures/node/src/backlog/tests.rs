@@ -1,4 +1,3 @@
-use super::checkpoint_interval;
 use super::{
     AnyProgress, Backlog, BacklogEntry, BacklogError, Bidirectional, Checkpoint, Checkpoints,
     Executing, ExecutionWatch, Final, Generating, Initial, PendingRequests, Publishing, Sign,
@@ -11,6 +10,7 @@ use crate::backlog::mock::{
 };
 use crate::sign_bidirectional::{BidirectionalProgress, SignProgress, SignStatus};
 use crate::storage::checkpoint_storage::CheckpointStorage;
+use crate::util::cadence::Cadence;
 use mpc_chain_integration_core::StateManager;
 use mpc_primitives::{
     BidirectionalTx, BidirectionalTxId, Chain, ExecutionOutcome, IndexedSignRequest, SignId,
@@ -63,7 +63,7 @@ fn digest_hex(hex_str: &str) -> [u8; 32] {
 
 #[tokio::test]
 async fn test_backlog_chain_isolation() {
-    let backlog = Backlog::new();
+    let backlog = Backlog::new(Cadence::default());
 
     let sign_id_eth = SignId::from_u8(1);
     let sign_id_sol = SignId::from_u8(2);
@@ -90,7 +90,7 @@ async fn test_backlog_chain_isolation() {
 
 #[tokio::test]
 async fn test_backlog_filter_by_status() {
-    let backlog = Backlog::new();
+    let backlog = Backlog::new(Cadence::default());
 
     // Add transactions with different statuses to Solana
     let sign_id0 = SignId::from_u8(0);
@@ -141,7 +141,7 @@ async fn test_backlog_filter_by_status() {
 
 #[tokio::test]
 async fn test_backlog_concurrent_access() {
-    let backlog = Backlog::new();
+    let backlog = Backlog::new(Cadence::default());
     let mut handles = vec![];
 
     // Spawn multiple tasks that insert concurrently to different chains
@@ -196,7 +196,7 @@ async fn test_backlog_concurrent_access() {
 
 #[tokio::test]
 async fn test_total_pending_accounting() {
-    let backlog = Backlog::new();
+    let backlog = Backlog::new(Cadence::default());
     assert_eq!(backlog.len(), 0);
     assert!(backlog.is_empty());
 
@@ -237,8 +237,8 @@ async fn test_total_pending_accounting() {
 #[tokio::test]
 async fn test_automatic_checkpoint_on_interval() {
     for chain in [Chain::Ethereum, Chain::Solana] {
-        let backlog = Backlog::new();
-        let interval = checkpoint_interval(chain).unwrap();
+        let backlog = Backlog::new(Cadence::test());
+        let interval = Cadence::test().checkpoint_interval(chain).unwrap();
 
         backlog
             .insert_mock_bidirectional(SignId::from_u8(1), chain)
@@ -279,7 +279,7 @@ async fn test_automatic_checkpoint_on_interval() {
 
 #[tokio::test]
 async fn test_boundary_crossing_rules() {
-    let backlog = Backlog::new();
+    let backlog = Backlog::new(Cadence::default());
     backlog
         .insert_mock_bidirectional(SignId::from_u8(1), Chain::Solana)
         .await;
@@ -330,7 +330,7 @@ async fn test_boundary_crossing_rules() {
 
 #[tokio::test]
 async fn test_checkpoint_creation() {
-    let backlog = Backlog::new();
+    let backlog = Backlog::new(Cadence::default());
 
     let tx1 = mock_bidirectional_tx(SignId::from_u8(1), Chain::Solana);
     let tx2 = mock_bidirectional_tx(SignId::from_u8(2), Chain::Solana);
@@ -369,7 +369,7 @@ struct OldCheckpoint {
 /// The two entries, at this height, whose digest earlier versions pinned as
 /// [`OLD_FORMAT_DIGEST`].
 async fn old_format_body() -> Checkpoint {
-    let backlog = Backlog::new();
+    let backlog = Backlog::new(Cadence::test());
     backlog
         .insert_mock_executing(&mock_bidirectional_tx(SignId::from_u8(1), Chain::Solana))
         .await;
@@ -419,7 +419,7 @@ async fn an_old_format_body_keeps_its_digest() {
 #[tokio::test]
 async fn adopting_an_old_format_body_stores_it_rebuilt() {
     let body = old_format_body().await;
-    let backlog = Backlog::new();
+    let backlog = Backlog::new(Cadence::test());
     backlog.regress(&body, mock_root_pk()).await.unwrap();
 
     let stored = backlog
@@ -447,7 +447,7 @@ async fn an_old_format_body_that_cannot_be_rebuilt_is_stored_as_sent() {
     }
     entry.request = Arc::new(request);
 
-    let backlog = Backlog::new();
+    let backlog = Backlog::new(Cadence::test());
     backlog.regress(&body, mock_root_pk()).await.unwrap();
 
     let stored = backlog
@@ -483,7 +483,7 @@ async fn loading_an_old_format_body_rebuilds_its_progress() {
     }
     answered.request = Arc::new(request);
 
-    let backlog = Backlog::new();
+    let backlog = Backlog::new(Cadence::test());
     backlog.regress(&body, mock_root_pk()).await.unwrap();
     assert_eq!(
         backlog
@@ -679,7 +679,7 @@ fn test_checkpoint_serialization() {
 
 #[tokio::test]
 async fn test_plain_sign_typestate_lifecycle() {
-    let backlog = Backlog::new();
+    let backlog = Backlog::new(Cadence::default());
     let sign_id = SignId::from_u8(1);
     let req = mock_sign_request(sign_id, Chain::Ethereum);
 
@@ -752,7 +752,7 @@ async fn test_plain_sign_typestate_lifecycle() {
 
 #[tokio::test]
 async fn test_bidirectional_typestate_lifecycle() {
-    let backlog = Backlog::new();
+    let backlog = Backlog::new(Cadence::default());
     let sign_id = SignId::from_u8(2);
     let req = mock_bidi_request(sign_id, Chain::Solana);
 
@@ -856,7 +856,7 @@ async fn test_bidirectional_typestate_lifecycle() {
 
 #[tokio::test]
 async fn test_bidirectional_executing_advance_outcomes() {
-    let backlog = Backlog::new();
+    let backlog = Backlog::new(Cadence::default());
     let tx = mock_tx(20);
     let sign_id = tx.sign_id();
 
@@ -908,7 +908,7 @@ async fn extraction_failure_cannot_advance_into_response_signing() {
         Chain::Canton,
         Chain::Hydration,
     ] {
-        let backlog = Backlog::new();
+        let backlog = Backlog::new(Cadence::default());
         let tx = mock_bidirectional_tx(SignId::from_u8(22), chain);
         let entry = backlog.insert_mock_executing(&tx).await;
         let before = backlog.checkpoint(chain).await.unwrap();
@@ -935,7 +935,7 @@ async fn extraction_failure_cannot_advance_into_response_signing() {
 
 #[tokio::test]
 async fn test_watch_unwatch_and_respond() {
-    let backlog = Backlog::new();
+    let backlog = Backlog::new(Cadence::default());
     let tx = mock_tx(7);
     let sign_id = tx.sign_id();
 
@@ -979,7 +979,7 @@ async fn test_watch_unwatch_and_respond() {
 
 #[tokio::test]
 async fn test_recovery_restores_state_and_watchers() {
-    let backlog = Backlog::new();
+    let backlog = Backlog::new(Cadence::default());
     let tx = mock_tx(6);
     let sign_id = tx.sign_id();
 
@@ -987,7 +987,7 @@ async fn test_recovery_restores_state_and_watchers() {
     backlog.set_processed_block(Chain::Solana, 10).await;
     let checkpoint = backlog.checkpoint(Chain::Solana).await.unwrap();
 
-    let recovered = Backlog::new();
+    let recovered = Backlog::new(Cadence::default());
     recovered
         .checkpoints()
         .storage()
@@ -1037,7 +1037,9 @@ async fn test_recovery_reports_restored_backlog_size() {
     pending.set_processed_block(100);
     let checkpoint = Checkpoints::snapshot(&pending, chain);
 
-    Backlog::new().recover_by_checkpoint(&checkpoint).await;
+    Backlog::new(Cadence::default())
+        .recover_by_checkpoint(&checkpoint)
+        .await;
 
     let size = crate::metrics::requests::BACKLOG_SIZE
         .with_label_values(&[chain.as_str()])
@@ -1047,14 +1049,14 @@ async fn test_recovery_reports_restored_backlog_size() {
 
 #[tokio::test]
 async fn test_recovery_requeues_completed_bidirectional_requests() {
-    let backlog = Backlog::new();
+    let backlog = Backlog::new(Cadence::default());
     let tx = mock_tx(42);
 
     backlog.insert_mock_final(&tx).await;
     backlog.set_processed_block(Chain::Solana, 10).await;
     let checkpoint = backlog.checkpoint(Chain::Solana).await.unwrap();
 
-    let recovered = Backlog::new();
+    let recovered = Backlog::new(Cadence::default());
     recovered.recover_by_checkpoint(&checkpoint).await;
 
     let requeued = recovered.requeueable_requests(Chain::Solana).await;
@@ -1067,9 +1069,9 @@ async fn test_recovery_requeues_completed_bidirectional_requests() {
 
 #[tokio::test]
 async fn test_recovery_preserves_pending_checkpoints() {
-    let backlog = Backlog::new();
+    let backlog = Backlog::new(Cadence::default());
     let chain = Chain::Ethereum;
-    let interval = checkpoint_interval(chain).unwrap();
+    let interval = Cadence::default().checkpoint_interval(chain).unwrap();
 
     backlog.set_processed_block(chain, interval).await.unwrap();
     backlog
@@ -1086,7 +1088,7 @@ async fn test_recovery_preserves_pending_checkpoints() {
 
 #[tokio::test]
 async fn test_total_pending_on_recovery() {
-    let backlog = Backlog::new();
+    let backlog = Backlog::new(Cadence::default());
     for i in 1..=3 {
         backlog
             .insert_mock_sign(SignId::from_u8(i), Chain::Ethereum)
@@ -1096,13 +1098,13 @@ async fn test_total_pending_on_recovery() {
     let checkpoint = backlog.checkpoint(Chain::Ethereum).await.unwrap();
 
     // Clean recovery updates count from 0 to 3
-    let clean = Backlog::new();
+    let clean = Backlog::new(Cadence::default());
     assert_eq!(clean.len(), 0);
     clean.recover_by_checkpoint(&checkpoint).await;
     assert_eq!(clean.len(), 3);
 
     // Dirty recovery overwrites pre-existing state to match checkpoint size exactly
-    let dirty = Backlog::new();
+    let dirty = Backlog::new(Cadence::default());
     dirty
         .insert_mock_sign(SignId::from_u8(99), Chain::Ethereum)
         .await;
@@ -1117,7 +1119,7 @@ async fn test_total_pending_on_recovery() {
 
 #[tokio::test]
 async fn test_publishable_requests() {
-    let backlog = Backlog::new();
+    let backlog = Backlog::new(Cadence::default());
     let chain = Chain::Ethereum;
 
     // 1. Plain sign request advanced to publishing
@@ -1154,7 +1156,7 @@ async fn test_publishable_requests() {
 
 #[tokio::test]
 async fn test_insert_and_accessors() {
-    let backlog = Backlog::new();
+    let backlog = Backlog::new(Cadence::default());
     let chain = Chain::Ethereum;
     let sign_id = SignId::from_u8(10);
     let req = mock_sign_request(sign_id, chain);
@@ -1174,7 +1176,7 @@ async fn test_insert_and_accessors() {
 
 #[tokio::test]
 async fn test_dynamic_entry_cast_and_is() {
-    let backlog = Backlog::new();
+    let backlog = Backlog::new(Cadence::default());
     let chain = Chain::Ethereum;
     let sign_id = SignId::from_u8(5);
     let req = mock_sign_request(sign_id, chain);
@@ -1207,7 +1209,7 @@ async fn test_dynamic_entry_cast_and_is() {
 
 #[tokio::test]
 async fn test_initial_any_progress_advance() {
-    let backlog = Backlog::new();
+    let backlog = Backlog::new(Cadence::default());
     let sign_id = SignId::from_u8(7);
     let tx = Arc::new(mock_bidirectional_tx(sign_id, Chain::Solana));
 
@@ -1235,7 +1237,7 @@ async fn test_initial_any_progress_advance() {
 
 #[tokio::test]
 async fn pending_executions_targeting_spans_sources() {
-    let backlog = Backlog::new();
+    let backlog = Backlog::new(Cadence::default());
     let tx1 = routed_tx(31, Chain::Ethereum, Chain::Tron);
     let tx2 = routed_tx(32, Chain::Solana, Chain::Tron);
     let tx3 = routed_tx(33, Chain::Ethereum, Chain::Solana);
@@ -1260,7 +1262,7 @@ async fn pending_executions_targeting_spans_sources() {
 
 #[tokio::test]
 async fn test_advance_rejects_invalid_publish_transition() {
-    let backlog = Backlog::new();
+    let backlog = Backlog::new(Cadence::default());
     let sign_id = SignId::from_u8(77);
     let req = mock_bidi_request(sign_id, Chain::Solana);
     let tx = Arc::new(mock_bidirectional_tx(sign_id, Chain::Solana));
@@ -1311,7 +1313,7 @@ async fn test_advance_rejects_invalid_publish_transition() {
 /// progress, or the node publishes the first-leg signature as the response.
 #[tokio::test]
 async fn a_first_leg_round_cannot_publish_into_the_response() {
-    let backlog = Backlog::new();
+    let backlog = Backlog::new(Cadence::test());
     let tx = mock_tx(79);
     let req = mock_bidi_request(tx.sign_id(), Chain::Solana);
     let (pk, output) = mock_signature_output(&req.args);
@@ -1342,7 +1344,7 @@ async fn a_first_leg_round_cannot_publish_into_the_response() {
 /// A marked entry is answered Unviable at catchup, so it spends no presignature on a first leg.
 #[tokio::test]
 async fn catchup_does_not_requeue_a_marked_entry() {
-    let backlog = Backlog::new();
+    let backlog = Backlog::new(Cadence::test());
     let sign_id = SignId::from_u8(80);
     backlog
         .insert_bidirectional(mock_bidi_request(sign_id, Chain::Solana))
@@ -1365,7 +1367,7 @@ async fn catchup_does_not_requeue_a_marked_entry() {
 /// sends it, and the mark stays on the entry.
 #[tokio::test]
 async fn catchup_requeues_a_marked_entry_already_answered() {
-    let backlog = Backlog::new();
+    let backlog = Backlog::new(Cadence::test());
     let tx = mock_tx(81);
     backlog
         .insert_bidirectional(mock_bidi_request(tx.sign_id(), Chain::Solana))
@@ -1390,7 +1392,7 @@ async fn catchup_requeues_a_marked_entry_already_answered() {
 
 #[tokio::test]
 async fn respond_observed_at_survives_the_unwatch_lookup() {
-    let backlog = Backlog::new();
+    let backlog = Backlog::new(Cadence::default());
     let tx = mock_bidirectional_tx(SignId::new([71; 32]), Chain::Solana);
     backlog.insert_mock_executing(&tx).await;
 
@@ -1412,7 +1414,7 @@ async fn respond_observed_at_survives_the_unwatch_lookup() {
 /// watch: the resident wait start must survive.
 #[tokio::test]
 async fn watch_execution_re_register_keeps_the_wait_start() {
-    let backlog = Backlog::new();
+    let backlog = Backlog::new(Cadence::default());
     let tx = mock_bidirectional_tx(SignId::new([73; 32]), Chain::Solana);
     backlog.insert_mock_executing(&tx).await;
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -1436,7 +1438,7 @@ async fn watch_execution_re_register_keeps_the_wait_start() {
 /// honest `EXECUTION_WAIT_UNMEASURED` case.
 #[tokio::test]
 async fn watch_execution_without_a_resident_watch_starts_unmeasured() {
-    let backlog = Backlog::new();
+    let backlog = Backlog::new(Cadence::default());
     let tx = mock_bidirectional_tx(SignId::new([79; 32]), Chain::Solana);
     backlog.insert_mock_executing(&tx).await;
     backlog
@@ -1455,7 +1457,7 @@ async fn watch_execution_without_a_resident_watch_starts_unmeasured() {
 
 #[tokio::test]
 async fn re_signed_replacement_keeps_both_flat_id_watches() {
-    let backlog = Backlog::new();
+    let backlog = Backlog::new(Cadence::test());
     let tx = mock_bidirectional_tx(SignId::new([85; 32]), Chain::Solana);
     backlog.insert_mock_executing(&tx).await;
     let mut replacement = tx.clone();
@@ -1469,7 +1471,7 @@ async fn re_signed_replacement_keeps_both_flat_id_watches() {
 
 #[tokio::test]
 async fn executing_entry_for_falls_back_to_the_backlog_entry_without_a_watch() {
-    let backlog = Backlog::new();
+    let backlog = Backlog::new(Cadence::default());
     let tx = mock_bidirectional_tx(SignId::new([77; 32]), Chain::Solana);
     backlog.insert_mock_executing(&tx).await;
     backlog
@@ -1502,7 +1504,7 @@ async fn executing_entry_for_falls_back_to_the_backlog_entry_without_a_watch() {
 
 #[tokio::test]
 async fn executing_entry_for_resolves_only_the_entrys_own_watch_for_duplicate_ids() {
-    let backlog = Backlog::new();
+    let backlog = Backlog::new(Cadence::default());
     let first = mock_bidirectional_tx(SignId::new([81; 32]), Chain::Solana);
     let mut second = first.clone();
     second.request_id = [0x7f; 32];
@@ -1564,7 +1566,7 @@ async fn executing_entry_for_resolves_only_the_entrys_own_watch_for_duplicate_id
 
 #[tokio::test]
 async fn plain_lookup_cannot_measure_the_execution_wait() {
-    let backlog = Backlog::new();
+    let backlog = Backlog::new(Cadence::default());
     let tx = mock_bidirectional_tx(SignId::new([75; 32]), Chain::Solana);
     backlog.insert_mock_executing(&tx).await;
 
@@ -1577,7 +1579,7 @@ async fn plain_lookup_cannot_measure_the_execution_wait() {
 
 #[tokio::test]
 async fn live_regress_preserves_only_matching_execution_wait_starts() {
-    let backlog = Backlog::new();
+    let backlog = Backlog::new(Cadence::default());
     let retained = mock_bidirectional_tx(SignId::from_u8(80), Chain::Solana);
     let restored = mock_bidirectional_tx(SignId::from_u8(81), Chain::Solana);
     let stale = mock_bidirectional_tx(SignId::from_u8(82), Chain::Solana);
@@ -1660,7 +1662,7 @@ async fn live_regress_preserves_only_matching_execution_wait_starts() {
 /// and re-registration.
 #[tokio::test]
 async fn twin_wait_starts_survive_recovery_and_re_registration() {
-    let backlog = Backlog::new();
+    let backlog = Backlog::new(Cadence::test());
     let first_tx = mock_bidirectional_tx(SignId::from_u8(90), Chain::Solana);
     let mut twin_tx = first_tx.clone();
     twin_tx.request_id = [0x7f; 32];
@@ -1738,7 +1740,7 @@ async fn twin_wait_starts_survive_recovery_and_re_registration() {
 
 #[tokio::test]
 async fn recovered_executing_entry_has_no_wait_start() {
-    let backlog = Backlog::new();
+    let backlog = Backlog::new(Cadence::default());
     let tx = mock_bidirectional_tx(SignId::new([73; 32]), Chain::Solana);
     backlog.insert_mock_executing(&tx).await;
 
@@ -1746,7 +1748,7 @@ async fn recovered_executing_entry_has_no_wait_start() {
         .checkpoint(Chain::Solana)
         .await
         .expect("checkpoint must snapshot");
-    let recovered = Backlog::new();
+    let recovered = Backlog::new(Cadence::default());
     recovered.recover_by_checkpoint(&checkpoint).await;
 
     let entry = recovered
@@ -1764,7 +1766,7 @@ async fn recovered_executing_entry_has_no_wait_start() {
 /// round trip's origin has to be carried across the transition explicitly.
 #[tokio::test]
 async fn advance_carries_the_origin_into_the_final_response() {
-    let backlog = Backlog::new();
+    let backlog = Backlog::new(Cadence::default());
     let tx = mock_bidirectional_tx(SignId::new([74; 32]), Chain::Solana);
     let executing = backlog.insert_mock_executing(&tx).await;
     let origin = executing.request().unix_timestamp_indexed;
@@ -1786,7 +1788,7 @@ async fn advance_carries_the_origin_into_the_final_response() {
 fn mock_cadence_covers_the_same_chains_as_production() {
     for chain in Chain::iter() {
         assert_eq!(
-            super::mock_checkpoint_interval(chain).is_some(),
+            Cadence::test().checkpoint_interval(chain).is_some(),
             mpc_primitives::ChainConfig::checkpoint_interval(&chain).is_some(),
             "{chain:?}"
         );
@@ -1797,7 +1799,7 @@ fn mock_cadence_covers_the_same_chains_as_production() {
 #[tokio::test]
 async fn a_removed_request_loses_its_record() {
     let storage = CheckpointStorage::in_memory();
-    let backlog = Backlog::persisted(storage.clone());
+    let backlog = Backlog::persisted(storage.clone(), Cadence::test());
     let request = mock_sign_request(SignId::new([1; 32]), Chain::Solana);
     let (pk, output) = mock_signature_output(&request.args);
     let (entry, _) = backlog.insert(Arc::clone(&request)).await;
@@ -1823,7 +1825,7 @@ async fn a_removed_request_loses_its_record() {
 #[tokio::test]
 async fn the_legs_of_a_request_have_separate_records() {
     let storage = CheckpointStorage::in_memory();
-    let backlog = Backlog::persisted(storage.clone());
+    let backlog = Backlog::persisted(storage.clone(), Cadence::test());
     let tx = mock_tx(42);
     let chain = tx.source_chain;
     let first_leg = mock_bidi_request(tx.sign_id(), chain);
@@ -1855,7 +1857,7 @@ async fn the_legs_of_a_request_have_separate_records() {
 #[tokio::test]
 async fn a_round_after_removal_leaves_no_record() {
     let storage = CheckpointStorage::in_memory();
-    let backlog = Backlog::persisted(storage.clone());
+    let backlog = Backlog::persisted(storage.clone(), Cadence::test());
     let request = mock_sign_request(SignId::new([1; 32]), Chain::Solana);
     let (pk, output) = mock_signature_output(&request.args);
     let (entry, _) = backlog.insert(Arc::clone(&request)).await;
@@ -1873,7 +1875,7 @@ async fn a_round_after_removal_leaves_no_record() {
 /// A signature that cannot be stored is published anyway, as before there were records.
 #[tokio::test]
 async fn a_signature_that_cannot_be_stored_is_still_published() {
-    let backlog = Backlog::persisted(CheckpointStorage::failing());
+    let backlog = Backlog::persisted(CheckpointStorage::failing(), Cadence::test());
     let request = mock_sign_request(SignId::new([1; 32]), Chain::Solana);
     let (pk, output) = mock_signature_output(&request.args);
     let (entry, _) = backlog.insert(request).await;
@@ -1902,7 +1904,7 @@ async fn a_stored_attestation_is_published_after_a_restart() {
         .unwrap();
 
     let records = storage.load_local(chain).await.unwrap();
-    let restarted = Backlog::persisted(storage);
+    let restarted = Backlog::persisted(storage, Cadence::test());
     restarted
         .recover_local(chain, mock_root_pk())
         .await
@@ -1931,10 +1933,10 @@ async fn a_first_leg_record_does_not_undo_later_progress() {
 #[tokio::test]
 async fn a_rebased_node_publishes_what_it_stored() {
     let storage = CheckpointStorage::in_memory();
-    let backlog = Backlog::persisted(storage.clone());
+    let backlog = Backlog::persisted(storage.clone(), Cadence::test());
     let request = mock_bidi_request(SignId::new([1; 32]), Chain::Solana);
     let (pk, output) = mock_signature_output(&request.args);
-    let peer = Backlog::new();
+    let peer = Backlog::new(Cadence::test());
     peer.insert_bidirectional(Arc::clone(&request)).await;
     let consensus = peer.checkpoint(Chain::Solana).await.unwrap();
     backlog
@@ -1956,7 +1958,7 @@ async fn a_rebased_node_publishes_what_it_stored() {
 #[tokio::test]
 async fn both_records_claim_the_attestation_in_any_order() {
     for attestation_first in [false, true] {
-        let backlog = Backlog::new();
+        let backlog = Backlog::new(Cadence::test());
         let tx = mock_tx(42);
         let chain = tx.source_chain;
         let request = mock_bidi_request(tx.sign_id(), chain);

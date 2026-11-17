@@ -189,6 +189,7 @@ pub struct ClusterSpawner {
     pub midnight_funding_seeds: Vec<String>,
     /// Tracks which binary source to use for each node index
     pub node_binary_sources: Vec<NodeBinarySource>,
+    pub test_cadence: bool,
 }
 
 impl Default for ClusterSpawner {
@@ -230,6 +231,7 @@ impl Default for ClusterSpawner {
             use_midnight: false,
             midnight_funding_seeds: Vec::new(),
             node_binary_sources: vec![NodeBinarySource::CurrentCode; nodes],
+            test_cadence: true,
         }
     }
 }
@@ -250,6 +252,8 @@ impl ClusterSpawner {
 
     /// Add nodes running the latest release binary under target/compat/latest.
     pub fn latest_release_nodes(mut self, count: usize) -> Self {
+        // We mark test cadence false if we are going to run release nodes in the cluster
+        self.test_cadence = false;
         let current_len = self.node_binary_sources.len();
         self.node_binary_sources
             .extend((0..count).map(|_| NodeBinarySource::LatestRelease));
