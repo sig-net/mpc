@@ -3,8 +3,8 @@
 
 use std::fmt;
 
-/// The Midnight networks the publisher builds transactions for. The wire name is
-/// [`Self::as_str`], used only at the SDK and storage edges that take text.
+/// The Midnight networks the publisher builds transactions for. [`Self::as_str`] is
+/// the wire name, used at the SDK and storage edges that take text.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum NetworkId {
     Undeployed,
@@ -33,6 +33,12 @@ impl NetworkId {
         Self::Preprod,
         Self::Mainnet,
     ];
+}
+
+impl fmt::Display for NetworkId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
 }
 
 /// The network id a node reported, which the publisher does not support.

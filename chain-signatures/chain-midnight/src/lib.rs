@@ -36,4 +36,4 @@ pub use indexer::MidnightIndexer;
 pub use publisher::{RecoveringMidnightPublisher, ResponseAwaiter};
 #[cfg(feature = "sandbox")]
 pub use rpc::probe_network_id;
-pub use types::NetworkId;
+pub use types::{NetworkId, UnsupportedNetwork};

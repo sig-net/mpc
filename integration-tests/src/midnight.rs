@@ -742,8 +742,7 @@ impl MidnightStack {
                 Some(network) => {
                     let network_id = wait_for_node(&network.node_http_url)
                         .await?
-                        .as_str()
-                        .to_owned();
+                        .to_string();
                     tracing::info!(%network_id, "running the Midnight cases on a deployed network");
                     (
                         None,
@@ -842,7 +841,7 @@ impl MidnightStack {
         // The indexer's SPO sub-indexer opens a client at block 1 as soon as it
         // connects and exits for good if the node has not imported that block yet,
         // so the indexer starts only once the node is producing blocks.
-        let network_id = wait_for_node(&node_http_url).await?.as_str().to_owned();
+        let network_id = wait_for_node(&node_http_url).await?.to_string();
 
         let node_internal_ws = format!("ws://{node_ip}:{NODE_PORT}");
         let indexer_log = log_consumer(&artifact_dir.join("indexer.log"));
