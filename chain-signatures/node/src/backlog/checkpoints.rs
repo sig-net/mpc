@@ -222,6 +222,18 @@ impl Checkpoints {
             return Ok(false);
         };
 
+        // Settlement bounds the voted store: at or below the settled height the
+        // vote is history, but later heights may still be under dispute
+        // (doc/checkpoints.md §4). Promotion has made this the canonical latest.
+        if let Some(settled) = self
+            .storage
+            .load_latest(chain)
+            .await
+            .map_err(|source| CheckpointError::Storage { chain, source })?
+        {
+            self.clear_voted_up_to(chain, settled.block_height).await?;
+        }
+
         self.pending_counts[chain].store(remaining_count, Ordering::Release);
         self.observe(chain, remaining_count);
         tracing::info!(
@@ -284,10 +296,10 @@ impl Checkpoints {
             .map_err(|source| CheckpointError::Storage { chain, source })
     }
 
-    // These wrappers are consumed by the settlement-stall handler in a later PR.
+    // Voted-record wrappers: written when a vote is cast, trimmed on settlement,
+    // and dropped wholesale on a stall re-index (doc/checkpoints.md §4).
 
     /// Durably records what this node voted for at a checkpoint height.
-    #[allow(dead_code)]
     pub(crate) async fn persist_voted(
         &self,
         checkpoint: &Checkpoint,
@@ -312,10 +324,21 @@ impl Checkpoints {
     }
 
     /// Removes all voted checkpoints for `chain`.
-    #[allow(dead_code)]
     pub(crate) async fn clear_voted(&self, chain: Chain) -> Result<(), CheckpointError> {
         self.storage
             .clear_voted(chain)
+            .await
+            .map_err(|source| CheckpointError::Storage { chain, source })
+    }
+
+    /// Removes voted checkpoints at or below `height` for `chain`.
+    pub(crate) async fn clear_voted_up_to(
+        &self,
+        chain: Chain,
+        height: u64,
+    ) -> Result<(), CheckpointError> {
+        self.storage
+            .clear_voted_up_to(chain, height)
             .await
             .map_err(|source| CheckpointError::Storage { chain, source })
     }
@@ -682,6 +705,60 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn confirm_clears_voted_records_at_or_below_settled_height() {
+        let checkpoints = Checkpoints::new(CheckpointStorage::in_memory());
+        let settled = Checkpoint::reset(Chain::Solana, 20);
+        let later = Checkpoint::reset(Chain::Solana, 30);
+        let earlier = Checkpoint::reset(Chain::Solana, 10);
+        let other = Checkpoint::reset(Chain::Ethereum, 15);
+
+        checkpoints.persist_pending(&settled).await.unwrap();
+        for voted in [&earlier, &settled, &later, &other] {
+            checkpoints.persist_voted(voted).await.unwrap();
+        }
+
+        assert!(checkpoints
+            .confirm(settled.chain, settled.digest())
+            .await
+            .unwrap());
+
+        // Only the still-unsettled height survives, and only for this chain.
+        assert_eq!(
+            checkpoints.load_voted(Chain::Solana).await.unwrap(),
+            vec![later]
+        );
+        assert_eq!(
+            checkpoints.load_voted(Chain::Ethereum).await.unwrap(),
+            vec![other]
+        );
+    }
+
+    #[tokio::test]
+    async fn confirm_clears_voted_records_for_an_already_promoted_checkpoint() {
+        let storage = CheckpointStorage::in_memory();
+        let checkpoints = Checkpoints::new(storage.clone());
+        let settled = checkpoint(2);
+        let later = checkpoint(3);
+
+        checkpoints.persist_pending(&settled).await.unwrap();
+        storage
+            .promote_pending(settled.chain, settled.digest())
+            .await
+            .unwrap();
+        checkpoints.persist_voted(&settled).await.unwrap();
+        checkpoints.persist_voted(&later).await.unwrap();
+
+        assert!(checkpoints
+            .confirm(settled.chain, settled.digest())
+            .await
+            .unwrap());
+        assert_eq!(
+            checkpoints.load_voted(settled.chain).await.unwrap(),
+            vec![later]
+        );
+    }
+
+    #[tokio::test]
     async fn voted_wrappers_delegate_to_storage() {
         let checkpoints = Checkpoints::new(CheckpointStorage::in_memory());
         let first = checkpoint(1);
@@ -716,6 +793,10 @@ mod tests {
         ));
         assert!(matches!(
             checkpoints.clear_voted(checkpoint.chain).await,
+            Err(CheckpointError::Storage { .. })
+        ));
+        assert!(matches!(
+            checkpoints.clear_voted_up_to(checkpoint.chain, 1).await,
             Err(CheckpointError::Storage { .. })
         ));
     }
