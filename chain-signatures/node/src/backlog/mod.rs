@@ -4,6 +4,7 @@ pub(crate) mod migration;
 #[cfg(any(test, feature = "test-feature"))]
 pub mod mock;
 pub mod request;
+mod stall;
 
 pub use request::{
     AnyProgress, Bidirectional, Executing, ExecutionWatch, Final, Generating, Initial, Publishing,
@@ -16,6 +17,7 @@ use crate::sign_bidirectional::{
 };
 use crate::storage::checkpoint_storage::CheckpointStorage;
 pub use checkpoints::{Checkpoint, CheckpointError, Checkpoints};
+pub use stall::{detect_stall, Stall};
 
 use enum_map::EnumMap;
 use mpc_chain_integration_core::{StateManager, WatchKey, WatchedExecution};
