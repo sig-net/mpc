@@ -226,7 +226,7 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
                                 .await
                                 .with_context(|| format!(
                                     "midnight notification tx_hash={} request_id={request_id} height={} extrinsic_index={} call_index={call_index} segment={physical_segment} phase={phase:?}",
-                                    hex::encode(candidate.ledger_tx_hash), block.number, candidate.extrinsic_index,
+                                    candidate.ledger_tx_hash, block.number, candidate.extrinsic_index,
                                 ))?
                             {
                                 tracing::info!(
@@ -237,7 +237,7 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
                                     call_index,
                                     physical_segment,
                                     ?phase,
-                                    tx_hash = %hex::encode(candidate.ledger_tx_hash),
+                                    tx_hash = %candidate.ledger_tx_hash,
                                     sign_id = ?request.id,
                                     "midnight signature requested"
                                 );
@@ -251,7 +251,7 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
                             } else {
                                 tracing::warn!(
                                     reason = "notification-not-indexed",
-                                    tx_hash = %hex::encode(candidate.ledger_tx_hash),
+                                    tx_hash = %candidate.ledger_tx_hash,
                                     request_id,
                                     height = block.number,
                                     block_hash = %block.hash,
@@ -770,6 +770,7 @@ mod tests {
         array_of, ascii_padded, cell_from_record, hex_32, key_of, map_of, notification_payload,
         response_payload, sample_record, test_root_pk, EventRecorder,
     };
+    use crate::types::LedgerTxHash;
     use midnight_onchain_state::state::StateValue;
     use mpc_chain_integration_core::utils::{hashing::hash_payload, stream::chain_event_channel};
     use mpc_chain_integration_core::{MockStateManager, NoopChainTelemetry};
@@ -858,7 +859,7 @@ mod tests {
             block_time_ms: fixture_block_ms(height),
             proof_seed: proof_seed(height),
             candidates: vec![CandidateTransactionEmissions {
-                ledger_tx_hash: LEDGER_TX_HASH,
+                ledger_tx_hash: LedgerTxHash::from_bytes(LEDGER_TX_HASH),
                 extrinsic_index: 1,
                 partial_success: false,
                 singleton_calls: calls,

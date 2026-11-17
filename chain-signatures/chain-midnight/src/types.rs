@@ -10,6 +10,10 @@ use std::fmt;
 pub(crate) struct BlockHash([u8; 32]);
 
 /// Why a `0x`-prefixed block-hash string did not parse.
+///
+/// Only tests parse hash text: every production boundary receives hashes typed
+/// from the node's own replies, so this stays out of non-test builds.
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum BlockHashError {
     Not0xPrefixed,
@@ -17,6 +21,7 @@ pub(crate) enum BlockHashError {
     Not32Bytes(usize),
 }
 
+#[cfg(test)]
 impl fmt::Display for BlockHashError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -27,6 +32,7 @@ impl fmt::Display for BlockHashError {
     }
 }
 
+#[cfg(test)]
 impl std::error::Error for BlockHashError {}
 
 impl BlockHash {
@@ -38,6 +44,8 @@ impl BlockHash {
         &self.0
     }
 
+    /// Parses the `0x`-prefixed 32-byte hex form; test fixtures and stubs only.
+    #[cfg(test)]
     pub(crate) fn from_0x_hex(value: &str) -> Result<Self, BlockHashError> {
         let bare = value
             .strip_prefix("0x")
@@ -53,5 +61,27 @@ impl BlockHash {
 impl fmt::Display for BlockHash {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(formatter, "0x{}", hex::encode(self.0))
+    }
+}
+
+/// A 32-byte Midnight ledger transaction hash, distinct from [`BlockHash`] so the
+/// two cannot be swapped where a seam carries both. Canonical text is bare
+/// lowercase hex, the form receipts and telemetry print.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct LedgerTxHash([u8; 32]);
+
+impl LedgerTxHash {
+    pub(crate) const fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+
+    pub(crate) const fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+}
+
+impl fmt::Display for LedgerTxHash {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{}", hex::encode(self.0))
     }
 }

@@ -25,6 +25,7 @@ use crate::native::{NativeIntentClient, Provers};
 use crate::output_storage::{OutputStore, RecoveringOutputStore};
 use crate::rpc::{MidnightPublisherRpc, PinnedReads};
 use crate::submit_error::refusal_code;
+use crate::types::BlockHash;
 
 const SPECK_PER_DUST: f64 = 1e15;
 
@@ -32,7 +33,7 @@ const SPECK_PER_DUST: f64 = 1e15;
 /// drift per block, so parameters priced at one block against a state read at another
 /// produce an intent the node answers `OutOfGas`.
 pub(crate) struct PinnedState {
-    pub at_hash: String,
+    pub at_hash: BlockHash,
     pub contract_state: Vec<u8>,
     pub ledger_parameters: Vec<u8>,
 }
@@ -176,7 +177,7 @@ impl MidnightPublisher {
     async fn pin(
         &self,
         responder_address: &MidnightAddress,
-        at_hash: String,
+        at_hash: BlockHash,
     ) -> anyhow::Result<PinnedState> {
         let contract_state = self
             .reads
@@ -440,7 +441,7 @@ fn circuit_signature(signature: &Signature) -> anyhow::Result<EcdsaSignature> {
 
 /// Whole milliseconds, never `Duration`'s `401.3s`: the publish loop's retry reads
 /// a bare 400-405 in the message as an HTTP status and drops the publish.
-fn submit_failed(at_hash: &str, elapsed: Duration) -> String {
+fn submit_failed(at_hash: &BlockHash, elapsed: Duration) -> String {
     format!(
         "submitting the midnight respond intent built over the chain at {at_hash} failed after {}ms",
         elapsed.as_millis()
@@ -500,7 +501,6 @@ mod tests {
         /// `false` makes `contract_state` answer "no contract here".
         contract_present: bool,
     }
-
     impl StubReads {
         fn new() -> Arc<Self> {
             Arc::new(Self {
@@ -521,7 +521,7 @@ mod tests {
             self.contract_addresses.lock().unwrap().clone()
         }
 
-        fn record(&self, method: &'static str, at_hash: &str) {
+        fn record(&self, method: &'static str, at_hash: &BlockHash) {
             self.calls.lock().unwrap().push(Read {
                 method,
                 at_hash: at_hash.to_string(),
@@ -531,17 +531,18 @@ mod tests {
 
     #[async_trait]
     impl PinnedReads for StubReads {
-        async fn finalized_head(&self) -> anyhow::Result<String> {
+        async fn finalized_head(&self) -> anyhow::Result<BlockHash> {
             let mut served = self.heads_served.lock().unwrap();
             *served += 1;
-            self.record("finalized_head", "");
-            Ok(if *served == 1 { HEAD_ONE } else { HEAD_TWO }.to_string())
+            let head = if *served == 1 { HEAD_ONE } else { HEAD_TWO };
+            self.record("finalized_head", &BlockHash::from_0x_hex(head).unwrap());
+            Ok(BlockHash::from_0x_hex(head).unwrap())
         }
 
         async fn contract_state(
             &self,
             address: &MidnightAddress,
-            at_hash: &str,
+            at_hash: &BlockHash,
         ) -> anyhow::Result<Option<Vec<u8>>> {
             self.contract_addresses
                 .lock()
@@ -551,7 +552,7 @@ mod tests {
             Ok(self.contract_present.then(|| CONTRACT_STATE.to_vec()))
         }
 
-        async fn ledger_parameters(&self, at_hash: &str) -> anyhow::Result<Vec<u8>> {
+        async fn ledger_parameters(&self, at_hash: &BlockHash) -> anyhow::Result<Vec<u8>> {
             self.record("ledger_parameters", at_hash);
             Ok(LEDGER_PARAMETERS.to_vec())
         }
@@ -637,7 +638,7 @@ mod tests {
             self.submitted
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Ok(Submitted {
-                tx_id: "stub-receipt".to_string(),
+                tx_id: crate::types::LedgerTxHash::from_bytes([0x5a; 32]),
                 dust_balance: self.dust_balance,
             })
         }
@@ -687,7 +688,7 @@ mod tests {
                 self.release.notified().await;
             }
             Ok(Submitted {
-                tx_id: format!("receipt-{attempt}"),
+                tx_id: crate::types::LedgerTxHash::from_bytes([0x5b; 32]),
                 dust_balance: 0,
             })
         }
@@ -1357,8 +1358,10 @@ mod tests {
             Duration::from_secs(403),
             Duration::from_secs(405),
         ] {
-            let error = anyhow::anyhow!("[state_conflict] expired")
-                .context(submit_failed(HEAD_ONE, elapsed));
+            let error = anyhow::anyhow!("[state_conflict] expired").context(submit_failed(
+                &BlockHash::from_0x_hex(HEAD_ONE).unwrap(),
+                elapsed,
+            ));
             assert!(
                 mpc_chain_integration_core::utils::retry::is_retryable(&error),
                 "{error:#}"

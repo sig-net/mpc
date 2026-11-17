@@ -5,7 +5,7 @@ use crate::emissions::ContractCallEmissions;
 use crate::reader::Node;
 use crate::rpc::{BlockRef, MidnightRpc};
 use crate::state::decode_contract_state;
-use crate::types::BlockHash;
+use crate::types::{BlockHash, LedgerTxHash};
 
 use async_trait::async_trait;
 
@@ -23,7 +23,8 @@ pub(crate) struct BlockProofSeed {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct CandidateTransactionEmissions {
-    pub ledger_tx_hash: [u8; 32],
+    /// The ledger transaction whose execution emitted the calls.
+    pub ledger_tx_hash: LedgerTxHash,
     pub extrinsic_index: u32,
     /// `TxPartialSuccess`: any fallible phase of either contract's calls may have
     /// rolled back.
@@ -136,7 +137,7 @@ mod proof_seed_tests {
                 scale_system_events: vec![0x61, 0x62, 0x63],
             },
             candidates: vec![CandidateTransactionEmissions {
-                ledger_tx_hash: [0x55; 32],
+                ledger_tx_hash: LedgerTxHash::from_bytes([0x55; 32]),
                 extrinsic_index: 1,
                 partial_success: false,
                 singleton_calls: vec![ContractCallEmissions {

@@ -2,12 +2,13 @@
 //! finalized submit answers.
 
 use crate::config::MidnightAddress;
+use crate::types::LedgerTxHash;
 use minocrab_publisher::{Attestation, EcdsaSignature};
 
 /// A finalized transaction and the funding wallet's DUST before it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Submitted {
-    pub tx_id: String,
+    pub tx_id: LedgerTxHash,
     /// Spendable DUST in SPECK.
     pub dust_balance: u128,
 }

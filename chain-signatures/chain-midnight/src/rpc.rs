@@ -26,7 +26,7 @@ use crate::config::{MidnightAddress, MidnightConfig, RpcConfig};
 use crate::emissions::{emissions_in, partial_success_emissions_in, DecodedTransaction};
 use crate::indexer::BlockHold;
 use crate::source::{BlockEmissions, BlockProofSeed, CandidateTransactionEmissions};
-use crate::types::BlockHash;
+use crate::types::{BlockHash, LedgerTxHash};
 
 /// Runtime API name from Midnight node 2.0.0-rc.4 metadata.
 const LEDGER_PARAMETERS_ENTRY: &str = "MidnightRuntimeApi_get_ledger_parameters";
@@ -283,20 +283,24 @@ enum AppliedStatus {
 /// These are RPC-reported events; this check does not verify their inclusion.
 fn applied_status(
     events: &subxt::blocks::ExtrinsicEvents<SubstrateConfig>,
-) -> anyhow::Result<Option<([u8; 32], AppliedStatus)>> {
+) -> anyhow::Result<Option<(LedgerTxHash, AppliedStatus)>> {
     let mut applied = None;
     let mut partial = None;
     for event in events.iter() {
         let event = event.context("Midnight status events did not match metadata")?;
         if let Some(TxApplied(details)) = event.as_event::<TxApplied>()? {
             anyhow::ensure!(
-                applied.replace(details.tx_hash).is_none(),
+                applied
+                    .replace(LedgerTxHash::from_bytes(details.tx_hash))
+                    .is_none(),
                 "duplicate TxApplied status"
             );
         }
         if let Some(TxPartialSuccess(details)) = event.as_event::<TxPartialSuccess>()? {
             anyhow::ensure!(
-                partial.replace(details.tx_hash).is_none(),
+                partial
+                    .replace(LedgerTxHash::from_bytes(details.tx_hash))
+                    .is_none(),
                 "duplicate TxPartialSuccess status"
             );
         }
@@ -312,12 +316,12 @@ fn applied_status(
 
 fn decode_applied_transaction(
     bytes: &[u8],
-    expected_hash: [u8; 32],
+    expected_hash: LedgerTxHash,
 ) -> anyhow::Result<DecodedTransaction> {
     let tx: DecodedTransaction = midnight_serialize::tagged_deserialize(&mut &bytes[..])
         .context("candidate ledger transaction did not decode")?;
     anyhow::ensure!(
-        tx.transaction_hash().0 .0 == expected_hash,
+        tx.transaction_hash().0 .0 == *expected_hash.as_bytes(),
         "status hash does not match the candidate ledger transaction"
     );
     Ok(tx)
@@ -334,12 +338,6 @@ pub struct BlockRef {
 
 fn hex_0x(hash: H256) -> String {
     format!("0x{}", hex::encode(hash.as_bytes()))
-}
-
-/// The `0x`-prefixed 32-byte block hash every pinned read is addressed by.
-fn parse_block_hash(at_block_hash_0x: &str) -> anyhow::Result<H256> {
-    let hash = BlockHash::from_0x_hex(at_block_hash_0x)?;
-    Ok(H256(*hash.as_bytes()))
 }
 
 fn connect_http(config: &MidnightConfig) -> anyhow::Result<RpcClient> {
@@ -607,9 +605,8 @@ impl MidnightRpc {
                         "contract-tx-undecodable",
                         height,
                         err.context(format!(
-                            "candidate extrinsic {} ledger transaction {}",
-                            found.details.index(),
-                            hex::encode(ledger_tx_hash)
+                            "candidate extrinsic {} ledger transaction {ledger_tx_hash}",
+                            found.details.index()
                         )),
                     )
                 },
@@ -620,10 +617,8 @@ impl MidnightRpc {
                         "emission-schema-hold",
                         height,
                         err.context(format!(
-                            "candidate extrinsic {} transaction {} emissions of contract {}",
-                            found.details.index(),
-                            hex::encode(ledger_tx_hash),
-                            contract
+                            "candidate extrinsic {} transaction {ledger_tx_hash} emissions of contract {contract}",
+                            found.details.index()
                         )),
                     )
                 };
@@ -638,7 +633,7 @@ impl MidnightRpc {
                         for skipped in skipped {
                             tracing::warn!(
                                 reason = "partial-success-fallible-skipped",
-                                tx_hash = %hex::encode(ledger_tx_hash),
+                                tx_hash = %ledger_tx_hash,
                                 height,
                                 block_hash = %block_ref.hash,
                                 extrinsic_index = found.details.index(),
@@ -859,48 +854,46 @@ async fn metadata_at(rpc: &RpcClient, at: H256) -> anyhow::Result<subxt::Metadat
 }
 
 /// Finalized reads used by the publisher and its in-process tests. Every read is
-/// addressed by the `0x`-prefixed hash `finalized_head` answers with.
+/// addressed by the hash `finalized_head` answers with.
 #[async_trait::async_trait]
 pub(crate) trait PinnedReads: Send + Sync {
-    async fn finalized_head(&self) -> anyhow::Result<String>;
-    /// The two node surfaces disagree about `0x`; both are decoded to bytes here, so
-    /// nothing above this trait may reintroduce the distinction.
+    async fn finalized_head(&self) -> anyhow::Result<BlockHash>;
     async fn contract_state(
         &self,
         address: &MidnightAddress,
-        at_hash_0x: &str,
+        at_hash: &BlockHash,
     ) -> anyhow::Result<Option<Vec<u8>>>;
-    async fn ledger_parameters(&self, at_hash_0x: &str) -> anyhow::Result<Vec<u8>>;
+    async fn ledger_parameters(&self, at_hash: &BlockHash) -> anyhow::Result<Vec<u8>>;
 }
 
 #[async_trait::async_trait]
 impl PinnedReads for MidnightPublisherRpc {
-    async fn finalized_head(&self) -> anyhow::Result<String> {
+    async fn finalized_head(&self) -> anyhow::Result<BlockHash> {
         let finalized = self
             .legacy
             .chain_get_finalized_head()
             .await
             .context("failed to fetch the midnight finalized head")?;
-        Ok(hex_0x(finalized))
+        Ok(BlockHash::from_bytes(finalized.0))
     }
 
     async fn contract_state(
         &self,
         address: &MidnightAddress,
-        at_hash_0x: &str,
+        at_hash: &BlockHash,
     ) -> anyhow::Result<Option<Vec<u8>>> {
-        publisher_contract_state(&self.rpc, address, at_hash_0x).await
+        publisher_contract_state(&self.rpc, address, at_hash).await
     }
 
-    async fn ledger_parameters(&self, at_hash_0x: &str) -> anyhow::Result<Vec<u8>> {
-        let at = parse_block_hash(at_hash_0x)?;
+    async fn ledger_parameters(&self, at_hash: &BlockHash) -> anyhow::Result<Vec<u8>> {
+        let at = H256(*at_hash.as_bytes());
         let answer = self
             .legacy
             .state_call(LEDGER_PARAMETERS_ENTRY, Some(&[]), Some(at))
             .await
             .context("failed to fetch midnight ledger parameters")?;
         unwrap_runtime_api_result(&answer)?
-            .with_context(|| format!("midnight node has no ledger parameters at {at_hash_0x}"))
+            .with_context(|| format!("midnight node has no ledger parameters at {at_hash}"))
     }
 }
 
@@ -954,25 +947,25 @@ fn classify_submit_reply(
 
 #[async_trait::async_trait]
 impl crate::native::SubmitChain for MidnightPublisherRpc {
-    async fn block_number(&self, at_hash_0x: &str) -> anyhow::Result<u64> {
-        let header = self.header(parse_block_hash(at_hash_0x)?).await?;
+    async fn block_number(&self, at: &BlockHash) -> anyhow::Result<u64> {
+        let header = self.header(H256(*at.as_bytes())).await?;
         Ok(u64::from(header.number))
     }
 
-    async fn block_hash_at(&self, number: u64) -> anyhow::Result<Option<String>> {
+    async fn block_hash_at(&self, number: u64) -> anyhow::Result<Option<BlockHash>> {
         Ok(self
             .legacy
             .chain_get_block_hash(Some(NumberOrHex::Number(number)))
             .await
             .context("failed to fetch a midnight block hash by number")?
-            .map(hex_0x))
+            .map(|hash| BlockHash::from_bytes(hash.0)))
     }
 
     async fn block_time(
         &self,
-        at_hash_0x: &str,
+        at: &BlockHash,
     ) -> anyhow::Result<midnight_base_crypto::time::Timestamp> {
-        let at = parse_block_hash(at_hash_0x)?;
+        let at = H256(*at.as_bytes());
         if let Some(time) = recall(&self.blocks().times, at) {
             return Ok(time);
         }
@@ -991,7 +984,7 @@ impl crate::native::SubmitChain for MidnightPublisherRpc {
             .state_get_storage(&key, Some(at))
             .await
             .context("failed to fetch the midnight block time")?
-            .with_context(|| format!("midnight node has no block time at {at_hash_0x}"))?;
+            .with_context(|| format!("midnight node has no block time at {at}"))?;
         let millis =
             u64::decode_all(&mut &raw[..]).context("the midnight block time is not a u64")?;
         let time = midnight_base_crypto::time::Timestamp::from_secs(millis / 1000);
@@ -1026,10 +1019,10 @@ impl crate::native::SubmitChain for MidnightPublisherRpc {
 
     async fn landing(
         &self,
-        at_hash_0x: &str,
-        tx_hash: [u8; 32],
+        at: &BlockHash,
+        tx_hash: LedgerTxHash,
     ) -> anyhow::Result<Option<Landing>> {
-        let at = parse_block_hash(at_hash_0x)?;
+        let at = H256(*at.as_bytes());
         let events = self
             .client_for_block(at)
             .await?
@@ -1040,12 +1033,12 @@ impl crate::native::SubmitChain for MidnightPublisherRpc {
         for event in events.iter() {
             let event = event.context("Midnight block events did not match metadata")?;
             if let Some(TxApplied(details)) = event.as_event::<TxApplied>()? {
-                if details.tx_hash == tx_hash {
+                if details.tx_hash == *tx_hash.as_bytes() {
                     return Ok(Some(Landing::Applied));
                 }
             }
             if let Some(TxPartialSuccess(details)) = event.as_event::<TxPartialSuccess>()? {
-                if details.tx_hash == tx_hash {
+                if details.tx_hash == *tx_hash.as_bytes() {
                     return Ok(Some(Landing::PartialSuccess));
                 }
             }
@@ -1091,10 +1084,11 @@ pub async fn probe_network_id(node_http_url: &str) -> anyhow::Result<Option<Stri
 async fn publisher_contract_state(
     rpc: &RpcClient,
     address: &MidnightAddress,
-    at_block_hash_0x: &str,
+    at_block_hash: &BlockHash,
 ) -> anyhow::Result<Option<Vec<u8>>> {
     // The one surface that takes the address bare: 64 hex chars, no `0x`.
     let address_64hex = address.to_hex();
+    let at_block_hash_0x = at_block_hash.to_string();
     let response = rpc
         .request::<String>(
             "midnight_contractState",
@@ -1547,11 +1541,11 @@ mod tests {
             applied_status(&captured_status_events(raw, 0)).unwrap(),
             None
         );
-        let mut wrong_hash = hash;
+        let mut wrong_hash = *hash.as_bytes();
         wrong_hash[0] ^= 1;
         assert!(decode_applied_transaction(
             include_bytes!("../fixtures/fallible-deposit-tx-432.mn"),
-            wrong_hash,
+            LedgerTxHash::from_bytes(wrong_hash),
         )
         .unwrap_err()
         .to_string()
@@ -1582,6 +1576,7 @@ mod tests {
         );
         let mut applied_hash = [0u8; 32];
         applied_hash.copy_from_slice(&applied.bytes()[7..39]);
+        let applied_hash = LedgerTxHash::from_bytes(applied_hash);
         assert_eq!(
             applied_status(&captured_status_events(
                 encode_status_records(&[partial.clone()]),
@@ -1776,9 +1771,9 @@ mod tests {
         assert_eq!(candidate.extrinsic_index, 4);
         assert_eq!(
             candidate.ledger_tx_hash,
-            crate::test_utils::hex_32(
+            LedgerTxHash::from_bytes(crate::test_utils::hex_32(
                 "ba41ac43f2cfa97e32357877b85210a7f2105f4930b60515e19aa9ec00bb0f5d"
-            )
+            ))
         );
         assert_eq!(candidate.singleton_calls.len(), 1);
         assert!(candidate.responder_calls.is_empty());
@@ -1954,7 +1949,10 @@ mod tests {
         .expect("a harmless noop must not hold block processing")
         .unwrap();
         assert_eq!(block.candidates.len(), 1);
-        assert_eq!(block.candidates[0].ledger_tx_hash, hash);
+        assert_eq!(
+            block.candidates[0].ledger_tx_hash,
+            LedgerTxHash::from_bytes(hash)
+        );
         let calls = &block.candidates[0].singleton_calls;
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].call_index, 1);
@@ -2032,7 +2030,10 @@ mod tests {
         .expect("checkpoints must not hide the captured event")
         .unwrap();
         assert_eq!(block.candidates.len(), 1);
-        assert_eq!(block.candidates[0].ledger_tx_hash, hash);
+        assert_eq!(
+            block.candidates[0].ledger_tx_hash,
+            LedgerTxHash::from_bytes(hash)
+        );
         assert_eq!(block.candidates[0].singleton_calls, expected);
     }
 
@@ -2840,7 +2841,7 @@ mod tests {
         let _handle = server.start(module);
 
         let rpc = connect_http(&http_config(address)).expect("build transport");
-        let err = publisher_contract_state(&rpc, &test_address(), AT_HASH)
+        let err = publisher_contract_state(&rpc, &test_address(), &test_at_hash())
             .await
             .expect_err("the server refuses the response");
         assert!(!is_oversized_contract_state(&err), "{err:#}");
@@ -3124,9 +3125,10 @@ mod tests {
             UNSERVABLE_MSG,
             DATA,
         ));
-        let publisher_error = publisher_contract_state(&publisher_rpc, &test_address(), AT_HASH)
-            .await
-            .expect_err("the node reply is a publisher read failure");
+        let publisher_error =
+            publisher_contract_state(&publisher_rpc, &test_address(), &test_at_hash())
+                .await
+                .expect_err("the node reply is a publisher read failure");
         let publisher_cause = publisher_error
             .chain()
             .find_map(|cause| cause.downcast_ref::<RawRpcError>())
@@ -3540,12 +3542,13 @@ mod tests {
     async fn the_publisher_reads_a_landing_and_the_block_time_from_a_captured_block() {
         use crate::native::SubmitChain as _;
 
-        let applied = crate::test_utils::hex_32(
+        let applied = LedgerTxHash::from_bytes(crate::test_utils::hex_32(
             "ba41ac43f2cfa97e32357877b85210a7f2105f4930b60515e19aa9ec00bb0f5d",
-        );
-        let mut other = applied;
+        ));
+        let mut other = *applied.as_bytes();
         other[0] ^= 1;
-        let block = hash_of_byte(0x43);
+        let other = LedgerTxHash::from_bytes(other);
+        let block = BlockHash::from_0x_hex(&hash_of_byte(0x43)).unwrap();
 
         let (rpc, _handle, _log) = captured_landing_node(
             include_bytes!("../fixtures/fallible-block-432-events.scale").to_vec(),
@@ -3585,10 +3588,10 @@ mod tests {
     async fn the_publisher_reads_a_block_header_and_runtime_once() {
         use crate::native::SubmitChain as _;
 
-        let applied = crate::test_utils::hex_32(
+        let applied = LedgerTxHash::from_bytes(crate::test_utils::hex_32(
             "ba41ac43f2cfa97e32357877b85210a7f2105f4930b60515e19aa9ec00bb0f5d",
-        );
-        let block = hash_of_byte(0x43);
+        ));
+        let block = BlockHash::from_0x_hex(&hash_of_byte(0x43)).unwrap();
         let (rpc, _handle, log) = captured_landing_node(
             include_bytes!("../fixtures/fallible-block-432-events.scale").to_vec(),
             1_761_400_000_999,
@@ -3669,14 +3672,20 @@ mod tests {
         let (rpc, _handle, reads) = numbered_header_node().await;
         for byte in 1u8..=17 {
             assert_eq!(
-                rpc.block_number(&hash_of_byte(byte)).await.unwrap(),
+                rpc.block_number(&BlockHash::from_0x_hex(&hash_of_byte(byte)).unwrap())
+                    .await
+                    .unwrap(),
                 u64::from(byte)
             );
         }
         assert_eq!(reads.lock().unwrap().len(), 17);
-        rpc.block_number(&hash_of_byte(2)).await.unwrap();
+        rpc.block_number(&BlockHash::from_0x_hex(&hash_of_byte(2)).unwrap())
+            .await
+            .unwrap();
         assert_eq!(reads.lock().unwrap().len(), 17, "block 2 is still kept");
-        rpc.block_number(&hash_of_byte(1)).await.unwrap();
+        rpc.block_number(&BlockHash::from_0x_hex(&hash_of_byte(1)).unwrap())
+            .await
+            .unwrap();
         assert_eq!(
             reads.lock().unwrap().last(),
             Some(&hash_of_byte(1)),
