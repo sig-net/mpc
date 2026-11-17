@@ -149,7 +149,7 @@ impl MidnightPublisher {
         }
     }
 
-    /// Counts a failed publish by its error class.
+    /// Counts a failed publish that carries an error class.
     fn record_refusal(&self, error: &anyhow::Error) {
         if let Some(code) = refusal_code(error) {
             self.telemetry.publish_refused(code);
