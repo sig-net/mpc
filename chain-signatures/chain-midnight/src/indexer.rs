@@ -2524,6 +2524,31 @@ mod tests {
         }
     }
 
+    /// The seed's reported hash must be the indexed block's hash, byte for byte.
+    #[tokio::test]
+    async fn a_divergent_proof_seed_refuses_the_block() {
+        let mut source = FixtureSource::default();
+        source.set_emissions(9, Vec::new());
+        source
+            .emissions
+            .get_mut(&9)
+            .expect("emissions installed")
+            .as_mut()
+            .expect("emissions present")
+            .proof_seed
+            .reported_block_hash = hash_bytes(800);
+
+        let err = direct_indexer()
+            .await
+            .process_block(&source, &block_ref(9))
+            .await
+            .expect_err("a seed for another block must refuse the block");
+        assert!(
+            format!("{err:#}").contains("proof seed does not match indexed block 9"),
+            "{err:#}"
+        );
+    }
+
     #[tokio::test]
     async fn an_unreadable_parent_state_holds_a_partial_success() {
         let (record, rid) = named_record_and_rid(7);
