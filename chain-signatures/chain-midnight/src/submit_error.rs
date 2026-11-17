@@ -1,8 +1,8 @@
 //! Why a build or submit failed, in the classes the retry logic and the logs tell
-//! apart. Terminal are malformed inputs, refused gates, and a node send the
-//! transport refused with a status other than 402, 408, 429 or 5xx — every retry
-//! would replay them unchanged. Every other class waits on a runtime event the
-//! retry may yet observe.
+//! apart. Terminal are malformed inputs, refused gates, and a read inside the
+//! submit the transport refused with a status other than 402, 408, 429 or 5xx —
+//! every retry would replay them unchanged. Every other class waits on a runtime
+//! event the retry may yet observe.
 
 use mpc_chain_integration_core::utils::retry::RpcFailure;
 
@@ -47,8 +47,8 @@ pub(crate) enum SubmitError {
     Ambiguous(String),
     #[error("[internal] {0}")]
     Internal(String),
-    /// A read from or a send to the node failed. Counted as `internal`; the
-    /// verdict reads the typed HTTP status in its chain, never the render.
+    /// A read from the node failed. Counted as `internal`; the verdict reads
+    /// the typed HTTP status in its chain, never the render.
     #[error("[internal] a node read or send failed")]
     Node {
         #[source]
