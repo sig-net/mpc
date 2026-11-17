@@ -1762,10 +1762,11 @@ mod live {
     //! responder, a funded seed and the artifact directories. Proving wants `--release`.
 
     use super::*;
-    use crate::config::{MidnightAddress, MidnightConfig, PublisherConfig};
+    use crate::config::{MidnightConfig, PublisherConfig};
     use crate::dust_feed::IndexerDustEvents;
     use crate::funding::{dust_secret_key, parse_seed, FundingWallet};
     use crate::rpc::MidnightPublisherRpc;
+    use crate::types::MidnightAddress;
     use minocrab_publisher::{Attestation, EcdsaSignature};
 
     fn env(name: &str) -> String {

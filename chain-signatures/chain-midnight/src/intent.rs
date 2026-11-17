@@ -1,8 +1,7 @@
 //! One respond call as the publisher hands it to the intent client, and what a
 //! finalized submit answers.
 
-use crate::config::MidnightAddress;
-use crate::types::LedgerTxHash;
+use crate::types::{LedgerTxHash, MidnightAddress};
 use minocrab_publisher::{Attestation, EcdsaSignature};
 
 /// A finalized transaction and the funding wallet's DUST before it.

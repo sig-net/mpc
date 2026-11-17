@@ -8,8 +8,8 @@ use google_cloud_storage::client::Storage;
 use mpc_primitives::AttestationMetadata;
 use mpc_utils::task::AbortOnDrop;
 
-use crate::config::{MidnightAddress, OutputStorageConfig};
-use crate::types::NetworkId;
+use crate::config::OutputStorageConfig;
+use crate::types::{MidnightAddress, NetworkId};
 
 #[async_trait]
 pub(crate) trait OutputStore: Send + Sync {

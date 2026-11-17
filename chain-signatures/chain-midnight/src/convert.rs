@@ -13,9 +13,9 @@ use mpc_primitives::{
     Chain, IndexedSignRequest, SignArgs, SignBidirectionalEvent, SignId, TxParams,
 };
 
-use crate::config::MidnightAddress;
 use crate::records::{MpcDestination, MpcSignatureAlgorithm, SignBidirectionalRecord};
 use crate::tx::serialized_transaction;
+use crate::types::MidnightAddress;
 
 /// Converts a verified record into the [`IndexedSignRequest`] the signing pipeline
 /// consumes (kind `SignBidirectional`). `root_pk` is the network's public

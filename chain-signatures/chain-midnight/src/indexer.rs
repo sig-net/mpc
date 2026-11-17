@@ -4,7 +4,7 @@
 //! V1 proof-ready seed for the block, but the indexer currently discards it; persistence
 //! and independent verification come later.
 
-use crate::config::{MidnightAddress, MidnightConfig};
+use crate::config::MidnightConfig;
 use crate::convert::generate_sign_request;
 use crate::emissions::{ContractCallEmissions, EmissionKind, TranscriptPhase};
 use crate::reader::{
@@ -15,6 +15,7 @@ use crate::records::SignBidirectionalEventNotification;
 use crate::rpc::{is_oversized_contract_state, BlockRef};
 use crate::source::{BlockEmissions, ChainSource, ContractState, LiveSource};
 use crate::types::BlockHash;
+use crate::types::MidnightAddress;
 
 use std::sync::Arc;
 use std::time::Duration;

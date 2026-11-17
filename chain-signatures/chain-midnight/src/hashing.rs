@@ -159,13 +159,13 @@ fn folded_words(calldata: &CompactMaybe<Calldata>) -> anyhow::Result<&[[u8; 32]]
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::MidnightAddress;
     use crate::records::{MpcDestination, MpcSignatureAlgorithm};
     use crate::test_utils::{
         sample_evm_params, sample_record, sample_record_with_partial_access_list,
         sample_tron_params, tron_record,
     };
     use crate::tx::serialized_evm_tx;
+    use crate::types::MidnightAddress;
 
     #[test]
     fn request_id_matches_compact_golden() {

@@ -1,11 +1,11 @@
 //! The node reads the indexer consumes: the [`ChainSource`] seam and its subxt implementation.
 
-use crate::config::{MidnightAddress, MidnightConfig};
+use crate::config::MidnightConfig;
 use crate::emissions::ContractCallEmissions;
 use crate::reader::Node;
 use crate::rpc::{BlockRef, MidnightRpc};
 use crate::state::decode_contract_state;
-use crate::types::{BlockHash, LedgerTxHash};
+use crate::types::{BlockHash, LedgerTxHash, MidnightAddress};
 
 use async_trait::async_trait;
 

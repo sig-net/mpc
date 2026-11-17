@@ -5,9 +5,9 @@ use midnight_base_crypto::fab::{AlignedValue, AlignmentAtom, AlignmentSegment, V
 use midnight_onchain_state::state::StateValue;
 use midnight_storage::DefaultDB;
 
-use crate::config::MidnightAddress;
 use crate::hashing::compute_request_id;
 use crate::records::{SignBidirectionalEventNotification, SignBidirectionalRecord};
+use crate::types::MidnightAddress;
 use mpc_primitives::{
     Calldata, CompactMaybe, EvmAccessListEntry, EvmType2TxParams, TronTxParams, TxParamType,
     TxParams,

@@ -1,7 +1,7 @@
 //! Test-only record builders shared by the unit tests.
 
-use crate::config::MidnightAddress;
 use crate::records::{MpcDestination, MpcSignatureAlgorithm, SignBidirectionalRecord};
+use crate::types::MidnightAddress;
 use midnight_base_crypto::fab::{
     AlignedValue, Alignment, AlignmentAtom, AlignmentSegment, Value, ValueAtom,
 };

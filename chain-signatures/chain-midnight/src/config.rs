@@ -1,5 +1,6 @@
 //! Midnight node configuration.
 
+use crate::types::MidnightAddress;
 use mpc_chain_integration_core::utils::retry::RetryConfig;
 use std::fmt;
 use std::path::PathBuf;
@@ -137,38 +138,6 @@ impl fmt::Debug for PublisherConfig {
     }
 }
 
-/// A Midnight contract address in its native 32-byte representation.
-///
-/// Text input is normalized to 64 lowercase hex characters without a `0x` prefix.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct MidnightAddress([u8; 32]);
-
-impl MidnightAddress {
-    pub fn from_hex(value: &str) -> Result<Self, hex::FromHexError> {
-        let mut bytes = [0; 32];
-        hex::decode_to_slice(value, &mut bytes)?;
-        Ok(Self(bytes))
-    }
-
-    pub const fn from_bytes(bytes: [u8; 32]) -> Self {
-        Self(bytes)
-    }
-
-    pub const fn as_bytes(&self) -> &[u8; 32] {
-        &self.0
-    }
-
-    pub fn to_hex(&self) -> String {
-        hex::encode(self.0)
-    }
-}
-
-impl fmt::Display for MidnightAddress {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.to_hex())
-    }
-}
-
 /// Midnight chain integration configuration.
 #[derive(Clone, Debug, PartialEq)]
 pub struct MidnightConfig {
@@ -255,41 +224,6 @@ fn validate_scheme(field: &str, url: &Url, schemes: &[&str]) -> anyhow::Result<(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn midnight_address_round_trips_bytes_and_canonical_hex() {
-        let bytes = [
-            0x00, 0x0f, 0x10, 0xab, 0xcd, 0xef, 0x80, 0xff, 0x01, 0x23, 0x45, 0x67, 0x89, 0xaa,
-            0xbb, 0xcc, 0xdd, 0xee, 0xfe, 0xdc, 0xba, 0x98, 0x76, 0x54, 0x32, 0x10, 0x09, 0x08,
-            0x07, 0x06, 0x05, 0x04,
-        ];
-        let expected = "000f10abcdef80ff0123456789aabbccddeefedcba9876543210090807060504";
-
-        let address = MidnightAddress::from_bytes(bytes);
-
-        assert_eq!(address.as_bytes(), &bytes);
-        assert_eq!(address.to_hex(), expected);
-        assert_eq!(MidnightAddress::from_hex(expected).unwrap(), address);
-        assert_eq!(
-            MidnightAddress::from_hex(&expected.to_ascii_uppercase()).unwrap(),
-            address
-        );
-    }
-
-    #[test]
-    fn midnight_address_rejects_invalid_hex() {
-        for input in [
-            "ab".repeat(31),
-            "ab".repeat(33),
-            format!("0x{}", "ab".repeat(31)),
-            "zz".repeat(32),
-        ] {
-            assert!(
-                MidnightAddress::from_hex(&input).is_err(),
-                "unexpectedly accepted {input}"
-            );
-        }
-    }
 
     fn valid_config() -> MidnightConfig {
         MidnightConfig {

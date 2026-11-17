@@ -1,6 +1,6 @@
 //! Mirrors of the Midnight Signet contract's on-chain record types.
 
-use crate::config::MidnightAddress;
+use crate::types::MidnightAddress;
 use mpc_primitives::TxParams;
 
 /// `MPCSignatureAlgorithm`, one byte on the wire: ecdsa = 0, reserved = 1.

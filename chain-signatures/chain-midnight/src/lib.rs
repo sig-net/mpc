@@ -28,12 +28,10 @@ mod tx;
 pub(crate) mod types;
 
 pub use attestation::validate_attestation_response;
-pub use config::{
-    IndexerConfig, MidnightAddress, MidnightConfig, OutputStorageConfig, PublisherConfig, RpcConfig,
-};
+pub use config::{IndexerConfig, MidnightConfig, OutputStorageConfig, PublisherConfig, RpcConfig};
 pub use funding::DustCheckpointStore;
 pub use indexer::MidnightIndexer;
 pub use publisher::{RecoveringMidnightPublisher, ResponseAwaiter};
 #[cfg(feature = "sandbox")]
 pub use rpc::probe_network_id;
-pub use types::{NetworkId, UnsupportedNetwork};
+pub use types::{MidnightAddress, NetworkId, UnsupportedNetwork};

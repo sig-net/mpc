@@ -22,10 +22,11 @@ use subxt::ext::subxt_rpcs::{rpc_params, Error as RawRpcError, UserError};
 use subxt::utils::H256;
 use subxt::SubstrateConfig;
 
-use crate::config::{MidnightAddress, MidnightConfig, RpcConfig};
+use crate::config::{MidnightConfig, RpcConfig};
 use crate::emissions::{emissions_in, partial_success_emissions_in, DecodedTransaction};
 use crate::indexer::BlockHold;
 use crate::source::{BlockEmissions, BlockProofSeed, CandidateTransactionEmissions};
+use crate::types::MidnightAddress;
 use crate::types::{BlockHash, LedgerTxHash, NetworkId};
 
 /// Runtime API name from Midnight node 2.0.0-rc.4 metadata.
@@ -2293,9 +2294,9 @@ mod tests {
 
         let config = crate::config::MidnightConfig {
             node_url,
-            central_address: crate::config::MidnightAddress::from_bytes(singleton),
+            central_address: MidnightAddress::from_bytes(singleton),
             // Unread: the capture reads only the singleton's calls.
-            responder_address: crate::config::MidnightAddress::from_bytes([0; 32]),
+            responder_address: MidnightAddress::from_bytes([0; 32]),
             publisher: Default::default(),
             rpc: Default::default(),
             indexer: Default::default(),
@@ -2393,8 +2394,8 @@ mod tests {
     fn http_config(address: SocketAddr) -> crate::config::MidnightConfig {
         crate::config::MidnightConfig {
             node_url: format!("http://{address}").parse().unwrap(),
-            central_address: crate::config::MidnightAddress::from_bytes([0xab; 32]),
-            responder_address: crate::config::MidnightAddress::from_bytes([0xcd; 32]),
+            central_address: MidnightAddress::from_bytes([0xab; 32]),
+            responder_address: MidnightAddress::from_bytes([0xcd; 32]),
             publisher: Default::default(),
             rpc: Default::default(),
             indexer: Default::default(),
@@ -2989,8 +2990,8 @@ mod tests {
         });
         let mut config = crate::config::MidnightConfig {
             node_url: format!("http://{address}").parse().unwrap(),
-            central_address: crate::config::MidnightAddress::from_bytes([0xab; 32]),
-            responder_address: crate::config::MidnightAddress::from_bytes([0xcd; 32]),
+            central_address: MidnightAddress::from_bytes([0xab; 32]),
+            responder_address: MidnightAddress::from_bytes([0xcd; 32]),
             publisher: Default::default(),
             rpc: Default::default(),
             indexer: Default::default(),

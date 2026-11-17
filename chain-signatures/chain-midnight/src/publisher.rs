@@ -15,7 +15,7 @@ use mpc_utils::task::AbortOnDrop;
 use mpc_utils::time::current_unix_timestamp;
 
 use crate::attestation::validate_attestation_response;
-use crate::config::{MidnightAddress, MidnightConfig, PublisherConfig};
+use crate::config::{MidnightConfig, PublisherConfig};
 use crate::dust_feed::IndexerDustEvents;
 use crate::funding::{dust_secret_key, parse_seed, DustCheckpointStore, FundingWallet};
 use crate::intent::{IntentRequest, RespondCircuit, Submitted};
@@ -23,7 +23,7 @@ use crate::native::{NativeIntentClient, Provers};
 use crate::output_storage::{OutputStore, RecoveringOutputStore};
 use crate::rpc::{MidnightPublisherRpc, PinnedReads};
 use crate::submit_error::refusal_code;
-use crate::types::BlockHash;
+use crate::types::{BlockHash, MidnightAddress};
 
 const SPECK_PER_DUST: f64 = 1e15;
 
