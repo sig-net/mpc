@@ -596,12 +596,12 @@ correct, with a signing threshold t, f+1 <= t <= n - f.
   and signing scheme. The id names a chain family, so the same contract
   address on two networks of one family derives the same key; a
   deployment watches one network per family (Section 3.3), so within it
-  the key still names one contract. So an executed transaction's account tells the MPC
-  which contract and key parameters asked for it. Assumed here: two
-  signing schemes never share a key. Key versions 0, 1 and 2 share a root
-  key and differ by their derivation paths; every later key version has a
-  root key of its own, and `processable` refuses a key version without
-  its root key.
+  the key still names one contract. So an executed transaction's account
+  tells the MPC which contract and key parameters asked for it. Assumed
+  here: two signing schemes never share a key. Key versions 0, 1 and 2
+  share a root key and differ by their derivation paths; every later key
+  version has a root key of its own, and `processable` refuses a key
+  version without its root key.
 
 * G1, in short: an execution this contract has already accepted is at or below
   last_seen, so a request made later records it as known and C3c drops any
