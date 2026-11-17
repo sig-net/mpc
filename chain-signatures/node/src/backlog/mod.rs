@@ -696,8 +696,7 @@ impl Backlog {
                         ?chain,
                         height,
                         %err,
-                        "keeping the stored checkpoint: expected once after an upgrade that \
-                         changes the digest, otherwise a bug"
+                        "keeping the stored checkpoint; a different one at its height is a bug"
                     );
                     return None;
                 }
