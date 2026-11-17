@@ -1095,18 +1095,25 @@ pub async fn probe_network_id(node_http_url: &str) -> anyhow::Result<Option<Netw
     network_id(&legacy).await.map(Some)
 }
 
+/// The `midnight_contractState` parameters: the address as 64 bare hex characters
+/// — the one wire surface that takes it without `0x` — beside the `0x`-prefixed
+/// block hash.
+fn contract_state_params(
+    address: &MidnightAddress,
+    at_block_hash: &BlockHash,
+) -> subxt::ext::subxt_rpcs::client::RpcParams {
+    rpc_params![address.to_hex(), at_block_hash.to_string()]
+}
+
 async fn publisher_contract_state(
     rpc: &RpcClient,
     address: &MidnightAddress,
     at_block_hash: &BlockHash,
 ) -> anyhow::Result<Option<Vec<u8>>> {
-    // The one surface that takes the address bare: 64 hex chars, no `0x`.
-    let address_64hex = address.to_hex();
-    let at_block_hash_0x = at_block_hash.to_string();
     let response = rpc
         .request::<String>(
             "midnight_contractState",
-            rpc_params![address_64hex, at_block_hash_0x],
+            contract_state_params(address, at_block_hash),
         )
         .await;
 
@@ -1436,8 +1443,6 @@ impl Reads {
         address: &MidnightAddress,
         at_block_hash: &BlockHash,
     ) -> anyhow::Result<Option<Vec<u8>>> {
-        let address_64hex = address.to_hex();
-        let at_block_hash_0x = at_block_hash.to_string();
         retry_read(
             self.request_timeout,
             self.retry,
@@ -1447,7 +1452,7 @@ impl Reads {
                     .rpc
                     .request(
                         "midnight_contractState",
-                        rpc_params![address_64hex.as_str(), at_block_hash_0x.as_str()],
+                        contract_state_params(address, at_block_hash),
                     )
                     .await;
 
