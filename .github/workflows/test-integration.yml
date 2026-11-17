@@ -55,9 +55,6 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Pull Redis image
-        run: docker pull redis:7.4.12
-
       - name: Install Rust (1.95.0)
         uses: dtolnay/rust-toolchain@035fceb3c12fb0c6a9461b52775e16473133e591 # 1.95.0
         with:
@@ -148,12 +145,6 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-
-      # Pull the images in parallel.
-      - name: Pull Redis and Foundry images
-        run: |
-          printf '%s\n' redis:7.4.12 ghcr.io/foundry-rs/foundry:nightly \
-            | xargs -P "$(nproc)" -n 1 docker pull
 
       - name: Install Rust (1.95.0)
         uses: dtolnay/rust-toolchain@035fceb3c12fb0c6a9461b52775e16473133e591 # 1.95.0

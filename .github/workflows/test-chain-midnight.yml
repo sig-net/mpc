@@ -61,17 +61,6 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # Prefetch every image the real-stack test starts, in parallel
-      - name: Pull Docker images
-        run: |
-          {
-            echo 'redis:7.4.12'
-            echo 'ghcr.io/foundry-rs/foundry:nightly'
-            perl -0ne 'while (/const \w+_IMAGE: \(&str, &str\) = \(\s*"([^"]+)",\s*"([^"]+)",?/g) { print "$1:$2\n" }' \
-              integration-tests/src/midnight.rs
-          } | tee /tmp/images.txt | xargs -P "$(nproc)" -n 1 docker pull
-          test "$(wc -l < /tmp/images.txt)" -eq 5
-
       - name: Install Node.js
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
