@@ -39,8 +39,8 @@ Organization:
 * *Signet contract*: our contract on the source chain, through which
   requests, signatures and responses are published. It holds no per-
   application state. On Midnight it is two contracts: requests are notified
-  to the Signet singleton, and signatures and responses are posted to the
-  signet responder (Section 4.2).
+  to the Signet singleton, and signatures and responses are published to
+  the signet responder (Section 4.2).
 * *MPC network*: the nodes that sign and attest.
 * *Broadcaster*: whoever submits the signed transaction to the target
   chain. Untrusted; the design does not depend on who it is.
@@ -382,8 +382,8 @@ call. It emits three events:
 
 On Midnight the singleton emits `SignRequest` as a notification that names
 the requesting contract, and the MPC reads the request itself from that
-contract's state (Section 4.3). A second contract, the signet responder,
-emits `Signature` and `Response`.
+contract's state (Sections 4.3 and 6). A second contract, the signet
+responder, emits `Signature` and `Response`.
 [midnight-publisher.md](midnight-publisher.md#events-the-reader-supports)
 says which events the MPC reads from each.
 
