@@ -834,9 +834,13 @@ mod tests {
             let store = Arc::new(StubOutputStore::default());
             let mut publisher = publisher(reads.clone(), client.clone());
             publisher.output_store = Some(store.clone());
+            let err = publisher
+                .publish_signature(&action)
+                .await
+                .expect_err(&format!("case {case}"));
             assert!(
-                publisher.publish_signature(&action).await.is_err(),
-                "case {case}"
+                !is_retryable(&err),
+                "case {case}: an attestation refusal must be terminal: {err:#}"
             );
             assert!(store.outputs.lock().unwrap().is_empty());
             assert!(reads.reads().is_empty());
@@ -1172,8 +1176,9 @@ mod tests {
 
     #[tokio::test]
     async fn publish_signature_rejects_actions_neither_circuit_answers() {
-        // Four gates, one property: a refused action must not reach the node, the
-        // builder or the submitter, its verdict is terminal, and it is counted.
+        // Five gates here, the attestation gates in their own test: one property —
+        // a refused action must not reach the node, the builder or the submitter,
+        // its verdict is terminal, and it is counted.
         let telemetry = Arc::new(WalletTelemetry::default());
         let cases = [
             (
@@ -1203,6 +1208,14 @@ mod tests {
                     action
                 },
                 "recovery_id 2",
+            ),
+            (
+                {
+                    let mut action = respond_action();
+                    action.signature.big_r = k256::AffinePoint::IDENTITY;
+                    action
+                },
+                "identity point",
             ),
         ];
         for (action, named) in cases {
@@ -1234,7 +1247,7 @@ mod tests {
             );
             assert_eq!(client.submissions(), 0);
         }
-        assert_eq!(*telemetry.refusals.lock().unwrap(), vec!["gate_refusal"; 4]);
+        assert_eq!(*telemetry.refusals.lock().unwrap(), vec!["gate_refusal"; 5]);
     }
 
     #[tokio::test]
