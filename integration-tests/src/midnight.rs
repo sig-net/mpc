@@ -740,9 +740,7 @@ impl MidnightStack {
         let (chain, node_http_url, indexer_url, indexer_ws_url, network_id, role_seeds) =
             match DeployedNetwork::from_env()? {
                 Some(network) => {
-                    let network_id = wait_for_node(&network.node_http_url)
-                        .await?
-                        .to_string();
+                    let network_id = wait_for_node(&network.node_http_url).await?.to_string();
                     tracing::info!(%network_id, "running the Midnight cases on a deployed network");
                     (
                         None,
