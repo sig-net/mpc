@@ -380,8 +380,11 @@ call. It emits three events:
   directly, which is how a response is delivered where the signet contract
   cannot call it, and again after a failed handler.
 
-On Midnight, a second contract, the signet responder, emits `Signature` and
-`Response`; see [midnight-publisher.md](midnight-publisher.md).
+On Midnight the singleton emits `SignRequest` and a second contract, the
+signet responder, emits `Signature` and `Response`, and the MPC reads each
+event only from the contract that emits it. A signature or response posted
+to the singleton is not published: clients read responses from the
+responder alone. See [midnight-publisher.md](midnight-publisher.md).
 
 ### 4.3 MPC network
 
