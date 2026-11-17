@@ -1305,7 +1305,10 @@ async fn process_execution_confirmed_recovery_requeues_final_respond_after_send_
     .await
     .expect_err("send failure should surface as an error");
 
-    ctx.backlog.set_processed_block(tx.source_chain, 10).await;
+    ctx.backlog
+        .set_processed_block(tx.source_chain, 10)
+        .await
+        .unwrap();
     let checkpoint = ctx.backlog.checkpoint(tx.source_chain).await.unwrap();
 
     // Simulate consensus confirmation so storage has the checkpoint
@@ -3076,7 +3079,8 @@ async fn decode_failure_parks_request_and_preserves_source_checkpoint() {
             backlog.insert_mock_executing(&tx).await;
             backlog
                 .set_processed_block_interval(source_chain, 40, 0)
-                .await;
+                .await
+                .unwrap();
             let before = backlog.checkpoint(source_chain).await.unwrap();
             let observer = Backlog::new();
             observer.recover_by_checkpoint(&before).await;
@@ -3187,7 +3191,8 @@ async fn published_midnight_response(
     backlog.insert_mock_executing(tx).await;
     backlog
         .set_processed_block_interval(Chain::Midnight, 40, 0)
-        .await;
+        .await
+        .unwrap();
     let (sign_tx, mut sign_rx) = mpsc::channel(4);
     let ctx = make_test_stream_context_with_generator_pk(backlog.clone(), sign_tx, true);
     confirm_execution(tx, height, outcome, &ctx).await.unwrap();
@@ -3247,7 +3252,8 @@ async fn midnight_response_settles_entries_that_missed_the_outcome() {
         }
         lagging
             .set_processed_block_interval(Chain::Midnight, 40, 0)
-            .await;
+            .await
+            .unwrap();
 
         let mut digests = Vec::new();
         for (node, backlog) in [

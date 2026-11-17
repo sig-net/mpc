@@ -409,6 +409,7 @@ mod tests {
                         .backlog
                         .set_processed_block(chain, height)
                         .await
+                        .unwrap()
                         .unwrap();
                     let cp = fixture.backlog.checkpoint(chain).await.unwrap();
                     local_digests.push(cp.digest());
@@ -621,7 +622,11 @@ mod tests {
 
         // Pre-reset state: a confirmed local checkpoint at height 100 and a
         // cursor to match.
-        fixture.backlog.set_processed_block(chain, 100).await;
+        fixture
+            .backlog
+            .set_processed_block(chain, 100)
+            .await
+            .unwrap();
         let stale = fixture.backlog.checkpoint(chain).await.unwrap();
         assert!(fixture
             .backlog
@@ -678,7 +683,11 @@ mod tests {
 
         let chain = Chain::Ethereum;
         let mut fixture = AlignFixture::new(None);
-        fixture.backlog.set_processed_block(chain, 500).await;
+        fixture
+            .backlog
+            .set_processed_block(chain, 500)
+            .await
+            .unwrap();
 
         fixture
             .checkpoints_tx
@@ -715,6 +724,7 @@ mod tests {
             .backlog
             .set_processed_block(chain, 100)
             .await
+            .unwrap()
             .unwrap();
         let _cp = fixture.backlog.checkpoint(chain).await.unwrap();
 

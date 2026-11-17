@@ -507,6 +507,7 @@ async fn test_stream_sends_pre_catchup_ethereum_completion() {
     seeded_backlog
         .set_processed_block(Chain::Ethereum, 100)
         .await
+        .unwrap()
         .unwrap();
     seeded_backlog.checkpoint(Chain::Ethereum).await.unwrap();
 
@@ -554,6 +555,7 @@ async fn test_stream_keeps_the_recovered_ethereum_entry_over_a_replay() {
     seeded_backlog
         .set_processed_block(Chain::Ethereum, 100)
         .await
+        .unwrap()
         .unwrap();
     seeded_backlog.checkpoint(Chain::Ethereum).await.unwrap();
 

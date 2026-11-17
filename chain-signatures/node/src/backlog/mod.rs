@@ -629,8 +629,15 @@ impl Backlog {
 
     /// Set the processed block height for a specific chain.
     /// Returns Some(Checkpoint) if a checkpoint should be created and submitted at this block height.
-    pub async fn set_processed_block(&self, chain: Chain, height: u64) -> Option<Checkpoint> {
-        let interval = checkpoint_interval(chain)?;
+    /// Fails only with [`CheckpointError::Conflict`].
+    pub async fn set_processed_block(
+        &self,
+        chain: Chain,
+        height: u64,
+    ) -> Result<Option<Checkpoint>, CheckpointError> {
+        let Some(interval) = checkpoint_interval(chain) else {
+            return Ok(None);
+        };
         self.set_processed_block_interval(chain, height, interval)
             .await
     }
@@ -641,7 +648,7 @@ impl Backlog {
         chain: Chain,
         height: u64,
         interval: u64,
-    ) -> Option<Checkpoint> {
+    ) -> Result<Option<Checkpoint>, CheckpointError> {
         let mut pending = self.pending(&chain).write().await;
         let prev = pending.processed_block_height().unwrap_or(0);
         pending.set_processed_block(height);
@@ -654,7 +661,7 @@ impl Backlog {
         );
 
         if interval == 0 {
-            return None;
+            return Ok(None);
         }
 
         // Create a checkpoint when crossing an interval boundary, not only
@@ -670,14 +677,13 @@ impl Backlog {
         // confirmed checkpoint and replays only the post-checkpoint same-bucket
         // tail.
         if height / interval <= prev / interval {
-            return None;
+            return Ok(None);
         }
 
         drop(pending);
         let checkpoint = self.snapshot(chain).await;
         // A boundary passed without a stored checkpoint is never voted for,
-        // so storing it is retried until it succeeds. A conflict lasts until
-        // the stored checkpoint is dropped; passing it would be unsafe.
+        // so storing it is retried until it succeeds.
         let mut retry_delay = PERSIST_RETRY_DELAY;
         loop {
             match self.checkpoints.persist_pending(&checkpoint).await {
@@ -689,17 +695,10 @@ impl Backlog {
                         tx_count,
                         "checkpoint creation stalled (pending cap reached)"
                     );
-                    return None;
+                    return Ok(None);
                 }
-                Err(err @ CheckpointError::Conflict { .. }) => {
-                    tracing::error!(
-                        ?chain,
-                        height,
-                        %err,
-                        ?retry_delay,
-                        "conflicting pending checkpoint: chain halted until it is dropped"
-                    );
-                }
+                // Not passed either: the caller reloads the stored checkpoint.
+                Err(err @ CheckpointError::Conflict { .. }) => return Err(err),
                 Err(err @ CheckpointError::Storage { .. }) => {
                     tracing::error!(
                         ?chain,
@@ -720,7 +719,7 @@ impl Backlog {
             ?checkpoint,
             "creating checkpoint"
         );
-        Some(checkpoint)
+        Ok(Some(checkpoint))
     }
 
     /// Captures the current backlog state of `chain` as a checkpoint.
