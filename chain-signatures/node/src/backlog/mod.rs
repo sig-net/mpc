@@ -17,7 +17,7 @@ use crate::sign_bidirectional::{
 };
 use crate::storage::checkpoint_storage::CheckpointStorage;
 pub use checkpoints::{Checkpoint, CheckpointError, Checkpoints};
-pub use stall::{detect_stall, Stall};
+pub use stall::{detect_stall, Stall, StallBackoff};
 
 use enum_map::EnumMap;
 use mpc_chain_integration_core::{StateManager, WatchKey, WatchedExecution};

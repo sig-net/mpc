@@ -1,10 +1,10 @@
 // Supervised indexer loop: node-side recovery, then spawn the chain's
-// `run()` and dispatch its events. Regression or a watchdog stall cancels
-// `run()` and restarts it, re-running light recovery first.
+// `run()` and dispatch its events. Regression, a settlement stall, or a
+// watchdog stall cancels `run()` and restarts it, re-running light recovery.
 use super::recovery::recover_backlog;
 use super::{handle_chain_event, StreamContext};
 
-use crate::backlog::{checkpoint_interval, detect_stall, Backlog, Checkpoint};
+use crate::backlog::{checkpoint_interval, detect_stall, Backlog, Checkpoint, Stall, StallBackoff};
 use crate::types::CheckpointWatcher;
 use crate::types::SignCommand;
 use mpc_chain_integration_core::utils::stream::chain_event_channel;
@@ -132,15 +132,13 @@ async fn resubmit_pending_checkpoint_votes(
     Ok(())
 }
 
-/// Shadow-mode settlement-stall detection: observe the latest checkpoint vote
-/// tallies, run the pure predicate, and log/count a detection. This is strictly
-/// observation-only — no sign tasks are aborted, no flags cleared, no rebase
-/// performed, and the supervised run is never cancelled. Acting on a detection
-/// is a later PR.
-async fn observe_stall(ctx: &StreamContext, chain: Chain) {
+/// Observe the latest checkpoint vote tallies, run the pure predicate, and
+/// log/count a detection. Returns the detection so the caller can decide whether
+/// to act on it (the backoff is checked there, not here).
+async fn observe_stall(ctx: &StreamContext, chain: Chain) -> Option<Stall> {
     let tallies = ctx.checkpoint_votes_rx.borrow().clone();
     if tallies.is_empty() {
-        return;
+        return None;
     }
 
     // First boundary above the base: the lowest pending height, else the
@@ -150,25 +148,25 @@ async fn observe_stall(ctx: &StreamContext, chain: Chain) {
         Ok(pending) => pending,
         Err(err) => {
             tracing::warn!(%chain, %err, "stall detection: failed to load pending checkpoints");
-            return;
+            return None;
         }
     };
     let first_boundary = match pending.iter().map(|cp| cp.block_height).min() {
         Some(height) => height,
         None => {
             let Some(interval) = checkpoint_interval(chain) else {
-                return;
+                return None;
             };
             let Ok(Some(base)) = ctx.backlog.checkpoints().storage().load_latest(chain).await
             else {
-                return;
+                return None;
             };
             base.block_height.saturating_add(interval)
         }
     };
 
     let Some(threshold) = ctx.contract_watcher.state().map(|state| state.threshold()) else {
-        return;
+        return None;
     };
     let committee_size = ctx.mesh_state.borrow().active().participants.len();
 
@@ -179,10 +177,12 @@ async fn observe_stall(ctx: &StreamContext, chain: Chain) {
             votes = stall.votes,
             threshold,
             committee_size,
-            "settlement stall detected (shadow mode: no rebase)"
+            "settlement stall detected from checkpoint vote tallies"
         );
         crate::metrics::stall::record_stall_detection(chain);
+        return Some(stall);
     }
+    None
 }
 
 /// Base delay before a restart; doubles up to `MAX_RESTART_DELAY` while
@@ -259,6 +259,9 @@ async fn run_supervised_with_watchdog<I: ChainIndexer, T: ChainTelemetry>(
     // failing at one height resumes below it on every restart and dispatches
     // the same blocks again; only a new high-water mark is real progress.
     let mut highest_block: u64 = 0;
+    // One backoff per supervisor instance, outside the inner restart loop: a
+    // stall re-index goes through `Exit::Restart` but must keep escalating.
+    let mut stall_backoff = StallBackoff::new();
     loop {
         // Cleared before recovery, not after: publish failover and sign-request
         // enqueue must not act on a backlog being recovered or replayed into.
@@ -279,6 +282,10 @@ async fn run_supervised_with_watchdog<I: ChainIndexer, T: ChainTelemetry>(
             if rebased {
                 // Every node rebasing brings back old stamps, so count again.
                 ctx.failover_floor = None;
+                // S3 consensus rebase (including startup recovery) onto a
+                // settled checkpoint: the only event that resets the stall
+                // backoff. `Exit::Restart` alone does not reach this branch.
+                stall_backoff.on_settled_rebase();
             }
             // Failing here retries: without its records the node would sign again.
             ctx.local_records = ctx
@@ -359,11 +366,59 @@ async fn run_supervised_with_watchdog<I: ChainIndexer, T: ChainTelemetry>(
                         tracing::error!(error = %format_args!("{err:#}"), %chain, "failed to process chain event");
                     }
                 }
-                // Shadow mode: observe checkpoint vote tallies and count stalls.
-                // `observe_stall` ignores empty snapshots; nothing here changes
-                // state or cancels the run.
+                // Settlement stall (doc/checkpoints.md §4). The branch stays
+                // enabled in `select!` so a new tally always wakes the loop;
+                // the backoff is checked inside the handler, not as a guard.
                 _ = ctx.checkpoint_votes_rx.changed() => {
-                    observe_stall(&ctx, chain).await;
+                    if let Some(stall) = observe_stall(&ctx, chain).await {
+                        let now = Instant::now();
+                        if !stall_backoff.allows(now) {
+                            tracing::warn!(
+                                %chain,
+                                height = stall.height,
+                                suppressed_until = ?stall_backoff.suppressed_until(),
+                                next_delay = ?stall_backoff.delay(),
+                                "settlement stall re-index suppressed by backoff"
+                            );
+                        } else {
+                            tracing::warn!(
+                                %chain,
+                                height = stall.height,
+                                votes = stall.votes,
+                                "settlement stall: aborting in-flight work and re-indexing from base"
+                            );
+                            // Same aborts and caught-up clearing as the
+                            // regression path, before the re-index starts.
+                            ctx.backlog.set_caught_up(chain, false);
+                            ctx.rpc.abort_checkpoints(chain).await;
+                            if let Err(err) =
+                                ctx.sign_tx.send(SignCommand::AbortChain(chain)).await
+                            {
+                                tracing::error!(?err, %chain, "failed to abort sign tasks on settlement stall");
+                            }
+                            match ctx
+                                .backlog
+                                .rebase_to_base(chain, root_pk, ctx.local_records.clone())
+                                .await
+                            {
+                                Ok(_) => crate::metrics::stall::record_stall_rebase(chain),
+                                Err(err) => tracing::error!(
+                                    ?err,
+                                    %chain,
+                                    "failed to rebase backlog to base on settlement stall"
+                                ),
+                            }
+                            // Suppress consecutive stall re-indexes for this
+                            // window, even if the rebase failed: work was
+                            // already aborted, so retrying on every vote
+                            // update would spin. Only a settled rebase resets.
+                            stall_backoff.on_stall_reindex(now);
+                            // Fresh `indexer.run()` resumes at the re-anchored
+                            // height. `Exit::Restart` itself never resets the
+                            // stall backoff.
+                            break Exit::Restart;
+                        }
+                    }
                 }
                 result = wait_detected_regression(&mut ctx.checkpoints_rx, &ctx.backlog, chain) => {
                     match result {
@@ -433,7 +488,7 @@ mod tests {
     use crate::backlog::Backlog;
     use crate::mesh::connection::NodeStatus;
     use crate::mesh::MeshState;
-    use crate::metrics::stall::stall_detection_count;
+    use crate::metrics::stall::{stall_detection_count, stall_rebase_count};
     use crate::protocol::ParticipantInfo;
     use crate::rpc::RpcAction;
     use crate::storage::checkpoint_storage::CheckpointStorage;
@@ -445,7 +500,7 @@ mod tests {
     use mpc_chain_integration_core::{NoopChainTelemetry, StateManager};
     use mpc_contract::primitives::CheckpointVoteTally;
     use mpc_primitives::{Chain, CheckpointDigest};
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Mutex;
     use tokio::sync::{mpsc, watch, Notify};
 
@@ -1448,42 +1503,96 @@ mod tests {
         task.abort();
     }
 
-    /// Shadow mode observes vote tallies and counts a stall, but changes no
-    /// state: the run is not cancelled, no abort is issued, and no rebase moves
-    /// the backlog off its settled base / pending checkpoint.
+    /// The PR4 observation counter still counts every detected stall,
+    /// including detections this PR acts on. Non-stalling snapshots do not
+    /// move it.
     #[tokio::test]
-    async fn shadow_stall_detection_observes_only() {
-        use mpc_chain_integration_core::ChainIndexer;
-
-        /// Runs until cancelled, recording whether cancellation ever happened.
-        struct ObserveStallIndexer {
-            started: Arc<Notify>,
-            cancelled: Arc<AtomicBool>,
-        }
-
-        #[async_trait::async_trait]
-        impl ChainIndexer for ObserveStallIndexer {
-            const CHAIN: Chain = Chain::Ethereum;
-
-            async fn run(
-                &self,
-                _events_tx: mpsc::Sender<ChainEvent>,
-                cancel: CancellationToken,
-            ) -> anyhow::Result<()> {
-                self.started.notify_one();
-                cancel.cancelled().await;
-                self.cancelled.store(true, Ordering::SeqCst);
-                Ok(())
-            }
-        }
-
+    async fn stall_detections_are_counted() {
+        let _guard = STALL_TEST_LOCK.lock().unwrap();
         let chain = Chain::Ethereum;
         let threshold = 5usize;
-        let committee = 7usize;
-        let backlog = Backlog::new();
+        let (backlog, _base) = stall_test_backlog(chain).await;
 
-        // A settled base below a pending checkpoint. The pending height is the
-        // first boundary; if a rebase happened it would reset to the base.
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let (sign_tx, _sign_rx) = mpsc::channel(8);
+        let (mut ctx, _cp_tx, mesh_tx, _rpc_rx) = make_test_stream_context(
+            backlog.clone(),
+            sign_tx,
+            true,
+            ProjectivePoint::GENERATOR.to_affine(),
+            threshold,
+        );
+        mesh_tx.send(stall_test_mesh()).unwrap();
+        let (votes_tx, votes_rx) = watch::channel(Vec::<CheckpointVoteTally>::new());
+        ctx.checkpoint_votes_rx = votes_rx;
+
+        let task = tokio::spawn(run_supervised_with_watchdog(
+            AlwaysStallIndexer {
+                attempts: attempts.clone(),
+            },
+            ctx,
+            NoopChainTelemetry,
+            Duration::from_secs(60),
+        ));
+        wait_for_runs_count(&attempts, 1).await;
+
+        let before = stall_detection_count(chain);
+        // A digest at t means the boundary is settling: not a detection.
+        votes_tx
+            .send(vec![stall_tally(100, &[(1, threshold)])])
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(
+            stall_detection_count(chain),
+            before,
+            "a digest at the threshold is not a stall"
+        );
+
+        // 3+2 votes over 2f=4 is detected and counted, even though the same
+        // detection now also triggers a rebase.
+        votes_tx
+            .send(vec![stall_tally(100, &[(1, 3), (2, 2)])])
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while stall_detection_count(chain) <= before {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("a stalling tally should be counted");
+        assert_eq!(stall_detection_count(chain), before + 1);
+
+        task.abort();
+        let _ = task.await;
+    }
+
+    // The stall rebase counter is process-global (Prometheus), so serialize the
+    // tests that assert on it.
+    static STALL_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    fn stall_tally(height: u64, votes: &[(u8, usize)]) -> CheckpointVoteTally {
+        CheckpointVoteTally {
+            height,
+            votes: votes.iter().map(|&(b, c)| ([b; 32], c)).collect(),
+        }
+    }
+
+    fn stall_test_mesh() -> MeshState {
+        let mut mesh = MeshState::default();
+        // n=7, t=5 -> f=2, so 3+2 votes (> 2f) is a stall.
+        for i in 0..7 {
+            mesh.update(
+                Participant::from(i as u32),
+                NodeStatus::Active,
+                ParticipantInfo::new(0),
+            );
+        }
+        mesh
+    }
+
+    /// A settled base at 50 with one pending checkpoint at height 100.
+    async fn stall_test_backlog(chain: Chain) -> (Backlog, Checkpoint) {
+        let backlog = Backlog::new();
         let base = Checkpoint::reset(chain, 50);
         backlog
             .checkpoints()
@@ -1492,97 +1601,111 @@ mod tests {
             .await
             .unwrap();
         backlog.set_processed_block(chain, 100).await.unwrap();
-        assert_eq!(
-            backlog
-                .checkpoints()
-                .load_pending(chain)
-                .await
-                .unwrap()
-                .len(),
-            1
-        );
+        (backlog, base)
+    }
 
+    /// Waits for cancellation on every run, so the supervisor stays alive
+    /// while the test drives further vote tallies.
+    struct AlwaysStallIndexer {
+        attempts: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl ChainIndexer for AlwaysStallIndexer {
+        const CHAIN: Chain = Chain::Ethereum;
+
+        async fn run(
+            &self,
+            _events_tx: mpsc::Sender<ChainEvent>,
+            cancel: CancellationToken,
+        ) -> anyhow::Result<()> {
+            self.attempts.fetch_add(1, Ordering::SeqCst);
+            cancel.cancelled().await;
+            Ok(())
+        }
+    }
+
+    async fn wait_for_runs_count(attempts: &AtomicUsize, target: usize) {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while attempts.load(Ordering::SeqCst) < target {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("supervisor should have restarted run()");
+    }
+
+    /// A detected stall aborts in-flight work, re-anchors at the settled base,
+    /// and restarts `run()` exactly once.
+    #[tokio::test]
+    async fn settlement_stall_aborts_rebases_and_restarts_once() {
+        let _guard = STALL_TEST_LOCK.lock().unwrap();
+        let chain = Chain::Ethereum;
+        let (backlog, base) = stall_test_backlog(chain).await;
+
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let first_cancel = Arc::new(Notify::new());
+        let indexer = StalledRunIndexer {
+            attempts: attempts.clone(),
+            first_cancel: first_cancel.clone(),
+        };
         let (sign_tx, mut sign_rx) = mpsc::channel(8);
         let (mut ctx, _cp_tx, mesh_tx, mut rpc_rx) = make_test_stream_context(
             backlog.clone(),
             sign_tx,
             true,
             ProjectivePoint::GENERATOR.to_affine(),
-            threshold,
+            5,
         );
-
-        // Committee large enough that 3+2 votes (> 2f = 4) is a stall.
-        let mut mesh = MeshState::default();
-        for i in 0..committee {
-            mesh.update(
-                Participant::from(i as u32),
-                NodeStatus::Active,
-                ParticipantInfo::new(0),
-            );
-        }
-        mesh_tx.send(mesh).unwrap();
-
-        // Drive the votes watch from the test instead of the empty default.
+        mesh_tx.send(stall_test_mesh()).unwrap();
         let (votes_tx, votes_rx) = watch::channel(Vec::<CheckpointVoteTally>::new());
         ctx.checkpoint_votes_rx = votes_rx;
 
-        let started = Arc::new(Notify::new());
-        let cancelled = Arc::new(AtomicBool::new(false));
-        let indexer = ObserveStallIndexer {
-            started: started.clone(),
-            cancelled: cancelled.clone(),
-        };
+        let rebases_before = stall_rebase_count(chain);
         let task = tokio::spawn(run_supervised_with_watchdog(
             indexer,
             ctx,
             NoopChainTelemetry,
             Duration::from_secs(60),
         ));
-        tokio::time::timeout(Duration::from_secs(2), started.notified())
-            .await
-            .expect("the supervised run should start");
+        wait_for_runs_count(&attempts, 1).await;
 
-        let tally = |height: u64, votes: &[(u8, usize)]| CheckpointVoteTally {
-            height,
-            votes: votes.iter().map(|&(b, c)| ([b; 32], c)).collect(),
-        };
-        let before = stall_detection_count(chain);
+        votes_tx
+            .send(vec![stall_tally(100, &[(1, 3), (2, 2)])])
+            .unwrap();
 
-        // Non-stalling snapshot: a digest at the first boundary reaches t, so
-        // the height is settling and the counter must not move.
-        votes_tx.send(vec![tally(100, &[(1, threshold)])]).unwrap();
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        assert_eq!(
-            stall_detection_count(chain),
-            before,
-            "a digest at the threshold is not a stall"
-        );
-
-        // Stalling snapshot: 5 votes split 3+2, none at t (f = 7-5 = 2, 2f = 4).
-        votes_tx.send(vec![tally(100, &[(1, 3), (2, 2)])]).unwrap();
-        tokio::time::timeout(Duration::from_secs(2), async {
-            while stall_detection_count(chain) <= before {
-                tokio::time::sleep(Duration::from_millis(5)).await;
+        // Startup resubmits the pending checkpoint's vote; skip it to reach
+        // the abort the stall must issue.
+        let abort = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                match rpc_rx.recv().await {
+                    Some(RpcAction::VoteCheckpoint { .. }) => continue,
+                    other => break other,
+                }
             }
         })
         .await
-        .expect("a stalling tally should be counted");
-
-        // Observation only: the run was never cancelled, and nothing rebased.
-        assert!(
-            !cancelled.load(Ordering::SeqCst),
-            "a stall must not cancel the run"
-        );
-        assert_eq!(backlog.get_processed_block(chain).await, Some(100));
-        assert_eq!(
-            backlog
-                .checkpoints()
-                .load_pending(chain)
+        .expect("a stall should abort checkpoint work immediately");
+        assert!(matches!(
+            abort,
+            Some(RpcAction::AbortCheckpoints(Chain::Ethereum))
+        ));
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_secs(2), sign_rx.recv())
                 .await
-                .unwrap()
-                .len(),
-            1
-        );
+                .expect("a stall should abort sign tasks immediately"),
+            Some(SignCommand::AbortChain(Chain::Ethereum))
+        ));
+
+        first_cancel.notified().await;
+        tokio::time::timeout(Duration::from_secs(10), task)
+            .await
+            .expect("supervisor should shut down after the rerun exits")
+            .expect("supervisor task should not panic")
+            .expect("supervisor should exit cleanly");
+
+        assert_eq!(attempts.load(Ordering::SeqCst), 2, "exactly one restart");
+        assert_eq!(backlog.get_processed_block(chain).await, Some(50));
         assert_eq!(
             backlog
                 .checkpoints()
@@ -1590,16 +1713,24 @@ mod tests {
                 .load_latest(chain)
                 .await
                 .unwrap(),
-            Some(base)
+            Some(base),
+            "re-indexed at the settled base"
         );
+        assert!(backlog
+            .checkpoints()
+            .load_pending(chain)
+            .await
+            .unwrap()
+            .is_empty());
+        assert_eq!(stall_rebase_count(chain), rebases_before + 1);
 
-        // No abort was issued to the RPC or signing pipeline.
+        // No second abort: a single detection causes a single re-index.
         while let Ok(Some(action)) =
             tokio::time::timeout(Duration::from_millis(50), rpc_rx.recv()).await
         {
             assert!(
                 !matches!(action, RpcAction::AbortCheckpoints(_)),
-                "a stall must not abort checkpoint work"
+                "a single stall must abort checkpoint work only once"
             );
         }
         while let Ok(Some(cmd)) =
@@ -1607,9 +1738,182 @@ mod tests {
         {
             assert!(
                 !matches!(cmd, SignCommand::AbortChain(_)),
-                "a stall must not abort sign tasks"
+                "a single stall must abort sign tasks only once"
             );
         }
+    }
+
+    /// A second stall inside the backoff window is observed but must not clear
+    /// caught-up, abort, rebase, or restart again.
+    #[tokio::test]
+    async fn settlement_stall_backoff_suppresses_a_second_reindex() {
+        let _guard = STALL_TEST_LOCK.lock().unwrap();
+        let chain = Chain::Ethereum;
+        let (backlog, base) = stall_test_backlog(chain).await;
+
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let indexer = AlwaysStallIndexer {
+            attempts: attempts.clone(),
+        };
+        let (sign_tx, mut sign_rx) = mpsc::channel(8);
+        let (mut ctx, _cp_tx, mesh_tx, mut rpc_rx) = make_test_stream_context(
+            backlog.clone(),
+            sign_tx,
+            true,
+            ProjectivePoint::GENERATOR.to_affine(),
+            5,
+        );
+        mesh_tx.send(stall_test_mesh()).unwrap();
+        let (votes_tx, votes_rx) = watch::channel(Vec::<CheckpointVoteTally>::new());
+        ctx.checkpoint_votes_rx = votes_rx;
+
+        let detections_before = stall_detection_count(chain);
+        let rebases_before = stall_rebase_count(chain);
+        let task = tokio::spawn(run_supervised_with_watchdog(
+            indexer,
+            ctx,
+            NoopChainTelemetry,
+            Duration::from_secs(60),
+        ));
+        wait_for_runs_count(&attempts, 1).await;
+
+        votes_tx
+            .send(vec![stall_tally(100, &[(1, 3), (2, 2)])])
+            .unwrap();
+        wait_for_runs_count(&attempts, 2).await;
+        // Drain the first stall's abort before checking for a second one.
+        while let Ok(Some(action)) =
+            tokio::time::timeout(Duration::from_millis(50), rpc_rx.recv()).await
+        {
+            if matches!(action, RpcAction::AbortCheckpoints(_)) {
+                break;
+            }
+        }
+        while let Ok(Some(cmd)) =
+            tokio::time::timeout(Duration::from_millis(50), sign_rx.recv()).await
+        {
+            if matches!(cmd, SignCommand::AbortChain(_)) {
+                break;
+            }
+        }
+        assert_eq!(backlog.get_processed_block(chain).await, Some(50));
+
+        // After the rebase the first boundary is the base plus one interval,
+        // and no pending checkpoint exists. A fresh stalling snapshot there
+        // is detected but suppressed: no abort, rebase or restart.
+        let boundary = base.block_height + checkpoint_interval(chain).unwrap();
+        // The first (legitimate) stall cleared it; restore it so this check
+        // isolates what a suppressed stall does to the flag.
+        backlog.set_caught_up(chain, true);
+        votes_tx
+            .send(vec![stall_tally(boundary, &[(1, 3), (2, 2)])])
+            .unwrap();
+        tokio::time::timeout(Duration::from_millis(300), async {
+            while stall_detection_count(chain) <= detections_before + 1 {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the second stalling snapshot should still be detected");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        assert_eq!(attempts.load(Ordering::SeqCst), 2, "no second restart");
+        assert_eq!(backlog.get_processed_block(chain).await, Some(50));
+        assert_eq!(stall_rebase_count(chain), rebases_before + 1);
+        assert!(
+            backlog.is_caught_up(chain),
+            "a suppressed stall must not clear caught up"
+        );
+        while let Ok(Some(action)) =
+            tokio::time::timeout(Duration::from_millis(50), rpc_rx.recv()).await
+        {
+            assert!(
+                !matches!(action, RpcAction::AbortCheckpoints(_)),
+                "a suppressed stall must not abort checkpoint work"
+            );
+        }
+        while let Ok(Some(cmd)) =
+            tokio::time::timeout(Duration::from_millis(50), sign_rx.recv()).await
+        {
+            assert!(
+                !matches!(cmd, SignCommand::AbortChain(_)),
+                "a suppressed stall must not abort sign tasks"
+            );
+        }
+
+        task.abort();
+        let _ = task.await;
+    }
+
+    /// A settled (S3 consensus) rebase resets the backoff; the restart path of
+    /// a stall rebase does not. A stall right after the settled rebase must
+    /// therefore re-index even though the ordinary window has not elapsed.
+    #[tokio::test]
+    async fn settled_rebase_resets_the_stall_backoff() {
+        let _guard = STALL_TEST_LOCK.lock().unwrap();
+        let chain = Chain::Ethereum;
+        let (backlog, _base) = stall_test_backlog(chain).await;
+
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let indexer = AlwaysStallIndexer {
+            attempts: attempts.clone(),
+        };
+        let (sign_tx, _sign_rx) = mpsc::channel(8);
+        let (mut ctx, cp_tx, mesh_tx, _rpc_rx) = make_test_stream_context(
+            backlog.clone(),
+            sign_tx,
+            true,
+            ProjectivePoint::GENERATOR.to_affine(),
+            5,
+        );
+        mesh_tx.send(stall_test_mesh()).unwrap();
+        let (votes_tx, votes_rx) = watch::channel(Vec::<CheckpointVoteTally>::new());
+        ctx.checkpoint_votes_rx = votes_rx;
+
+        let rebases_before = stall_rebase_count(chain);
+        let task = tokio::spawn(run_supervised_with_watchdog(
+            indexer,
+            ctx,
+            NoopChainTelemetry,
+            Duration::from_secs(60),
+        ));
+        wait_for_runs_count(&attempts, 1).await;
+
+        // First stall: 30s suppression starts, delay doubles to 60s.
+        votes_tx
+            .send(vec![stall_tally(100, &[(1, 3), (2, 2)])])
+            .unwrap();
+        wait_for_runs_count(&attempts, 2).await;
+        assert_eq!(stall_rebase_count(chain), rebases_before + 1);
+
+        // A settled checkpoint at 60 makes consensus rebase the backlog during
+        // the outer recovery — the only occurrence of `rebased == true` here.
+        cp_tx
+            .send(Some(CheckpointDigest {
+                chain,
+                height: 60,
+                digest: mpc_primitives::reset_checkpoint_digest(chain, 60),
+            }))
+            .unwrap();
+        wait_for_runs_count(&attempts, 3).await;
+        assert_eq!(backlog.get_processed_block(chain).await, Some(60));
+
+        // Boundary is now 60 + interval; another stall inside the original
+        // 30s window must re-index if (and only if) the settled rebase reset
+        // the backoff.
+        let boundary = 60 + checkpoint_interval(chain).unwrap();
+        votes_tx
+            .send(vec![stall_tally(boundary, &[(1, 3), (2, 2)])])
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while stall_rebase_count(chain) <= rebases_before + 1 {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("a settled rebase must reset the stall backoff");
+        assert_eq!(stall_rebase_count(chain), rebases_before + 2);
+        assert_eq!(backlog.get_processed_block(chain).await, Some(60));
 
         task.abort();
         let _ = task.await;
