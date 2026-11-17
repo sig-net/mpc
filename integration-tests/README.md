@@ -19,9 +19,8 @@ curl -LsSf https://get.nexte.st/latest/mac | tar zxf - -C ~/.cargo/bin
 2. Install the WebAssembly `wasm32-unknown-unknown` target:
 
 ```bash
+# rust-toolchain.toml lists the target, so rustup adds it on the first cargo run. To add it ahead:
 rustup target add wasm32-unknown-unknown
-# The contract build runs under the pinned toolchain, so add the target there too:
-rustup target add wasm32-unknown-unknown --toolchain 1.93.0
 ```
 
 3. Install [just](https://just.systems/man/en/packages.html):
@@ -37,11 +36,11 @@ cargo install just
 ## Basic guide
 
 Running integration tests requires a running Docker daemon (`just setup` installs
-Docker Desktop on macOS, docker.io on Linux). The `redis:7.4.2` image is pulled
+Docker Desktop on macOS, docker.io on Linux). The `redis:7.4.12` image is pulled
 automatically by testcontainers on first run; prefetch it to avoid waiting:
 
 ```BASH
-docker pull redis:7.4.2
+docker pull redis:7.4.12
 ```
 
 In case of authorization issues make sure you have logged into docker using your [access token](https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry#authenticating-with-a-personal-access-token-classic).
@@ -77,9 +76,9 @@ In addition to the prerequisites above, it requires:
 - Docker
 - [Node.js](https://nodejs.org/) 22.13 or newer
 - [cargo-near](https://github.com/near/cargo-near)
-- Compact launcher 0.5.1 with `compactc` 0.33.0-rc.2 available as `compact`; see the [Midnight CI workflow](../.github/workflows/test-chain-midnight.yml) for the pinned Linux installation
+- Compact launcher 0.5.3 with `compactc` 0.36.0 available as `compact`; see the [Midnight CI workflow](../.github/workflows/test-chain-midnight.yml) for the pinned Linux installation
 
-From the repository root, prepare the TypeScript publisher and the test caller and vault contracts,
+From the repository root, prepare the Midnight devtools and the test caller and vault contracts,
 then build the MPC contract and host node and run the ignored tests:
 
 ```bash
@@ -90,6 +89,8 @@ just test-midnight <test>            # one test from cases::midnight_stream
 ```
 
 The tests require the host `mpc-node` binary. Midnight node, indexer, proof-server, and fixture-driver logs are written under `target/tmp_*/midnight`.
+
+To run them against a deployed network such as Preview instead of a local node and indexer, set `MPC_MIDNIGHT_E2E_NODE_URL`, `MPC_MIDNIGHT_E2E_INDEXER_URL` and `MPC_MIDNIGHT_E2E_INDEXER_WS_URL` to its node RPC and indexer GraphQL endpoints, and `MPC_MIDNIGHT_E2E_DEPLOYER_SEED`, `MPC_MIDNIGHT_E2E_INVOKER_SEED` and `MPC_MIDNIGHT_E2E_PUBLISHER_SEEDS` (comma-separated, one per MPC node) to wallets there that already hold NIGHT registered for DUST. The proof server stays local, and every run deploys fresh contracts.
 
 ## Logging and Tracing
 

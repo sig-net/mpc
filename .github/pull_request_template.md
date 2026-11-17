@@ -6,9 +6,10 @@
 <!--
 Tick `None` or every type that applies. For each breaking type, replace
 [details here] with what breaks and what users must do. This text is copied into the release notes.
+Code behind an `unstable-*` feature or a disabled gate is not breaking.
 
 Mark breaking PRs with `!` in the title (e.g. `feat(node)!: ...`) so the
-squash commit records it in git history.
+squash commit records it in git history. CI checks the section against the title.
 
 Network–Applications: only additive changes (new flows) are allowed.
 -->
@@ -22,7 +23,7 @@ Network–Applications: only additive changes (new flows) are allowed.
 
 ## Design
 
-<!-- Tick exactly one. Non-trivial changes need a design doc in doc/. -->
+<!-- Tick exactly one and replace the [link]. Non-trivial changes need a design doc in doc/. -->
 
 - [ ] Trivial: no design decision involved (CI, tests, tooling, dependencies, refactor without behaviour change)
 - [ ] Follows the existing design in [doc/](https://github.com/sig-net/mpc/tree/develop/doc)

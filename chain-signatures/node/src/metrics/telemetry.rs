@@ -5,7 +5,7 @@ use mpc_primitives::{Chain, ChainConfig as _, RequestKind};
 use mpc_utils::time::unix_elapsed;
 
 use super::{
-    indexers::{BIDIRECTIONAL_EXTRACTION_FAILURES, LATEST_BLOCK_NUMBER},
+    indexers::{BIDIRECTIONAL_EXTRACTION_FAILURES, LATEST_BLOCK_NUMBER, TRON_EXPIRY_SCAN_DEFERRED},
     publishers::{FUNDING_WALLET_BALANCE, PUBLISH_REFUSALS},
     requests::{record_indexing_step_reached, record_request_latency_since, SignRequestStep},
 };
@@ -103,6 +103,12 @@ impl ChainTelemetry for NodeTelemetry {
     fn bidirectional_extraction_failed(&self, kind: ExtractionFailureKind) {
         BIDIRECTIONAL_EXTRACTION_FAILURES
             .with_label_values(&[self.chain.as_str(), kind.as_str()])
+            .inc();
+    }
+
+    fn expiry_scan_deferred(&self) {
+        TRON_EXPIRY_SCAN_DEFERRED
+            .with_label_values(&[] as &[&str])
             .inc();
     }
 }

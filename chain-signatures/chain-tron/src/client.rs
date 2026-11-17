@@ -6,9 +6,10 @@ use serde::{Deserialize, Serialize};
 use url::Url;
 
 use mpc_chain_integration_core::utils::retry::{retry_rpc, RetryConfig, SharedBackoff};
+use mpc_chain_integration_core::ExtractionFailure;
 
 use crate::config::TronConfig;
-use crate::types::{BroadcastOutcome, NowBlock, TronLog, TronReceipt};
+use crate::types::{BroadcastOutcome, NowBlock, SolidifiedBlock, TronLog, TronReceipt};
 use mpc_tron_wire::{encoding::decode_bytes, parse_hex, TronAddress};
 
 /// Tron HTTP client for interacting with the Tron blockchain.
@@ -50,11 +51,45 @@ impl TronHttp {
                 let response: NowBlockResponse = self
                     .post_json("wallet/getnowblock", &serde_json::json!({}))
                     .await?;
-                Ok(NowBlock {
-                    block_id: response.block_id.parse().context("blockID")?,
-                    number: response.block_header.raw_data.number,
-                    timestamp: response.block_header.raw_data.timestamp,
-                })
+                response.into_now_block()
+            }
+        )
+    }
+
+    /// `POST /walletsolidity/getnowblock` — the solidified head as a
+    /// [`SolidifiedBlock`] with empty `txids` (the response carries no
+    /// transactions; the head only gates the expiry scan).
+    pub async fn get_now_block_solidity(&self) -> anyhow::Result<SolidifiedBlock> {
+        retry_rpc!(
+            self.request_timeout,
+            self.retry,
+            self.gate,
+            "get_now_block_solidity",
+            {
+                let response: SolidBlockResponse = self
+                    .post_json("walletsolidity/getnowblock", &serde_json::json!({}))
+                    .await?;
+                response.into_block().context("solidified head absent")
+            }
+        )
+    }
+
+    /// `POST /walletsolidity/getblockbynum` — one final block's
+    /// header and resident txIDs; `Ok(None)` means not solidified yet.
+    pub async fn get_block_solidity(&self, number: u64) -> anyhow::Result<Option<SolidifiedBlock>> {
+        retry_rpc!(
+            self.request_timeout,
+            self.retry,
+            self.gate,
+            "get_block_solidity",
+            {
+                let response: SolidBlockResponse = self
+                    .post_json(
+                        "walletsolidity/getblockbynum",
+                        &serde_json::json!({ "num": number }),
+                    )
+                    .await?;
+                Ok(response.into_block())
             }
         )
     }
@@ -78,35 +113,27 @@ impl TronHttp {
     pub async fn get_transaction_info_solidity(
         &self,
         tx_id: &B256,
-    ) -> anyhow::Result<Option<TronReceipt>> {
-        retry_rpc!(
+    ) -> Result<Option<TronReceipt>, ReceiptError> {
+        let text = retry_rpc!(
             self.request_timeout,
             self.retry,
             self.gate,
             "get_transaction_info_solidity",
             {
-                let response: TransactionInfoResponse = self
-                    .post_json(
-                        "walletsolidity/gettransactioninfobyid",
-                        &serde_json::json!({ "value": hex::encode(tx_id), "visible": false }),
-                    )
-                    .await?;
-
-                match response.id {
-                    Some(id) => Ok(Some(TronReceipt {
-                        id: id.parse().context("receipt id")?,
-                        block_number: response.block_number,
-                        block_timestamp: response.block_timestamp,
-                        fee: response.fee,
-                        result: response.result,
-                        res_message: response.res_message.as_deref().map(decode_hex_ascii),
-                        receipt_result: response.receipt.result,
-                        logs: response.log,
-                    })),
-                    None => Ok(None),
-                }
+                self.post_text(
+                    "walletsolidity/gettransactioninfobyid",
+                    &serde_json::json!({ "value": hex::encode(tx_id), "visible": false }),
+                )
+                .await
             }
         )
+        .map_err(ReceiptError::Transport)?;
+
+        let response: TransactionInfoResponse = serde_json::from_str(&text)
+            .with_context(|| format!("decoding tron receipt response: {text}"))
+            .map_err(ReceiptError::Malformed)?;
+
+        decode_receipt(response).map_err(ReceiptError::Malformed)
     }
 
     /// `POST /wallet/getaccount`, returning the TRX balance in sun. Zero
@@ -143,12 +170,9 @@ impl TronHttp {
         response.into_outcome()
     }
 
-    /// Sends a JSON POST request to the Tron node and deserializes the response.
-    async fn post_json<T: for<'de> Deserialize<'de>>(
-        &self,
-        path: &str,
-        body: &impl Serialize,
-    ) -> anyhow::Result<T> {
+    /// JSON POST → the success body as text: transport and status only,
+    /// so deterministic decodes stay outside a caller's retry closure.
+    async fn post_text(&self, path: &str, body: &impl Serialize) -> anyhow::Result<String> {
         let url = self
             .endpoint
             .join(path)
@@ -167,7 +191,16 @@ impl TronHttp {
         if !status.is_success() {
             return Err(anyhow!("tron http {path}: {status}: {text}"));
         }
+        Ok(text)
+    }
 
+    /// [`post_text`](Self::post_text) plus the JSON decode.
+    async fn post_json<T: for<'de> Deserialize<'de>>(
+        &self,
+        path: &str,
+        body: &impl Serialize,
+    ) -> anyhow::Result<T> {
+        let text = self.post_text(path, body).await?;
         serde_json::from_str(&text)
             .with_context(|| format!("decoding tron {path} response: {text}"))
     }
@@ -179,6 +212,47 @@ fn decode_hex_ascii(s: &str) -> String {
         .ok()
         .and_then(|bytes| String::from_utf8(bytes).ok())
         .unwrap_or_else(|| s.to_string())
+}
+
+/// Receipt-fetch classes: transport retries inside; a malformed body is
+/// deterministic per response, but another replica may serve the same
+/// solidified receipt intact — the watcher counts it and keeps polling.
+#[derive(Debug, thiserror::Error)]
+pub enum ReceiptError {
+    #[error(transparent)]
+    Transport(anyhow::Error),
+    #[error(transparent)]
+    Malformed(anyhow::Error),
+}
+
+/// Both classes are node-local retries: a malformed body can still be
+/// served intact by another replica.
+impl From<ReceiptError> for ExtractionFailure {
+    fn from(err: ReceiptError) -> Self {
+        Self::Retryable(err.into())
+    }
+}
+
+/// Wire → domain, after transport; `Ok(None)` is the pending receipt.
+fn decode_receipt(response: TransactionInfoResponse) -> anyhow::Result<Option<TronReceipt>> {
+    let Some(id) = response.id else {
+        return Ok(None);
+    };
+    Ok(Some(TronReceipt {
+        id: id.parse().context("receipt id")?,
+        block_number: response.block_number,
+        block_timestamp: response.block_timestamp,
+        fee: response.fee,
+        result: response.result,
+        res_message: response.res_message.as_deref().map(decode_hex_ascii),
+        receipt_result: response.receipt.result,
+        contract_result: response
+            .contract_result
+            .iter()
+            .map(|raw| decode_bytes(raw).context("contractResult element"))
+            .collect::<anyhow::Result<_>>()?,
+        logs: response.log,
+    }))
 }
 
 /// Response structure for the `now` block query.
@@ -200,6 +274,61 @@ struct NowBlockHeader {
 struct NowBlockRawData {
     number: u64,
     timestamp: u64,
+}
+
+/// Response structure for `getblockbynum`/`getnowblock` on the
+/// solidity router; `{}` (not solidified) reads as an absent header.
+#[derive(Deserialize)]
+struct SolidBlockResponse {
+    #[serde(default, rename = "blockID")]
+    block_id: Option<String>,
+    #[serde(default)]
+    block_header: Option<NowBlockHeader>,
+    #[serde(default)]
+    transactions: Vec<SolidBlockTx>,
+}
+
+/// One resident transaction; only its hex `txID` is read.
+#[derive(Deserialize)]
+struct SolidBlockTx {
+    #[serde(rename = "txID", default)]
+    tx_id: Option<String>,
+}
+
+impl SolidBlockResponse {
+    fn into_block(self) -> Option<SolidifiedBlock> {
+        let raw = self.block_header?.raw_data;
+        // A malformed blockID reads as an unmatchable slice — the
+        // reference check defers.
+        let ref_slice = self
+            .block_id
+            .as_deref()
+            .and_then(|id| id.parse::<B256>().ok())
+            .map_or([0; 8], |id| id.0[8..16].try_into().expect("8 of 32 bytes"));
+
+        Some(SolidifiedBlock {
+            number: raw.number,
+            timestamp: raw.timestamp as i64,
+            ref_slice,
+            txids: self
+                .transactions
+                .iter()
+                .filter_map(|tx| tx.tx_id.as_deref())
+                .filter_map(|id| id.parse::<B256>().ok())
+                .map(|id| id.0)
+                .collect(),
+        })
+    }
+}
+
+impl NowBlockResponse {
+    fn into_now_block(self) -> anyhow::Result<NowBlock> {
+        Ok(NowBlock {
+            block_id: self.block_id.parse().context("blockID")?,
+            number: self.block_header.raw_data.number,
+            timestamp: self.block_header.raw_data.timestamp,
+        })
+    }
 }
 
 /// Response structure for `getaccount`; `{}` for unseen accounts.
@@ -258,6 +387,8 @@ struct TransactionInfoResponse {
     result: Option<String>,
     #[serde(default, rename = "resMessage")]
     res_message: Option<String>,
+    #[serde(default, rename = "contractResult")]
+    contract_result: Vec<String>,
     #[serde(default)]
     receipt: ReceiptUsage,
     #[serde(default, deserialize_with = "deserialize_logs")]
@@ -380,6 +511,73 @@ mod tests {
         assert_eq!(block.number, 3035019);
         assert_eq!(block.timestamp, 1730000000000);
         assert_eq!(block.block_id, block_hash);
+    }
+
+    #[tokio::test]
+    async fn solidity_head_parses_the_recorded_nile_body() {
+        let (mut server, client) = test_client(fast_retry()).await;
+        // Recorded 2026-10-30 off nile.trongrid.io
+        server
+            .mock("POST", "/walletsolidity/getnowblock")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(include_str!(
+                "../tests/fixtures/nile/nowblock-solidity.json"
+            ))
+            .create_async()
+            .await;
+
+        let block = client.get_now_block_solidity().await.unwrap();
+        assert_eq!(block.number, 72_266_582);
+        assert_eq!(block.timestamp, 1_793_335_731_000);
+    }
+
+    #[tokio::test]
+    async fn solidity_block_parses_the_recorded_nile_body() {
+        let (mut server, client) = test_client(fast_retry()).await;
+        // Recorded 2026-10-31 off api.nileex.io
+        server
+            .mock("POST", "/walletsolidity/getblockbynum")
+            .match_body(Matcher::PartialJson(
+                serde_json::json!({ "num": 71_896_096 }),
+            ))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(include_str!(
+                "../tests/fixtures/nile/solid-block-71896096.json"
+            ))
+            .create_async()
+            .await;
+
+        let block = client
+            .get_block_solidity(71_896_096)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(block.number, 71_896_096);
+        assert_eq!(block.timestamp, 1_792_220_499_000);
+        assert_eq!(block.txids.len(), 9);
+        assert_eq!(
+            block.txids[0],
+            "b4e8076ad07087c23b857a4649686954f235b57425bce5205295a5f5e9274e88"
+                .parse::<B256>()
+                .unwrap()
+                .0
+        );
+    }
+
+    #[tokio::test]
+    async fn solidity_block_absent_reads_as_none() {
+        let (mut server, client) = test_client(fast_retry()).await;
+        server
+            .mock("POST", "/walletsolidity/getblockbynum")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body("{}")
+            .create_async()
+            .await;
+
+        assert!(client.get_block_solidity(99).await.unwrap().is_none());
     }
 
     #[test]
@@ -576,7 +774,8 @@ mod tests {
         assert_eq!(receipt.result, None);
         assert_eq!(receipt.receipt_result.as_deref(), Some("SUCCESS"));
         assert_eq!(receipt.res_message, None);
-
+        // ABI `false` — the recorded USDT transfer's return value.
+        assert_eq!(receipt.contract_result, vec![vec![0u8; 32]]);
         let usdt = address!("eca9bc828a3005b9a3b909f2cc5c2a54794de05f");
         let holder = "000000000000000000000000bdf81069827deba7d39729eb387eda8827e5525c";
         let topics = [
@@ -597,6 +796,81 @@ mod tests {
         )
         .unwrap();
         assert_eq!(receipt.logs, vec![expected_log]);
+    }
+
+    /// A body that arrives but fails to decode is its own class, not transport.
+    #[tokio::test]
+    async fn malformed_contract_result_is_classified_not_transport() {
+        let (mut server, client) = test_client(fast_retry()).await;
+        let tx_id = test_hash(9);
+        server
+            .mock("POST", "/walletsolidity/gettransactioninfobyid")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(format!(
+                r#"{{ "id": "{tx_id}", "blockNumber": 1, "contractResult": ["zz"],
+                     "receipt": {{ "result": "SUCCESS" }} }}"#
+            ))
+            .create_async()
+            .await;
+
+        let err = client
+            .get_transaction_info_solidity(&tx_id)
+            .await
+            .unwrap_err();
+        let ReceiptError::Malformed(err) = err else {
+            panic!("decode must not classify as transport: {err:#}")
+        };
+        let rendered = format!("{err:#}");
+        assert!(rendered.contains("contractResult"), "{rendered}");
+    }
+
+    /// Transport is the retried class — budget burns, then the variant.
+    #[tokio::test]
+    async fn transport_failure_is_retried_then_transport() {
+        let (mut server, client) = test_client(fast_retry()).await;
+        let mock = server
+            .mock("POST", "/walletsolidity/gettransactioninfobyid")
+            .with_status(500)
+            .with_body("internal")
+            .expect(3) // 1 + fast_retry's 2
+            .create_async()
+            .await;
+
+        let err = client
+            .get_transaction_info_solidity(&test_hash(4))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ReceiptError::Transport(_)), "{err:#}");
+        assert!(format!("{err:#}").contains("exhausted"), "{err:#}");
+        mock.assert_async().await;
+    }
+
+    /// A non-JSON 200 body is deterministic per response: one fetch, `Malformed`.
+    #[tokio::test]
+    async fn non_json_success_body_is_malformed_not_transport() {
+        let (mut server, client) = test_client(fast_retry()).await;
+        let mock = server
+            .mock("POST", "/walletsolidity/gettransactioninfobyid")
+            .with_status(200)
+            .with_header("content-type", "text/html")
+            .with_body("<html>gateway error page</html>")
+            .expect(1)
+            .create_async()
+            .await;
+
+        let err = client
+            .get_transaction_info_solidity(&test_hash(5))
+            .await
+            .unwrap_err();
+        let ReceiptError::Malformed(err) = err else {
+            panic!("a mangled 200 body must not classify as transport: {err:#}")
+        };
+        assert!(
+            format!("{err:#}").contains("decoding tron receipt response"),
+            "{err:#}"
+        );
+        mock.assert_async().await;
     }
 
     #[tokio::test]

@@ -14,7 +14,7 @@ use crate::protocol::Chain;
 use crate::respond_bidirectional::claims_attestation_key;
 use crate::rpc::{ContractStateWatcher, GovernanceInfo, RpcChannel};
 use crate::storage::presignature_storage::{PresignatureReservation, PresignatureTaken};
-use crate::storage::PresignatureStorage;
+use crate::storage::{Initializing, PresignatureStorage};
 use crate::types::SignCommand;
 
 use mpc_utils::{
@@ -179,7 +179,7 @@ struct SignEntry {
 pub struct SignatureSpawner {
     contract: ContractStateWatcher,
     /// Presignature storage that maintains all presignatures.
-    presignatures: PresignatureStorage,
+    presignatures: PresignatureStorage<Initializing>,
     /// Consolidated signature tasks - one per (sign_id, kind), each task is an async task handling complete lifecycle
     tasks: JoinMap<SignTaskKey, Result<(), SignError>>,
     /// Per-(sign, kind) posit mailboxes; also buffer messages that arrive before their
@@ -208,7 +208,7 @@ impl SignatureSpawner {
     pub fn new(
         node_account_id: near_account_id::AccountId,
         contract: ContractStateWatcher,
-        presignatures: PresignatureStorage,
+        presignatures: PresignatureStorage<Initializing>,
         mesh_state: watch::Receiver<MeshState>,
         msg: MessageChannel,
         rpc: RpcChannel,
@@ -318,7 +318,7 @@ impl SignatureSpawner {
             governance: governance.clone(),
             sign_id,
             kind,
-            presignatures: self.presignatures.clone(),
+            presignatures: self.presignatures.to_ready(governance.me),
             msg: self.msg.clone(),
             rpc: self.rpc.clone(),
             signature_timeout,
@@ -511,7 +511,7 @@ impl SignatureSpawner {
             SignCommand::AbortChain(chain) => {
                 tracing::warn!(
                     ?chain,
-                    "aborting all in-flight signature tasks on chain regression"
+                    "aborting in-flight signature tasks to rebase onto the consensus checkpoint"
                 );
                 let to_abort: Vec<SignId> = self
                     .requests
@@ -1132,6 +1132,18 @@ mod tests {
         // A completion naming the leg we do track still retires it.
         spawner.leg_completed(sign_id, RequestKind::RespondBidirectional);
         assert!(!spawner.test_requests_contains(&sign_id));
+    }
+
+    /// Round timing every node must share, pinned for both build flavours.
+    #[test]
+    fn round_timeouts_are_pinned() {
+        let (organize_posit, ceiling) = if cfg!(feature = "test-feature") {
+            (5, 30)
+        } else {
+            (20, 600)
+        };
+        assert_eq!(ORGANIZE_POSIT_TIMEOUT, Duration::from_secs(organize_posit));
+        assert_eq!(ROUND_TIMEOUT_CEILING, Duration::from_secs(ceiling));
     }
 
     #[test]

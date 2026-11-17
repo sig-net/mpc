@@ -10,6 +10,7 @@ pub mod local;
 pub mod midnight;
 pub mod mpc_fixture;
 mod node_args;
+pub mod redis_harness;
 pub mod utils;
 
 use std::collections::HashMap;
@@ -76,11 +77,7 @@ impl Default for NodeConfig {
         Self {
             nodes: 3,
             threshold: 2,
-            protocol: ProtocolConfig {
-                min_mine_triple_pairs: 16,
-                min_mine_presignatures: 16,
-                max_mine_generations: 2,
-            },
+            protocol: ProtocolConfig::new(16, 16, 2),
             eth: None,
             sol: None,
             hydration: None,
@@ -242,7 +239,6 @@ pub async fn setup(spawner: &mut ClusterSpawner) -> anyhow::Result<Context> {
 
     let sk_share_local_path = spawner.tmp_dir.join("secrets");
     std::fs::create_dir_all(&sk_share_local_path).expect("could not create secrets dir");
-    let sk_share_local_path = sk_share_local_path.to_string_lossy().to_string();
 
     let mut ethereum = None;
     if spawner.use_ethereum {
@@ -270,8 +266,7 @@ pub async fn setup(spawner: &mut ClusterSpawner) -> anyhow::Result<Context> {
             contract_address: contract_address_hex
                 .parse()
                 .context("invalid deployed contract address")?,
-            network: "anvil".to_string(),
-            optimistic_requests: true,
+            network: mpc_chain_ethereum::EthNetwork::Anvil,
             gas: Default::default(),
             indexer: Default::default(),
             publisher: Default::default(),
@@ -286,13 +281,13 @@ pub async fn setup(spawner: &mut ClusterSpawner) -> anyhow::Result<Context> {
     }
 
     let storage_options = mpc_node::storage::Options {
-        gcp_project_id: spawner.gcp_project_id.clone(),
+        gcp_project_id: None,
         sk_share_secret_id: None,
         sk_share_local_path: Some(sk_share_local_path),
         redis_url: redis.internal_address.clone(),
     };
 
-    let log_options = logs::Options::test();
+    let log_options = logs::Options::default();
 
     // If using pregenerated keys, inject them into storage before nodes start
     if spawner.pregenerated_keys.is_enabled() {
@@ -300,20 +295,17 @@ pub async fn setup(spawner: &mut ClusterSpawner) -> anyhow::Result<Context> {
         for (i, account) in spawner.accounts.iter().enumerate() {
             let participant = Participant::from(i as u32);
             if let Some(key_info) = spawner.pregenerated_keys.get(&participant) {
-                let mut secret_storage = storage::secret_storage::init(
-                    None, // No GCP service for tests
-                    &storage_options,
-                    account.id(),
-                );
+                let mut keystore =
+                    storage::keystore::Keystore::init(&storage_options, account.id()).await?;
 
-                let persistent_data = mpc_node::protocol::state::PersistentNodeData {
+                let persistent_data = mpc_node::protocol::state::KeyShare {
                     epoch: 0,
                     private_share: key_info.private_share,
                     public_key: key_info.public_key,
                 };
 
                 let account_id = account.id().to_string();
-                if let Err(err) = secret_storage.store(&persistent_data).await {
+                if let Err(err) = keystore.store(&persistent_data).await {
                     tracing::error!(?err, "failed to store pregenerated key");
                     continue;
                 }
@@ -354,7 +346,7 @@ pub async fn dry_host(spawner: &mut ClusterSpawner) -> anyhow::Result<Context> {
                 account.id().clone(),
                 CandidateInfo {
                     account_id: account.id().as_str().parse().unwrap(),
-                    url: format!("http://127.0.0.1:{0}", node_cfg.web_port),
+                    url: node_cfg.address(),
                     cipher_pk: node_cfg.cipher_sk.public_key().to_bytes(),
                     sign_pk: node_cfg.sign_sk.public_key().to_string().parse().unwrap(),
                 },
@@ -394,13 +386,17 @@ pub async fn host(spawner: &mut ClusterSpawner) -> anyhow::Result<Nodes> {
     let cfg = &spawner.cfg;
 
     let spawn_nodes_start = std::time::Instant::now();
+    let node_cfgs = (0..spawner.accounts.len())
+        .map(|index| spawner.node_config(index))
+        .collect::<anyhow::Result<Vec<_>>>()?;
     let node_futures = spawner
         .accounts
         .iter()
         .zip(std::mem::take(&mut spawner.node_binary_sources))
-        .map(|(account, source)| {
+        .zip(&node_cfgs)
+        .map(|((account, source), node_cfg)| {
             let binary_path = source.binary_path().unwrap();
-            local::Node::run_with_binary(&ctx, cfg, account, binary_path)
+            local::Node::run_with_binary(&ctx, node_cfg, account, binary_path)
         });
     let nodes = futures::future::join_all(node_futures)
         .await

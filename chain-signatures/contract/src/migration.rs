@@ -81,11 +81,11 @@ pub(crate) struct PreviousSignatureConfig {
 impl PreviousConfig {
     fn upgrade(self) -> ProtocolConfig {
         let p = self.protocol;
-        ProtocolConfig {
-            min_mine_triple_pairs: p.triple.min_triples,
-            min_mine_presignatures: p.presignature.min_presignatures,
-            max_mine_generations: p.max_concurrent_introduction,
-        }
+        ProtocolConfig::new(
+            p.triple.min_triples,
+            p.presignature.min_presignatures,
+            p.max_concurrent_introduction,
+        )
     }
 }
 

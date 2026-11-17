@@ -462,7 +462,7 @@ pub(crate) mod tests {
 
         let redis_cfg = deadpool_redis::Config::from_url("redis://127.0.0.1/");
         let pool = redis_cfg.create_pool(Some(Runtime::Tokio1)).unwrap();
-        let presignatures = Presignature::storage(&pool, &account_id);
+        let presignatures = Presignature::ready_storage(&pool, &account_id, me);
         let (_inbox, outbox, msg_channel) = MessageChannel::new();
         let (rpc_tx, _rpc_rx) = mpsc::channel(1);
         let (sync_report_tx, sync_report_rx) = mpsc::channel(8);

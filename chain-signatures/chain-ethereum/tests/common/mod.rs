@@ -69,8 +69,7 @@ impl EthTestEnv {
             account_sk: signer.clone(),
             execution_rpc_http_url: endpoint.parse()?,
             contract_address,
-            network: "anvil".to_string(),
-            optimistic_requests: false,
+            network: mpc_chain_ethereum::EthNetwork::Anvil,
             rpc: Default::default(),
             gas: Default::default(),
             publisher: PublisherConfig {

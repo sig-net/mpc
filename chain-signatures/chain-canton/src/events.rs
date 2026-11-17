@@ -54,6 +54,8 @@ pub async fn process_canton_event(
                 let entropy: [u8; 32] = alloy::primitives::keccak256(request_id).into();
                 match canton_event.generate_sign_request(entropy, current_unix_timestamp()) {
                     Ok(request) => {
+                        // TODO: surface the update's record time so
+                        // §4.3's expiry bound anchors for Canton sources too.
                         if events_tx
                             .send(ChainEvent::SignRequest {
                                 request: Arc::new(request),

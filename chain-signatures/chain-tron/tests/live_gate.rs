@@ -4,12 +4,9 @@
 //! The recorded-response replay runs in CI; live legs are opt-in via
 //! env vars (see README).
 
-mod common;
-
 use anyhow::{bail, Context};
-use common::build_raw;
 use k256::ecdsa::SigningKey;
-use mpc_chain_integration_core::{ChainIndexer, MockStateManager, NoopChainTelemetry};
+use mpc_chain_integration_core::{ChainIndexer, MockStateManager, StateManager};
 use mpc_chain_tron::{
     BroadcastOutcome, TronConfig, TronExecutionResult, TronHttp, TronReceipt, TronWatcher,
 };
@@ -18,9 +15,10 @@ use mpc_primitives::{
 };
 use mpc_tron_wire::{
     parse_hex,
-    pb::{Message, RawTransaction},
+    pb::{Contract, ContractType, Message, RawTransaction, TriggerSmartContract},
     NowBlock, TronAddress,
 };
+use prost_types::Any;
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -42,6 +40,9 @@ fn env_secs(name: &str, default: u64) -> anyhow::Result<Duration> {
 /// Nile USDT; verified by `triggerconstantcontract name()` = "Tether USD".
 const DEFAULT_CONTRACT: &str = "TXYZopYRdj2D9XRtbG411XZZ3kM5VkAeBf";
 
+/// Tron's 3 s slot — also the expiry leg's window length.
+const SLOT_MS: i64 = 3_000;
+
 alloy::sol! {
     interface Trc20 {
         function transfer(address to, uint256 amount) external returns (bool);
@@ -62,6 +63,130 @@ fn transfer_topic() -> B256 {
     alloy::primitives::keccak256(b"Transfer(address,address,uint256)")
 }
 
+/// Validity window and energy-fee cap; observed on recorded transfers.
+const EXPIRATION_MS: i64 = 300_000;
+const FEE_LIMIT_SUN: i64 = 50_000_000;
+const TRIGGER_SMART_CONTRACT_TYPE_URL: &str = "type.googleapis.com/protocol.TriggerSmartContract";
+
+/// Minimal watcher-leg backlog entry: identity and bytes, `request_id`
+/// mirroring the flat id, Nile-targeted.
+fn bidirectional_tx(
+    id: [u8; 32],
+    serialized_transaction: Vec<u8>,
+    source_chain: Chain,
+) -> Arc<BidirectionalTx> {
+    Arc::new(BidirectionalTx {
+        id: BidirectionalTxId(id),
+        sender: [0u8; 32],
+        serialized_transaction,
+        source_chain,
+        target_chain: Chain::Tron,
+        caip2_id: "tron:nile".to_string(),
+        key_version: 0,
+        deposit: 0,
+        path: String::new(),
+        algo: "secp256k1".to_string(),
+        dest: "tron:nile".to_string(),
+        params: String::new(),
+        output_deserialization_schema: br#"[{"name":"ok","type":"bool"}]"#.to_vec(),
+        respond_serialization_schema: br#"[{"name":"ok","type":"bool"}]"#.to_vec(),
+        request_id: id,
+        from_address: [0u8; 20],
+        nonce: 0,
+    })
+}
+
+/// Test-local assembly of raw transactions from structured parameters,
+/// with the standard 5-minute validity window.
+fn build_raw(
+    owner: &TronAddress,
+    contract: &TronAddress,
+    call_data: &[u8],
+    reference: &NowBlock,
+    now_ms: i64,
+) -> RawTransaction {
+    build_raw_expiring(
+        owner,
+        contract,
+        call_data,
+        reference,
+        now_ms,
+        now_ms + EXPIRATION_MS,
+    )
+}
+
+/// As [`build_raw`] with an explicit expiration — the live expiry gate
+/// needs a window shorter than any realistic confirmation.
+fn build_raw_expiring(
+    owner: &TronAddress,
+    contract: &TronAddress,
+    call_data: &[u8],
+    reference: &NowBlock,
+    now_ms: i64,
+    expiration: i64,
+) -> RawTransaction {
+    let trigger = TriggerSmartContract {
+        owner_address: owner.as_bytes().to_vec(),
+        contract_address: contract.as_bytes().to_vec(),
+        call_value: 0,
+        data: call_data.to_vec(),
+        call_token_value: 0,
+        token_id: 0,
+    };
+    let contract = Contract {
+        r#type: ContractType::TriggerSmartContract as i32,
+        parameter: Some(Any {
+            type_url: TRIGGER_SMART_CONTRACT_TYPE_URL.to_string(),
+            value: trigger.encode_to_vec(),
+        }),
+        permission_id: 0,
+    };
+    let (ref_block_bytes, ref_block_hash) = reference.reference_fields();
+    RawTransaction {
+        ref_block_bytes,
+        ref_block_num: 0,
+        ref_block_hash,
+        expiration,
+        timestamp: now_ms,
+        fee_limit: FEE_LIMIT_SUN,
+        contract: vec![contract],
+    }
+}
+
+/// A spawned [`TronWatcher`] over a mock backlog: its event channel,
+/// plus the task to join on stop.
+struct WatcherRun {
+    cancel: CancellationToken,
+    events: tokio::sync::mpsc::Receiver<ChainEvent>,
+    done: tokio::task::JoinHandle<anyhow::Result<()>>,
+}
+
+fn spawn_watcher(config: TronConfig, state: MockStateManager) -> anyhow::Result<WatcherRun> {
+    let watcher = TronWatcher::new(
+        config,
+        state,
+        mpc_chain_integration_core::NoopChainTelemetry,
+    )?;
+    let (events_tx, events) = tokio::sync::mpsc::channel(64);
+    let cancel = CancellationToken::new();
+    let done = tokio::spawn({
+        let cancel = cancel.clone();
+        async move { watcher.run(events_tx, cancel).await }
+    });
+    Ok(WatcherRun {
+        cancel,
+        events,
+        done,
+    })
+}
+
+impl WatcherRun {
+    async fn stop(self) -> anyhow::Result<()> {
+        self.cancel.cancel();
+        self.done.await?
+    }
+}
+
 /// One gate run: connection, signer, and timing.
 struct Gate {
     client: TronHttp,
@@ -77,6 +202,7 @@ struct Gate {
 /// What the later probes reuse from the acceptance broadcast.
 struct Broadcast {
     signed: Vec<u8>,
+    raw: Vec<u8>,
     reference: NowBlock,
     txid: [u8; 32],
     receipt: TronReceipt,
@@ -182,6 +308,15 @@ impl Gate {
     /// artifact via the node's `deploycontract` builder (raw bytes +
     /// pre-computed address), settled like any other broadcast.
     async fn with_deployed_token(self, artifact: &str) -> anyhow::Result<Self> {
+        let (_, deployed) = self.deploy(artifact).await?;
+        Ok(Self {
+            contract: deployed,
+            ..self
+        })
+    }
+
+    /// Deploys the artifact's contract, returning its name and address.
+    async fn deploy(&self, artifact: &str) -> anyhow::Result<(String, TronAddress)> {
         let artifact = std::fs::read_to_string(artifact)
             .with_context(|| format!("token artifact {artifact}"))?;
         let artifact: serde_json::Value = serde_json::from_str(&artifact)?;
@@ -239,10 +374,7 @@ impl Gate {
             .or(receipt.receipt_result.as_deref());
         anyhow::ensure!(result == Some("SUCCESS"), "deploy executed {result:?}");
         println!("[deploy] {name} at {deployed}");
-        Ok(Self {
-            contract: deployed,
-            ..self
-        })
+        Ok((name.to_string(), deployed))
     }
 
     /// Runs the sequence: acceptance, watcher, duplicate, codeless.
@@ -254,63 +386,36 @@ impl Gate {
         self.codeless(&accepted).await
     }
 
-    /// Watcher leg: run [`TronWatcher`] on the settled tx; the event
-    /// must match the receipt's own classification.
-    async fn watcher(&self, accepted: &Broadcast) -> anyhow::Result<()> {
-        let state = MockStateManager::new();
-        let tx = Arc::new(BidirectionalTx {
-            id: BidirectionalTxId(accepted.txid),
-            sender: [0u8; 32],
-            serialized_transaction: vec![],
-            source_chain: Chain::Ethereum,
-            target_chain: Chain::Tron,
-            caip2_id: "tron:mainnet".to_string(),
-            key_version: 0,
-            deposit: 0,
-            path: String::new(),
-            algo: "secp256k1".to_string(),
-            dest: "tron:mainnet".to_string(),
-            params: String::new(),
-            output_deserialization_schema: vec![],
-            respond_serialization_schema: vec![],
-            request_id: accepted.txid,
-            from_address: [0u8; 20],
-            nonce: 0,
-        });
-
-        let expected = accepted
-            .receipt
-            .execution_outcome(&tx.output_deserialization_schema)?;
-
-        state
-            .watch_execution(Chain::Tron, SignId::new(accepted.txid), tx)
-            .await;
-        let config = TronConfig {
+    /// Watcher config matching this gate's connection and cadence.
+    fn watcher_config(&self) -> TronConfig {
+        TronConfig {
             endpoint: self.endpoint.clone(),
             api_key: self.api_key.clone(),
             poll_interval: self.poll,
             ..TronConfig::default()
-        };
-        let watcher = TronWatcher::new(config, state, NoopChainTelemetry)?;
-        let (events_tx, mut events_rx) = tokio::sync::mpsc::channel(64);
-        let cancel = CancellationToken::new();
-        let done = tokio::spawn({
-            let cancel = cancel.clone();
-            async move { watcher.run(events_tx, cancel).await }
-        });
+        }
+    }
 
+    /// Watcher leg: run [`TronWatcher`] on the settled tx; the event
+    /// must match the receipt's own classification.
+    async fn watcher(&self, accepted: &Broadcast) -> anyhow::Result<()> {
+        let tx = bidirectional_tx(accepted.txid, accepted.raw.clone(), Chain::Ethereum);
+        let expected = accepted.receipt.execution_outcome(&tx)?;
+
+        let state = MockStateManager::new();
+        state.watch_execution(Chain::Tron, tx).await;
+        let mut run = spawn_watcher(self.watcher_config(), state)?;
         let deadline = Instant::now() + self.deadline;
         let confirmation = loop {
-            let event = tokio::time::timeout_at(deadline.into(), events_rx.recv())
+            let event = tokio::time::timeout_at(deadline.into(), run.events.recv())
                 .await
                 .context("watcher produced no event before the deadline")?
                 .context("watcher channel closed")?;
-            if let ChainEvent::ExecutionConfirmed { .. } = &event {
+            if let ChainEvent::ExecutionConfirmed { .. } = event {
                 break event;
             }
         };
-        cancel.cancel();
-        done.await??;
+        run.stop().await?;
 
         let ChainEvent::ExecutionConfirmed {
             tx_id,
@@ -342,6 +447,10 @@ impl Gate {
             agrees,
             "watcher classified {result:?}, receipt says {expected:?}"
         );
+        // The source stand-in responds in Borsh: `bool` is one byte.
+        if let ExecutionOutcome::Success { output } = &result {
+            anyhow::ensure!(output.len() == 1, "borsh bool is one byte: {output:?}");
+        }
         println!("[watcher] confirmed at block {block_height} as {result:?}");
         Ok(())
     }
@@ -402,10 +511,139 @@ impl Gate {
         }
         Ok(Broadcast {
             signed,
+            raw: raw_bytes,
             reference,
             txid,
             receipt,
         })
+    }
+
+    /// Broadcasts a transfer so a demand-driven chain (TRE) produces
+    /// a block; settled chains (Nile) produce on their own.
+    async fn push_block(&self) -> anyhow::Result<()> {
+        let reference = self.client.get_now_block().await?;
+        let raw = build_raw(
+            &self.owner,
+            &self.contract,
+            &usdt_transfer_calldata(&self.owner, 1),
+            &reference,
+            reference.timestamp as i64,
+        );
+        let (signed, _) = sign(&self.key, &raw.encode_to_vec())?;
+        self.client.broadcast_transaction(&signed).await?;
+        Ok(())
+    }
+
+    /// M6 from a refused broadcast — the reproducible never-included
+    /// id (accepted broadcasts pack within their window). The entry
+    /// registers with no watch: the backlog scan resolves it.
+    async fn expiry(&self) -> anyhow::Result<()> {
+        let reference = self.client.get_now_block().await?;
+        let expiration = reference.timestamp as i64 + SLOT_MS;
+        let raw = build_raw_expiring(
+            &self.owner,
+            &self.contract,
+            &usdt_transfer_calldata(&self.owner, 1),
+            &reference,
+            reference.timestamp as i64,
+            expiration,
+        );
+        let raw_bytes = raw.encode_to_vec();
+        let (signed, txid) = sign(&self.key, &raw_bytes)?;
+        // The refusal comes from the chain's clock, not the wall's:
+        // advance the served head one slot past the window, pushing a
+        // block whenever a demand-driven chain stalls.
+        let start = Instant::now();
+        let mut last_live = 0;
+        loop {
+            let live = self.client.get_now_block().await?;
+            if live.timestamp as i64 > expiration + SLOT_MS {
+                break;
+            }
+            anyhow::ensure!(
+                start.elapsed() < self.deadline,
+                "live head did not pass the window within {:?}",
+                self.deadline
+            );
+            self.push_if_stalled(live.timestamp, &mut last_live).await?;
+            tokio::time::sleep(self.poll).await;
+        }
+        match self.client.broadcast_transaction(&signed).await? {
+            BroadcastOutcome::Rejected { code, .. } => {
+                println!("[expiry] refused as expected: {code}")
+            }
+            other => bail!("[expiry] wanted the expiry refusal, got {other:?}"),
+        }
+
+        let state = MockStateManager::new();
+        state
+            .add_pending_execution(bidirectional_tx(txid, raw_bytes, Chain::Midnight))
+            .await;
+        let mut run = spawn_watcher(self.watcher_config(), state)?;
+        let mut last_live = 0;
+        let confirmation = loop {
+            tokio::select! {
+                event = run.events.recv() => {
+                    let event = event.context("watcher channel closed")?;
+                    if let ChainEvent::ExecutionConfirmed { .. } = event {
+                        break event;
+                    }
+                }
+                _ = tokio::time::sleep(self.poll) => {
+                    anyhow::ensure!(
+                        start.elapsed() < self.deadline,
+                        "no attestation within {:?}",
+                        self.deadline
+                    );
+                    let live = self.client.get_now_block().await?;
+                    self.push_if_stalled(live.timestamp, &mut last_live).await?;
+                }
+            }
+        };
+        run.stop().await?;
+
+        let ChainEvent::ExecutionConfirmed {
+            tx_id,
+            sign_id,
+            block_height,
+            result,
+            ..
+        } = confirmation
+        else {
+            unreachable!()
+        };
+        anyhow::ensure!(tx_id.0 == txid, "[expiry] attested {tx_id:?}");
+        anyhow::ensure!(sign_id == SignId::new(txid));
+        anyhow::ensure!(
+            matches!(result, ExecutionOutcome::Unviable),
+            "[expiry] attested {result:?}, want Unviable"
+        );
+        // Independent oracle for the deterministic height: a linear
+        // scan for the first solidified block at or past the window's
+        // end.
+        let mut boundary = reference.number + 1;
+        loop {
+            let block = self
+                .client
+                .get_block_solidity(boundary)
+                .await?
+                .with_context(|| format!("[expiry] solidified block {boundary} absent"))?;
+            if block.timestamp >= expiration {
+                break;
+            }
+            boundary += 1;
+        }
+        anyhow::ensure!(
+            block_height == boundary,
+            "[expiry] attested at {block_height}, want the boundary {boundary}"
+        );
+        println!(
+            "[expiry] attested Unviable at the boundary {block_height} \
+             (broadcast reference {}, {:.1?} after the refusal)",
+            reference.number,
+            start.elapsed()
+        );
+        Ok(())
     }
 
     /// Duplicate probe: the identical signed bytes again, rejected by
@@ -449,6 +687,16 @@ impl Gate {
         Ok(())
     }
 
+    /// Pushes a block while the served head stays stalled, tracking
+    /// the last-seen timestamp.
+    async fn push_if_stalled(&self, live_ts: u64, last_live: &mut u64) -> anyhow::Result<()> {
+        if live_ts != *last_live {
+            *last_live = live_ts;
+            return Ok(());
+        }
+        self.push_block().await
+    }
+
     /// Polls the solidity router until the receipt appears (solidified);
     /// absence is pending, not an error.
     async fn settle(&self, txid: &[u8; 32]) -> anyhow::Result<TronReceipt> {
@@ -485,6 +733,46 @@ fn mock_config(endpoint: Url) -> TronConfig {
     }
 }
 
+/// One `broadcasthex` stub answering a specific signed transaction;
+/// `expect` bounds its hits — mockito hands overflow to the next
+/// matching stub.
+async fn broadcast_stub(
+    server: &mut mockito::ServerGuard,
+    signed: &[u8],
+    body: String,
+    expect: Option<usize>,
+) {
+    let mut mock = server
+        .mock("POST", "/wallet/broadcasthex")
+        .match_body(mockito::Matcher::Json(serde_json::json!({
+            "transaction": hex::encode(signed)
+        })))
+        .with_body(body);
+    if let Some(hits) = expect {
+        mock = mock.expect(hits);
+    }
+    mock.create_async().await;
+}
+
+/// One `gettransactioninfobyid` stub answering this txid.
+async fn receipt_stub(
+    server: &mut mockito::ServerGuard,
+    txid: &[u8; 32],
+    body: String,
+    expect: Option<usize>,
+) {
+    let mut mock = server
+        .mock("POST", "/walletsolidity/gettransactioninfobyid")
+        .match_body(mockito::Matcher::PartialJson(serde_json::json!({
+            "value": hex::encode(txid)
+        })))
+        .with_body(body);
+    if let Some(hits) = expect {
+        mock = mock.expect(hits);
+    }
+    mock.create_async().await;
+}
+
 /// A raw response body recorded from nile.trongrid.io; the mock below
 /// serves these verbatim.
 fn fixture(name: &str) -> String {
@@ -519,7 +807,7 @@ fn patched_receipt(txid: &[u8; 32]) -> String {
 }
 
 #[tokio::test]
-async fn relay_sequence_runs_against_recorded_nile_responses() {
+async fn relay_sequence_runs_against_recorded_nile_responses() -> anyhow::Result<()> {
     let (nowblock, reference) = recorded_nowblock();
 
     let mut key_bytes = [0u8; 32];
@@ -558,60 +846,26 @@ async fn relay_sequence_runs_against_recorded_nile_responses() {
     let mut server = mockito::Server::new_async().await;
     let endpoint: Url = server.url().parse().unwrap();
     // Mockito answers the first stub whose expectation is still unmet:
-    // accept's `expect(1)` hands the second identical broadcast to dup,
-    // and the pending `{}` stub hands the first poll to the receipt.
+    // accept's one-hit stub hands the second identical broadcast to
+    // dup, and the pending `{}` stub hands the first poll to the
+    // receipt.
     server
         .mock("POST", "/wallet/getnowblock")
         .with_body(nowblock)
         .create_async()
         .await;
 
-    server
-        .mock("POST", "/wallet/broadcasthex")
-        .match_body(mockito::Matcher::Json(serde_json::json!({
-            "transaction": hex::encode(&void_signed)
-        })))
-        .with_body(fixture("broadcast-codeless"))
-        .create_async()
-        .await;
-
-    server
-        .mock("POST", "/wallet/broadcasthex")
-        .match_body(mockito::Matcher::Json(serde_json::json!({
-            "transaction": hex::encode(&signed)
-        })))
-        .with_body(fixture("broadcast-accept"))
-        .expect(1)
-        .create_async()
-        .await;
-
-    server
-        .mock("POST", "/wallet/broadcasthex")
-        .match_body(mockito::Matcher::Json(serde_json::json!({
-            "transaction": hex::encode(&signed)
-        })))
-        .with_body(fixture("broadcast-dup"))
-        .create_async()
-        .await;
-
-    server
-        .mock("POST", "/walletsolidity/gettransactioninfobyid")
-        .match_body(mockito::Matcher::PartialJson(serde_json::json!({
-            "value": hex::encode(txid)
-        })))
-        .with_body(fixture("receipt-pending"))
-        .expect(1)
-        .create_async()
-        .await;
-
-    server
-        .mock("POST", "/walletsolidity/gettransactioninfobyid")
-        .match_body(mockito::Matcher::PartialJson(serde_json::json!({
-            "value": hex::encode(txid)
-        })))
-        .with_body(patched_receipt(&txid))
-        .create_async()
-        .await;
+    broadcast_stub(
+        &mut server,
+        &void_signed,
+        fixture("broadcast-codeless"),
+        None,
+    )
+    .await;
+    broadcast_stub(&mut server, &signed, fixture("broadcast-accept"), Some(1)).await;
+    broadcast_stub(&mut server, &signed, fixture("broadcast-dup"), None).await;
+    receipt_stub(&mut server, &txid, fixture("receipt-pending"), Some(1)).await;
+    receipt_stub(&mut server, &txid, patched_receipt(&txid), None).await;
 
     let gate = Gate {
         client: TronHttp::new(&mock_config(endpoint.clone())).unwrap(),
@@ -623,11 +877,279 @@ async fn relay_sequence_runs_against_recorded_nile_responses() {
         poll: Duration::from_millis(10),
         deadline: Duration::from_secs(2),
     };
-    gate.run().await.unwrap();
+    gate.run().await?;
+    Ok(())
+}
+
+/// The expiry leg against recorded Nile responses (refusal captured
+/// 2026-10-31, api.nileex.io): refused broadcast, `Unviable` at the
+/// first solidified block at or past the window's end.
+#[tokio::test]
+async fn expiry_leg_runs_against_recorded_nile_responses() -> anyhow::Result<()> {
+    let (nowblock, reference) = recorded_nowblock();
+    let solidified: serde_json::Value = serde_json::from_str(&fixture("nowblock-solidity"))?;
+    let solid_height = solidified["block_header"]["raw_data"]["number"]
+        .as_u64()
+        .context("solidity head number")?;
+
+    let mut key_bytes = [0u8; 32];
+    key_bytes[31] = 1;
+    let key = SigningKey::from_bytes(&k256::FieldBytes::from(key_bytes))?;
+    let owner = TronAddress::from_evm(derive_address(&key));
+    let contract: TronAddress = DEFAULT_CONTRACT.parse().unwrap();
+
+    // A one-slot window the recorded solidified head is long past.
+    let expiration = reference.timestamp as i64 + SLOT_MS;
+    anyhow::ensure!(
+        solidified["block_header"]["raw_data"]["timestamp"]
+            .as_i64()
+            .context("solidity head timestamp")?
+            > expiration,
+        "head must be past the window"
+    );
+    let raw = build_raw_expiring(
+        &owner,
+        &contract,
+        &usdt_transfer_calldata(&owner, 1),
+        &reference,
+        reference.timestamp as i64,
+        expiration,
+    );
+    let raw_bytes = raw.encode_to_vec();
+    let (signed, txid) = sign(&key, &raw_bytes)?;
+
+    let mut server = mockito::Server::new_async().await;
+    let endpoint: Url = server.url().parse().unwrap();
+    server
+        .mock("POST", "/wallet/getnowblock")
+        .with_body(nowblock)
+        .create_async()
+        .await;
+    broadcast_stub(&mut server, &signed, fixture("broadcast-expired"), None).await;
+    server
+        .mock("POST", "/walletsolidity/getnowblock")
+        .with_body(fixture("nowblock-solidity"))
+        .create_async()
+        .await;
+    receipt_stub(&mut server, &txid, fixture("receipt-pending"), None).await;
+
+    // The recorded chain anchors at the boundary — reference + 1, its
+    // timestamp exactly the window's end; synthesized search mids ride
+    // a 3 s clock through it, so any probe that is not a recorded
+    // block reads a consistent timestamp.
+    let boundary = reference.number + 1;
+    let clock = |n: u64| expiration + (n as i64 - boundary as i64) * SLOT_MS;
+    let recorded = |n: u64| n == reference.number || n == boundary;
+    let stub_mid = |server: &mut mockito::ServerGuard, n: u64| {
+        server
+            .mock("POST", "/walletsolidity/getblockbynum")
+            .match_body(mockito::Matcher::PartialJson(serde_json::json!({
+                "num": n
+            })))
+            .with_header("content-type", "application/json")
+            .with_body(format!(
+                r#"{{ "block_header": {{ "raw_data": {{ "number": {n}, "timestamp": {} }} }}, "transactions": [] }}"#,
+                clock(n)
+            ))
+            .create();
+    };
+    for target in [reference.timestamp as i64, expiration] {
+        let (mut lo, mut hi) = (0u64, solid_height);
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2;
+            if !recorded(mid) {
+                stub_mid(&mut server, mid);
+            }
+            if clock(mid) >= target {
+                hi = mid;
+            } else {
+                lo = mid + 1;
+            }
+        }
+        if !recorded(lo) {
+            stub_mid(&mut server, lo);
+        }
+    }
+    for n in [reference.number, boundary] {
+        server
+            .mock("POST", "/walletsolidity/getblockbynum")
+            .match_body(mockito::Matcher::PartialJson(serde_json::json!({
+                "num": n
+            })))
+            .with_header("content-type", "application/json")
+            .with_body(fixture(&format!("solid-block-{n}")))
+            .create_async()
+            .await;
+    }
+
+    let client = TronHttp::new(&mock_config(endpoint.clone()))?;
+    match client.broadcast_transaction(&signed).await? {
+        BroadcastOutcome::Rejected { code, .. } => {
+            anyhow::ensure!(code == "TRANSACTION_EXPIRATION_ERROR", "refused as {code}");
+        }
+        other => bail!("wanted the recorded expiry refusal, got {other:?}"),
+    }
+
+    let state = MockStateManager::new();
+    state
+        .add_pending_execution(bidirectional_tx(txid, raw_bytes, Chain::Midnight))
+        .await;
+    let mut run = spawn_watcher(mock_config(endpoint), state)?;
+    let confirmation = loop {
+        let event = tokio::time::timeout(Duration::from_secs(5), run.events.recv())
+            .await
+            .context("watcher produced no event before the deadline")?
+            .context("watcher channel closed")?;
+        if let ChainEvent::ExecutionConfirmed { .. } = event {
+            break event;
+        }
+    };
+    run.stop().await?;
+
+    let ChainEvent::ExecutionConfirmed {
+        tx_id,
+        block_height,
+        result,
+        ..
+    } = confirmation
+    else {
+        unreachable!()
+    };
+    anyhow::ensure!(tx_id.0 == txid, "attested {tx_id:?}");
+    anyhow::ensure!(
+        block_height == boundary,
+        "attested at {block_height}, want the boundary {boundary}"
+    );
+    anyhow::ensure!(
+        matches!(result, ExecutionOutcome::Unviable),
+        "attested {result:?}, want Unviable"
+    );
+    Ok(())
+}
+
+/// `contractResult` order, replayed from the TRE-recorded probe
+/// receipt (§7.5.2.2): the field carries the top call's return data
+/// alone — element 0, here 43. The probe's internal call (42) never
+/// appears; `internal_transactions` reports it instead.
+#[tokio::test]
+async fn inner_call_receipt_attests_the_top_return() -> anyhow::Result<()> {
+    let body = std::fs::read_to_string("tests/fixtures/tre/ret-probe-receipt.json")?;
+    let recorded: serde_json::Value = serde_json::from_str(&body)?;
+    let txid: [u8; 32] = recorded["id"]
+        .as_str()
+        .context("recorded id")?
+        .parse::<B256>()?
+        .into();
+
+    let mut server = mockito::Server::new_async().await;
+    receipt_stub(&mut server, &txid, body, None).await;
+    let client = TronHttp::new(&mock_config(server.url().parse().unwrap()))?;
+    let receipt = client
+        .get_transaction_info_solidity(&B256::from(txid))
+        .await?
+        .context("recorded receipt present")?;
+
+    let mut word = [0u8; 32];
+    word[31] = 43;
+    assert_eq!(receipt.contract_result, vec![word.to_vec()]);
+
+    // Extraction reads element 0: uint256 schema, Borsh respond
+    // encoding — 43 little-endian.
+    let (_, reference) = recorded_nowblock();
+    let probe = TronAddress::from_evm(parse_hex(
+        recorded["contract_address"].as_str().context("contract")?,
+    )?);
+    let calldata = alloy::primitives::keccak256(b"f()")[..4].to_vec();
+    let raw = build_raw(
+        &TronAddress::from_evm(Address::ZERO),
+        &probe,
+        &calldata,
+        &reference,
+        reference.timestamp as i64,
+    );
+    let mut tx = Arc::unwrap_or_clone(bidirectional_tx(txid, raw.encode_to_vec(), Chain::Solana));
+    let schema = br#"[{"name":"v","type":"uint256"}]"#;
+    tx.output_deserialization_schema = schema.to_vec();
+    tx.respond_serialization_schema = schema.to_vec();
+
+    let mut want = [0u8; 32];
+    want[0] = 43;
+    assert!(matches!(
+        receipt.execution_outcome(&tx)?,
+        ExecutionOutcome::Success { output } if output == want
+    ));
+    Ok(())
 }
 
 #[tokio::test]
 #[ignore = "live network: TRON_ENDPOINT, TRON_PRIVATE_KEY"]
 async fn live_gate() -> anyhow::Result<()> {
     Gate::from_env().await?.run().await
+}
+
+#[tokio::test]
+#[ignore = "live network: TRON_ENDPOINT, TRON_PRIVATE_KEY"]
+async fn live_gate_expiry() -> anyhow::Result<()> {
+    Gate::from_env().await?.expiry().await
+}
+
+/// `contractResult` element order, live-pinned (§7.5.2.2): element 0
+/// is the top call's return data. The probe contract's `f()` returns 43
+/// over an internal call returning 42; the recorded receipt pins the
+/// replay test.
+#[tokio::test]
+#[ignore = "live network: TRON_ENDPOINT, TRON_PRIVATE_KEY"]
+async fn live_gate_inner_call_return_order() -> anyhow::Result<()> {
+    let gate = Gate::from_env().await?;
+    let (_, probe) = gate.deploy("tests/fixtures/tre/ret-probe.json").await?;
+
+    let reference = gate.client.get_now_block().await?;
+    let calldata = alloy::primitives::keccak256(b"f()")[..4].to_vec();
+    let raw = build_raw(
+        &gate.owner,
+        &probe,
+        &calldata,
+        &reference,
+        reference.timestamp as i64,
+    );
+    let (signed, txid) = sign(&gate.key, &raw.encode_to_vec())?;
+    match gate.client.broadcast_transaction(&signed).await? {
+        BroadcastOutcome::Accepted => {}
+        other => anyhow::bail!("[ret-probe] {other:?}"),
+    }
+    let receipt = gate.settle(&txid).await?;
+    anyhow::ensure!(
+        matches!(receipt.execution_result()?, TronExecutionResult::Succeeded),
+        "probe call must execute"
+    );
+    let top = receipt
+        .contract_result
+        .first()
+        .context("probe receipt carries no contractResult")?;
+    anyhow::ensure!(
+        alloy::primitives::U256::from_be_slice(top) == alloy::primitives::U256::from(43),
+        "element 0 must be the top call's 43, got {:?}",
+        receipt.contract_result
+    );
+    for (i, ret) in receipt.contract_result.iter().enumerate() {
+        println!(
+            "[ret-probe] contractResult[{i}] = {}",
+            alloy::primitives::U256::from_be_slice(ret)
+        );
+    }
+    // The wire body, for the replay fixture.
+    let body: String = reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()?
+        .post(
+            gate.endpoint
+                .join("walletsolidity/gettransactioninfobyid")?,
+        )
+        .json(&serde_json::json!({ "value": hex::encode(txid), "visible": false }))
+        .send()
+        .await?
+        .text()
+        .await?;
+    println!("[ret-probe] receipt body: {body}");
+    Ok(())
 }

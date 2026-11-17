@@ -606,6 +606,7 @@ impl MpcContract {
                         threshold_votes: ThresholdVotes::new(),
                         reshare_votes: ReshareVotes::new(),
                     });
+                    self.drop_non_member_checkpoint_votes();
                     Ok(true)
                 } else {
                     Ok(false)
@@ -707,12 +708,17 @@ impl MpcContract {
         );
         let threshold = self.threshold()?;
         let voter = self.voter()?;
-        let Some(votes) = self.proposed_updates().vote(&id, voter) else {
+        let Some(votes) = self.proposed_updates.vote(&id, voter) else {
             return Err(InvalidParameters::UpdateNotFound.into());
         };
+        // Only current members' votes count.
+        let vote_count = votes
+            .iter()
+            .filter(|account| self.protocol_state.is_voter(account))
+            .count();
 
         // Not enough votes, wait for more.
-        if votes.len() < threshold {
+        if vote_count < threshold {
             return Ok(false);
         }
 
@@ -829,7 +835,10 @@ impl MpcContract {
     pub fn migrate() -> Result<Self, Error> {
         let state_bytes =
             env::storage_read(b"STATE").ok_or(InvalidState::ContractStateIsMissing)?;
-        migration::migrate(&state_bytes)
+        let mut contract = migration::migrate(&state_bytes)?;
+        // State from before reshares dropped removed nodes' checkpoint votes can still hold some.
+        contract.drop_non_member_checkpoint_votes();
+        Ok(contract)
     }
 
     pub fn state(&self) -> ProtocolContractStateView {
@@ -952,8 +961,7 @@ impl MpcContract {
         }
 
         let vote_count = {
-            let checkpoint_votes = self.checkpoint_votes_mut();
-            let voters = checkpoint_votes.entry(checkpoint);
+            let voters = self.checkpoint_votes.entry(checkpoint);
             voters.insert(voter);
             voters.len()
         };
@@ -1162,33 +1170,23 @@ impl MpcContract {
         &mut self.proposed_updates
     }
 
+    fn drop_non_member_checkpoint_votes(&mut self) {
+        let state = &self.protocol_state;
+        self.checkpoint_votes.votes.retain(|_, voters| {
+            voters.retain(|account| state.is_voter(account));
+            !voters.is_empty()
+        });
+    }
+
     /// Get our own account id as a voter. Check to see if we are a participant in the protocol.
     /// If we are not a participant, return an error.
     fn voter(&self) -> Result<AccountId, Error> {
+        if let ProtocolContractState::NotInitialized = self.protocol_state {
+            return Err(InvalidState::UnexpectedProtocolState.message(self.protocol_state.name()));
+        }
         let voter = env::signer_account_id();
-        {
-            match &self.protocol_state {
-                ProtocolContractState::Initializing(state) => {
-                    if !state.candidates.contains_key(&voter) {
-                        return Err(VoteError::VoterNotParticipant.into());
-                    }
-                }
-                ProtocolContractState::Running(state) => {
-                    if !state.participants.contains_key(&voter) {
-                        return Err(VoteError::VoterNotParticipant.into());
-                    }
-                }
-                ProtocolContractState::Resharing(state) => {
-                    if !state.old_participants.contains_key(&voter) {
-                        return Err(VoteError::VoterNotParticipant.into());
-                    }
-                }
-                ProtocolContractState::NotInitialized => {
-                    return Err(
-                        InvalidState::UnexpectedProtocolState.message(self.protocol_state.name())
-                    );
-                }
-            }
+        if !self.protocol_state.is_voter(&voter) {
+            return Err(VoteError::VoterNotParticipant.into());
         }
         Ok(voter)
     }
@@ -1558,5 +1556,101 @@ mod tests {
         assert_eq!(event["chain"], serde_json::json!(Chain::Solana));
         assert_eq!(event["height"], resume_at_height);
         assert_eq!(event["resume_after"], resume_at_height - 1);
+    }
+
+    fn act_as(account: &AccountId) {
+        testing_env!(VMContextBuilder::new()
+            .current_account_id("contract.near".parse().unwrap())
+            .signer_account_id(account.clone())
+            .build());
+    }
+
+    const THRESHOLD: usize = 3;
+
+    fn reshare(
+        contract: &mut MpcContract,
+        voters: &[&AccountId],
+        joins: &[AccountId],
+        kicks: &[AccountId],
+    ) {
+        let ProtocolContractState::Running(state) = contract.state_ref() else {
+            unreachable!()
+        };
+        let epoch = state.epoch + 1;
+        for voter in voters {
+            act_as(voter);
+            contract
+                .vote_reshare(joins.to_vec(), kicks.to_vec())
+                .unwrap();
+        }
+        for voter in voters {
+            act_as(voter);
+            contract.vote_reshared(epoch).unwrap();
+        }
+    }
+
+    /// Alice to erin at `THRESHOLD`; alice and dave vote for `far` and `id`, one short,
+    /// then alice, bob and carol kick dave and erin.
+    fn kick_dave_and_erin_after_votes() -> (MpcContract, [AccountId; 5], CheckpointDigest, UpdateId)
+    {
+        let mut contract = running_contract(THRESHOLD);
+        let accounts: [AccountId; 5] = ["alice", "bob", "carol", "dave", "erin"]
+            .map(|name| format!("{name}.near").parse().unwrap());
+        let [alice, bob, carol, dave, erin] = &accounts;
+        let ProtocolContractState::Running(state) = contract.mutable_state() else {
+            unreachable!()
+        };
+        let info = state.participants.participants[alice].clone();
+        for account in [bob, carol, dave, erin] {
+            let info = primitives::ParticipantInfo {
+                account_id: account.clone(),
+                ..info.clone()
+            };
+            state.participants.insert(account.clone(), info);
+        }
+
+        let far = CheckpointDigest::new(Chain::Solana, 1_000_000, [9u8; 32]);
+        let id = contract
+            .proposed_updates
+            .propose(None, Some(ProtocolConfig::default()))
+            .unwrap();
+        for voter in [alice, dave] {
+            act_as(voter);
+            assert!(!contract.vote_checkpoint(far).unwrap());
+            assert!(!contract.vote_update(id).unwrap());
+        }
+        reshare(
+            &mut contract,
+            &[alice, bob, carol],
+            &[],
+            &[dave.clone(), erin.clone()],
+        );
+        (contract, accounts, far, id)
+    }
+
+    #[test]
+    fn reshare_keeps_only_members_votes() {
+        let (mut contract, [alice, bob, ..], far, id) = kick_dave_and_erin_after_votes();
+        assert_eq!(contract.checkpoint_votes(Chain::Solana), vec![(far, 1)]);
+
+        act_as(&alice);
+        assert!(!contract.vote_checkpoint(far).unwrap());
+        assert!(!contract.vote_update(id).unwrap());
+
+        act_as(&bob);
+        assert!(contract.vote_checkpoint(far).unwrap());
+        assert!(contract.vote_update(id).unwrap());
+    }
+
+    /// Stored state from before reshares dropped removed nodes' votes.
+    #[test]
+    fn migrate_drops_non_member_checkpoint_votes() {
+        let (mut contract, [.., dave, _], far, _) = kick_dave_and_erin_after_votes();
+        contract.checkpoint_votes.entry(far).insert(dave);
+        assert_eq!(contract.checkpoint_votes(Chain::Solana), vec![(far, 2)]);
+        env::storage_write(b"STATE", &borsh::to_vec(&contract).unwrap());
+
+        let migrated = MpcContract::migrate().unwrap();
+        assert_eq!(migrated.checkpoint_votes(Chain::Solana), vec![(far, 1)]);
     }
 }

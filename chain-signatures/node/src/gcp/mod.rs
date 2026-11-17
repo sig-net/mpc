@@ -1,16 +1,33 @@
-pub mod error;
-
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine as _;
 use google_cloud_auth::credentials::AccessTokenCredentials;
 use serde::{Deserialize, Serialize};
+use std::time::Duration;
 
-use crate::storage;
-
-pub type SecretResult<T> = std::result::Result<T, error::SecretStorageError>;
+#[derive(thiserror::Error, Debug)]
+pub enum Error {
+    #[error("GCP auth error: {0}")]
+    Auth(#[from] google_cloud_auth::errors::CredentialsError),
+    #[error("GCP access token not issued within {REQUEST_TIMEOUT:?}")]
+    TokenTimeout,
+    #[error("GCP API error ({status}): {message}")]
+    Api {
+        status: reqwest::StatusCode,
+        message: String,
+    },
+    #[error("HTTP error: {0}")]
+    Http(#[from] reqwest::Error),
+    #[error("base64 decode error: {0}")]
+    Base64(#[from] base64::DecodeError),
+    #[error("JSON error: {0}")]
+    Json(#[from] serde_json::Error),
+}
 
 const SECRET_MANAGER_ENDPOINT: &str = "https://secretmanager.googleapis.com";
 const CLOUD_PLATFORM_SCOPE: &str = "https://www.googleapis.com/auth/cloud-platform";
+/// The access token fetch and the Secret Manager call each fail after this
+/// instead of hanging.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Deserialize)]
 struct AccessSecretVersionResponse {
@@ -42,8 +59,23 @@ pub struct SecretManagerService {
 }
 
 impl SecretManagerService {
+    pub fn new(project_id: &str) -> anyhow::Result<Self> {
+        let credentials = google_cloud_auth::credentials::Builder::default()
+            .with_scopes([CLOUD_PLATFORM_SCOPE])
+            .build_access_token_credentials()?;
+        let http = reqwest::Client::builder()
+            .https_only(true)
+            .timeout(REQUEST_TIMEOUT)
+            .build()?;
+        Ok(Self {
+            http,
+            credentials,
+            project_id: project_id.to_string(),
+        })
+    }
+
     #[tracing::instrument(level = "debug", skip_all, fields(name = name.as_ref()))]
-    pub async fn load_secret<T: AsRef<str>>(&self, name: T) -> SecretResult<Option<Vec<u8>>> {
+    pub async fn load_secret<T: AsRef<str>>(&self, name: T) -> Result<Option<Vec<u8>>, Error> {
         let url = format!(
             "{SECRET_MANAGER_ENDPOINT}/v1/projects/{}/secrets/{}/versions/latest:access",
             self.project_id,
@@ -63,7 +95,7 @@ impl SecretManagerService {
         }
     }
 
-    pub async fn store_secret<T: AsRef<str>>(&mut self, data: &[u8], name: T) -> SecretResult<()> {
+    pub async fn store_secret<T: AsRef<str>>(&mut self, data: &[u8], name: T) -> Result<(), Error> {
         let url = format!(
             "{SECRET_MANAGER_ENDPOINT}/v1/projects/{}/secrets/{}:addVersion",
             self.project_id,
@@ -92,8 +124,10 @@ impl SecretManagerService {
         method: reqwest::Method,
         url: &str,
         body: Option<Vec<u8>>,
-    ) -> SecretResult<reqwest::Response> {
-        let token = self.credentials.access_token().await?;
+    ) -> Result<reqwest::Response, Error> {
+        let token = tokio::time::timeout(REQUEST_TIMEOUT, self.credentials.access_token())
+            .await
+            .map_err(|_| Error::TokenTimeout)??;
         let mut request = self.http.request(method, url).bearer_auth(token.token);
         if let Some(body) = body {
             request = request.header(reqwest::header::CONTENT_TYPE, "application/json");
@@ -103,31 +137,9 @@ impl SecretManagerService {
         if !response.status().is_success() {
             let status = response.status();
             let message = response.text().await.unwrap_or_default();
-            return Err(error::SecretStorageError::Api { status, message });
+            return Err(Error::Api { status, message });
         }
         Ok(response)
-    }
-}
-
-#[derive(Clone)]
-pub struct GcpService {
-    pub secret_manager: SecretManagerService,
-}
-
-impl GcpService {
-    pub async fn init(storage_options: &storage::Options) -> anyhow::Result<Self> {
-        let credentials = google_cloud_auth::credentials::Builder::default()
-            .with_scopes([CLOUD_PLATFORM_SCOPE])
-            .build_access_token_credentials()?;
-        let http = reqwest::Client::builder().https_only(true).build()?;
-
-        Ok(Self {
-            secret_manager: SecretManagerService {
-                http,
-                credentials,
-                project_id: storage_options.gcp_project_id.clone(),
-            },
-        })
     }
 }
 
