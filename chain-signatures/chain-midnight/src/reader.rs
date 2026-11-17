@@ -514,10 +514,13 @@ fn boolean(cursor: &mut AtomCursor, what: &'static str) -> anyhow::Result<bool> 
 }
 
 /// A two-variant Compact enum: one declared byte, and only 0 or 1 is in range.
-fn bounded_enum(cursor: &mut AtomCursor, what: &'static str) -> anyhow::Result<u8> {
+fn one_byte_enum<T>(cursor: &mut AtomCursor, what: &'static str) -> anyhow::Result<T>
+where
+    T: TryFrom<u8>,
+    T::Error: std::fmt::Display,
+{
     let value = uint::<u8>(cursor, 1, what)?;
-    anyhow::ensure!(value <= 1, "{what}: {value} exceeds the maximum 1");
-    Ok(value)
+    T::try_from(value).map_err(|err| anyhow::anyhow!("{what}: {err}"))
 }
 
 fn decode_sign_bidirectional(
@@ -537,14 +540,14 @@ fn decode_sign_bidirectional(
         key_version: uint::<u8>(cursor, 1, "key_version")?,
         sender: bytes_n::<32>(cursor, "sender")?,
         path: bytes_n::<32>(cursor, "path")?,
-        algo: bounded_enum(cursor, "algo")?,
+        algo: one_byte_enum(cursor, "algo")?,
         tx_params: {
             // Consume the tx_param_type atom (not used here)
             let _ = uint::<u8>(cursor, 1, "tx_param_type")?;
             decode_tx_params(cursor, layout)?
         },
         execution_dest: bytes_n::<64>(cursor, "execution_dest")?,
-        signature_dest: bounded_enum(cursor, "signature_dest")?,
+        signature_dest: one_byte_enum(cursor, "signature_dest")?,
         params: bytes_n::<64>(cursor, "params")?,
         output_deserialization_schema: bytes_dyn(cursor, "output_deserialization_schema")?,
         respond_serialization_schema: bytes_dyn(cursor, "respond_serialization_schema")?,

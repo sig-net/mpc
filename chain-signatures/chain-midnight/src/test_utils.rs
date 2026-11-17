@@ -1,6 +1,6 @@
 //! Test-only record builders shared by the unit tests.
 
-use crate::records::SignBidirectionalRecord;
+use crate::records::{MpcDestination, MpcSignatureAlgorithm, SignBidirectionalRecord};
 use midnight_base_crypto::fab::{
     AlignedValue, Alignment, AlignmentAtom, AlignmentSegment, Value, ValueAtom,
 };
@@ -99,7 +99,7 @@ pub(crate) fn atoms_from_record(record: &SignBidirectionalRecord) -> Vec<Vec<u8>
         trim(&[record.key_version]),
         trim(&record.sender),
         trim(&record.path),
-        trim(&[record.algo]),
+        trim(&[record.algo as u8]),
         trim(&[record.tx_params.ty() as u8]),
     ];
     match &record.tx_params {
@@ -133,7 +133,7 @@ pub(crate) fn atoms_from_record(record: &SignBidirectionalRecord) -> Vec<Vec<u8>
         }
     }
     atoms.push(trim(&record.execution_dest));
-    atoms.push(trim(&[record.signature_dest]));
+    atoms.push(trim(&[record.signature_dest as u8]));
     atoms.push(trim(&record.params));
     atoms.push(trim(&record.output_deserialization_schema));
     atoms.push(trim(&record.respond_serialization_schema));
@@ -350,8 +350,8 @@ pub(crate) fn sample_record() -> SignBidirectionalRecord {
         sender: [0xab; 32],
         key_version: 1,
         path: ascii_padded(b"caller-path"),
-        algo: 0,
-        signature_dest: 0,
+        algo: MpcSignatureAlgorithm::Ecdsa,
+        signature_dest: MpcDestination::Unused,
         params: [0u8; 64],
         tx_params: TxParams::EvmType2(sample_evm_params()),
         execution_dest: ascii_padded(b"eip155:31337"),
@@ -392,8 +392,8 @@ pub(crate) fn tron_record(params: TronTxParams) -> SignBidirectionalRecord {
         sender: [0xab; 32],
         key_version: 1,
         path: ascii_padded(b"caller-path"),
-        algo: 0,
-        signature_dest: 0,
+        algo: MpcSignatureAlgorithm::Ecdsa,
+        signature_dest: MpcDestination::Unused,
         params: [0u8; 64],
         tx_params: TxParams::Tron(params),
         execution_dest: ascii_padded(b"tron:mainnet"),

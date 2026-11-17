@@ -21,7 +21,7 @@ pub(crate) fn compute_request_id(record: &SignBidirectionalRecord) -> anyhow::Re
         record.key_version,
         record.sender,
         record.path,
-        record.algo,
+        record.algo as u8,
         record.tx_params.ty() as u8,
         tx_params_digest,
         record.execution_dest,
@@ -159,6 +159,7 @@ fn folded_words(calldata: &CompactMaybe<Calldata>) -> anyhow::Result<&[[u8; 32]]
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::records::{MpcDestination, MpcSignatureAlgorithm};
     use crate::test_utils::{
         sample_evm_params, sample_record, sample_record_with_partial_access_list,
         sample_tron_params, tron_record,
@@ -275,7 +276,7 @@ mod tests {
     fn request_identity_excludes_reserved_fields_and_schema_bytes_and_widths() {
         let mut record = sample_record();
         let original = compute_request_id(&record).unwrap();
-        record.signature_dest = 1;
+        record.signature_dest = MpcDestination::Reserved;
         record.params = [0x73; 64];
         record.output_deserialization_schema = b"different-output-schema".to_vec();
         record.respond_serialization_schema = b"[]".to_vec();
@@ -293,7 +294,7 @@ mod tests {
         changes[3].path[0] ^= 1;
         changes[4].sender[0] ^= 1;
         changes[5].execution_dest[0] ^= 1;
-        changes[6].algo = 1;
+        changes[6].algo = MpcSignatureAlgorithm::Reserved;
         changes[7].evm_mut().calldata.value.selector[0] ^= 1;
         changes[8].evm_mut().calldata.value.words[1][31] ^= 1;
         changes[9].evm_mut().access_list[0].address[0] ^= 1;

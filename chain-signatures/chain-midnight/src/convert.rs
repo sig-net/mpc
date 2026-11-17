@@ -13,13 +13,8 @@ use mpc_primitives::{
     Chain, IndexedSignRequest, SignArgs, SignBidirectionalEvent, SignId, TxParams,
 };
 
-use crate::records::SignBidirectionalRecord;
+use crate::records::{MpcDestination, MpcSignatureAlgorithm, SignBidirectionalRecord};
 use crate::tx::serialized_transaction;
-
-/// `MPCSignatureAlgorithm::ecdsa`, the only real variant (1 is reserved).
-const ALGO_ECDSA: u8 = 0;
-/// `MPCDestination::unused`, the only real variant (1 is reserved).
-const DEST_UNUSED: u8 = 0;
 
 /// Converts a verified record into the [`IndexedSignRequest`] the signing pipeline
 /// consumes (kind `SignBidirectional`). `root_pk` is the network's public
@@ -48,12 +43,16 @@ pub fn generate_sign_request(
     );
     let key_version = u32::from(record.key_version);
     let algo = match record.algo {
-        ALGO_ECDSA => "ECDSA".to_string(),
-        reserved => anyhow::bail!("unsupported algo {reserved}: only ecdsa (0) is real"),
+        MpcSignatureAlgorithm::Ecdsa => "ECDSA".to_string(),
+        MpcSignatureAlgorithm::Reserved => {
+            anyhow::bail!("unsupported algo: ecdsa (0) is the only real variant")
+        }
     };
     let dest = match record.signature_dest {
-        DEST_UNUSED => String::new(),
-        reserved => anyhow::bail!("unsupported signature_dest {reserved}: only unused (0) is real"),
+        MpcDestination::Unused => String::new(),
+        MpcDestination::Reserved => {
+            anyhow::bail!("unsupported signature_dest: unused (0) is the only real variant")
+        }
     };
 
     let mut response_key_path = [0; 32];

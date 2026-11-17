@@ -2544,7 +2544,7 @@ mod tests {
         let (good_record, good_rid) = named_record_and_rid(7);
         let mut bad_record = sample_record();
         bad_record.evm_mut().nonce = 8;
-        bad_record.algo = 1;
+        bad_record.algo = crate::records::MpcSignatureAlgorithm::Reserved;
         let bad_rid = crate::hashing::compute_request_id(&bad_record).unwrap();
         let mut source = FixtureSource::default();
         source.set_emissions(
