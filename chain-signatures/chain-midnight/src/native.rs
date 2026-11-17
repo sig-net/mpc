@@ -962,8 +962,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_contract_whose_key_is_not_the_packaged_one_is_refused() {
+    #[tokio::test]
+    async fn a_contract_whose_key_is_not_the_packaged_one_is_refused() {
         // The packaged respond key is another circuit's, so the deployed one differs.
         let dir = managed_dir(|circuit, bytes| {
             if circuit == "respond" {
@@ -976,19 +976,33 @@ mod tests {
             }
         });
         let client = client_over(dir, ScriptedChain::new(0, 0, None));
-        let error = client.build_intent(&respond_request()).unwrap_err();
-        assert!(matches!(error, SubmitError::ContractMismatch(_)), "{error}");
+        let error = client.build(&respond_request()).await.unwrap_err();
+        assert_eq!(
+            crate::submit_error::refusal_code(&error),
+            Some("contract_mismatch"),
+            "{error:#}"
+        );
+        assert!(
+            !is_retryable(&error),
+            "a mismatched contract must be terminal: {error:#}"
+        );
 
         let mut empty = Vec::new();
         midnight_serialize::tagged_serialize(&ContractState::<DefaultDB>::default(), &mut empty)
             .unwrap();
         let error = client
-            .build_intent(&IntentRequest {
+            .build(&IntentRequest {
                 contract_state: empty,
                 ..respond_request()
             })
+            .await
             .unwrap_err();
-        assert!(matches!(error, SubmitError::ContractMismatch(_)), "{error}");
+        assert_eq!(
+            crate::submit_error::refusal_code(&error),
+            Some("contract_mismatch"),
+            "{error:#}"
+        );
+        assert!(!is_retryable(&error), "{error:#}");
     }
 
     #[test]
