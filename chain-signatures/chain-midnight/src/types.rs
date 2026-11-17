@@ -111,8 +111,8 @@ impl TryFrom<&str> for NetworkId {
 }
 
 /// A 32-byte Midnight block hash. Canonical text is the `0x`-prefixed lowercase
-/// hex every pinned read is addressed by; parse and format happen only at the
-/// RPC edge.
+/// hex every pinned read is addressed by; wire parse and format happen only at
+/// the RPC edge.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct BlockHash([u8; 32]);
 
