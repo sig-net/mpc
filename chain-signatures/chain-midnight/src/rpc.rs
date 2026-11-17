@@ -26,6 +26,7 @@ use crate::config::{MidnightAddress, MidnightConfig, RpcConfig};
 use crate::emissions::{emissions_in, partial_success_emissions_in, DecodedTransaction};
 use crate::indexer::BlockHold;
 use crate::source::{BlockEmissions, BlockProofSeed, CandidateTransactionEmissions};
+use crate::types::BlockHash;
 
 /// Runtime API name from Midnight node 2.0.0-rc.4 metadata.
 const LEDGER_PARAMETERS_ENTRY: &str = "MidnightRuntimeApi_get_ledger_parameters";
@@ -322,14 +323,13 @@ fn decode_applied_transaction(
     Ok(tx)
 }
 
-/// One finalized block as plain data: the number plus the `0x`-prefixed hashes
-/// `midnight_contractState` takes, detached from any subxt handle so fixtures can mint
-/// them.
+/// One finalized block as plain data: the number plus the hashes of the block and
+/// its parent, detached from any subxt handle so fixtures can mint them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BlockRef {
     pub number: u64,
-    pub hash: String,
-    pub parent_hash: String,
+    pub hash: BlockHash,
+    pub parent_hash: BlockHash,
 }
 
 fn hex_0x(hash: H256) -> String {
@@ -338,14 +338,8 @@ fn hex_0x(hash: H256) -> String {
 
 /// The `0x`-prefixed 32-byte block hash every pinned read is addressed by.
 fn parse_block_hash(at_block_hash_0x: &str) -> anyhow::Result<H256> {
-    let bare = at_block_hash_0x
-        .strip_prefix("0x")
-        .context("block hash is not 0x-prefixed")?;
-    let bytes: [u8; 32] = hex::decode(bare)
-        .context("block hash is not hex")?
-        .try_into()
-        .map_err(|got: Vec<u8>| anyhow::anyhow!("block hash is {} bytes, not 32", got.len()))?;
-    Ok(H256(bytes))
+    let hash = BlockHash::from_0x_hex(at_block_hash_0x)?;
+    Ok(H256(*hash.as_bytes()))
 }
 
 fn connect_http(config: &MidnightConfig) -> anyhow::Result<RpcClient> {
@@ -361,7 +355,7 @@ pub(crate) struct MidnightRpc {
     reads: Reads,
     head: std::sync::Mutex<Option<FinalizedHead>>,
     /// The block a lookup by number last read, until the indexer processes it.
-    walked: std::sync::Mutex<Option<(String, BlockDetails<SubstrateConfig>)>>,
+    walked: std::sync::Mutex<Option<(BlockHash, BlockDetails<SubstrateConfig>)>>,
 }
 
 /// The finalized head last read, with its block until the indexer processes it.
@@ -390,14 +384,14 @@ impl MidnightRpc {
         })
     }
 
-    /// Raw contract state of `address` at `at_block_hash_0x` (`0x`-prefixed), via the
+    /// Raw contract state of `address` at `at_block_hash`, via the
     /// `midnight_contractState` JSON-RPC.
     pub async fn contract_state(
         &self,
         address: &MidnightAddress,
-        at_block_hash_0x: &str,
+        at_block_hash: &BlockHash,
     ) -> anyhow::Result<Option<Vec<u8>>> {
-        self.reads.contract_state(address, at_block_hash_0x).await
+        self.reads.contract_state(address, at_block_hash).await
     }
 
     /// The finalized head as a [`BlockRef`]: the head hash, then, when it moved, its
@@ -405,7 +399,7 @@ impl MidnightRpc {
     /// kept for [`block_emissions`](Self::block_emissions) of that head.
     pub async fn finalized_block_ref(&self) -> anyhow::Result<BlockRef> {
         let head = self.reads.finalized_head().await?;
-        let hash = hex_0x(head);
+        let hash = BlockHash::from_bytes(head.0);
         if let Some(known) = self.head().as_ref() {
             if known.block_ref.hash == hash {
                 return Ok(known.block_ref.clone());
@@ -418,7 +412,7 @@ impl MidnightRpc {
         let block_ref = BlockRef {
             number,
             hash,
-            parent_hash: hex_0x(parent_hash),
+            parent_hash: BlockHash::from_bytes(parent_hash.0),
         };
         *self.head() = Some(FinalizedHead {
             block_ref: block_ref.clone(),
@@ -468,7 +462,9 @@ impl MidnightRpc {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
-    fn walked(&self) -> std::sync::MutexGuard<'_, Option<(String, BlockDetails<SubstrateConfig>)>> {
+    fn walked(
+        &self,
+    ) -> std::sync::MutexGuard<'_, Option<(BlockHash, BlockDetails<SubstrateConfig>)>> {
         self.walked
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -492,10 +488,10 @@ impl MidnightRpc {
         );
         let block_ref = BlockRef {
             number: returned_number,
-            hash: hex_0x(hash),
-            parent_hash: hex_0x(parent_hash),
+            hash: BlockHash::from_bytes(hash.0),
+            parent_hash: BlockHash::from_bytes(parent_hash.0),
         };
-        *self.walked() = block.map(|block| (block_ref.hash.clone(), block));
+        *self.walked() = block.map(|block| (block_ref.hash, block));
         Ok(block_ref)
     }
 
@@ -505,7 +501,7 @@ impl MidnightRpc {
         singleton: &MidnightAddress,
         responder: &MidnightAddress,
     ) -> anyhow::Result<Option<BlockEmissions>> {
-        let hash = parse_block_hash(&block_ref.hash)?;
+        let hash = H256(*block_ref.hash.as_bytes());
         let read = self
             .head()
             .as_mut()
@@ -1430,9 +1426,10 @@ impl Reads {
     async fn contract_state(
         &self,
         address: &MidnightAddress,
-        at_block_hash_0x: &str,
+        at_block_hash: &BlockHash,
     ) -> anyhow::Result<Option<Vec<u8>>> {
         let address_64hex = address.to_hex();
+        let at_block_hash_0x = at_block_hash.to_string();
         retry_read(
             self.request_timeout,
             self.retry,
@@ -1442,7 +1439,7 @@ impl Reads {
                     .rpc
                     .request(
                         "midnight_contractState",
-                        rpc_params![address_64hex.as_str(), at_block_hash_0x],
+                        rpc_params![address_64hex.as_str(), at_block_hash_0x.as_str()],
                     )
                     .await;
 
@@ -1745,8 +1742,8 @@ mod tests {
         };
         let block = BlockRef {
             number: 432,
-            hash: hash_of_byte(0x43),
-            parent_hash: hash_of_byte(0x42),
+            hash: BlockHash::from_bytes([0x43; 32]),
+            parent_hash: BlockHash::from_bytes([0x42; 32]),
         };
         let result = tokio::time::timeout(
             Duration::from_secs(5),
@@ -2306,7 +2303,7 @@ mod tests {
             .block_ref_at(height)
             .await
             .expect("resolve capture block");
-        let block_hash = parse_block_hash(&block_ref.hash).expect("parse capture block hash");
+        let block_hash = H256(*block_ref.hash.as_bytes());
         let block = rpc
             .client
             .blocks()
@@ -2737,7 +2734,7 @@ mod tests {
         );
         let reads = Reads::new(capped_rpc, READ_TIMEOUT, attempts(2));
         let capped_error = reads
-            .contract_state(&test_address(), AT_HASH)
+            .contract_state(&test_address(), &test_at_hash())
             .await
             .expect_err("oversized response must be refused");
         assert!(
@@ -2777,7 +2774,7 @@ mod tests {
             };
             let reads = Reads::new(RpcClient::new(counted), READ_TIMEOUT, attempts(2));
             let err = reads
-                .contract_state(&test_address(), AT_HASH)
+                .contract_state(&test_address(), &test_at_hash())
                 .await
                 .expect_err("the server refuses the response");
             assert_eq!(
@@ -2817,7 +2814,7 @@ mod tests {
         };
         let reads = Reads::new(RpcClient::new(counted), READ_TIMEOUT, attempts(2));
         let err = reads
-            .contract_state(&test_address(), AT_HASH)
+            .contract_state(&test_address(), &test_at_hash())
             .await
             .expect_err("one byte over the limit");
         assert!(is_oversized_contract_state(&err), "{err:#}");
@@ -2894,7 +2891,7 @@ mod tests {
         );
         let reads = Reads::new(rpc, READ_TIMEOUT, attempts(2));
         let err = reads
-            .contract_state(&test_address(), AT_HASH)
+            .contract_state(&test_address(), &test_at_hash())
             .await
             .expect_err("the streamed body overflows the client cap");
         assert!(
@@ -3058,6 +3055,10 @@ mod tests {
     fn test_address() -> MidnightAddress {
         MidnightAddress::from_hex(ADDRESS).expect("test address is 64 hex chars")
     }
+
+    fn test_at_hash() -> BlockHash {
+        BlockHash::from_0x_hex(AT_HASH).expect("test at-hash is 0x-prefixed 32-byte hex")
+    }
     const READ_TIMEOUT: Duration = Duration::from_secs(5);
     const NOT_PRESENT_MSG: &str = "Contract not present at the requested address";
     const UNSERVABLE_MSG: &str = "Unable to get requested contract state";
@@ -3146,7 +3147,7 @@ mod tests {
         );
         assert_eq!(
             reads
-                .contract_state(&test_address(), AT_HASH)
+                .contract_state(&test_address(), &test_at_hash())
                 .await
                 .expect("contract-not-present is a value"),
             None
@@ -3194,7 +3195,7 @@ mod tests {
         ] {
             let (reads, calls) = stub_reads(reply, attempts(2));
             let err = reads
-                .contract_state(&test_address(), AT_HASH)
+                .contract_state(&test_address(), &test_at_hash())
                 .await
                 .expect_err("the canned node answer is a failure");
 
@@ -3775,8 +3776,8 @@ mod tests {
     fn numbered_block_ref(byte: u8) -> BlockRef {
         BlockRef {
             number: 0x1b0 + u64::from(byte) - 0x43,
-            hash: hash_of_byte(byte),
-            parent_hash: hash_of_byte(byte - 1),
+            hash: BlockHash::from_bytes([byte; 32]),
+            parent_hash: BlockHash::from_bytes([byte - 1; 32]),
         }
     }
 
@@ -3999,8 +4000,8 @@ mod tests {
         };
         let at_0x43 = BlockRef {
             number: 0x1b0,
-            hash: hash_of_byte(0x43),
-            parent_hash: hash_of_byte(0x42),
+            hash: BlockHash::from_bytes([0x43; 32]),
+            parent_hash: BlockHash::from_bytes([0x42; 32]),
         };
 
         assert_eq!(rpc.finalized_block_ref().await.unwrap(), at_0x43);
@@ -4088,8 +4089,8 @@ mod tests {
         };
         let at_0x43 = BlockRef {
             number: 0x1b0,
-            hash: hash_of_byte(0x43),
-            parent_hash: hash_of_byte(0x42),
+            hash: BlockHash::from_bytes([0x43; 32]),
+            parent_hash: BlockHash::from_bytes([0x42; 32]),
         };
 
         assert_eq!(rpc.finalized_block_ref().await.unwrap(), at_0x43);
@@ -4120,8 +4121,8 @@ mod tests {
             rpc.finalized_block_ref().await.unwrap(),
             BlockRef {
                 number: 0x1b1,
-                hash: hash_of_byte(0x46),
-                parent_hash: hash_of_byte(0x43),
+                hash: BlockHash::from_bytes([0x46; 32]),
+                parent_hash: BlockHash::from_bytes([0x43; 32]),
             }
         );
         assert_eq!(

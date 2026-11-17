@@ -25,6 +25,7 @@ mod submit_error;
 #[cfg(test)]
 mod test_utils;
 mod tx;
+pub(crate) mod types;
 
 pub use attestation::validate_attestation_response;
 pub use config::{

@@ -14,6 +14,7 @@ use crate::reader::{
 use crate::records::SignBidirectionalEventNotification;
 use crate::rpc::{is_oversized_contract_state, BlockRef};
 use crate::source::{BlockEmissions, ChainSource, ContractState, LiveSource};
+use crate::types::BlockHash;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -148,8 +149,7 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
         // finalized block. Check the source's proof seed is for the block indexed.
         anyhow::ensure!(
             proof_seed.reported_block_number == block.number
-                && hex::encode(proof_seed.reported_block_hash)
-                    == block.hash.trim_start_matches("0x").to_ascii_lowercase(),
+                && proof_seed.reported_block_hash == *block.hash.as_bytes(),
             "midnight proof seed does not match indexed block {} ({})",
             block.number,
             block.hash
@@ -220,7 +220,7 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
                                     &block.hash,
                                     block.number,
                                     block_entropy,
-                                    maybe_rolled_back.then_some(block.parent_hash.as_str()),
+                                    maybe_rolled_back.then_some(&block.parent_hash),
                                     indexed_ts,
                                 )
                                 .await
@@ -344,10 +344,10 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
         source: &C,
         notification: SignBidirectionalEventNotification,
         direct_caller: Option<[u8; 32]>,
-        at_hash: &str,
+        at_hash: &BlockHash,
         height: u64,
         block_entropy: [u8; 32],
-        rolled_back_parent: Option<&str>,
+        rolled_back_parent: Option<&BlockHash>,
         indexed_ts: u64,
     ) -> anyhow::Result<Option<IndexedSignRequest>> {
         let rid = notification.request_id;
@@ -800,6 +800,10 @@ mod tests {
     const CAPTURE_NOTIFY_TX: &[u8] = include_bytes!("../fixtures/notify-tx-156.mn");
     const CAPTURE_CALLER_STATE: &[u8] = include_bytes!("../fixtures/caller-post-state-156.mn");
 
+    fn capture_block_hash() -> BlockHash {
+        BlockHash::from_0x_hex(CAPTURE_BLOCK_HASH).expect("capture hash is 0x-prefixed 32-byte hex")
+    }
+
     fn test_config() -> MidnightConfig {
         MidnightConfig {
             node_url: "http://127.0.0.1:1".parse().unwrap(),
@@ -818,8 +822,8 @@ mod tests {
         }
     }
 
-    fn hash_of(number: u64) -> String {
-        format!("0x{number:064x}")
+    fn hash_of(number: u64) -> BlockHash {
+        BlockHash::from_bytes(hash_bytes(number))
     }
 
     fn hash_bytes(number: u64) -> [u8; 32] {
@@ -917,10 +921,10 @@ mod tests {
         emissions: HashMap<u64, Option<BlockEmissions>>,
         emission_errors: Mutex<HashMap<u64, (String, usize)>>,
         emission_holds: HashMap<u64, &'static str>,
-        states: HashMap<(MidnightAddress, String), crate::reader::Node>,
-        state_errors: HashMap<(MidnightAddress, String), String>,
-        oversized_states: HashSet<(MidnightAddress, String)>,
-        undecodable_states: HashMap<(MidnightAddress, String), String>,
+        states: HashMap<(MidnightAddress, BlockHash), crate::reader::Node>,
+        state_errors: HashMap<(MidnightAddress, BlockHash), String>,
+        oversized_states: HashSet<(MidnightAddress, BlockHash)>,
+        undecodable_states: HashMap<(MidnightAddress, BlockHash), String>,
         transient_head_errors: Mutex<usize>,
         block_errors: HashSet<u64>,
         live: tokio::sync::Mutex<Option<mpsc::Receiver<BlockRef>>>,
@@ -1067,9 +1071,9 @@ mod tests {
         async fn contract_state_tree(
             &self,
             address: &MidnightAddress,
-            at_hash: &str,
+            at_hash: &BlockHash,
         ) -> anyhow::Result<ContractState> {
-            let key = (*address, at_hash.to_string());
+            let key = (*address, *at_hash);
             if self.oversized_states.contains(&key) {
                 return Err(crate::rpc::oversized_contract_state(
                     "fixture oversized contract state",
@@ -1664,10 +1668,7 @@ mod tests {
         let caller = hex_32(CAPTURE_CALLER);
         let mut source = FixtureSource::default();
         source.states.insert(
-            (
-                MidnightAddress::from_bytes(caller),
-                CAPTURE_BLOCK_HASH.to_string(),
-            ),
+            (MidnightAddress::from_bytes(caller), capture_block_hash()),
             caller_tree,
         );
 
@@ -1677,7 +1678,7 @@ mod tests {
                 &source,
                 notification.clone(),
                 call.caller,
-                CAPTURE_BLOCK_HASH,
+                &capture_block_hash(),
                 CAPTURE_HEIGHT,
                 [0x55; 32],
                 None,
@@ -1692,10 +1693,7 @@ mod tests {
 
         let captured_tree = source
             .states
-            .get(&(
-                MidnightAddress::from_bytes(caller),
-                CAPTURE_BLOCK_HASH.to_string(),
-            ))
+            .get(&(MidnightAddress::from_bytes(caller), capture_block_hash()))
             .expect("captured caller state is installed");
         let requests_path = unpack_notification_v1(&notification)
             .expect("captured notification unpacks")
@@ -1726,10 +1724,7 @@ mod tests {
         let request_id = upgrade_from_transient(transient_hash(&preimage)).0;
         notification.request_id = request_id;
         source.states.insert(
-            (
-                MidnightAddress::from_bytes(caller),
-                CAPTURE_BLOCK_HASH.to_string(),
-            ),
+            (MidnightAddress::from_bytes(caller), capture_block_hash()),
             array_of(vec![
                 StateValue::Null,
                 StateValue::Null,
@@ -1745,7 +1740,7 @@ mod tests {
                 &source,
                 notification,
                 call.caller,
-                CAPTURE_BLOCK_HASH,
+                &capture_block_hash(),
                 CAPTURE_HEIGHT,
                 [0x55; 32],
                 None,

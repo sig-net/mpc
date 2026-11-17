@@ -5,6 +5,7 @@ use crate::emissions::ContractCallEmissions;
 use crate::reader::Node;
 use crate::rpc::{BlockRef, MidnightRpc};
 use crate::state::decode_contract_state;
+use crate::types::BlockHash;
 
 use async_trait::async_trait;
 
@@ -65,7 +66,7 @@ pub(crate) trait ChainSource: Send + Sync {
     async fn contract_state_tree(
         &self,
         address: &MidnightAddress,
-        at_hash: &str,
+        at_hash: &BlockHash,
     ) -> anyhow::Result<ContractState>;
 }
 
@@ -103,7 +104,7 @@ impl ChainSource for LiveSource {
     async fn contract_state_tree(
         &self,
         address: &MidnightAddress,
-        at_hash: &str,
+        at_hash: &BlockHash,
     ) -> anyhow::Result<ContractState> {
         match self.rpc.contract_state(address, at_hash).await? {
             None => Ok(ContractState::Absent),
