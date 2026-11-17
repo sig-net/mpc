@@ -4,7 +4,7 @@
 use super::recovery::recover_backlog;
 use super::{handle_chain_event, StreamContext};
 
-use crate::backlog::{Backlog, Checkpoint};
+use crate::backlog::{checkpoint_interval, detect_stall, Backlog, Checkpoint};
 use crate::types::CheckpointWatcher;
 use crate::types::SignCommand;
 use mpc_chain_integration_core::utils::stream::chain_event_channel;
@@ -130,6 +130,59 @@ async fn resubmit_pending_checkpoint_votes(
             .await?;
     }
     Ok(())
+}
+
+/// Shadow-mode settlement-stall detection: observe the latest checkpoint vote
+/// tallies, run the pure predicate, and log/count a detection. This is strictly
+/// observation-only — no sign tasks are aborted, no flags cleared, no rebase
+/// performed, and the supervised run is never cancelled. Acting on a detection
+/// is a later PR.
+async fn observe_stall(ctx: &StreamContext, chain: Chain) {
+    let tallies = ctx.checkpoint_votes_rx.borrow().clone();
+    if tallies.is_empty() {
+        return;
+    }
+
+    // First boundary above the base: the lowest pending height, else the
+    // settled base plus one checkpoint interval. Without an interval/config
+    // there is no boundary to judge, so skip.
+    let pending = match ctx.backlog.checkpoints().load_pending(chain).await {
+        Ok(pending) => pending,
+        Err(err) => {
+            tracing::warn!(%chain, %err, "stall detection: failed to load pending checkpoints");
+            return;
+        }
+    };
+    let first_boundary = match pending.iter().map(|cp| cp.block_height).min() {
+        Some(height) => height,
+        None => {
+            let Some(interval) = checkpoint_interval(chain) else {
+                return;
+            };
+            let Ok(Some(base)) = ctx.backlog.checkpoints().storage().load_latest(chain).await
+            else {
+                return;
+            };
+            base.block_height.saturating_add(interval)
+        }
+    };
+
+    let Some(threshold) = ctx.contract_watcher.state().map(|state| state.threshold()) else {
+        return;
+    };
+    let committee_size = ctx.mesh_state.borrow().active().participants.len();
+
+    if let Some(stall) = detect_stall(&tallies, first_boundary, threshold, committee_size) {
+        tracing::warn!(
+            %chain,
+            height = stall.height,
+            votes = stall.votes,
+            threshold,
+            committee_size,
+            "settlement stall detected (shadow mode: no rebase)"
+        );
+        crate::metrics::stall::record_stall_detection(chain);
+    }
 }
 
 /// Base delay before a restart; doubles up to `MAX_RESTART_DELAY` while
@@ -306,6 +359,12 @@ async fn run_supervised_with_watchdog<I: ChainIndexer, T: ChainTelemetry>(
                         tracing::error!(error = %format_args!("{err:#}"), %chain, "failed to process chain event");
                     }
                 }
+                // Shadow mode: observe checkpoint vote tallies and count stalls.
+                // `observe_stall` ignores empty snapshots; nothing here changes
+                // state or cancels the run.
+                _ = ctx.checkpoint_votes_rx.changed() => {
+                    observe_stall(&ctx, chain).await;
+                }
                 result = wait_detected_regression(&mut ctx.checkpoints_rx, &ctx.backlog, chain) => {
                     match result {
                         RegressionOutcome::Recovery => {
@@ -372,16 +431,21 @@ async fn run_supervised_with_watchdog<I: ChainIndexer, T: ChainTelemetry>(
 mod tests {
     use super::*;
     use crate::backlog::Backlog;
+    use crate::mesh::connection::NodeStatus;
     use crate::mesh::MeshState;
+    use crate::metrics::stall::stall_detection_count;
+    use crate::protocol::ParticipantInfo;
     use crate::rpc::RpcAction;
     use crate::storage::checkpoint_storage::CheckpointStorage;
     use crate::stream::test_utils::make_test_stream_context;
     use crate::types::SignCommand;
 
+    use cait_sith::protocol::Participant;
     use k256::ProjectivePoint;
     use mpc_chain_integration_core::{NoopChainTelemetry, StateManager};
+    use mpc_contract::primitives::CheckpointVoteTally;
     use mpc_primitives::{Chain, CheckpointDigest};
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::Mutex;
     use tokio::sync::{mpsc, watch, Notify};
 
@@ -1382,5 +1446,172 @@ mod tests {
             );
         }
         task.abort();
+    }
+
+    /// Shadow mode observes vote tallies and counts a stall, but changes no
+    /// state: the run is not cancelled, no abort is issued, and no rebase moves
+    /// the backlog off its settled base / pending checkpoint.
+    #[tokio::test]
+    async fn shadow_stall_detection_observes_only() {
+        use mpc_chain_integration_core::ChainIndexer;
+
+        /// Runs until cancelled, recording whether cancellation ever happened.
+        struct ObserveStallIndexer {
+            started: Arc<Notify>,
+            cancelled: Arc<AtomicBool>,
+        }
+
+        #[async_trait::async_trait]
+        impl ChainIndexer for ObserveStallIndexer {
+            const CHAIN: Chain = Chain::Ethereum;
+
+            async fn run(
+                &self,
+                _events_tx: mpsc::Sender<ChainEvent>,
+                cancel: CancellationToken,
+            ) -> anyhow::Result<()> {
+                self.started.notify_one();
+                cancel.cancelled().await;
+                self.cancelled.store(true, Ordering::SeqCst);
+                Ok(())
+            }
+        }
+
+        let chain = Chain::Ethereum;
+        let threshold = 5usize;
+        let committee = 7usize;
+        let backlog = Backlog::new();
+
+        // A settled base below a pending checkpoint. The pending height is the
+        // first boundary; if a rebase happened it would reset to the base.
+        let base = Checkpoint::reset(chain, 50);
+        backlog
+            .checkpoints()
+            .storage()
+            .persist(&base)
+            .await
+            .unwrap();
+        backlog.set_processed_block(chain, 100).await.unwrap();
+        assert_eq!(
+            backlog
+                .checkpoints()
+                .load_pending(chain)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+
+        let (sign_tx, mut sign_rx) = mpsc::channel(8);
+        let (mut ctx, _cp_tx, mesh_tx, mut rpc_rx) = make_test_stream_context(
+            backlog.clone(),
+            sign_tx,
+            true,
+            ProjectivePoint::GENERATOR.to_affine(),
+            threshold,
+        );
+
+        // Committee large enough that 3+2 votes (> 2f = 4) is a stall.
+        let mut mesh = MeshState::default();
+        for i in 0..committee {
+            mesh.update(
+                Participant::from(i as u32),
+                NodeStatus::Active,
+                ParticipantInfo::new(0),
+            );
+        }
+        mesh_tx.send(mesh).unwrap();
+
+        // Drive the votes watch from the test instead of the empty default.
+        let (votes_tx, votes_rx) = watch::channel(Vec::<CheckpointVoteTally>::new());
+        ctx.checkpoint_votes_rx = votes_rx;
+
+        let started = Arc::new(Notify::new());
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let indexer = ObserveStallIndexer {
+            started: started.clone(),
+            cancelled: cancelled.clone(),
+        };
+        let task = tokio::spawn(run_supervised_with_watchdog(
+            indexer,
+            ctx,
+            NoopChainTelemetry,
+            Duration::from_secs(60),
+        ));
+        tokio::time::timeout(Duration::from_secs(2), started.notified())
+            .await
+            .expect("the supervised run should start");
+
+        let tally = |height: u64, votes: &[(u8, usize)]| CheckpointVoteTally {
+            height,
+            votes: votes.iter().map(|&(b, c)| ([b; 32], c)).collect(),
+        };
+        let before = stall_detection_count(chain);
+
+        // Non-stalling snapshot: a digest at the first boundary reaches t, so
+        // the height is settling and the counter must not move.
+        votes_tx.send(vec![tally(100, &[(1, threshold)])]).unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(
+            stall_detection_count(chain),
+            before,
+            "a digest at the threshold is not a stall"
+        );
+
+        // Stalling snapshot: 5 votes split 3+2, none at t (f = 7-5 = 2, 2f = 4).
+        votes_tx.send(vec![tally(100, &[(1, 3), (2, 2)])]).unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while stall_detection_count(chain) <= before {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("a stalling tally should be counted");
+
+        // Observation only: the run was never cancelled, and nothing rebased.
+        assert!(
+            !cancelled.load(Ordering::SeqCst),
+            "a stall must not cancel the run"
+        );
+        assert_eq!(backlog.get_processed_block(chain).await, Some(100));
+        assert_eq!(
+            backlog
+                .checkpoints()
+                .load_pending(chain)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            backlog
+                .checkpoints()
+                .storage()
+                .load_latest(chain)
+                .await
+                .unwrap(),
+            Some(base)
+        );
+
+        // No abort was issued to the RPC or signing pipeline.
+        while let Ok(Some(action)) =
+            tokio::time::timeout(Duration::from_millis(50), rpc_rx.recv()).await
+        {
+            assert!(
+                !matches!(action, RpcAction::AbortCheckpoints(_)),
+                "a stall must not abort checkpoint work"
+            );
+        }
+        while let Ok(Some(cmd)) =
+            tokio::time::timeout(Duration::from_millis(50), sign_rx.recv()).await
+        {
+            assert!(
+                !matches!(cmd, SignCommand::AbortChain(_)),
+                "a stall must not abort sign tasks"
+            );
+        }
+
+        task.abort();
+        let _ = task.await;
     }
 }

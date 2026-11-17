@@ -2023,3 +2023,127 @@ fn a_record_applies_only_to_an_entry_behind_it() {
         }
     }
 }
+
+/// A stall re-index re-anchors to the canonical settled checkpoint, not to a
+/// newer pending one: the base's pending set is restored, its count zeroed,
+/// local records reapplied, voted checkpoints cleared, and other chains left
+/// untouched.
+#[tokio::test]
+async fn rebase_to_base_restores_base_reapplies_records_and_clears_votes() {
+    let chain = Chain::Solana;
+    let other = Chain::Ethereum;
+    let storage = CheckpointStorage::in_memory();
+    let backlog = Backlog::persisted(storage.clone());
+
+    // The settled base: a peer's view with one pending entry this node has
+    // since progressed locally.
+    let request = mock_bidi_request(SignId::new([1; 32]), chain);
+    let peer = Backlog::new();
+    peer.insert_bidirectional(Arc::clone(&request)).await;
+    let base = peer.checkpoint(chain).await.unwrap();
+    storage.persist(&base).await.unwrap();
+
+    // More advanced pending checkpoints, and what this node voted for.
+    for height in [base.block_height + 1, base.block_height + 2] {
+        storage
+            .persist_pending(&Checkpoint::reset(chain, height))
+            .await
+            .unwrap();
+    }
+    backlog.checkpoints().persist_voted(&base).await.unwrap();
+    assert!(!backlog
+        .checkpoints()
+        .load_voted(chain)
+        .await
+        .unwrap()
+        .is_empty());
+
+    // Another chain's checkpoints and votes must survive the rebase untouched.
+    let other_settled = Checkpoint::reset(other, 10);
+    let other_pending = Checkpoint::reset(other, 11);
+    storage.persist(&other_settled).await.unwrap();
+    storage.persist_pending(&other_pending).await.unwrap();
+    backlog
+        .checkpoints()
+        .persist_voted(&other_settled)
+        .await
+        .unwrap();
+
+    // The local record this node stored after advancing the request.
+    let (pk, output) = mock_signature_output(&request.args);
+    let signer = Backlog::persisted(storage.clone());
+    signer
+        .insert_bidirectional(Arc::clone(&request))
+        .await
+        .advance(pk, &output, mock_participants(), true)
+        .await
+        .unwrap();
+    let records = storage.load_local(chain).await.unwrap();
+    assert!(!records.is_empty());
+
+    assert_eq!(
+        backlog
+            .rebase_to_base(chain, mock_root_pk(), records)
+            .await
+            .unwrap(),
+        Some(base.clone())
+    );
+
+    assert_eq!(
+        storage.load_latest(chain).await.unwrap(),
+        Some(base.clone())
+    );
+    assert!(storage.load_pending(chain).await.unwrap().is_empty());
+    assert_eq!(backlog.checkpoints().count(chain), 0);
+    {
+        let pending = backlog.pending(&chain).read().await;
+        assert_eq!(pending.processed_block_height(), Some(base.block_height));
+        assert_eq!(pending.len(), base.len());
+    }
+    // The record was reapplied to the matching entry.
+    assert_eq!(backlog.publishable_requests(chain).await.len(), 1);
+    assert!(backlog
+        .checkpoints()
+        .load_voted(chain)
+        .await
+        .unwrap()
+        .is_empty());
+
+    // Other chain untouched.
+    assert_eq!(
+        storage.load_latest(other).await.unwrap(),
+        Some(other_settled.clone())
+    );
+    assert_eq!(
+        storage.load_pending(other).await.unwrap(),
+        vec![other_pending]
+    );
+    assert_eq!(
+        backlog.checkpoints().load_voted(other).await.unwrap(),
+        vec![other_settled]
+    );
+}
+
+/// Without a settled base there is nothing to rebase to: the call is a no-op.
+#[tokio::test]
+async fn rebase_to_base_without_a_settled_checkpoint_is_a_no_op() {
+    let chain = Chain::Solana;
+    let storage = CheckpointStorage::in_memory();
+    let backlog = Backlog::persisted(storage.clone());
+    // A pending checkpoint alone is not a base.
+    storage
+        .persist_pending(&Checkpoint::reset(chain, 5))
+        .await
+        .unwrap();
+    let before = storage.load_pending(chain).await.unwrap();
+
+    assert_eq!(
+        backlog
+            .rebase_to_base(chain, mock_root_pk(), vec![])
+            .await
+            .unwrap(),
+        None
+    );
+    assert_eq!(storage.load_latest(chain).await.unwrap(), None);
+    assert_eq!(storage.load_pending(chain).await.unwrap(), before);
+}

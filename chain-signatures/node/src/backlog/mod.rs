@@ -768,6 +768,41 @@ impl Backlog {
         Ok(())
     }
 
+    /// Re-anchor a chain to its canonical settled checkpoint after a stall re-index.
+    ///
+    /// Loads the settled base (never a pending checkpoint), reuses [`Backlog::regress`]
+    /// to reset durable state and the in-memory backlog to that base, reapplies this
+    /// node's local records, and drops the checkpoints it had voted for on the chain
+    /// — a re-index invalidates those votes. When there is no settled base the call
+    /// is a no-op and returns `Ok(None)`.
+    pub async fn rebase_to_base(
+        &self,
+        chain: Chain,
+        root_pk: PublicKey,
+        local_records: Vec<(SignId, SignStatus)>,
+    ) -> Result<Option<Checkpoint>, CheckpointError> {
+        // `load_latest` reads only the canonical settled checkpoint; `latest`
+        // would instead return a newer pending one.
+        let base = self
+            .checkpoints
+            .storage()
+            .load_latest(chain)
+            .await
+            .map_err(|source| CheckpointError::Storage { chain, source })?;
+        let Some(base) = base else {
+            return Ok(None);
+        };
+
+        // Reuses the existing regression path: durable state is reset to the
+        // base, pending counts are zeroed, and the in-memory backlog and
+        // processed height are restored from it.
+        self.regress(&base, root_pk).await?;
+        self.claim_local(chain, local_records).await;
+        // A stall re-index drops what this node voted for; nothing else changes.
+        self.checkpoints.clear_voted(chain).await?;
+        Ok(Some(base))
+    }
+
     /// Access the checkpoint subsystem.
     pub fn checkpoints(&self) -> &Checkpoints {
         &self.checkpoints
