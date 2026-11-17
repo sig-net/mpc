@@ -19,9 +19,9 @@ pub enum CheckpointStorage {
         latest: Arc<RwLock<HashMap<Chain, Checkpoint>>>,
         pending: Arc<RwLock<HashMap<Chain, BTreeMap<u64, Checkpoint>>>>,
         local: Arc<RwLock<HashMap<Chain, LocalRecords>>>,
-        /// Number of upcoming `load_pending` calls to fail, for tests of transient errors.
+        /// Upcoming calls to fail, for tests of transient errors.
         #[cfg(test)]
-        load_pending_failures: Arc<std::sync::atomic::AtomicUsize>,
+        injected_failures: Arc<InjectedFailures>,
     },
     /// A storage configured to fail operations, used to exercise error paths in tests.
     #[cfg(test)]
@@ -41,7 +41,7 @@ impl CheckpointStorage {
             pending: Arc::new(RwLock::new(HashMap::new())),
             local: Arc::default(),
             #[cfg(test)]
-            load_pending_failures: Arc::default(),
+            injected_failures: Arc::default(),
         }
     }
 
@@ -54,30 +54,38 @@ impl CheckpointStorage {
     #[cfg(test)]
     pub fn fail_next_load_pending(&self, times: usize) {
         if let Self::InMemory {
-            load_pending_failures,
-            ..
+            injected_failures, ..
         } = self
         {
-            load_pending_failures.store(times, std::sync::atomic::Ordering::SeqCst);
+            injected_failures
+                .load_pending
+                .store(times, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    /// Makes the next `times` calls to `persist_pending` fail; in-memory storage only.
+    #[cfg(test)]
+    pub fn fail_next_persist_pending(&self, times: usize) {
+        if let Self::InMemory {
+            injected_failures, ..
+        } = self
+        {
+            injected_failures
+                .persist_pending
+                .store(times, std::sync::atomic::Ordering::SeqCst);
         }
     }
 
     #[cfg(test)]
     fn take_injected_load_pending_failure(&self) -> bool {
-        let Self::InMemory {
-            load_pending_failures,
-            ..
-        } = self
-        else {
-            return false;
-        };
-        load_pending_failures
-            .fetch_update(
-                std::sync::atomic::Ordering::SeqCst,
-                std::sync::atomic::Ordering::SeqCst,
-                |remaining| remaining.checked_sub(1),
-            )
-            .is_ok()
+        matches!(self, Self::InMemory { injected_failures, .. }
+            if take_injected_failure(&injected_failures.load_pending))
+    }
+
+    #[cfg(test)]
+    fn take_injected_persist_pending_failure(&self) -> bool {
+        matches!(self, Self::InMemory { injected_failures, .. }
+            if take_injected_failure(&injected_failures.persist_pending))
     }
 
     fn key(&self, kind: &str, chain: Chain) -> String {
@@ -232,6 +240,10 @@ impl CheckpointStorage {
     /// Persist an unconfirmed checkpoint before its digest is submitted for consensus.
     /// Returns true if newly persisted, or false if already persisted.
     pub async fn persist_pending(&self, checkpoint: &Checkpoint) -> anyhow::Result<bool> {
+        #[cfg(test)]
+        if self.take_injected_persist_pending_failure() {
+            anyhow::bail!("injected persist_pending failure");
+        }
         match self {
             CheckpointStorage::Redis(pool, _) => {
                 let mut conn = pool.get().await.context("failed to get redis connection")?;
@@ -703,6 +715,26 @@ fn encode_checkpoint(checkpoint: &Checkpoint) -> anyhow::Result<Vec<u8>> {
 
 fn decode_checkpoint(bytes: &[u8]) -> anyhow::Result<Checkpoint> {
     ciborium::from_reader(bytes).context("failed to decode checkpoint CBOR")
+}
+
+/// Per-operation counts of upcoming calls to fail.
+#[cfg(test)]
+#[derive(Debug, Default)]
+pub struct InjectedFailures {
+    load_pending: std::sync::atomic::AtomicUsize,
+    persist_pending: std::sync::atomic::AtomicUsize,
+}
+
+/// Consumes one injected failure from `remaining`, if any is left.
+#[cfg(test)]
+fn take_injected_failure(remaining: &std::sync::atomic::AtomicUsize) -> bool {
+    remaining
+        .fetch_update(
+            std::sync::atomic::Ordering::SeqCst,
+            std::sync::atomic::Ordering::SeqCst,
+            |remaining| remaining.checked_sub(1),
+        )
+        .is_ok()
 }
 
 #[cfg(test)]

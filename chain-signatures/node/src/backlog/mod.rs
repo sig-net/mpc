@@ -25,10 +25,16 @@ use mpc_primitives::{
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::RwLock;
 
 /// Max pending (unconfirmed) checkpoints per chain before stalling.
 pub const MAX_PENDING_CHECKPOINTS: usize = 32;
+
+/// Base delay before storing a checkpoint is retried; doubles up to `MAX_PERSIST_RETRY_DELAY`.
+const PERSIST_RETRY_DELAY: Duration = Duration::from_secs(1);
+/// Upper bound of the checkpoint persist retry backoff.
+const MAX_PERSIST_RETRY_DELAY: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone)]
 pub struct PendingRequests {
@@ -668,39 +674,54 @@ impl Backlog {
         }
 
         drop(pending);
-        match self.checkpoint(chain).await {
-            Ok(checkpoint) => {
-                tracing::info!(
-                    ?chain,
-                    height,
-                    tx_count = checkpoint.len(),
-                    ?checkpoint,
-                    "creating checkpoint"
-                );
-                Some(checkpoint)
-            }
-            Err(CheckpointError::PendingCap { tx_count, .. }) => {
-                tracing::warn!(
-                    ?chain,
-                    height,
-                    tx_count,
-                    "checkpoint creation stalled (pending cap reached)"
-                );
-                None
-            }
-            Err(err @ CheckpointError::Storage { .. }) => {
-                tracing::error!(?chain, %err, "failed to create checkpoint");
-                None
+        let checkpoint = self.snapshot(chain).await;
+        // A boundary passed without a stored checkpoint is never voted for,
+        // so storing it is retried until it succeeds.
+        let mut retry_delay = PERSIST_RETRY_DELAY;
+        loop {
+            match self.checkpoints.persist_pending(&checkpoint).await {
+                Ok(()) => break,
+                Err(CheckpointError::PendingCap { tx_count, .. }) => {
+                    tracing::warn!(
+                        ?chain,
+                        height,
+                        tx_count,
+                        "checkpoint creation stalled (pending cap reached)"
+                    );
+                    return None;
+                }
+                Err(err @ CheckpointError::Storage { .. }) => {
+                    tracing::error!(
+                        ?chain,
+                        height,
+                        %err,
+                        ?retry_delay,
+                        "failed to persist checkpoint; retrying"
+                    );
+                    tokio::time::sleep(retry_delay).await;
+                    retry_delay = (retry_delay * 2).min(MAX_PERSIST_RETRY_DELAY);
+                }
             }
         }
+        tracing::info!(
+            ?chain,
+            height,
+            tx_count = checkpoint.len(),
+            ?checkpoint,
+            "creating checkpoint"
+        );
+        Some(checkpoint)
+    }
+
+    /// Captures the current backlog state of `chain` as a checkpoint.
+    async fn snapshot(&self, chain: Chain) -> Checkpoint {
+        let requests = self.pending(&chain).read().await;
+        Checkpoints::snapshot(&requests, chain)
     }
 
     /// Create a checkpoint of the current backlog state for a specific chain.
     pub async fn checkpoint(&self, chain: Chain) -> Result<Checkpoint, CheckpointError> {
-        let checkpoint = {
-            let requests = self.pending(&chain).read().await;
-            Checkpoints::snapshot(&requests, chain)
-        };
+        let checkpoint = self.snapshot(chain).await;
         self.checkpoints.persist_pending(&checkpoint).await?;
         Ok(checkpoint)
     }

@@ -324,6 +324,25 @@ async fn test_boundary_crossing_rules() {
     assert_eq!(cp.block_height, 600);
 }
 
+/// A boundary is not passed without its checkpoint when storage fails.
+#[tokio::test(start_paused = true)]
+async fn a_checkpoint_that_cannot_be_stored_is_retried() {
+    let storage = CheckpointStorage::in_memory();
+    let backlog = Backlog::persisted(storage.clone());
+    storage.fail_next_persist_pending(3);
+
+    let checkpoint = backlog
+        .set_processed_block_interval(Chain::Solana, 120, 120)
+        .await
+        .expect("stored once storage recovers");
+
+    assert_eq!(checkpoint.block_height, 120);
+    assert_eq!(
+        storage.load_pending(Chain::Solana).await.unwrap(),
+        vec![checkpoint]
+    );
+}
+
 // =========================================================================
 // 3. Checkpoint Structure & Invariants
 // =========================================================================
