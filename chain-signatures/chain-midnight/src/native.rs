@@ -379,6 +379,10 @@ impl<W: FeePayer, C: SubmitChain> NativeIntentClient<W, C> {
                     source: error.context("the transaction could not be sent; nothing was posted"),
                 });
             }
+            Err(SubmitRefusal::Mismatch(error)) => {
+                self.wallet.release(spent);
+                return Err(SubmitError::ContractMismatch(error.to_string()));
+            }
             Err(SubmitRefusal::Unanswered(error)) => {
                 tracing::warn!(
                     ?error,
@@ -1279,6 +1283,39 @@ mod tests {
         assert!(matches!(error, SubmitError::Node { .. }), "{error}");
         assert_eq!(*client.wallet.released.lock().unwrap(), vec![spent()]);
         assert!(client.chain.landing_reads.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_runtime_without_the_call_is_a_contract_mismatch() {
+        let client = client_over(
+            managed_dir(|_, bytes| bytes),
+            ScriptedChain::new(10, 20, None).refusing(SubmitRefusal::Mismatch(anyhow::anyhow!(
+                "send_mn_transaction did not match the node's metadata"
+            ))),
+        );
+        let error = client
+            .post(
+                b"tx",
+                TX_HASH,
+                &spent(),
+                10,
+                Timestamp::from_secs(5000),
+                deadline(),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(*client.wallet.released.lock().unwrap(), vec![spent()]);
+
+        let error = error.into_publish_error();
+        assert_eq!(
+            crate::submit_error::refusal_code(&error),
+            Some("contract_mismatch"),
+            "{error:#}"
+        );
+        assert!(
+            !is_retryable(&error),
+            "a node without the call must be terminal: {error:#}"
+        );
     }
 
     #[tokio::test(start_paused = true)]

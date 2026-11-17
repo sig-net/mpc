@@ -35,7 +35,7 @@ A submit has one budget, `PublisherConfig::submit_timeout` (420 s): waiting for 
 | Class | Meaning |
 |---|---|
 | `bad_request` | The request or intent is malformed. |
-| `contract_mismatch` | The deployed contract or the packaged artifacts are not the ones this node proves for. |
+| `contract_mismatch` | The deployed contract or the packaged artifacts are not the ones this node proves for, or the node's runtime has no such call. |
 | `gate_refusal` | The action was refused before any work: wrong chain, wrong kind, or an unanswerable signature or attestation. |
 | `wallet_unsynced` | The DUST replay has not caught up. Nothing was posted. |
 | `wallet_busy` | The fee needs UTXOs held by a submit that may still land. Nothing was posted. |
