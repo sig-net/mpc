@@ -14,6 +14,7 @@ pub mod nodes;
 pub mod protocols;
 pub mod publishers;
 pub mod requests;
+pub mod stall;
 pub mod storage;
 pub mod telemetry;
 
