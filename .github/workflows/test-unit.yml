@@ -104,8 +104,10 @@ jobs:
       - name: Migration test, mainnet contract
         run: cargo nextest run -p mpc-contract --run-ignored only -E 'test(=test_migrate_mainnet_state)'
 
-      - name: Midnight output storage tests
-        run: cargo test -p mpc-chain-midnight --lib --features sandbox output_storage::tests
+      - name: Midnight sandbox-gated tests
+        run: |
+          cargo test -p mpc-chain-midnight --lib --features sandbox output_storage::tests
+          cargo test -p mpc-chain-midnight --lib --features sandbox probing_a_node_on_an_unlisted_network
 
       - name: Check build left no uncommitted changes
         if: ${{ !cancelled() }}

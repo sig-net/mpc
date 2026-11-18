@@ -3316,7 +3316,8 @@ mod tests {
         );
     }
 
-    /// An unlisted id errors, never `None`, which a readiness loop would keep polling.
+    /// An unlisted id errors naming it — deterministic, unlike `None`, which is
+    /// reserved for a node that has not imported block 1 yet.
     #[cfg(feature = "sandbox")]
     #[tokio::test]
     async fn probing_a_node_on_an_unlisted_network_errors_with_the_reported_id() {
