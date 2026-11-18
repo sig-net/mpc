@@ -273,7 +273,28 @@ The next poll overwrites `want` with whatever is settled then, so the poll perio
 The arguments of Section 5 assume that correct nodes build the same backlog from the same blocks.
 A bug can make nodes build different backlogs from the same blocks, on more than f nodes at once, which the model does not cover.
 In this case only S3 is still guaranteed: the nodes run to the cap and stop there.
-Section 6 describes an alternative design where nodes re-index at the cap if no checkpoint settled despite more than 2f votes.
+The settlement stall handler below gives a way out.
+
+### Settlement stall
+
+The governance contract exposes the vote tallies at each height, per digest; the node reads them on the settlement poll beside `latest_checkpoint`.
+Let n be the active committee size and f = n - t, so f < t ≤ n - f (Section 1).
+
+A node detects a stall when, at the first boundary above its base — the height of the first checkpoint in `pending` — more than 2f votes are cast at that height and no digest there has reached t.
+At most f nodes are faulty, so more than 2f votes means at least f + 1 correct nodes voted; at one boundary correct nodes build one digest (S1), so this is a disagreement.
+
+on settlement stall:
+  abort the chain's sign tasks and clear caught up        // as on the regression path
+  pending = {}                                            // drop what we voted for
+  re_index()                                              // backlog, processed_height at base;
+                                                          // caught_up_at from the provider
+  // vote again at each boundary passed, with the rebuilt backlog
+
+This needs one vote per node and height in the contract, newest replacing older, or faulty nodes can inflate a tally at will; and the node must keep at each height both what it voted for and what it rebuilt from its base.
+
+The delay starts at 30 s, doubles on each consecutive stall-triggered re-index, and is capped at 600 s.
+It resets to 30 s only on a rebase onto a settled checkpoint: an S3 consensus rebase, including startup recovery onto a settled checkpoint; a stall-triggered re-index does not reset it.
+The re-index is immediate on detection; the backoff only suppresses a further stall-triggered re-index within the delay, it does not hold the re-index back.
 
 ## 5. Why the properties hold
 
@@ -363,10 +384,9 @@ Where no node can produce a checkpoint at all there is no recovery here (Section
 
 * A node whose own checkpoint at a settled height differs from the settled one is the sign of a bug and worth alerting on.
 * No digest reaches t.
-  Nodes run to the cap and stop.
-  There is no in-band way out.
-  A restart resumes from the checkpoints built with the bug, so the release with the fix must also drop `pending`.
-  The nodes then build the same checkpoints from the base again, and the next settlement realigns them.
+  The settlement stall handler (Section 4) re-indexes from the base on more than 2f votes at the first boundary with no digest at t, and votes again on the rebuilt backlog, so the nodes have an in-band way out.
+  A restart no longer needs a release that drops `pending`.
+  It cannot help where a rebuild cannot change the result: every copy of a settled checkpoint is lost, or the node repeats the same bug at each re-index.
 * A node that wrongly takes a request for finished deletes its record, with the signatures it issued.
 * A node that rebases onto a checkpoint it does not hold drops all of `pending`, also checkpoints above that height it voted for.
   Such a vote can settle a checkpoint no node holds, and every node that wants it then stalls.
@@ -392,10 +412,9 @@ Each closes one of the limits above, at a price.
   If one of them settles, the node rebases onto it as onto one fetched from a peer.
   Every correct voter of a settled checkpoint then still holds it when it settles, at any threshold.
   The price is a second store per chain.
-* Re-index at the cap: a node at the cap that sees, in a view of the vote counts, more than 2f votes at the first boundary above its base settling nothing re-indexes from its base, on a backoff that grows each time and resets on a rebase.
-  For a correct node in the model this changes nothing, it builds the same checkpoints again.
-  It gives a second attempt, without an operator, where building the backlog again can come out differently, and not where a node repeats the same result.
-  It needs a list of checkpoints per height, so that a node keeps what it voted for beside what it rebuilt, and one vote per node and height in the contract, since otherwise faulty nodes can trigger it at will.
+* Re-index at the cap is adopted as the settlement stall handler (Section 4), no longer an option.
+  It gives a second attempt without an operator where rebuilding can come out differently; for a correct node in the model it changes nothing.
+  Its prerequisites — one vote per node and height in the contract, and keeping what was voted for beside what was rebuilt — are part of that design (Section 4).
 * Settle through communication with peers instead of the contract: a node asks all peers for the digests they hold and takes a height as settled once it has heard 2f+1 matching answers, its own counted.
   This drops the vote loop, and any answer that differs from the node's own digest is a faulty node or a bug and can be alerted on.
   The price: a node that restarts behind the others needs 2f+1 peers up at once that hold a common height above its base, not the chain and one peer, and there is no shared record of what settled when.
@@ -436,3 +455,18 @@ The interval is `checkpoint_interval`, a per-chain constant with no per-node ove
    Now: the indexer makes no progress at the cap, so the stall watchdog restarts it again and again, and each restart makes the node not caught up.
    Until a settlement takes it below the cap, the node holds second-leg publishes and queues no second-leg sign requests.
    Design: at the cap the node keeps its caught-up state and keeps acting on the requests it holds.
+
+### Settlement stall (Section 4)
+
+Not implemented. The work lands in this order:
+
+* Expose the vote tallies from the contract and read them in the node.
+* Enforce one vote per node and height in the contract, newest replacing older.
+* Add the stall predicate as a pure function of the tallies, the base and t.
+* Keep, per height, both the checkpoint the node voted for and the one it rebuilt.
+* Add the rebase-to-base primitive and log stall detections and re-indexes in shadow mode, with no rebase.
+* Activate the handler with the backoff, reset only on a rebase onto a settled checkpoint.
+* Record the proof that the predicate cannot fire for a correct node in the model, and the rollout status.
+
+Now: no tallies are read, the contract accepts several digests per height, and a node at the cap waits for a settlement; there is no stall predicate, rebase to base or backoff.
+Design: the node detects a stall as in Section 4, re-indexes from its base on a backoff that doubles on each stall-triggered re-index and resets only on a rebase onto a settled checkpoint, and votes again on the rebuilt backlog; shadow mode first, then active.
