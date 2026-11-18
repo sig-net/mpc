@@ -797,9 +797,6 @@ impl Backlog {
             "recovering backlog to checkpoint"
         );
 
-        // One guard through replace and rebuild: a racing
-        // `add_published_tx` registers after the rebuild, not into rows
-        // it deletes.
         let mut pending = self.pending(&chain).write().await;
         let previous_height = pending.processed_block_height().unwrap_or(0);
 
