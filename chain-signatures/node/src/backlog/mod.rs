@@ -493,15 +493,9 @@ impl Backlog {
             return;
         };
         let status_key = WatchKey::of(status_tx);
-        let observed_at = self
-            .watchers(status_key.target)
-            .read()
-            .await
-            .clock_of(&status_key);
-        self.watchers(tx.target_chain)
-            .write()
-            .await
-            .register(tx, observed_at);
+        let mut watchers = self.watchers(tx.target_chain).write().await;
+        let observed_at = watchers.clock_of(&status_key);
+        watchers.register(tx, observed_at);
     }
 
     /// Unwatch and return the entries of `chain` that `taker`, executed, leaves unexecutable (M4),
