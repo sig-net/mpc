@@ -18,7 +18,7 @@ The node posts every finished Midnight response itself: one transaction per sign
 - `TxPartialSuccess` answers it too: the respond's only transcript is guaranteed, which a partial success commits and readers read.
 - A finalized block past the fee intent's TTL without the transaction means it can never land.
 
-When the node does not answer the submit, it may never have received the transaction, so the publisher sends the same transaction again six seconds later, then at doubling intervals up to a minute, until a node answers one or the wait for the transaction ends. The ledger applies an intent once, so a resend cannot post the response twice, and only the scan decides the outcome.
+When the node does not answer the submit, it may never have received the transaction, so the publisher sends the same transaction again six seconds later, then at doubling intervals up to a minute, until a node answers one, the node's runtime has no such call, or the wait for the transaction ends. The ledger applies an intent once, so a resend cannot post the response twice, and only the scan decides the outcome.
 
 ## The funding wallet
 

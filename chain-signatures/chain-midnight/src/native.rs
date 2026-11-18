@@ -635,6 +635,15 @@ async fn resend<C: SubmitChain>(chain: Arc<C>, transaction: Vec<u8>, tx_hash: [u
                 );
                 return;
             }
+            Err(SubmitRefusal::Mismatch(error)) => {
+                tracing::warn!(
+                    error = %format_args!("{error:#}"),
+                    tx_hash = %hex::encode(tx_hash),
+                    "midnight: the node cannot carry the resent respond transaction; watching \
+                     for it"
+                );
+                return;
+            }
             Err(SubmitRefusal::Unanswered(error) | SubmitRefusal::Unsent(error)) => {
                 if let Some(count) = mpc_utils::throttle::check("midnight:resend-unanswered") {
                     tracing::warn!(
@@ -761,7 +770,10 @@ mod tests {
         number_reads: Mutex<Vec<u64>>,
         time_reads: Mutex<Vec<u64>>,
         hash_lookups: Mutex<Vec<u64>>,
-        submit: Mutex<Option<SubmitRefusal>>,
+        /// What each submit answers, in turn; past the last, the node takes it.
+        submit: Mutex<VecDeque<SubmitRefusal>>,
+        /// When each submit was sent.
+        submitted: Mutex<Vec<Instant>>,
         landing: Option<(u64, Landing)>,
         landing_reads: Mutex<VecDeque<u64>>,
         /// A block whose first landing read fails.
@@ -779,7 +791,8 @@ mod tests {
                 number_reads: Mutex::new(Vec::new()),
                 time_reads: Mutex::new(Vec::new()),
                 hash_lookups: Mutex::new(Vec::new()),
-                submit: Mutex::new(None),
+                submit: Mutex::new(VecDeque::new()),
+                submitted: Mutex::new(Vec::new()),
                 landing,
                 landing_reads: Mutex::new(VecDeque::new()),
                 failing_read: Mutex::new(None),
@@ -1579,6 +1592,33 @@ mod tests {
                 .refusing(SubmitRefusal::Refused(
                     "1012: Transaction is temporarily banned".into(),
                 )),
+        );
+        let landed = client
+            .post(
+                b"tx",
+                TX_HASH,
+                &spent(),
+                10,
+                Timestamp::from_secs(5000),
+                deadline(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(landed, hex::encode(TX_HASH));
+        assert_eq!(client.chain.submits().len(), 2);
+        assert!(client.wallet.released.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_resend_the_node_cannot_carry_is_not_sent_again_and_the_scan_decides() {
+        let client = client_over(
+            managed_dir(|_, bytes| bytes),
+            // Block 25 is the scan's 15th ask, 28 s in: room for further resends.
+            ScriptedChain::new(10, 30, Some((25, Landing::Applied)))
+                .refusing(unanswered())
+                .refusing(SubmitRefusal::Mismatch(anyhow::anyhow!(
+                    "send_mn_transaction did not match the node's metadata"
+                ))),
         );
         let landed = client
             .post(
