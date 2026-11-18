@@ -54,7 +54,7 @@ pub(crate) enum SubmitError {
     #[error("[internal] {0}")]
     Internal(String),
     /// A read from the node failed. Counted as `internal`; the verdict reads
-    /// the typed HTTP status in its chain, never the render.
+    /// the typed signals in its chain, never the render.
     #[error("[internal] a node read or send failed")]
     Node {
         #[source]

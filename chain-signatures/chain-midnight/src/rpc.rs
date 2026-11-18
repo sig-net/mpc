@@ -1156,18 +1156,12 @@ async fn publisher_contract_state(
 
     match classify_contract_state_reply(response)? {
         ContractStateReply::State(state) => Ok(state),
-        // Not an admission verdict, so the marker type stays out of the chain. The
-        // detail names the cap that refused, the rpc node's or the client's.
-        ContractStateReply::TooLarge(OversizedContractState { detail, source }) => {
-            let cause = match source {
-                Some(source) => anyhow::Error::new(source).context(detail),
-                None => anyhow::anyhow!(detail),
-            };
-            Err(cause.context(
-                "the responder's state was refused for its size; it is exempt from \
-                 the admission limit, so the refusing cap is too small for it",
-            ))
-        }
+        // The marker stays in the chain, as `Reads::contract_state` keeps it: it
+        // carries the publish verdict besides the indexer's admission one.
+        ContractStateReply::TooLarge(marker) => Err(anyhow::Error::new(marker).context(
+            "the responder's state was refused for its size; it is exempt from \
+             the admission limit, so the refusing cap is too small for it",
+        )),
         ContractStateReply::Other(err) => {
             Err(anyhow::Error::new(err).context("midnight_contractState failed"))
         }
@@ -2621,13 +2615,40 @@ mod tests {
         }
     }
 
-    #[test]
-    fn an_oversized_state_read_is_terminal() {
-        let error = attach_read_carrier(
-            oversized_contract_state("server cap 1024 bytes").context("the pin"),
-        );
-        assert!(!is_retryable(&error), "{error:#}");
-        assert!(!is_provider_throttled(&error), "{error:#}");
+    #[tokio::test]
+    async fn cap_proven_size_refusals_terminate_the_publish_read() {
+        // Both TooLarge producers, driven through the boundary that wraps them.
+        for reply in [
+            Canned::UserWithData(
+                OVERSIZED_RESPONSE_CODE,
+                "Response is too big",
+                "\"Exceeded max limit of 15728640\"",
+            ),
+            Canned::ClientTooLarge,
+        ] {
+            let (transport, _calls) = stub_rpc(reply);
+            let rpc = MidnightPublisherRpc {
+                rpc: transport.clone(),
+                legacy: LegacyRpcMethods::<SubstrateConfig>::new(transport),
+                genesis_hash: H256([0x11; 32]),
+                clients: Default::default(),
+                blocks: Default::default(),
+                network_id: NetworkId::Undeployed,
+            };
+
+            let error = PinnedReads::contract_state(&rpc, &test_address(), &test_at_hash())
+                .await
+                .expect_err("the refusal must fail the read");
+            assert!(
+                error
+                    .chain()
+                    .find_map(|cause| cause.downcast_ref::<RpcFailure>())
+                    .is_some(),
+                "the read attaches its carrier: {error:#}"
+            );
+            assert!(!is_retryable(&error), "{error:#}");
+            assert!(!is_provider_throttled(&error), "{error:#}");
+        }
     }
 
     #[test]
@@ -3020,10 +3041,10 @@ mod tests {
         assert_eq!(calls.load(Ordering::SeqCst), 1, "a drop is not retried");
     }
 
-    /// The publisher reads the responder through the same classifier, but a
-    /// size refusal there is a read failure, never an admission drop.
+    /// The publisher reads the responder through the same classifier: a
+    /// cap-proven size refusal is terminal, never an admission drop or a spin.
     #[tokio::test]
-    async fn a_size_refusal_on_the_publisher_read_is_not_an_admission_drop() {
+    async fn a_size_refusal_on_the_publisher_read_is_terminal() {
         let server = ServerBuilder::default()
             .max_response_body_size(15 * 1024 * 1024)
             .build("127.0.0.1:0")
@@ -3042,7 +3063,7 @@ mod tests {
         let err = publisher_contract_state(&rpc, &test_address(), &test_at_hash())
             .await
             .expect_err("the server refuses the response");
-        assert!(!is_oversized_contract_state(&err), "{err:#}");
+        assert!(is_oversized_contract_state(&err), "{err:#}");
         let rendered = format!("{err:#}");
         assert!(
             rendered.contains("exempt from the admission limit"),
