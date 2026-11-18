@@ -17,27 +17,26 @@ use tokio_util::time::delay_queue::{DelayQueue, Key};
 use crate::metrics::requests::{record_request_latency_since, SignRequestStep};
 
 /// How many late, unanswered legs are remembered.
-const MAX_LATE: usize = 65536;
+const MAX_LATE: usize = 8192;
 
 type Leg = (SignId, RequestKind);
 
-struct Watched {
-    key: Key,
+/// Where and when this node indexed a leg; its latency runs from here.
+#[derive(Clone, Copy)]
+struct Indexed {
     chain: Chain,
-    unix_timestamp_indexed: u64,
+    unix_timestamp: u64,
 }
 
-/// A leg counted as delayed whose late response has not been observed yet.
-struct Late {
-    chain: Chain,
-    unix_timestamp_indexed: u64,
+struct Watched {
+    key: Key,
+    indexed: Indexed,
 }
 
 enum DelayCommand {
     Watch {
         leg: Leg,
-        chain: Chain,
-        unix_timestamp_indexed: u64,
+        indexed: Indexed,
         deadline: Instant,
     },
     Responded(Leg),
@@ -89,8 +88,10 @@ impl DelayMonitor {
     ) {
         let _ = self.tx.send(DelayCommand::Watch {
             leg: (sign_id, kind),
-            chain,
-            unix_timestamp_indexed,
+            indexed: Indexed {
+                chain,
+                unix_timestamp: unix_timestamp_indexed,
+            },
             deadline,
         });
     }
@@ -107,7 +108,7 @@ impl DelayMonitor {
     }
 
     async fn run(mut rx: mpsc::UnboundedReceiver<DelayCommand>) {
-        let mut monitor = Monitor {
+        let mut state = DelayState {
             started: Instant::now(),
             watched: HashMap::new(),
             queue: DelayQueue::new(),
@@ -120,10 +121,10 @@ impl DelayMonitor {
                     let Some(cmd) = cmd else {
                         break;
                     };
-                    monitor.handle_command(cmd);
+                    state.handle_command(cmd);
                 }
-                Some(expired) = monitor.queue.next(), if !monitor.queue.is_empty() => {
-                    monitor.delayed(expired.into_inner());
+                Some(expired) = state.queue.next(), if !state.queue.is_empty() => {
+                    state.delayed(expired.into_inner());
                 }
             }
         }
@@ -132,22 +133,22 @@ impl DelayMonitor {
     }
 }
 
-struct Monitor {
+/// The monitor task's state.
+struct DelayState {
     started: Instant,
     watched: HashMap<Leg, Watched>,
     queue: DelayQueue<Leg>,
     /// Legs counted as delayed and not answered yet: a re-admitted one is not
     /// counted again, and its response records `expired`.
-    late: LruCache<Leg, Late>,
+    late: LruCache<Leg, Indexed>,
 }
 
-impl Monitor {
+impl DelayState {
     fn handle_command(&mut self, cmd: DelayCommand) {
         match cmd {
             DelayCommand::Watch {
                 leg,
-                chain,
-                unix_timestamp_indexed,
+                indexed,
                 deadline,
             } => {
                 if self.late.contains(&leg) || self.watched.contains_key(&leg) {
@@ -158,20 +159,13 @@ impl Monitor {
                     return;
                 }
                 let key = self.queue.insert_at(leg, deadline.max(Instant::now()));
-                self.watched.insert(
-                    leg,
-                    Watched {
-                        key,
-                        chain,
-                        unix_timestamp_indexed,
-                    },
-                );
+                self.watched.insert(leg, Watched { key, indexed });
             }
             DelayCommand::Responded(leg) => self.responded(leg),
             DelayCommand::AbortChain(chain) => {
                 let queue = &mut self.queue;
                 self.watched.retain(|_, watched| {
-                    let keep = watched.chain != chain;
+                    let keep = watched.indexed.chain != chain;
                     if !keep {
                         queue.remove(&watched.key);
                     }
@@ -182,26 +176,21 @@ impl Monitor {
     }
 
     fn responded(&mut self, leg: Leg) {
-        let (sign_id, kind) = leg;
-        if let Some(watched) = self.watched.remove(&leg) {
+        let (indexed, status) = if let Some(watched) = self.watched.remove(&leg) {
             self.queue.remove(&watched.key);
-            record_request_latency_since(
-                watched.chain,
-                SignRequestStep::Total,
-                "in_time",
-                kind,
-                watched.unix_timestamp_indexed,
-            );
-        } else if let Some(late) = self.late.pop(&leg) {
-            tracing::info!(?sign_id, "late response observed");
-            record_request_latency_since(
-                late.chain,
-                SignRequestStep::Total,
-                "expired",
-                kind,
-                late.unix_timestamp_indexed,
-            );
-        }
+            (watched.indexed, "in_time")
+        } else if let Some(indexed) = self.late.pop(&leg) {
+            (indexed, "expired")
+        } else {
+            return;
+        };
+        record_request_latency_since(
+            indexed.chain,
+            SignRequestStep::Total,
+            status,
+            leg.1,
+            indexed.unix_timestamp,
+        );
     }
 
     fn delayed(&mut self, leg: Leg) {
@@ -209,22 +198,20 @@ impl Monitor {
             return;
         };
         let (sign_id, kind) = leg;
+        let Indexed {
+            chain,
+            unix_timestamp,
+        } = watched.indexed;
         tracing::warn!(
             ?sign_id,
-            chain = ?watched.chain,
+            ?chain,
             kind = kind.as_str(),
-            elapsed_secs = unix_elapsed(watched.unix_timestamp_indexed).as_secs(),
+            elapsed_secs = unix_elapsed(unix_timestamp).as_secs(),
             "signature request delayed beyond expected response time"
         );
-        self.late.put(
-            leg,
-            Late {
-                chain: watched.chain,
-                unix_timestamp_indexed: watched.unix_timestamp_indexed,
-            },
-        );
+        self.late.put(leg, watched.indexed);
         crate::metrics::requests::SIGN_REQUEST_DELAYED
-            .with_label_values(&[watched.chain.as_str(), kind.as_str()])
+            .with_label_values(&[chain.as_str(), kind.as_str()])
             .inc();
     }
 }
