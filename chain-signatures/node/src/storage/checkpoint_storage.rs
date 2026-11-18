@@ -12,12 +12,27 @@ use tokio::sync::RwLock;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
+/// Serve-only bodies displaced from `pending`, keyed by digest so a vote that settles
+/// one of them can still be answered to a peer. Never used to reconstruct local state
+/// — only `latest`/`pending` are authoritative.
+type OrphanMap = HashMap<Chain, HashMap<[u8; 32], Checkpoint>>;
+
+/// The result of an atomic pending → orphan demotion.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DemoteOutcome {
+    /// Bodies above the settled height, kept in the orphan store for serving.
+    pub demoted: usize,
+    /// Bodies at or below the settled height, stale relative to consensus and dropped.
+    pub dropped: usize,
+}
+
 #[derive(Clone, Debug)]
 pub enum CheckpointStorage {
     Redis(Pool, AccountId),
     InMemory {
         latest: Arc<RwLock<HashMap<Chain, Checkpoint>>>,
         pending: Arc<RwLock<HashMap<Chain, BTreeMap<u64, Checkpoint>>>>,
+        orphan: Arc<RwLock<OrphanMap>>,
         local: Arc<RwLock<HashMap<Chain, LocalRecords>>>,
         /// Number of upcoming `load_pending` calls to fail, for tests of transient errors.
         #[cfg(test)]
@@ -39,6 +54,7 @@ impl CheckpointStorage {
         Self::InMemory {
             latest: Arc::new(RwLock::new(HashMap::new())),
             pending: Arc::new(RwLock::new(HashMap::new())),
+            orphan: Arc::new(RwLock::new(HashMap::new())),
             local: Arc::default(),
             #[cfg(test)]
             load_pending_failures: Arc::default(),
@@ -106,6 +122,21 @@ impl CheckpointStorage {
 
     fn local_key(&self, chain: Chain) -> String {
         self.key("local", chain)
+    }
+
+    fn orphan_key(&self, chain: Chain) -> String {
+        self.key("orphan", chain)
+    }
+
+    fn orphan_height_key(&self, chain: Chain) -> String {
+        self.key("orphan_height", chain)
+    }
+
+    /// Fixed-width decimal so Redis Lua can compare heights with plain string
+    /// ordering (`<=`). Lua numbers are doubles, so `tonumber` silently rounds
+    /// heights above 2^53; these keys must stay exact for full `u64` heights.
+    fn height_field(height: u64) -> String {
+        format!("{height:020}")
     }
 
     /// Store what this node signed for one leg of a request, before it is published.
@@ -426,6 +457,164 @@ impl CheckpointStorage {
         }
     }
 
+    /// Atomically move every pending checkpoint above `settled_height` into the
+    /// serve-only orphan store, and drop every pending checkpoint at or below it.
+    ///
+    /// Both the bodies and the reverse digest index are removed in one step, so no
+    /// reader can observe a half-moved cohort. Orphans are never used locally to
+    /// rebuild the backlog — `latest` and `pending` remain the only authorities.
+    pub async fn demote_to_orphan(
+        &self,
+        chain: Chain,
+        settled_height: u64,
+    ) -> anyhow::Result<DemoteOutcome> {
+        match self {
+            CheckpointStorage::Redis(pool, _) => {
+                let mut conn = pool.get().await.context("failed to get redis connection")?;
+                // ONE script for the whole chain. The digest index is the source of
+                // digest → height, so each live pending body is keyed by its digest
+                // when it moves to the orphan hashes:
+                // - above the settled height: copy body to the orphan hash and its
+                //   fixed-width height to the orphan height hash (`demoted`);
+                // - at or below: drop it without orphaning, since consensus has moved
+                //   past it and no vote for that body can settle (`dropped`);
+                // - remove the body from `pending` and its row from the index either way.
+                // The pending fields are plain decimals, so pad them to the fixed width
+                // before comparing; `tonumber` would silently round heights above 2^53.
+                const DEMOTE: &str = r#"
+                    local demoted = 0
+                    local dropped = 0
+                    local index = redis.call('HGETALL', KEYS[2])
+                    for i = 1, #index, 2 do
+                        local digest = index[i]
+                        local height = index[i+1]
+                        local body = redis.call('HGET', KEYS[1], height)
+                        if body then
+                            local padded = string.rep('0', 20 - string.len(height)) .. height
+                            if padded > ARGV[1] then
+                                redis.call('HSET', KEYS[3], digest, body)
+                                redis.call('HSET', KEYS[4], digest, padded)
+                                demoted = demoted + 1
+                            else
+                                dropped = dropped + 1
+                            end
+                            redis.call('HDEL', KEYS[1], height)
+                        else
+                            dropped = dropped + 1
+                        end
+                        redis.call('HDEL', KEYS[2], digest)
+                    end
+                    -- Defensive: a pending body without an index row cannot be served
+                    -- by digest, so it is dropped rather than retained as an orphan.
+                    local leftover = redis.call('HGETALL', KEYS[1])
+                    for i = 1, #leftover, 2 do
+                        redis.call('HDEL', KEYS[1], leftover[i])
+                        dropped = dropped + 1
+                    end
+                    return { demoted, dropped }
+                "#;
+                let (demoted, dropped): (usize, usize) = redis::Script::new(DEMOTE)
+                    .key(self.pending_checkpoint_key(chain))
+                    .key(self.pending_digest_key(chain))
+                    .key(self.orphan_key(chain))
+                    .key(self.orphan_height_key(chain))
+                    .arg(Self::height_field(settled_height))
+                    .invoke_async(&mut conn)
+                    .await
+                    .context("failed to demote pending checkpoints in redis")?;
+                Ok(DemoteOutcome { demoted, dropped })
+            }
+            CheckpointStorage::InMemory {
+                pending, orphan, ..
+            } => {
+                let mut pending = pending.write().await;
+                let Some(checkpoints) = pending.remove(&chain) else {
+                    return Ok(DemoteOutcome::default());
+                };
+                let mut orphan = orphan.write().await;
+                let retained = orphan.entry(chain).or_default();
+                let mut outcome = DemoteOutcome::default();
+                for (height, checkpoint) in checkpoints {
+                    if height > settled_height {
+                        retained.insert(checkpoint.digest(), checkpoint);
+                        outcome.demoted += 1;
+                    } else {
+                        outcome.dropped += 1;
+                    }
+                }
+                Ok(outcome)
+            }
+            #[cfg(test)]
+            CheckpointStorage::Failing => anyhow::bail!("failing storage"),
+        }
+    }
+
+    /// Returns an orphan body by digest, if one was retained.
+    pub async fn find_orphan(
+        &self,
+        chain: Chain,
+        digest: [u8; 32],
+    ) -> anyhow::Result<Option<Checkpoint>> {
+        match self {
+            CheckpointStorage::Redis(pool, _) => {
+                let mut conn = pool.get().await.context("failed to get redis connection")?;
+                let body: Option<Vec<u8>> = conn
+                    .hget(self.orphan_key(chain), hex::encode(digest))
+                    .await
+                    .context("failed to find orphan checkpoint in redis")?;
+                let Some(body) = body else {
+                    return Ok(None);
+                };
+                let checkpoint =
+                    decode_checkpoint(&body).context("failed to deserialize orphan checkpoint")?;
+                Ok((checkpoint.digest() == digest).then_some(checkpoint))
+            }
+            CheckpointStorage::InMemory { orphan, .. } => Ok(orphan
+                .read()
+                .await
+                .get(&chain)
+                .and_then(|entries| entries.get(&digest).cloned())),
+            #[cfg(test)]
+            CheckpointStorage::Failing => anyhow::bail!("failing storage"),
+        }
+    }
+
+    /// Drops orphan bodies at or below `height`. Once a checkpoint at that height
+    /// settles, a vote for any older body can no longer settle, so they are dead
+    /// weight. Heights are compared as fixed-width decimal strings in Lua so no
+    /// precision is lost for heights above 2^53.
+    pub async fn clear_orphan_up_to(&self, chain: Chain, height: u64) -> anyhow::Result<()> {
+        match self {
+            CheckpointStorage::Redis(pool, _) => {
+                let mut conn = pool.get().await.context("failed to get redis connection")?;
+                const CLEAR_ORPHANS: &str = r#"
+                    local entries = redis.call('HGETALL', KEYS[2])
+                    for i = 1, #entries, 2 do
+                        if entries[i+1] <= ARGV[1] then
+                            redis.call('HDEL', KEYS[1], entries[i])
+                            redis.call('HDEL', KEYS[2], entries[i])
+                        end
+                    end
+                "#;
+                let _: () = redis::Script::new(CLEAR_ORPHANS)
+                    .key(self.orphan_key(chain))
+                    .key(self.orphan_height_key(chain))
+                    .arg(Self::height_field(height))
+                    .invoke_async(&mut conn)
+                    .await
+                    .context("failed to clear orphan checkpoints in redis")?;
+            }
+            CheckpointStorage::InMemory { orphan, .. } => {
+                if let Some(entries) = orphan.write().await.get_mut(&chain) {
+                    entries.retain(|_, cp| cp.block_height > height);
+                }
+            }
+            #[cfg(test)]
+            CheckpointStorage::Failing => anyhow::bail!("failing storage"),
+        }
+        Ok(())
+    }
+
     /// Replace the confirmed checkpoint and discard obsolete pending checkpoints.
     pub async fn reset_to_latest(&self, checkpoint: &Checkpoint) -> anyhow::Result<()> {
         let value =
@@ -583,13 +772,19 @@ impl CheckpointStorage {
         }
     }
 
-    /// Finds a checkpoint by digest, searching durable latest and pending storage.
+    /// Finds a checkpoint by digest, searching pending, then the serve-only orphan
+    /// store, then the canonical latest. Orphans are keyed by digest and checked
+    /// before `latest`, which needs a digest comparison and could otherwise hide a
+    /// retained body after consensus moved on to a different checkpoint.
     pub async fn find(&self, chain: Chain, digest: [u8; 32]) -> anyhow::Result<Option<Checkpoint>> {
         match self {
             CheckpointStorage::Redis(pool, _) => {
                 let mut conn = pool.get().await.context("failed to get redis connection")?;
-                // Resolves a checkpoint by digest across pending and latest storage:
+                // Resolves a checkpoint by digest across pending, latest, then the
+                // serve-only orphan store:
                 // - Checks the digest index (`KEYS[2]`); if present in pending, returns `{ true, pending_body }`.
+                // - Then checks the orphan hash (`KEYS[4]`), keyed directly by digest. It returns
+                //   `{ false, orphan }` so the same digest verification below applies as for latest.
                 // - Otherwise returns `{ false, latest_body }` for latest checkpoint comparison.
                 const FIND: &str = r#"
                     local height = redis.call('HGET', KEYS[2], ARGV[1])
@@ -597,12 +792,17 @@ impl CheckpointStorage {
                     if pending then
                         return { true, pending }
                     end
+                    local orphan = redis.call('HGET', KEYS[4], ARGV[1])
+                    if orphan then
+                        return { false, orphan }
+                    end
                     return { false, redis.call('GET', KEYS[3]) }
                 "#;
                 let (is_pending, maybe_body): (bool, Option<Vec<u8>>) = redis::Script::new(FIND)
                     .key(self.pending_checkpoint_key(chain))
                     .key(self.pending_digest_key(chain))
                     .key(self.checkpoint_key(chain))
+                    .key(self.orphan_key(chain))
                     .arg(hex::encode(digest))
                     .invoke_async(&mut conn)
                     .await
@@ -619,7 +819,10 @@ impl CheckpointStorage {
                 }
             }
             CheckpointStorage::InMemory {
-                latest, pending, ..
+                latest,
+                pending,
+                orphan,
+                ..
             } => {
                 if let Some(cp) = pending.read().await.get(&chain).and_then(|checkpoints| {
                     checkpoints
@@ -627,6 +830,17 @@ impl CheckpointStorage {
                         .find(|cp| cp.digest() == digest)
                         .cloned()
                 }) {
+                    return Ok(Some(cp));
+                }
+                // Orphans are keyed by digest, so check them before the canonical
+                // latest, which needs a digest comparison and can hide the orphan
+                // if it already moved on to a different body.
+                if let Some(cp) = orphan
+                    .read()
+                    .await
+                    .get(&chain)
+                    .and_then(|entries| entries.get(&digest).cloned())
+                {
                     return Ok(Some(cp));
                 }
                 let confirmed = latest.read().await.get(&chain).cloned();
@@ -843,5 +1057,170 @@ mod tests {
         assert!(!storage.has_checkpoint(chain).await?);
         assert!(storage.latest(chain).await?.is_none());
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn orphan_store_serves_discarded_bodies_and_clears_exactly() -> anyhow::Result<()> {
+        let chain = Chain::Ethereum;
+        let storage = CheckpointStorage::in_memory();
+        let cp = |height| Checkpoint {
+            chain,
+            block_height: height,
+            pending_requests: vec![],
+            legacy_digest: None,
+        };
+        let low = cp(90);
+        let mid = cp(100);
+        let high = cp(110);
+
+        for c in [&low, &mid, &high] {
+            storage.persist_pending(c).await?;
+        }
+        assert_eq!(
+            storage.demote_to_orphan(chain, 0).await?,
+            DemoteOutcome {
+                demoted: 3,
+                dropped: 0
+            }
+        );
+        assert!(storage.load_pending(chain).await?.is_empty());
+        assert_eq!(
+            storage.find_orphan(chain, mid.digest()).await?,
+            Some(mid.clone())
+        );
+        // `find` must reach orphans even though nothing is pending or latest.
+        assert_eq!(storage.find(chain, mid.digest()).await?, Some(mid.clone()));
+
+        storage.clear_orphan_up_to(chain, 100).await?;
+        assert_eq!(storage.find_orphan(chain, low.digest()).await?, None);
+        assert_eq!(storage.find_orphan(chain, mid.digest()).await?, None);
+        assert_eq!(storage.find_orphan(chain, high.digest()).await?, Some(high));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn orphan_store_is_isolated_per_chain() -> anyhow::Result<()> {
+        let storage = CheckpointStorage::in_memory();
+        let a = Checkpoint {
+            chain: Chain::Ethereum,
+            block_height: 100,
+            pending_requests: vec![],
+            legacy_digest: None,
+        };
+        let b = Checkpoint {
+            chain: Chain::Solana,
+            block_height: 100,
+            pending_requests: vec![],
+            legacy_digest: None,
+        };
+        storage.persist_pending(&a).await?;
+        storage.persist_pending(&b).await?;
+
+        // Demoting one chain leaves the other chain's pending body untouched.
+        assert_eq!(
+            storage.demote_to_orphan(Chain::Ethereum, 0).await?,
+            DemoteOutcome {
+                demoted: 1,
+                dropped: 0
+            }
+        );
+        assert_eq!(
+            storage.find(Chain::Ethereum, a.digest()).await?,
+            Some(a.clone())
+        );
+        assert_eq!(
+            storage.find(Chain::Solana, b.digest()).await?,
+            Some(b.clone())
+        );
+        assert_eq!(
+            storage.demote_to_orphan(Chain::Solana, 0).await?,
+            DemoteOutcome {
+                demoted: 1,
+                dropped: 0
+            }
+        );
+
+        storage.clear_orphan_up_to(Chain::Ethereum, 100).await?;
+        assert_eq!(
+            storage.find_orphan(Chain::Ethereum, a.digest()).await?,
+            None
+        );
+        assert_eq!(
+            storage.find_orphan(Chain::Solana, b.digest()).await?,
+            Some(b)
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn demote_to_orphan_splits_above_and_at_settled_height() -> anyhow::Result<()> {
+        let chain = Chain::Ethereum;
+        let storage = CheckpointStorage::in_memory();
+        let cp = |height| Checkpoint {
+            chain,
+            block_height: height,
+            pending_requests: vec![],
+            legacy_digest: None,
+        };
+        let below = cp(90);
+        let at = cp(100);
+        let above = cp(110);
+        for c in [&below, &at, &above] {
+            storage.persist_pending(c).await?;
+        }
+
+        assert_eq!(
+            storage.demote_to_orphan(chain, 100).await?,
+            DemoteOutcome {
+                demoted: 1,
+                dropped: 2
+            }
+        );
+        assert!(storage.load_pending(chain).await?.is_empty());
+        assert_eq!(storage.pending_count(chain).await?, 0);
+        // The stale bodies are gone from both stores; only the body above survives.
+        assert_eq!(storage.find(chain, below.digest()).await?, None);
+        assert_eq!(storage.find(chain, at.digest()).await?, None);
+        assert_eq!(storage.find(chain, above.digest()).await?, Some(above));
+
+        // Idempotent: a second call finds nothing left to move or drop.
+        assert_eq!(
+            storage.demote_to_orphan(chain, 100).await?,
+            DemoteOutcome::default()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn height_field_orders_u64_exactly() {
+        // The Redis Lua `clear_orphan_up_to` compares these fixed-width strings
+        // lexicographically. Verify the mapping is order-preserving across the
+        // full u64 range, including values above 2^53 where `tonumber` rounds.
+        let heights = [
+            0u64,
+            1,
+            9,
+            10,
+            99,
+            100,
+            (1u64 << 53) - 1,
+            1u64 << 53,
+            (1u64 << 53) + 1,
+            u64::MAX - 1,
+            u64::MAX,
+        ];
+        for pair in heights.windows(2) {
+            let left = CheckpointStorage::height_field(pair[0]);
+            let right = CheckpointStorage::height_field(pair[1]);
+            assert_eq!(left.len(), 20);
+            assert!(left < right, "{:?} !< {:?}", pair[0], pair[1]);
+        }
+        // Equality at the boundary is inclusive: clearing "up to" H keeps > H.
+        let h = 1u64 << 60;
+        assert_eq!(
+            CheckpointStorage::height_field(h),
+            CheckpointStorage::height_field(h)
+        );
+        assert!(CheckpointStorage::height_field(h) < CheckpointStorage::height_field(h + 1));
     }
 }
