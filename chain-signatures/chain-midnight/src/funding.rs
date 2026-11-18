@@ -574,7 +574,10 @@ async fn subscribe_once(shared: Arc<Shared>, source: Arc<dyn DustEventSource>) -
                 match tokio::task::spawn_blocking(move || apply(&applying, batch)).await {
                     Ok(Ok(())) => {}
                     Ok(Err(error)) => {
-                        tracing::warn!(?error, "midnight funding wallet: DUST replay failed");
+                        tracing::warn!(
+                            error = %format_args!("{error:#}"),
+                            "midnight funding wallet: DUST replay failed"
+                        );
                         return if error.is::<Restarted>() {
                             Ended::Restarted { caught_up }
                         } else {
@@ -592,7 +595,7 @@ async fn subscribe_once(shared: Arc<Shared>, source: Arc<dyn DustEventSource>) -
         }
         Err(error) => {
             tracing::warn!(
-                ?error,
+                error = %format_args!("{error:#}"),
                 "midnight funding wallet: DUST event subscription failed"
             );
             return Ended::Refused;
@@ -1636,6 +1639,84 @@ pub(crate) mod tests {
             .ready_by(Instant::now() + std::time::Duration::from_secs(30))
             .await
             .unwrap();
+    }
+
+    /// Refuses the first subscription and drops the second, each failure under a context.
+    struct FailsTwice(std::sync::atomic::AtomicUsize);
+
+    #[async_trait]
+    impl DustEventSource for FailsTwice {
+        async fn subscribe(
+            &self,
+            _from: Option<u64>,
+        ) -> anyhow::Result<BoxStream<'static, anyhow::Result<DustEventUpdate>>> {
+            match self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst) {
+                0 => Err(anyhow::anyhow!("HTTP error: 503 Service Unavailable")
+                    .context("connecting to the indexer subscription")),
+                1 => Ok(futures_util::stream::iter([Err(anyhow::anyhow!(
+                    "Connection reset without closing handshake"
+                )
+                .context("reading the indexer subscription"))])
+                .chain(futures_util::stream::pending())
+                .boxed()),
+                _ => Ok(futures_util::stream::pending().boxed()),
+            }
+        }
+
+        async fn indexed_time(&self) -> anyhow::Result<Timestamp> {
+            unimplemented!("never asked")
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct LogWriter(Arc<Mutex<Vec<u8>>>);
+
+    impl std::io::Write for LogWriter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Log collectors keep one entry per line, so why the indexer dropped a subscription
+    /// has to be on the line that says it did.
+    #[tokio::test(start_paused = true)]
+    async fn an_indexer_failure_is_logged_on_one_line_with_its_cause() {
+        let logs = LogWriter::default();
+        let writer = logs.clone();
+        // Keep a second scoped dispatch registered so callsites first reached by a
+        // parallel test register against the live dispatches, not that thread's default.
+        let _registration_guard = tracing::subscriber::set_default(tracing_subscriber::registry());
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_writer(move || writer.clone())
+            .finish();
+        let _subscriber_guard = tracing::subscriber::set_default(subscriber);
+        let source = Arc::new(FailsTwice(Default::default()));
+        let _wallet = FundingWallet::start(funded_key(), source.clone(), None);
+        while source.0.load(std::sync::atomic::Ordering::SeqCst) < 3 {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+
+        let recorded = String::from_utf8(logs.0.lock().unwrap().clone()).unwrap();
+        for (message, cause) in [
+            ("DUST event subscription failed", "503 Service Unavailable"),
+            (
+                "DUST replay failed",
+                "Connection reset without closing handshake",
+            ),
+        ] {
+            let line = recorded
+                .lines()
+                .find(|line| line.contains(message))
+                .unwrap_or_else(|| panic!("no {message:?} line in {recorded}"));
+            assert!(line.contains(cause), "{recorded}");
+        }
     }
 
     /// Delivers the fixture and ends; every later subscription stays silent.
