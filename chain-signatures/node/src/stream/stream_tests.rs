@@ -194,7 +194,7 @@ async fn test_stream_handles_sign_and_respond() {
     .await
     .expect("supervisor should exit cleanly");
 
-    // We should have received the Request then Completion
+    // We should have received the Request then the response
     let msg1 = timeout(Duration::from_secs(1), sign_rx.recv())
         .await
         .unwrap()

@@ -290,7 +290,7 @@ async fn process_execution_confirmed_failed_advance_parks_the_entry() {
     );
     assert_matches!(
         sign_rx.try_recv(),
-        Ok(SignCommand::Completion(id)) if id == tx.sign_id()
+        Ok(SignCommand::Retire(id)) if id == tx.sign_id()
     );
 }
 
@@ -3094,7 +3094,7 @@ async fn decode_failure_parks_request_and_preserves_source_checkpoint() {
             );
             assert_matches!(
                 sign_rx.try_recv().expect("parked request must stop its signing task"),
-                SignCommand::Completion(id) if id == tx.sign_id()
+                SignCommand::Retire(id) if id == tx.sign_id()
             );
             assert!(sign_rx.try_recv().is_err(), "no response should be signed");
             assert_matches!(

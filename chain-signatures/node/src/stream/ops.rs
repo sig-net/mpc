@@ -328,7 +328,7 @@ pub(crate) async fn process_respond_event(
             .await?;
         if !kept {
             ctx.sign_tx
-                .send(SignCommand::Completion(sign_id))
+                .send(SignCommand::Retire(sign_id))
                 .await
                 .context("sign command channel closed")?;
         }
@@ -745,7 +745,7 @@ async fn answer_execution(
         entry.park().await?;
         // Sent even during catchup: nothing requeues a parked request.
         ctx.sign_tx
-            .send(SignCommand::Completion(sign_id))
+            .send(SignCommand::Retire(sign_id))
             .await
             .context("failed to send completion into queue")?;
         return Ok(());
@@ -781,7 +781,7 @@ async fn answer_execution(
             }
             if ctx
                 .sign_tx
-                .send(SignCommand::Completion(sign_id))
+                .send(SignCommand::Retire(sign_id))
                 .await
                 .is_err()
             {

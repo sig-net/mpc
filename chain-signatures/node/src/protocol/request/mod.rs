@@ -361,11 +361,11 @@ impl SignatureSpawner {
             .push(msg);
     }
 
-    /// A peer/chain reported this signature done: tear down and abort our task.
-    fn handle_completion(&mut self, sign_id: SignId) {
-        let aborted = self.retire_all(sign_id, "completion");
+    /// The request ended on chain: tear down and abort our task.
+    fn handle_retire(&mut self, sign_id: SignId, reason: &'static str) {
+        let aborted = self.retire_all(sign_id, reason);
         if aborted {
-            tracing::info!(?sign_id, "aborting signature task due to completion event");
+            tracing::info!(?sign_id, %reason, "aborting signature task; the request ended");
         } else {
             tracing::info!(?sign_id, "task already completed or unable to be aborted");
         }
@@ -492,12 +492,12 @@ impl SignatureSpawner {
         signature_timeout: Duration,
     ) {
         match sign {
-            SignCommand::Completion(sign_id) => {
-                self.handle_completion(sign_id);
+            SignCommand::Retire(sign_id) => {
+                self.handle_retire(sign_id, "retired");
             }
             SignCommand::Responded { sign_id, kind } => {
                 self.delay_monitor.responded(sign_id, kind);
-                self.handle_completion(sign_id);
+                self.handle_retire(sign_id, "responded");
             }
             SignCommand::LegCompleted { sign_id, kind } => {
                 self.delay_monitor.responded(sign_id, kind);
@@ -748,8 +748,8 @@ mod tests {
             self.handle_sign(SignCommand::LegCompleted { sign_id, kind });
         }
 
-        fn completion(&mut self, sign_id: SignId) {
-            self.handle_sign(SignCommand::Completion(sign_id));
+        fn retire(&mut self, sign_id: SignId) {
+            self.handle_sign(SignCommand::Retire(sign_id));
         }
 
         fn abort_chain(&mut self, chain: Chain) {
@@ -1315,8 +1315,8 @@ mod tests {
         spawner.handle_posit(sign_id, RequestKind::RespondBidirectional, propose(124));
         assert!(spawner.test_posit_mailboxes_contains(&sign_id, RequestKind::RespondBidirectional));
 
-        // 3. Completion arrives: must retire first leg AND buffered second leg posits, consuming exactly 1 LRU slot
-        spawner.completion(sign_id);
+        // 3. Retire arrives: must retire first leg AND buffered second leg posits, consuming exactly 1 LRU slot
+        spawner.retire(sign_id);
         assert!(!spawner.test_tasks_contains(sign_id, RequestKind::SignBidirectional));
         assert!(!spawner.test_requests_contains(&sign_id));
         assert!(!spawner.test_posit_mailboxes_contains(&sign_id, RequestKind::SignBidirectional));
