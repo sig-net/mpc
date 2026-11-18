@@ -972,6 +972,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_close_code_the_protocol_reserves_or_forbids_is_reported_as_1002() {
+        for code in [1005, 1006, 1015, 5000] {
+            let (url, server) = indexer(move |mut socket| async move {
+                assert_eq!(receive(&mut socket).await["type"], "connection_init");
+                close(&mut socket, Some((code, "reserved"))).await;
+            })
+            .await;
+            let error =
+                tokio::time::timeout(TEST_TIMEOUT, IndexerDustEvents::new(url).subscribe(None))
+                    .await
+                    .expect("a close ends the handshake")
+                    .err()
+                    .expect("a closed handshake opens no subscription");
+            server.await.unwrap();
+            let error = format!("{error:#}");
+            assert!(
+                error.contains("code 1002") && error.contains("Protocol violation"),
+                "{code}: {error}"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn a_close_while_naming_the_newest_event_is_answered_at_once() {
         let (url, server) = indexer(|mut socket| async move {
             accept(&mut socket).await;
