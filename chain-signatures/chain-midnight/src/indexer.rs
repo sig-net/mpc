@@ -14,6 +14,8 @@ use crate::reader::{
 use crate::records::SignBidirectionalEventNotification;
 use crate::rpc::{is_oversized_contract_state, BlockRef};
 use crate::source::{BlockEmissions, ChainSource, ContractState, LiveSource};
+use crate::types::BlockHash;
+use crate::types::MidnightAddress;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -137,8 +139,8 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
         }) = source
             .block_emissions(
                 block,
-                self.config.central_address.as_bytes(),
-                self.config.responder_address.as_bytes(),
+                &self.config.central_address,
+                &self.config.responder_address,
             )
             .await?
         else {
@@ -148,8 +150,7 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
         // finalized block. Check the source's proof seed is for the block indexed.
         anyhow::ensure!(
             proof_seed.reported_block_number == block.number
-                && hex::encode(proof_seed.reported_block_hash)
-                    == block.hash.trim_start_matches("0x").to_ascii_lowercase(),
+                && proof_seed.reported_block_hash == *block.hash.as_bytes(),
             "midnight proof seed does not match indexed block {} ({})",
             block.number,
             block.hash
@@ -216,17 +217,17 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
                                 .process_entry(
                                     source,
                                     notification,
-                                    caller,
+                                    caller.map(MidnightAddress::from_bytes),
                                     &block.hash,
                                     block.number,
                                     block_entropy,
-                                    maybe_rolled_back.then_some(block.parent_hash.as_str()),
+                                    maybe_rolled_back.then_some(&block.parent_hash),
                                     indexed_ts,
                                 )
                                 .await
                                 .with_context(|| format!(
                                     "midnight notification tx_hash={} request_id={request_id} height={} extrinsic_index={} call_index={call_index} segment={physical_segment} phase={phase:?}",
-                                    hex::encode(candidate.ledger_tx_hash), block.number, candidate.extrinsic_index,
+                                    candidate.ledger_tx_hash, block.number, candidate.extrinsic_index,
                                 ))?
                             {
                                 tracing::info!(
@@ -237,7 +238,7 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
                                     call_index,
                                     physical_segment,
                                     ?phase,
-                                    tx_hash = %hex::encode(candidate.ledger_tx_hash),
+                                    tx_hash = %candidate.ledger_tx_hash,
                                     sign_id = ?request.id,
                                     "midnight signature requested"
                                 );
@@ -251,7 +252,7 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
                             } else {
                                 tracing::warn!(
                                     reason = "notification-not-indexed",
-                                    tx_hash = %hex::encode(candidate.ledger_tx_hash),
+                                    tx_hash = %candidate.ledger_tx_hash,
                                     request_id,
                                     height = block.number,
                                     block_hash = %block.hash,
@@ -343,11 +344,11 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
         &self,
         source: &C,
         notification: SignBidirectionalEventNotification,
-        caller: Option<[u8; 32]>,
-        at_hash: &str,
+        direct_caller: Option<MidnightAddress>,
+        at_hash: &BlockHash,
         height: u64,
         block_entropy: [u8; 32],
-        rolled_back_parent: Option<&str>,
+        rolled_back_parent: Option<&BlockHash>,
         indexed_ts: u64,
     ) -> anyhow::Result<Option<IndexedSignRequest>> {
         let rid = notification.request_id;
@@ -371,21 +372,18 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
                 ));
             }
         };
-        let caller_hex = hex::encode(unpacked.caller_address);
+        let notified = MidnightAddress::from_bytes(unpacked.caller_address);
 
         // `caller_address` is producer-supplied, since a Midnight callee cannot see its caller.
         // Bind it to the ledger-recorded direct caller so no contract can notify as another.
-        match caller {
-            Some(caller) if caller == unpacked.caller_address => {}
-            Some(caller) => {
+        match direct_caller {
+            Some(direct) if direct == notified => {}
+            Some(direct) => {
                 return Ok(drop_entry(
                     "caller-mismatch",
                     height,
                     Some(rid),
-                    &format!(
-                        "notification names {caller_hex}, direct caller is {}",
-                        hex::encode(caller)
-                    ),
+                    &format!("notification names {notified}, direct caller is {direct}"),
                 ));
             }
             None => {
@@ -393,23 +391,21 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
                     "caller-absent",
                     height,
                     Some(rid),
-                    &format!(
-                        "notification names {caller_hex}, singleton call has no direct caller"
-                    ),
+                    &format!("notification names {notified}, singleton call has no direct caller"),
                 ));
             }
         }
 
         // Authority: the caller's own ledger at the SAME finalized hash the
         // notification was read at.
-        let caller_tree = match source.contract_state_tree(&caller_hex, at_hash).await {
+        let caller_tree = match source.contract_state_tree(&notified, at_hash).await {
             Ok(ContractState::Tree(tree)) => tree,
             Ok(ContractState::Absent) => {
                 return Ok(drop_entry(
                     "caller-contract-absent",
                     height,
                     Some(rid),
-                    &caller_hex,
+                    &notified.to_string(),
                 ));
             }
             Ok(ContractState::Undecodable(err)) => {
@@ -417,7 +413,7 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
                     "caller-state-undecodable",
                     height,
                     Some(rid),
-                    &format!("{caller_hex}: {err:#}"),
+                    &format!("{notified}: {err:#}"),
                 ));
             }
             Err(err) if is_oversized_contract_state(&err) => {
@@ -425,11 +421,11 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
                     "caller-state-too-large",
                     height,
                     Some(rid),
-                    &format!("{caller_hex}: {err:#}"),
+                    &format!("{notified}: {err:#}"),
                 ));
             }
             Err(err) => {
-                return Err(err.context(format!("failed to read caller state {caller_hex}")));
+                return Err(err.context(format!("failed to read caller state {notified}")));
             }
         };
         let field = match signet_field_node_by_path(&caller_tree, &unpacked.requests_path) {
@@ -467,7 +463,7 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
         // transaction wrote. Only a record new in this block was written by a committed
         // segment of this block.
         if let Some(parent_hash) = rolled_back_parent {
-            let parent_tree = match source.contract_state_tree(&caller_hex, parent_hash).await {
+            let parent_tree = match source.contract_state_tree(&notified, parent_hash).await {
                 Ok(ContractState::Tree(tree)) => Some(tree),
                 Ok(ContractState::Absent) => None,
                 Ok(ContractState::Undecodable(err)) => {
@@ -475,7 +471,7 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
                         "parent-state-undecodable",
                         height,
                         Some(rid),
-                        &format!("{caller_hex}: {err:#}"),
+                        &format!("{notified}: {err:#}"),
                     ));
                 }
                 Err(err) if is_oversized_contract_state(&err) => {
@@ -483,12 +479,12 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
                         "parent-state-too-large",
                         height,
                         Some(rid),
-                        &format!("{caller_hex}: {err:#}"),
+                        &format!("{notified}: {err:#}"),
                     ));
                 }
                 Err(err) => {
                     return Err(err.context(format!(
-                        "failed to read caller state {caller_hex} at the parent block"
+                        "failed to read caller state {notified} at the parent block"
                     )));
                 }
             };
@@ -512,7 +508,7 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
                             height,
                             Some(rid),
                             &format!(
-                                "{caller_hex} held the record before this block, and this \
+                                "{notified} held the record before this block, and this \
                                  fallible notification of a partial success may have rolled back"
                             ),
                         ));
@@ -530,7 +526,7 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
         }
         match generate_sign_request(
             &record,
-            &unpacked.caller_address,
+            &notified,
             rid,
             block_entropy,
             indexed_ts,
@@ -769,6 +765,7 @@ mod tests {
         array_of, ascii_padded, cell_from_record, hex_32, key_of, map_of, notification_payload,
         response_payload, sample_record, test_root_pk, EventRecorder,
     };
+    use crate::types::LedgerTxHash;
     use midnight_onchain_state::state::StateValue;
     use mpc_chain_integration_core::utils::{hashing::hash_payload, stream::chain_event_channel};
     use mpc_chain_integration_core::{MockStateManager, NoopChainTelemetry};
@@ -799,6 +796,10 @@ mod tests {
     const CAPTURE_NOTIFY_TX: &[u8] = include_bytes!("../fixtures/notify-tx-156.mn");
     const CAPTURE_CALLER_STATE: &[u8] = include_bytes!("../fixtures/caller-post-state-156.mn");
 
+    fn capture_block_hash() -> BlockHash {
+        BlockHash::from_0x_hex(CAPTURE_BLOCK_HASH).expect("capture hash is 0x-prefixed 32-byte hex")
+    }
+
     fn test_config() -> MidnightConfig {
         MidnightConfig {
             node_url: "http://127.0.0.1:1".parse().unwrap(),
@@ -817,8 +818,8 @@ mod tests {
         }
     }
 
-    fn hash_of(number: u64) -> String {
-        format!("0x{number:064x}")
+    fn hash_of(number: u64) -> BlockHash {
+        BlockHash::from_bytes(hash_bytes(number))
     }
 
     fn hash_bytes(number: u64) -> [u8; 32] {
@@ -853,7 +854,7 @@ mod tests {
             block_time_ms: fixture_block_ms(height),
             proof_seed: proof_seed(height),
             candidates: vec![CandidateTransactionEmissions {
-                ledger_tx_hash: LEDGER_TX_HASH,
+                ledger_tx_hash: LedgerTxHash::from_bytes(LEDGER_TX_HASH),
                 extrinsic_index: 1,
                 partial_success: false,
                 singleton_calls: calls,
@@ -916,10 +917,10 @@ mod tests {
         emissions: HashMap<u64, Option<BlockEmissions>>,
         emission_errors: Mutex<HashMap<u64, (String, usize)>>,
         emission_holds: HashMap<u64, &'static str>,
-        states: HashMap<(String, String), crate::reader::Node>,
-        state_errors: HashMap<(String, String), String>,
-        oversized_states: HashSet<(String, String)>,
-        undecodable_states: HashMap<(String, String), String>,
+        states: HashMap<(MidnightAddress, BlockHash), crate::reader::Node>,
+        state_errors: HashMap<(MidnightAddress, BlockHash), String>,
+        oversized_states: HashSet<(MidnightAddress, BlockHash)>,
+        undecodable_states: HashMap<(MidnightAddress, BlockHash), String>,
         transient_head_errors: Mutex<usize>,
         block_errors: HashSet<u64>,
         live: tokio::sync::Mutex<Option<mpsc::Receiver<BlockRef>>>,
@@ -949,18 +950,22 @@ mod tests {
         }
 
         fn set_state(&mut self, address: [u8; 32], height: u64, state: crate::reader::Node) {
-            self.states
-                .insert((hex::encode(address), hash_of(height)), state);
+            self.states.insert(
+                (MidnightAddress::from_bytes(address), hash_of(height)),
+                state,
+            );
         }
 
         fn set_state_error(&mut self, address: [u8; 32], height: u64, message: &str) {
-            self.state_errors
-                .insert((hex::encode(address), hash_of(height)), message.to_string());
+            self.state_errors.insert(
+                (MidnightAddress::from_bytes(address), hash_of(height)),
+                message.to_string(),
+            );
         }
 
         fn set_oversized_state(&mut self, address: [u8; 32], height: u64) {
             self.oversized_states
-                .insert((hex::encode(address), hash_of(height)));
+                .insert((MidnightAddress::from_bytes(address), hash_of(height)));
         }
 
         fn set_transient_emission_error(&mut self, height: u64, times: usize, message: &str) {
@@ -1024,11 +1029,19 @@ mod tests {
         async fn block_emissions(
             &self,
             block: &BlockRef,
-            singleton: &[u8; 32],
-            responder: &[u8; 32],
+            singleton: &MidnightAddress,
+            responder: &MidnightAddress,
         ) -> anyhow::Result<Option<BlockEmissions>> {
-            assert_eq!(singleton, &SINGLETON, "configured singleton bytes");
-            assert_eq!(responder, &RESPONDER, "configured responder bytes");
+            assert_eq!(
+                singleton,
+                &MidnightAddress::from_bytes(SINGLETON),
+                "configured singleton bytes"
+            );
+            assert_eq!(
+                responder,
+                &MidnightAddress::from_bytes(RESPONDER),
+                "configured responder bytes"
+            );
             if let Some(reason) = self.emission_holds.get(&block.number) {
                 return Err(BlockHold::new(
                     reason,
@@ -1053,10 +1066,10 @@ mod tests {
 
         async fn contract_state_tree(
             &self,
-            address_64hex: &str,
-            at_hash: &str,
+            address: &MidnightAddress,
+            at_hash: &BlockHash,
         ) -> anyhow::Result<ContractState> {
-            let key = (address_64hex.to_string(), at_hash.to_string());
+            let key = (*address, *at_hash);
             if self.oversized_states.contains(&key) {
                 return Err(crate::rpc::oversized_contract_state(
                     "fixture oversized contract state",
@@ -1273,7 +1286,11 @@ mod tests {
         source.emissions.insert(42, Some(expected.clone()));
 
         let carried = source
-            .block_emissions(&block_ref(42), &SINGLETON, &RESPONDER)
+            .block_emissions(
+                &block_ref(42),
+                &MidnightAddress::from_bytes(SINGLETON),
+                &MidnightAddress::from_bytes(RESPONDER),
+            )
             .await
             .expect("source read")
             .expect("candidate block");
@@ -1392,7 +1409,7 @@ mod tests {
 
         let record_from = |sender: [u8; 32], nonce: u64| {
             let mut record = sample_record();
-            record.sender = sender;
+            record.sender = MidnightAddress::from_bytes(sender);
             record.execution_dest = ascii_padded(b"eip155:1");
             record.evm_mut().nonce = nonce;
             let rid = crate::hashing::compute_request_id(&record).unwrap();
@@ -1647,7 +1664,7 @@ mod tests {
         let caller = hex_32(CAPTURE_CALLER);
         let mut source = FixtureSource::default();
         source.states.insert(
-            (hex::encode(caller), CAPTURE_BLOCK_HASH.to_string()),
+            (MidnightAddress::from_bytes(caller), capture_block_hash()),
             caller_tree,
         );
 
@@ -1656,8 +1673,8 @@ mod tests {
             .process_entry(
                 &source,
                 notification.clone(),
-                call.caller,
-                CAPTURE_BLOCK_HASH,
+                call.caller.map(MidnightAddress::from_bytes),
+                &capture_block_hash(),
                 CAPTURE_HEIGHT,
                 [0x55; 32],
                 None,
@@ -1672,7 +1689,7 @@ mod tests {
 
         let captured_tree = source
             .states
-            .get(&(hex::encode(caller), CAPTURE_BLOCK_HASH.to_string()))
+            .get(&(MidnightAddress::from_bytes(caller), capture_block_hash()))
             .expect("captured caller state is installed");
         let requests_path = unpack_notification_v1(&notification)
             .expect("captured notification unpacks")
@@ -1703,7 +1720,7 @@ mod tests {
         let request_id = upgrade_from_transient(transient_hash(&preimage)).0;
         notification.request_id = request_id;
         source.states.insert(
-            (hex::encode(caller), CAPTURE_BLOCK_HASH.to_string()),
+            (MidnightAddress::from_bytes(caller), capture_block_hash()),
             array_of(vec![
                 StateValue::Null,
                 StateValue::Null,
@@ -1718,8 +1735,8 @@ mod tests {
             .process_entry(
                 &source,
                 notification,
-                call.caller,
-                CAPTURE_BLOCK_HASH,
+                call.caller.map(MidnightAddress::from_bytes),
+                &capture_block_hash(),
                 CAPTURE_HEIGHT,
                 [0x55; 32],
                 None,
@@ -2111,7 +2128,7 @@ mod tests {
                 source.set_oversized_state(CALLER, 9);
             } else {
                 source.undecodable_states.insert(
-                    (hex::encode(CALLER), hash_of(9)),
+                    (MidnightAddress::from_bytes(CALLER), hash_of(9)),
                     "unexpected state tag".to_string(),
                 );
             }
@@ -2434,7 +2451,7 @@ mod tests {
             match case {
                 "undecodable" => {
                     source.undecodable_states.insert(
-                        (hex::encode(CALLER), hash_of(8)),
+                        (MidnightAddress::from_bytes(CALLER), hash_of(8)),
                         "unexpected state tag".to_string(),
                     );
                 }
@@ -2501,6 +2518,31 @@ mod tests {
         }
     }
 
+    /// The seed's reported hash must be the indexed block's hash, byte for byte.
+    #[tokio::test]
+    async fn a_divergent_proof_seed_refuses_the_block() {
+        let mut source = FixtureSource::default();
+        source.set_emissions(9, Vec::new());
+        source
+            .emissions
+            .get_mut(&9)
+            .expect("emissions installed")
+            .as_mut()
+            .expect("emissions present")
+            .proof_seed
+            .reported_block_hash = hash_bytes(800);
+
+        let err = direct_indexer()
+            .await
+            .process_block(&source, &block_ref(9))
+            .await
+            .expect_err("a seed for another block must refuse the block");
+        assert!(
+            format!("{err:#}").contains("proof seed does not match indexed block 9"),
+            "{err:#}"
+        );
+    }
+
     #[tokio::test]
     async fn an_unreadable_parent_state_holds_a_partial_success() {
         let (record, rid) = named_record_and_rid(7);
@@ -2544,7 +2586,7 @@ mod tests {
         let (good_record, good_rid) = named_record_and_rid(7);
         let mut bad_record = sample_record();
         bad_record.evm_mut().nonce = 8;
-        bad_record.algo = 1;
+        bad_record.algo = crate::records::MpcSignatureAlgorithm::Reserved;
         let bad_rid = crate::hashing::compute_request_id(&bad_record).unwrap();
         let mut source = FixtureSource::default();
         source.set_emissions(
