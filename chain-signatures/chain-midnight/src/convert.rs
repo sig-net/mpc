@@ -401,6 +401,26 @@ mod tests {
         );
     }
 
+    /// Pin the bails for the Reserved arms of the algorithm and signature destination checks.
+    #[test]
+    fn generate_sign_request_refuses_a_reserved_algo() {
+        let mut record = caller_record();
+        record.algo = MpcSignatureAlgorithm::Reserved;
+        let err = generate_sign_request(
+            &record,
+            &READ_ADDRESS,
+            REQUEST_ID,
+            BLOCK_HASH,
+            INDEXED_TS,
+            test_root_pk(),
+        )
+        .expect_err("a reserved algo must not sign");
+        assert!(
+            format!("{err:#}").contains("unsupported algo"),
+            "the refusal must name the reserved algorithm: {err:#}"
+        );
+    }
+    
     /// The one refusal arm no other test reaches.
     #[test]
     fn generate_sign_request_refuses_a_reserved_signature_dest() {
