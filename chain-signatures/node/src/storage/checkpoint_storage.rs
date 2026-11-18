@@ -19,9 +19,9 @@ pub enum CheckpointStorage {
         latest: Arc<RwLock<HashMap<Chain, Checkpoint>>>,
         pending: Arc<RwLock<HashMap<Chain, BTreeMap<u64, Checkpoint>>>>,
         local: Arc<RwLock<HashMap<Chain, LocalRecords>>>,
-        /// Number of upcoming `load_pending` calls to fail, for tests of transient errors.
+        /// Upcoming calls to fail, for tests of transient errors.
         #[cfg(test)]
-        load_pending_failures: Arc<std::sync::atomic::AtomicUsize>,
+        injected_failures: Arc<InjectedFailures>,
     },
     /// A storage configured to fail operations, used to exercise error paths in tests.
     #[cfg(test)]
@@ -41,7 +41,7 @@ impl CheckpointStorage {
             pending: Arc::new(RwLock::new(HashMap::new())),
             local: Arc::default(),
             #[cfg(test)]
-            load_pending_failures: Arc::default(),
+            injected_failures: Arc::default(),
         }
     }
 
@@ -54,30 +54,39 @@ impl CheckpointStorage {
     #[cfg(test)]
     pub fn fail_next_load_pending(&self, times: usize) {
         if let Self::InMemory {
-            load_pending_failures,
-            ..
+            injected_failures, ..
         } = self
         {
-            load_pending_failures.store(times, std::sync::atomic::Ordering::SeqCst);
+            injected_failures
+                .load_pending
+                .store(times, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    /// Makes the next `times` calls to `persist_pending` fail after the write,
+    /// as when the reply is lost; in-memory storage only.
+    #[cfg(test)]
+    pub fn fail_next_persist_pending(&self, times: usize) {
+        if let Self::InMemory {
+            injected_failures, ..
+        } = self
+        {
+            injected_failures
+                .persist_pending
+                .store(times, std::sync::atomic::Ordering::SeqCst);
         }
     }
 
     #[cfg(test)]
     fn take_injected_load_pending_failure(&self) -> bool {
-        let Self::InMemory {
-            load_pending_failures,
-            ..
-        } = self
-        else {
-            return false;
-        };
-        load_pending_failures
-            .fetch_update(
-                std::sync::atomic::Ordering::SeqCst,
-                std::sync::atomic::Ordering::SeqCst,
-                |remaining| remaining.checked_sub(1),
-            )
-            .is_ok()
+        matches!(self, Self::InMemory { injected_failures, .. }
+            if take_injected_failure(&injected_failures.load_pending))
+    }
+
+    #[cfg(test)]
+    fn take_injected_persist_pending_failure(&self) -> bool {
+        matches!(self, Self::InMemory { injected_failures, .. }
+            if take_injected_failure(&injected_failures.persist_pending))
     }
 
     fn key(&self, kind: &str, chain: Chain) -> String {
@@ -230,8 +239,9 @@ impl CheckpointStorage {
     }
 
     /// Persist an unconfirmed checkpoint before its digest is submitted for consensus.
-    /// Returns true if newly persisted, or false if already persisted.
-    pub async fn persist_pending(&self, checkpoint: &Checkpoint) -> anyhow::Result<bool> {
+    /// Returns the number of pending checkpoints afterwards, or `None` if a
+    /// different checkpoint is already stored at that height.
+    pub async fn persist_pending(&self, checkpoint: &Checkpoint) -> anyhow::Result<Option<usize>> {
         match self {
             CheckpointStorage::Redis(pool, _) => {
                 let mut conn = pool.get().await.context("failed to get redis connection")?;
@@ -243,22 +253,22 @@ impl CheckpointStorage {
                 // - If an entry already exists at `block_height`:
                 //   - If its digest is different, return -1 (a body can differ in this node's
                 //     progress alone; conflicting checkpoint).
-                //   - If identical, return 0 (idempotent no-op).
-                // - If new, write `height -> body` to pending and `digest -> height` to index,
-                //   and return 1 (successfully inserted).
+                //   - If identical, it is an idempotent no-op.
+                // - If new, write `height -> body` to pending and `digest -> height` to index.
+                // Returns the pending count unless conflicting.
                 const PERSIST: &str = r#"
                     local existing = redis.call('HGET', KEYS[1], ARGV[1])
                     if existing then
                         if redis.call('HGET', KEYS[2], ARGV[3]) ~= ARGV[1] then
                             return -1
                         end
-                        return 0
+                    else
+                        redis.call('HSET', KEYS[1], ARGV[1], ARGV[2])
+                        redis.call('HSET', KEYS[2], ARGV[3], ARGV[1])
                     end
-                    redis.call('HSET', KEYS[1], ARGV[1], ARGV[2])
-                    redis.call('HSET', KEYS[2], ARGV[3], ARGV[1])
-                    return 1
+                    return redis.call('HLEN', KEYS[1])
                 "#;
-                let status: i32 = redis::Script::new(PERSIST)
+                let count: i64 = redis::Script::new(PERSIST)
                     .key(self.pending_checkpoint_key(checkpoint.chain))
                     .key(self.pending_digest_key(checkpoint.chain))
                     .arg(checkpoint.block_height)
@@ -267,27 +277,23 @@ impl CheckpointStorage {
                     .invoke_async(&mut conn)
                     .await
                     .context("failed to persist pending checkpoint to redis")?;
-                if status < 0 {
-                    anyhow::bail!(
-                        "conflicting pending checkpoint at height {}",
-                        checkpoint.block_height
-                    );
-                }
-                Ok(status == 1)
+                Ok(usize::try_from(count).ok())
             }
             CheckpointStorage::InMemory { pending, .. } => {
                 let mut pending = pending.write().await;
                 let checkpoints = pending.entry(checkpoint.chain).or_default();
-                if let Some(existing) = checkpoints.get(&checkpoint.block_height) {
-                    anyhow::ensure!(
-                        existing.digest() == checkpoint.digest(),
-                        "conflicting pending checkpoint at height {}",
-                        checkpoint.block_height
-                    );
-                    return Ok(false);
+                match checkpoints.get(&checkpoint.block_height) {
+                    Some(existing) if existing.digest() != checkpoint.digest() => return Ok(None),
+                    Some(_) => {}
+                    None => {
+                        checkpoints.insert(checkpoint.block_height, checkpoint.clone());
+                    }
                 }
-                checkpoints.insert(checkpoint.block_height, checkpoint.clone());
-                Ok(true)
+                #[cfg(test)]
+                if self.take_injected_persist_pending_failure() {
+                    anyhow::bail!("injected persist_pending failure");
+                }
+                Ok(Some(checkpoints.len()))
             }
             #[cfg(test)]
             CheckpointStorage::Failing => {
@@ -705,6 +711,26 @@ fn decode_checkpoint(bytes: &[u8]) -> anyhow::Result<Checkpoint> {
     ciborium::from_reader(bytes).context("failed to decode checkpoint CBOR")
 }
 
+/// Per-operation counts of upcoming calls to fail.
+#[cfg(test)]
+#[derive(Debug, Default)]
+pub struct InjectedFailures {
+    load_pending: std::sync::atomic::AtomicUsize,
+    persist_pending: std::sync::atomic::AtomicUsize,
+}
+
+/// Consumes one injected failure from `remaining`, if any is left.
+#[cfg(test)]
+fn take_injected_failure(remaining: &std::sync::atomic::AtomicUsize) -> bool {
+    remaining
+        .fetch_update(
+            std::sync::atomic::Ordering::SeqCst,
+            std::sync::atomic::Ordering::SeqCst,
+            |remaining| remaining.checked_sub(1),
+        )
+        .is_ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -807,9 +833,9 @@ mod tests {
                 ),
             ));
 
-        assert!(storage.persist_pending(&checkpoint).await?);
-        assert!(!storage.persist_pending(&checkpoint).await?);
-        assert!(storage.persist_pending(&conflicting).await.is_err());
+        assert_eq!(storage.persist_pending(&checkpoint).await?, Some(1));
+        assert_eq!(storage.persist_pending(&checkpoint).await?, Some(1));
+        assert_eq!(storage.persist_pending(&conflicting).await?, None);
         assert!(storage
             .promote_pending(Chain::Solana, [99; 32])
             .await?

@@ -18,7 +18,7 @@ mpc-primitives.workspace = true
 signet-crypto.workspace = true
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-getrandom = { version = "0.2.12", features = ["custom"] }
+getrandom.workspace = true
 
 # `derive_delta` is only used off-chain by the node, never in the wasm contract.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]

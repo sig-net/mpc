@@ -216,6 +216,8 @@ impl EthereumClient {
             Ok(blocks) => blocks,
             Err(err) => {
                 tracing::warn!(num_blocks, "get_blocks failed: {err:#}");
+                // `EthereumIndexer::process_range` refetches Missing items and
+                // propagates the first terminal refetch error to the supervisor.
                 block_ids.iter().copied().map(MaybeBlock::Missing).collect()
             }
         }

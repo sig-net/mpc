@@ -69,6 +69,8 @@ Because existing nodes are still running the previous release when the contract 
   1. **Phase 1 (Release $N$):** Introduce the new schema while keeping the legacy format (or wire emulation) intact and marked `#[deprecated]`. The contract/node accepts and/or emits both formats.
   2. **Phase 2 (Release $N+1$):** Once release $N$ is deployed on testnet and mainnet, release $N+1$'s compatibility test baseline advances to release $N$. The legacy format and its deprecated code can then be safely removed.
 
+*Exception: an entropy change must not be a rolling upgrade unless it activates at a fixed height.*
+
 ## Release flow
 
 Every second Tuesday is a **release day**. On it, in this order:

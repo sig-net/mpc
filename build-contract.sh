@@ -7,7 +7,7 @@ if [ -z "$CC" ] && [ -x "/opt/homebrew/opt/llvm/bin/clang" ]; then
     export CC="/opt/homebrew/opt/llvm/bin/clang"
 fi
 
-cargo +1.95.0 near build non-reproducible-wasm \
+cargo near build non-reproducible-wasm \
     --manifest-path chain-signatures/contract/Cargo.toml \
     --no-abi --env 'RUSTFLAGS=--cfg near -C link-arg=--allow-undefined' \
     "$@"

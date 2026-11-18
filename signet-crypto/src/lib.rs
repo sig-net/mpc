@@ -1,18 +1,20 @@
-//! Key-derivation primitives shared between the MPC network and its clients.
+//! Key-derivation and signature-reconstruction primitives shared between the
+//! MPC network and its clients.
 //!
 //! Everything here is a pure function of its inputs — the epsilon derivation
-//! scheme and derived-key computation the network uses. Clients compiling
-//! against this crate stay wire-correct by construction. Node-only helpers
-//! (secret-key derivation, NEAR account-id wrappers, checkpoint derivation,
-//! signature recovery on wasm) live in `mpc-crypto`.
+//! scheme, derived-key computation, and reconstruction of a signature from its
+//! secp256k1 components. Clients compiling against this crate stay
+//! wire-correct by construction. Node-only helpers (secret-key derivation, NEAR
+//! account-id wrappers, checkpoint derivation, recovery on wasm) live in
+//! `mpc-crypto`.
 
 mod kdf;
 
 pub use kdf::{
     derive_epsilon, derive_epsilon_bitcoin, derive_epsilon_canton, derive_epsilon_eth,
     derive_epsilon_hydration, derive_epsilon_midnight, derive_epsilon_sol, derive_key,
-    DerivationParams, UnsupportedKeyVersion, EPSILON_DERIVATION_PREFIX_V1,
-    EPSILON_DERIVATION_PREFIX_V2,
+    reconstruct_signature, x_coordinate, DerivationParams, UnsupportedKeyVersion,
+    EPSILON_DERIVATION_PREFIX_V1, EPSILON_DERIVATION_PREFIX_V2,
 };
 pub use signet_primitives::{PublicKey, ScalarExt};
 
