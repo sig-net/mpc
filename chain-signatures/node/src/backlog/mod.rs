@@ -464,14 +464,11 @@ impl Backlog {
             .unwrap_or_default();
         // Under the pending lock, as `add_published_tx` inserts: the
         // sweep sees every tx the entry holds when it runs.
+        let mut watchers = self.watchers(key.target).write().await;
         for other in others {
-            let other_key = WatchKey::of(&other);
-            self.watchers(other_key.target)
-                .write()
-                .await
-                .remove(&other_key);
+            watchers.remove(&WatchKey::of(&other));
         }
-        drop(pending);
+        drop((watchers, pending));
         Some(entry.with_execution_watch(ExecutionWatch::new(tx, observed_at)))
     }
 
