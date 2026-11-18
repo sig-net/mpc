@@ -454,7 +454,7 @@ impl SignatureSpawner {
         if let Some(tracked) = self.requests.get(&sign_id) {
             if tracked.entry.request().request_kind() == kind {
                 self.requests.remove(&sign_id);
-                tracing::debug!(?sign_id, ?kind, %reason, "retired sign request");
+                tracing::info!(?sign_id, ?kind, %reason, "retired sign request");
             }
         }
         self.posit_mailboxes.remove(&(sign_id, kind));
@@ -476,7 +476,7 @@ impl SignatureSpawner {
             self.posit_mailboxes.remove(&(sign_id, kind));
         }
         if self.requests.remove(&sign_id).is_some() {
-            tracing::debug!(?sign_id, %reason, "retired sign request");
+            tracing::info!(?sign_id, %reason, "retired sign request");
         }
         aborted
     }
