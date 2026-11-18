@@ -267,6 +267,11 @@ mod tests {
         };
 
         assert_eq!(
+            event.sender,
+            *READ_ADDRESS.as_bytes(),
+            "the event's sender is the address the record was read from"
+        );
+        assert_eq!(
             event.serialized_transaction,
             crate::tx::serialized_evm_tx(&record).expect("assembles"),
             "the event carries the record's own unsigned transaction bytes"
@@ -420,7 +425,7 @@ mod tests {
             "the refusal must name the reserved algorithm: {err:#}"
         );
     }
-    
+
     /// The one refusal arm no other test reaches.
     #[test]
     fn generate_sign_request_refuses_a_reserved_signature_dest() {
