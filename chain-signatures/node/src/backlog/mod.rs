@@ -130,12 +130,12 @@ impl PendingRequests {
 /// The watches for one target chain and their wait starts, under one
 /// lock: registering or resolving an execution touches both atomically.
 #[derive(Debug, Clone, Default)]
-struct WatchedExecutions {
+struct ExecutionWatches {
     index: ExecutionWatchIndex,
     wait_starts: HashMap<WatchKey, Instant>,
 }
 
-impl WatchedExecutions {
+impl ExecutionWatches {
     /// `None` keeps a resident clock — a re-registration goes on
     /// waiting from its first observation.
     fn register(&mut self, tx: Arc<BidirectionalTx>, observed_at: Option<Instant>) {
@@ -175,7 +175,7 @@ pub struct Backlog {
     /// Pending requests indexed by chain
     requests: Arc<EnumMap<Chain, RwLock<PendingRequests>>>,
     /// Execution watchers indexed by chain, each with its wait starts
-    execution_watchers: Arc<EnumMap<Chain, RwLock<WatchedExecutions>>>,
+    execution_watchers: Arc<EnumMap<Chain, RwLock<ExecutionWatches>>>,
     /// Total number of pending requests across all chains, wrapped in Arc to make clonable
     total_pending: Arc<AtomicUsize>,
     /// Whether each chain's stream has caught up, read across streams
@@ -251,7 +251,7 @@ impl Backlog {
 
     /// Get the execution watchers for a specific chain.
     #[inline]
-    fn watchers(&self, chain: Chain) -> &RwLock<WatchedExecutions> {
+    fn watchers(&self, chain: Chain) -> &RwLock<ExecutionWatches> {
         &self.execution_watchers[chain]
     }
 

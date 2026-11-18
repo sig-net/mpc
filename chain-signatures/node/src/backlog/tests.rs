@@ -2025,9 +2025,9 @@ fn a_record_applies_only_to_an_entry_behind_it() {
 
 #[test]
 fn rebuild_drops_clocks_only_with_their_watches() {
-    use super::WatchedExecutions;
+    use super::ExecutionWatches;
 
-    let mut watches = WatchedExecutions::default();
+    let mut watches = ExecutionWatches::default();
     let dropped = mock_bidirectional_tx(SignId::from_u8(1), Chain::Solana);
     let kept = mock_bidirectional_tx(SignId::from_u8(2), Chain::Ethereum);
     watches.register(Arc::new(dropped.clone()), Some(Instant::now()));
