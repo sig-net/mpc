@@ -73,7 +73,7 @@ impl DelayMonitor {
     /// Spawns the single background delay monitor task.
     pub fn spawn() -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
-        let handle = tokio::spawn(Self::run(rx, Instant::now()));
+        let handle = tokio::spawn(Self::run(rx));
         Self { tx, handle }
     }
 
@@ -107,9 +107,9 @@ impl DelayMonitor {
         let _ = self.tx.send(DelayCommand::ForgetChain(chain));
     }
 
-    async fn run(mut rx: mpsc::UnboundedReceiver<DelayCommand>, started: Instant) {
+    async fn run(mut rx: mpsc::UnboundedReceiver<DelayCommand>) {
         let mut monitor = Monitor {
-            started,
+            started: Instant::now(),
             watched: HashMap::new(),
             queue: DelayQueue::new(),
             counted: LruCache::new(NonZeroUsize::new(MAX_COUNTED).unwrap()),
