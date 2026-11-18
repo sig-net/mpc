@@ -8,9 +8,7 @@ use jsonrpsee::core::client::{ClientT as _, Error as JsonrpseeClientError};
 use jsonrpsee::core::traits::ToRpcParams;
 use jsonrpsee::http_client::{HttpClient, HttpClientBuilder};
 use jsonrpsee::types::error::{INVALID_PARAMS_CODE, OVERSIZED_RESPONSE_CODE};
-use mpc_chain_integration_core::utils::retry::{
-    exhausted, is_retryable, RpcFailure, RetryConfig,
-};
+use mpc_chain_integration_core::utils::retry::{exhausted, is_retryable, RetryConfig, RpcFailure};
 use subxt::backend::legacy::rpc_methods::{BlockDetails, NumberOrHex};
 use subxt::backend::legacy::LegacyRpcMethods;
 use subxt::backend::rpc::{RawRpcFuture, RawRpcSubscription, RawValue, RpcClient, RpcClientT};
@@ -2535,8 +2533,7 @@ mod tests {
             (500, "Internal Server Error", true, false),
         ] {
             let (address, _calls, server) = http_status_server(status, reason).await;
-            let transport =
-                connect_http(&http_config(address)).expect("build request-only client");
+            let transport = connect_http(&http_config(address)).expect("build request-only client");
             let rpc = publisher_rpc(transport);
             let responder = test_address();
             let at_hash = test_at_hash();
