@@ -1496,7 +1496,7 @@ mod tests {
     use jsonrpsee::server::ServerBuilder;
     use jsonrpsee::types::ErrorObjectOwned;
     use jsonrpsee::RpcModule;
-    use mpc_chain_integration_core::utils::retry::is_provider_throttled;
+    use mpc_chain_integration_core::utils::retry::{is_provider_throttled, is_retryable};
     use serde_json::json;
     use std::io::Write as _;
     use std::net::SocketAddr;
