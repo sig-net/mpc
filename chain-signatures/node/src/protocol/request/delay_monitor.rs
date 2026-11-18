@@ -389,4 +389,32 @@ mod tests {
         settle(1).await;
         assert_eq!(delayed(aborted, kind) - aborted_before, 1);
     }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_late_leg_is_not_recounted_after_its_chain_is_aborted() {
+        let (chain, kind) = (Chain::Ethereum, RequestKind::RespondBidirectional);
+        let before = delayed(chain, kind);
+        let monitor = DelayMonitor::spawn();
+
+        monitor.watch(sign_id(11), kind, chain, 0, after(10));
+        settle(20).await;
+        monitor.abort_chain(chain);
+        monitor.watch(sign_id(11), kind, chain, 0, after(0));
+        settle(10).await;
+
+        assert_eq!(delayed(chain, kind) - before, 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_duplicate_watch_keeps_the_first_deadline() {
+        let (chain, kind) = (Chain::Solana, RequestKind::RespondBidirectional);
+        let before = delayed(chain, kind);
+        let monitor = DelayMonitor::spawn();
+
+        monitor.watch(sign_id(12), kind, chain, 0, after(20));
+        monitor.watch(sign_id(12), kind, chain, 0, after(100));
+        settle(30).await;
+
+        assert_eq!(delayed(chain, kind) - before, 1);
+    }
 }
