@@ -9,7 +9,7 @@ use jsonrpsee::core::traits::ToRpcParams;
 use jsonrpsee::http_client::{HttpClient, HttpClientBuilder};
 use jsonrpsee::types::error::{INVALID_PARAMS_CODE, OVERSIZED_RESPONSE_CODE};
 use mpc_chain_integration_core::utils::retry::{
-    exhausted, http_status_read_retryable, is_retryable, RpcFailure, RetryConfig,
+    exhausted, http_status_read_retryable, is_retryable, RetryConfig, RpcFailure,
 };
 use subxt::backend::legacy::rpc_methods::{BlockDetails, NumberOrHex};
 use subxt::backend::legacy::LegacyRpcMethods;
@@ -2542,8 +2542,7 @@ mod tests {
             (500, "Internal Server Error", true, false),
         ] {
             let (address, _calls, server) = http_status_server(status, reason).await;
-            let transport =
-                connect_http(&http_config(address)).expect("build request-only client");
+            let transport = connect_http(&http_config(address)).expect("build request-only client");
             let rpc = MidnightPublisherRpc {
                 rpc: transport.clone(),
                 legacy: LegacyRpcMethods::<SubstrateConfig>::new(transport),
@@ -2584,7 +2583,9 @@ mod tests {
     /// jsonrpsee's `Rejected` wire shape (jsonrpsee-http-client 0.24.10
     /// transport.rs:376), as a raw HTTP status fails these reads.
     fn rejected_read(status: u16) -> anyhow::Error {
-        let transport = jsonrpsee::http_client::transport::Error::Rejected { status_code: status };
+        let transport = jsonrpsee::http_client::transport::Error::Rejected {
+            status_code: status,
+        };
         let client = JsonrpseeClientError::Transport(Box::new(transport));
         anyhow::Error::new(RawRpcError::Client(Box::new(client)))
             .context("failed to fetch the midnight finalized head")
@@ -2622,8 +2623,9 @@ mod tests {
 
     #[test]
     fn an_oversized_state_read_is_terminal() {
-        let error =
-            attach_read_carrier(oversized_contract_state("server cap 1024 bytes").context("the pin"));
+        let error = attach_read_carrier(
+            oversized_contract_state("server cap 1024 bytes").context("the pin"),
+        );
         assert!(!is_retryable(&error), "{error:#}");
         assert!(!is_provider_throttled(&error), "{error:#}");
     }
