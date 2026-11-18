@@ -508,7 +508,7 @@ impl SignatureSpawner {
                     ?chain,
                     "aborting in-flight signature tasks to rebase onto the consensus checkpoint"
                 );
-                self.delay_monitor.forget_chain(chain);
+                self.delay_monitor.abort_chain(chain);
                 let to_abort: Vec<SignId> = self
                     .requests
                     .iter()

@@ -42,7 +42,7 @@ enum DelayCommand {
         deadline: Instant,
     },
     Responded(Leg),
-    ForgetChain(Chain),
+    AbortChain(Chain),
 }
 
 /// The deadline of a request indexed at `unix_timestamp_indexed`, `None` if it
@@ -103,8 +103,8 @@ impl DelayMonitor {
 
     /// Stops watching the chain's legs without counting them; they are watched
     /// again when re-admitted.
-    pub fn forget_chain(&self, chain: Chain) {
-        let _ = self.tx.send(DelayCommand::ForgetChain(chain));
+    pub fn abort_chain(&self, chain: Chain) {
+        let _ = self.tx.send(DelayCommand::AbortChain(chain));
     }
 
     async fn run(mut rx: mpsc::UnboundedReceiver<DelayCommand>) {
@@ -168,7 +168,7 @@ impl Monitor {
                 );
             }
             DelayCommand::Responded(leg) => self.responded(leg),
-            DelayCommand::ForgetChain(chain) => {
+            DelayCommand::AbortChain(chain) => {
                 let queue = &mut self.queue;
                 self.watched.retain(|_, watched| {
                     let keep = watched.chain != chain;
@@ -366,23 +366,23 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn forgetting_a_chain_drops_its_watches_uncounted() {
+    async fn aborting_a_chain_drops_its_watches_uncounted() {
         let kind = RequestKind::SignBidirectional;
-        let (forgotten, kept) = (Chain::Solana, Chain::Ethereum);
-        let (forgotten_before, kept_before) = (delayed(forgotten, kind), delayed(kept, kind));
+        let (aborted, kept) = (Chain::Solana, Chain::Ethereum);
+        let (aborted_before, kept_before) = (delayed(aborted, kind), delayed(kept, kind));
         let monitor = DelayMonitor::spawn();
 
-        monitor.watch(sign_id(7), kind, forgotten, 0, after(20));
+        monitor.watch(sign_id(7), kind, aborted, 0, after(20));
         monitor.watch(sign_id(8), kind, kept, 0, after(20));
-        monitor.forget_chain(forgotten);
+        monitor.abort_chain(aborted);
         settle(30).await;
 
-        assert_eq!(delayed(forgotten, kind) - forgotten_before, 0);
+        assert_eq!(delayed(aborted, kind) - aborted_before, 0);
         assert_eq!(delayed(kept, kind) - kept_before, 1);
 
         // Re-admitted after the rebase, it is watched again.
-        monitor.watch(sign_id(7), kind, forgotten, 0, after(0));
+        monitor.watch(sign_id(7), kind, aborted, 0, after(0));
         settle(1).await;
-        assert_eq!(delayed(forgotten, kind) - forgotten_before, 1);
+        assert_eq!(delayed(aborted, kind) - aborted_before, 1);
     }
 }
