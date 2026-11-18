@@ -11,6 +11,7 @@ use crate::backlog::mock::{
 };
 use crate::sign_bidirectional::{BidirectionalProgress, SignProgress, SignStatus};
 use crate::storage::checkpoint_storage::CheckpointStorage;
+use crate::types::SignCommand;
 use mpc_chain_integration_core::StateManager;
 use mpc_primitives::{
     BidirectionalTx, BidirectionalTxId, Chain, ExecutionOutcome, IndexedSignRequest, SignId,
@@ -322,6 +323,61 @@ async fn test_boundary_crossing_rules() {
         .await
         .expect("jump to bucket 5 checkpoints");
     assert_eq!(cp.block_height, 600);
+}
+
+/// A boundary is not passed without its checkpoint when storage fails, and a
+/// write whose reply was lost still counts towards the cap.
+#[tokio::test(start_paused = true)]
+async fn a_checkpoint_that_cannot_be_stored_is_retried() {
+    let storage = CheckpointStorage::in_memory();
+    let backlog = Backlog::persisted(storage.clone());
+    let cap = super::MAX_PENDING_CHECKPOINTS as u64;
+
+    for boundary in 1..=cap {
+        storage.fail_next_persist_pending(3);
+        let checkpoint = backlog
+            .set_processed_block_interval(Chain::Solana, boundary * 120, 120)
+            .await
+            .expect("stored once storage recovers");
+        assert_eq!(checkpoint.block_height, boundary * 120);
+    }
+
+    let stored = storage.load_pending(Chain::Solana).await.unwrap();
+    assert_eq!(stored.len(), super::MAX_PENDING_CHECKPOINTS);
+    assert_eq!(
+        backlog.checkpoints().count(Chain::Solana),
+        super::MAX_PENDING_CHECKPOINTS
+    );
+    assert!(backlog
+        .set_processed_block_interval(Chain::Solana, (cap + 1) * 120, 120)
+        .await
+        .is_none());
+}
+
+/// A boundary where storage holds a different checkpoint keeps the stored one
+/// and is passed without a vote.
+#[tokio::test]
+async fn a_conflicting_stored_checkpoint_is_kept() {
+    let storage = CheckpointStorage::in_memory();
+    let stored = Backlog::persisted(storage.clone());
+    stored
+        .insert_mock_bidirectional(SignId::from_u8(1), Chain::Solana)
+        .await;
+    let kept = stored
+        .set_processed_block_interval(Chain::Solana, 120, 120)
+        .await
+        .unwrap();
+
+    let backlog = Backlog::persisted(storage.clone());
+    assert!(backlog
+        .set_processed_block_interval(Chain::Solana, 120, 120)
+        .await
+        .is_none());
+    let pending = storage.load_pending(Chain::Solana).await.unwrap();
+    assert_eq!(
+        pending.iter().map(Checkpoint::digest).collect::<Vec<_>>(),
+        [kept.digest()]
+    );
 }
 
 // =========================================================================
@@ -2119,4 +2175,22 @@ fn a_record_applies_only_to_an_entry_behind_it() {
             assert_eq!(&entry.status, expected, "{record:?} on {status:?}");
         }
     }
+}
+
+#[tokio::test]
+async fn sign_command_debug_leaves_out_the_other_pending_requests() {
+    let backlog = Backlog::new();
+    let entry = backlog
+        .insert_mock_sign(SignId::new([1; 32]), Chain::Ethereum)
+        .await;
+    let other = backlog
+        .insert_mock_sign(SignId::new([2; 32]), Chain::Solana)
+        .await;
+
+    let debug = format!("{:?}", SignCommand::Request(entry.into()));
+    assert!(debug.contains("total_pending: 2"), "{debug}");
+    assert!(
+        !debug.contains(&format!("{:?}", other.sign_id())),
+        "{debug}"
+    );
 }

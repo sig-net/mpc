@@ -201,6 +201,8 @@ pub struct Checkpoints {
 pub enum CheckpointError {
     #[error("pending checkpoint cap reached for {chain}")]
     PendingCap { chain: Chain, tx_count: usize },
+    #[error("a different pending checkpoint is stored for {chain} at height {height}")]
+    Conflict { chain: Chain, height: u64 },
     #[error("failed to persist checkpoint for {chain}: {source:#}")]
     Storage {
         chain: Chain,
@@ -238,16 +240,19 @@ impl Checkpoints {
             });
         }
 
-        let inserted = self
+        let count = self
             .storage
             .persist_pending(checkpoint)
             .await
-            .map_err(|source| CheckpointError::Storage { chain, source })?;
+            .map_err(|source| CheckpointError::Storage { chain, source })?
+            .ok_or(CheckpointError::Conflict {
+                chain,
+                height: checkpoint.block_height,
+            })?;
 
-        if inserted {
-            let new_count = self.pending_counts[chain].fetch_add(1, Ordering::AcqRel) + 1;
-            self.observe(chain, new_count);
-        }
+        // The count comes from storage: a write whose reply was lost is still counted.
+        self.pending_counts[chain].store(count, Ordering::Release);
+        self.observe(chain, count);
         Ok(())
     }
 
@@ -273,8 +278,9 @@ impl Checkpoints {
             .await
             .map_err(|source| CheckpointError::Storage { chain, source })?;
 
+        // Not a fault by itself: a node behind consensus has no such checkpoint yet.
         let Some(remaining_count) = outcome else {
-            tracing::warn!(
+            tracing::debug!(
                 ?chain,
                 ?digest,
                 "pending checkpoint not found for promotion"

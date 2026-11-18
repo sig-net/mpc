@@ -10,7 +10,6 @@ mod execution_watcher;
 mod finalized_head;
 mod indexer;
 pub mod publisher;
-mod respond_bidirectional;
 mod rpc;
 #[cfg(test)]
 mod test_utils;
@@ -20,4 +19,3 @@ pub use client::{CatchupItem, MaybeBlock};
 pub use config::{EthConfig, EthNetwork, GasConfig, IndexerConfig, PublisherConfig, RpcConfig};
 pub use event_parsing::generate_request_id;
 pub use indexer::EthereumIndexer;
-pub use respond_bidirectional::validate_schemas;

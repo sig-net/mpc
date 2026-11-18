@@ -1,5 +1,7 @@
 //! Shared helpers for the Ethereum benchmark examples.
 
+#![allow(clippy::disallowed_methods)]
+
 use anyhow::anyhow;
 use futures_util::StreamExt;
 use mpc_chain_ethereum::{EthConfig, EthereumIndexer};

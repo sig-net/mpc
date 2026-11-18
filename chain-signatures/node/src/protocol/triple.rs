@@ -17,17 +17,21 @@ use cait_sith::triples::{TriplePub, TripleShare};
 use chrono::Utc;
 use k256::Secp256k1;
 use serde::{Deserialize, Serialize};
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{mpsc, watch, Semaphore};
 use tokio::task::JoinHandle;
 
 use std::collections::HashSet;
 use std::fmt;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 /// Unique number used to identify a specific ongoing triple generation protocol.
 /// Without `TripleId` it would be unclear where to route incoming cait-sith triple generation
 /// messages.
 pub type TripleId = u64;
+
+/// Triple pokes running at once per node, which bounds the CPU they take from messaging.
+const MAX_CONCURRENT_TRIPLE_POKES: usize = 2;
 
 /// A completed triple.
 #[derive(Clone, Serialize, Deserialize, Debug)]
@@ -41,14 +45,13 @@ struct TripleGenerator {
     me: Participant,
     owner: Participant,
     participants: Vec<Participant>,
-    /// Option to temporarily move it to a blocking task. Must be Some in all
-    /// other circumstances.
-    protocol: Option<TripleProtocol>,
+    protocol: TripleProtocol,
     timeout: Duration,
     slot: TriplePairSlot,
     created: Instant,
     inbox: mpsc::Receiver<TripleMessage>,
     msg: MessageChannel,
+    pokes: Arc<Semaphore>,
     #[cfg(feature = "debug-page")]
     debug_view: crate::web::debug::DebugPageTaskHandle,
 }
@@ -64,6 +67,7 @@ impl TripleGenerator {
         timeout: Duration,
         slot: TriplePairSlot,
         msg: &MessageChannel,
+        pokes: Arc<Semaphore>,
         _node_account_id: &str,
     ) -> Result<Self, InitializationError> {
         #[cfg(feature = "debug-page")]
@@ -84,12 +88,13 @@ impl TripleGenerator {
             me,
             owner,
             participants,
-            protocol: Some(Box::new(protocol)),
+            protocol: Box::new(protocol),
             timeout,
             slot,
             created: Instant::now(),
             inbox,
             msg: msg.clone(),
+            pokes,
             #[cfg(feature = "debug-page")]
             debug_view: crate::web::debug::register_task(
                 node_account_id.to_string(),
@@ -128,30 +133,32 @@ impl TripleGenerator {
             .observe(self.created.elapsed().as_millis() as f64);
 
         loop {
+            // Let tasks this one woke (outbox, next permit holder) run before the next poke.
+            tokio::task::yield_now().await;
+            // Held only while poking, never while waiting for a peer's message.
+            let Ok(Ok(permit)) = tokio::time::timeout(
+                self.timeout.saturating_sub(self.created.elapsed()),
+                self.pokes.acquire(),
+            )
+            .await
+            else {
+                crate::metrics::protocols::TRIPLE_GENERATOR_FAILURES.inc();
+                if self.owner == self.me {
+                    crate::metrics::protocols::TRIPLE_GENERATOR_OWNED_FAILURES.inc();
+                }
+                tracing::warn!(
+                    id = self.id,
+                    "triple generation timeout waiting for a poke permit"
+                );
+                break;
+            };
             let poke_start_time = Instant::now();
-            // Temporarily move protocol into blocking task and restore it immediately after.
-            let mut protocol = self.protocol.take().expect("must be always be Some");
-
-            let poke_result =
-                match tokio::task::spawn_blocking(move || (protocol.poke(), protocol)).await {
-                    Ok((res, protocol)) => {
-                        self.protocol = Some(protocol);
-                        res
-                    }
-                    Err(err) => {
-                        crate::metrics::protocols::TRIPLE_GENERATOR_FAILURES.inc();
-                        if self.owner == self.me {
-                            crate::metrics::protocols::TRIPLE_GENERATOR_OWNED_FAILURES.inc();
-                        }
-                        tracing::warn!(
-                            id = self.id,
-                            ?err,
-                            elapsed = ?start_time.elapsed(),
-                            "triple generation failed in a spawned blocking task",
-                        );
-                        return;
-                    }
-                };
+            // Hands this worker's other tasks to another thread while the poke runs.
+            let poke_result = tokio::task::block_in_place(|| self.protocol.poke());
+            let poke_end_time = Instant::now();
+            drop(permit);
+            // Lets an abort requested during the poke take effect before its action runs.
+            tokio::task::yield_now().await;
 
             let action = match poke_result {
                 Ok(action) => action,
@@ -172,9 +179,9 @@ impl TripleGenerator {
 
             total_wait += poke_start_time - poke_last_time;
             total_pokes += 1;
-            poke_last_time = Instant::now();
+            poke_last_time = poke_end_time;
             crate::metrics::protocols::TRIPLE_POKE_CPU_TIME
-                .observe(poke_start_time.elapsed().as_millis() as f64);
+                .observe((poke_end_time - poke_start_time).as_millis() as f64);
             #[cfg(feature = "debug-page")]
             self.render_debug(total_pokes);
 
@@ -188,10 +195,7 @@ impl TripleGenerator {
                         }
                         break;
                     };
-                    self.protocol
-                        .as_mut()
-                        .expect("must always be Some")
-                        .message(msg.from, msg.data);
+                    self.protocol.message(msg.from, msg.data);
                 }
                 Action::SendMany(data) => {
                     for to in &self.participants {
@@ -322,6 +326,8 @@ pub struct TripleSpawner {
     epoch: u64,
     msg: MessageChannel,
     node_account_id: String,
+    /// Shared by this node's triple generators; see [`MAX_CONCURRENT_TRIPLE_POKES`].
+    pokes: Arc<Semaphore>,
 
     #[cfg(feature = "debug-page")]
     posits_debug_view: crate::web::debug::DebugPageTaskHandle,
@@ -363,6 +369,7 @@ impl TripleSpawner {
             posits: Posits::new(me),
             msg,
             node_account_id,
+            pokes: Arc::new(Semaphore::new(MAX_CONCURRENT_TRIPLE_POKES)),
             #[cfg(feature = "debug-page")]
             posits_debug_view,
         }
@@ -567,6 +574,7 @@ impl TripleSpawner {
             timeout,
             slot,
             &self.msg,
+            self.pokes.clone(),
             &self.node_account_id,
         )
         .await?;

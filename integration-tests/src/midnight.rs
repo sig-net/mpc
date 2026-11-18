@@ -8,7 +8,8 @@ use std::time::Duration;
 use anyhow::Context as _;
 use k256::elliptic_curve::sec1::ToEncodedPoint as _;
 use mpc_chain_midnight::{
-    probe_network_id, MidnightAddress, MidnightConfig, OutputStorageConfig, PublisherConfig,
+    probe_network_id, MidnightAddress, MidnightConfig, NetworkId, OutputStorageConfig,
+    PublisherConfig,
 };
 use reqwest::Client;
 use serde::de::DeserializeOwned;
@@ -739,7 +740,7 @@ impl MidnightStack {
         let (chain, node_http_url, indexer_url, indexer_ws_url, network_id, role_seeds) =
             match DeployedNetwork::from_env()? {
                 Some(network) => {
-                    let network_id = wait_for_node(&network.node_http_url).await?;
+                    let network_id = wait_for_node(&network.node_http_url).await?.to_string();
                     tracing::info!(%network_id, "running the Midnight cases on a deployed network");
                     (
                         None,
@@ -838,7 +839,7 @@ impl MidnightStack {
         // The indexer's SPO sub-indexer opens a client at block 1 as soon as it
         // connects and exits for good if the node has not imported that block yet,
         // so the indexer starts only once the node is producing blocks.
-        let network_id = wait_for_node(&node_http_url).await?;
+        let network_id = wait_for_node(&node_http_url).await?.to_string();
 
         let node_internal_ws = format!("ws://{node_ip}:{NODE_PORT}");
         let indexer_log = log_consumer(&artifact_dir.join("indexer.log"));
@@ -914,7 +915,7 @@ where
 }
 
 /// The node's network id, once its RPC answers and it has imported block 1.
-async fn wait_for_node(node_http_url: &str) -> anyhow::Result<String> {
+async fn wait_for_node(node_http_url: &str) -> anyhow::Result<NetworkId> {
     wait_until_ready("node", node_http_url, 120, || async {
         probe_network_id(node_http_url)
             .await?
