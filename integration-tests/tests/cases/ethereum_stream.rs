@@ -586,7 +586,7 @@ async fn test_ethereum_stream_linear_catchup_from_checkpoint() -> Result<()> {
 
     for _ in 0..8 {
         match next_sign_message_within(&mut sign_rx, Duration::from_secs(20)).await? {
-            SignCommand::Completion(sign_id) if sign_id == resolved_sign_id => {
+            SignCommand::Responded { sign_id, .. } if sign_id == resolved_sign_id => {
                 saw_resolved_completion = true;
             }
             SignCommand::Request(req) if req.sign_id() == execution_sign_id => {

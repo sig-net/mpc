@@ -209,8 +209,8 @@ async fn test_stream_handles_sign_and_respond() {
         .unwrap()
         .unwrap();
     match msg2 {
-        SignCommand::Completion(id) => assert_eq!(id, sign_id),
-        _ => panic!("expected completion"),
+        SignCommand::Responded { sign_id: id, .. } => assert_eq!(id, sign_id),
+        _ => panic!("expected the response"),
     }
 }
 
@@ -528,8 +528,8 @@ async fn test_stream_sends_pre_catchup_ethereum_completion() {
     run_stream_with_two_node_mesh(indexer, sign_tx, backlog.clone(), root_pk).await;
 
     match timeout(Duration::from_secs(1), sign_rx.recv()).await {
-        Ok(Some(SignCommand::Completion(id))) => assert_eq!(id, sign_id),
-        other => panic!("expected the completion during catchup, got {other:?}"),
+        Ok(Some(SignCommand::Responded { sign_id: id, .. })) => assert_eq!(id, sign_id),
+        other => panic!("expected the response during catchup, got {other:?}"),
     }
     assert!(backlog.get(Chain::Ethereum, &sign_id).await.is_none());
 }

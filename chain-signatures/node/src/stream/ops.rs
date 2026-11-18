@@ -308,7 +308,10 @@ pub(crate) async fn process_respond_event(
         entry.complete().await;
         // Sent even during catchup: unlike a request, nothing requeues it later.
         ctx.sign_tx
-            .send(SignCommand::Completion(sign_id))
+            .send(SignCommand::Responded {
+                sign_id,
+                kind: RequestKind::Sign,
+            })
             .await
             .context("sign command channel closed")?;
         return Ok(());
@@ -468,7 +471,10 @@ pub(crate) async fn process_respond_bidirectional_event(
     tracing::info!(?sign_id, "bidirectional tx completed");
     // Sent even during catchup: unlike a request, nothing requeues it later.
     ctx.sign_tx
-        .send(SignCommand::Completion(sign_id))
+        .send(SignCommand::Responded {
+            sign_id,
+            kind: RequestKind::RespondBidirectional,
+        })
         .await
         .context("sign command channel closed")?;
 
@@ -572,7 +578,10 @@ async fn settle_unobserved(
     );
     // Sent even during catchup: unlike a request, nothing requeues it later.
     ctx.sign_tx
-        .send(SignCommand::Completion(sign_id))
+        .send(SignCommand::Responded {
+            sign_id,
+            kind: RequestKind::RespondBidirectional,
+        })
         .await
         .context("sign command channel closed")?;
 

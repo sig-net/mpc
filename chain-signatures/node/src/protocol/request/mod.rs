@@ -17,10 +17,7 @@ use crate::storage::presignature_storage::{PresignatureReservation, Presignature
 use crate::storage::{Initializing, PresignatureStorage};
 use crate::types::SignCommand;
 
-use mpc_utils::{
-    task::JoinMap,
-    time::{unix_elapsed, TimeoutBudget},
-};
+use mpc_utils::{task::JoinMap, time::TimeoutBudget};
 
 use cait_sith::protocol::Participant;
 use enum_map::EnumMap;
@@ -260,20 +257,13 @@ impl SignatureSpawner {
             },
         );
 
-        // Watcher that increments the delayed metric if not completed within the expected response time.
+        // Counts the leg in time or delayed once its response lands or its deadline passes.
         let unix_timestamp_indexed = request.unix_timestamp_indexed;
-        let expected_response_time_secs = chain.expected_response_time_secs();
-        let already_elapsed = unix_elapsed(unix_timestamp_indexed);
-        let remaining_time =
-            Duration::from_secs(expected_response_time_secs).saturating_sub(already_elapsed);
-        self.delay_monitor.watch(
-            sign_id,
-            chain,
-            request.request_kind(),
-            unix_timestamp_indexed,
-            remaining_time,
-            Arc::clone(&is_proposer),
-        );
+        let expected = Duration::from_secs(chain.expected_response_time_secs());
+        if let Some(deadline) = delay_monitor::deadline(unix_timestamp_indexed, expected) {
+            self.delay_monitor
+                .watch(sign_id, kind, chain, unix_timestamp_indexed, deadline);
+        }
 
         if !governance.is_running {
             tracing::info!(?sign_id, "holding sign request until governance is running");
@@ -460,15 +450,15 @@ impl SignatureSpawner {
     }
 
     /// Common teardown when a sign request ends: abort its task if one is still
-    /// running, mark the id and leg kind dead, forget the request, drop its mailbox and
-    /// unwatch its delay monitoring. Returns whether a task was aborted.
+    /// running, mark the id and leg kind dead, forget the request and drop its
+    /// mailbox. Returns whether a task was aborted.
     fn retire_task(&mut self, sign_id: SignId, kind: RequestKind, reason: &'static str) -> bool {
         self.mark_dead(sign_id, kind);
         let aborted = self.tasks.abort((sign_id, kind));
         if let Some(tracked) = self.requests.get(&sign_id) {
             if tracked.entry.request().request_kind() == kind {
                 self.requests.remove(&sign_id);
-                self.delay_monitor.unwatch(sign_id, reason);
+                tracing::debug!(?sign_id, ?kind, %reason, "retired sign request");
             }
         }
         self.posit_mailboxes.remove(&(sign_id, kind));
@@ -476,8 +466,8 @@ impl SignatureSpawner {
     }
 
     /// Complete teardown when a sign request completes, is refused, or aborts on chain regression:
-    /// abort tasks and drop mailboxes for all kinds, mark all kinds dead, forget the request,
-    /// and unwatch its delay monitoring. Returns whether any task was aborted.
+    /// abort tasks and drop mailboxes for all kinds, mark all kinds dead and forget the
+    /// request. Returns whether any task was aborted.
     fn retire_all(&mut self, sign_id: SignId, reason: &'static str) -> bool {
         self.mark_dead_all(sign_id);
         let mut aborted = false;
@@ -490,7 +480,7 @@ impl SignatureSpawner {
             self.posit_mailboxes.remove(&(sign_id, kind));
         }
         if self.requests.remove(&sign_id).is_some() {
-            self.delay_monitor.unwatch(sign_id, reason);
+            tracing::debug!(?sign_id, %reason, "retired sign request");
         }
         aborted
     }
@@ -505,7 +495,12 @@ impl SignatureSpawner {
             SignCommand::Completion(sign_id) => {
                 self.handle_completion(sign_id);
             }
+            SignCommand::Responded { sign_id, kind } => {
+                self.delay_monitor.responded(sign_id, kind);
+                self.handle_completion(sign_id);
+            }
             SignCommand::LegCompleted { sign_id, kind } => {
+                self.delay_monitor.responded(sign_id, kind);
                 self.handle_leg_completed(sign_id, kind);
             }
             SignCommand::AbortChain(chain) => {
@@ -513,6 +508,7 @@ impl SignatureSpawner {
                     ?chain,
                     "aborting in-flight signature tasks to rebase onto the consensus checkpoint"
                 );
+                self.delay_monitor.forget_chain(chain);
                 let to_abort: Vec<SignId> = self
                     .requests
                     .iter()
