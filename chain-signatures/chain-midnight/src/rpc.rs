@@ -3316,6 +3316,36 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn connect_refuses_a_node_on_an_unlisted_network() {
+        let server = ServerBuilder::default()
+            .build("127.0.0.1:0")
+            .await
+            .expect("bind HTTP rpc server");
+        let address = server.local_addr().expect("HTTP rpc server address");
+        let mut module = RpcModule::new(());
+        module
+            .register_method("chain_getFinalizedHead", |_, _, _| hash_of_byte(0x43))
+            .expect("register finalized-head method");
+        let devnet = "devnet".to_string().encode();
+        module
+            .register_method("state_call", move |params, _, _| {
+                let (method, _, _) = params.parse::<(String, String, String)>().unwrap();
+                assert_eq!(method, NETWORK_ID_ENTRY);
+                format!("0x{}", hex::encode(&devnet))
+            })
+            .expect("register state-call method");
+        let _handle = server.start(module);
+
+        let error = MidnightPublisherRpc::connect(&http_config(address))
+            .await
+            .err()
+            .expect("a node on an unlisted network must not connect");
+        let rendered = format!("{error:#}");
+        assert!(rendered.contains("'devnet'"), "{rendered}");
+        assert!(rendered.contains("unknown network"), "{rendered}");
+    }
+
     /// An unlisted id errors naming it — deterministic, unlike `None`, which is
     /// reserved for a node that has not imported block 1 yet.
     #[cfg(feature = "sandbox")]
