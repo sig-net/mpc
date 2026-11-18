@@ -1,6 +1,8 @@
 use super::{BacklogEntry, PendingRequests, MAX_PENDING_CHECKPOINTS};
 use crate::storage::checkpoint_storage::CheckpointStorage;
 
+pub use crate::storage::checkpoint_storage::DemoteOutcome;
+
 use enum_map::EnumMap;
 use mpc_primitives::Chain;
 use sha3::Digest;
@@ -313,14 +315,16 @@ impl Checkpoints {
         self.storage.find(chain, digest).await.ok().flatten()
     }
 
-    /// Retains a checkpoint displaced from `pending` at startup, for serving only.
-    pub(crate) async fn persist_orphan(
+    /// Moves pending bodies above `settled_height` into the serve-only orphan store and
+    /// drops those at or below it, atomically. Used at startup and before a rebase.
+    /// The caller re-hydrates the counter afterwards.
+    pub async fn demote_to_orphan(
         &self,
-        checkpoint: &Checkpoint,
-    ) -> Result<(), CheckpointError> {
-        let chain = checkpoint.chain;
+        chain: Chain,
+        settled_height: u64,
+    ) -> Result<DemoteOutcome, CheckpointError> {
         self.storage
-            .persist_orphan(checkpoint)
+            .demote_to_orphan(chain, settled_height)
             .await
             .map_err(|source| CheckpointError::Storage { chain, source })
     }
@@ -347,15 +351,6 @@ impl Checkpoints {
     ) -> Result<(), CheckpointError> {
         self.storage
             .clear_orphan_up_to(chain, height)
-            .await
-            .map_err(|source| CheckpointError::Storage { chain, source })
-    }
-
-    /// Atomically drops every pending checkpoint (and its digest index) for `chain`.
-    /// The caller re-hydrates the counter afterwards.
-    pub(crate) async fn clear_pending(&self, chain: Chain) -> Result<(), CheckpointError> {
-        self.storage
-            .clear_pending(chain)
             .await
             .map_err(|source| CheckpointError::Storage { chain, source })
     }
@@ -746,8 +741,10 @@ mod tests {
         let discarded = checkpoint_with_entry(110, 7);
         let digest = discarded.digest();
 
-        checkpoints.persist_orphan(&discarded).await.unwrap();
-        checkpoints.clear_pending(chain).await.unwrap();
+        checkpoints.persist_pending(&discarded).await.unwrap();
+        let outcome = checkpoints.demote_to_orphan(chain, 0).await.unwrap();
+        assert_eq!(outcome.demoted, 1);
+        assert_eq!(outcome.dropped, 0);
         checkpoints.hydrate(chain).await.unwrap();
 
         // The body is gone from pending, yet a peer asking by digest is served.
@@ -775,8 +772,9 @@ mod tests {
         let at = checkpoint_with_entry(100, 3);
         let above = checkpoint(105);
         for cp in [&below, &at, &above] {
-            checkpoints.persist_orphan(cp).await.unwrap();
+            checkpoints.persist_pending(cp).await.unwrap();
         }
+        checkpoints.demote_to_orphan(chain, 0).await.unwrap();
 
         // Settle a (different) body at height 100 — the boundary is inclusive.
         let settled = checkpoint(100);
@@ -804,7 +802,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn clear_pending_and_hydrate_reset_the_counter() {
+    async fn demote_to_orphan_and_hydrate_reset_the_counter() {
         let storage = CheckpointStorage::in_memory();
         let checkpoints = Checkpoints::new(storage.clone());
         let chain = Chain::Ethereum;
@@ -812,9 +810,57 @@ mod tests {
         checkpoints.persist_pending(&checkpoint(110)).await.unwrap();
         assert_eq!(checkpoints.count(chain), 2);
 
-        checkpoints.clear_pending(chain).await.unwrap();
+        let outcome = checkpoints.demote_to_orphan(chain, 0).await.unwrap();
+        assert_eq!(outcome.demoted, 2);
         assert_eq!(checkpoints.hydrate(chain).await.unwrap(), 0);
         assert_eq!(checkpoints.count(chain), 0);
+    }
+
+    #[tokio::test]
+    async fn demote_to_orphan_splits_heights_by_chain_and_is_idempotent() {
+        let checkpoints = Checkpoints::new(CheckpointStorage::in_memory());
+        let eth = Chain::Ethereum;
+        let sol = Chain::Solana;
+        let below = checkpoint_with_entry(90, 1);
+        let at = checkpoint_with_entry(100, 2);
+        let above = checkpoint_with_entry(110, 3);
+        let other = Checkpoint {
+            chain: sol,
+            block_height: 110,
+            pending_requests: vec![BacklogEntry::new(mock_sign_request(
+                SignId::new([4; 32]),
+                sol,
+            ))],
+            legacy_digest: None,
+        };
+        for cp in [&below, &at, &above, &other] {
+            checkpoints.persist_pending(cp).await.unwrap();
+        }
+
+        let outcome = checkpoints.demote_to_orphan(eth, 100).await.unwrap();
+        assert_eq!(outcome.demoted, 1);
+        assert_eq!(outcome.dropped, 2);
+        assert_eq!(
+            checkpoints.find_orphan(eth, above.digest()).await.unwrap(),
+            Some(above.clone())
+        );
+        assert_eq!(
+            checkpoints.find_orphan(eth, at.digest()).await.unwrap(),
+            None
+        );
+        // The other chain's pending body was not touched by the demotion.
+        assert_eq!(
+            checkpoints.load_pending(sol).await.unwrap(),
+            vec![other.clone()]
+        );
+
+        // A second pass is a no-op, including for the untouched chain.
+        let again = checkpoints.demote_to_orphan(eth, 100).await.unwrap();
+        assert_eq!(again, DemoteOutcome::default());
+        assert_eq!(
+            checkpoints.find_orphan(eth, above.digest()).await.unwrap(),
+            Some(above)
+        );
     }
 
     #[tokio::test]
@@ -823,7 +869,7 @@ mod tests {
         let chain = Chain::Ethereum;
         let cp = checkpoint(100);
         assert!(matches!(
-            checkpoints.persist_orphan(&cp).await,
+            checkpoints.demote_to_orphan(chain, 100).await,
             Err(CheckpointError::Storage { .. })
         ));
         assert!(matches!(
@@ -832,10 +878,6 @@ mod tests {
         ));
         assert!(matches!(
             checkpoints.clear_orphan_up_to(chain, 100).await,
-            Err(CheckpointError::Storage { .. })
-        ));
-        assert!(matches!(
-            checkpoints.clear_pending(chain).await,
             Err(CheckpointError::Storage { .. })
         ));
     }
@@ -855,8 +897,7 @@ mod tests {
         storage_a.persist_pending(&old_pending).await.unwrap();
         let a = Checkpoints::new(storage_a);
         a.hydrate(chain).await.unwrap();
-        a.persist_orphan(&old_pending).await.unwrap();
-        a.clear_pending(chain).await.unwrap();
+        assert_eq!(a.demote_to_orphan(chain, 100).await.unwrap().demoted, 1);
         a.hydrate(chain).await.unwrap();
         assert_eq!(a.count(chain), 0);
         assert!(a
@@ -909,5 +950,35 @@ mod tests {
             Some(next.clone())
         );
         assert_eq!(b.storage().load_latest(chain).await.unwrap(), Some(next));
+    }
+
+    #[tokio::test]
+    async fn settling_the_orphans_own_digest_keeps_the_body_servable_after_release() {
+        // A vote in flight for the orphan's own digest settles. The node rebases onto
+        // that body, which makes it the canonical latest; releasing the orphan must
+        // not make the body unservable, because `find` then resolves it from latest.
+        let checkpoints = Checkpoints::new(CheckpointStorage::in_memory());
+        let chain = Chain::Ethereum;
+        let body = checkpoint_with_entry(110, 8);
+        let digest = body.digest();
+        checkpoints.persist_pending(&body).await.unwrap();
+        assert_eq!(
+            checkpoints
+                .demote_to_orphan(chain, 100)
+                .await
+                .unwrap()
+                .demoted,
+            1
+        );
+        assert_eq!(checkpoints.find(chain, digest).await, Some(body.clone()));
+
+        checkpoints.regress(&body).await.unwrap();
+        checkpoints
+            .clear_orphan_up_to(chain, body.block_height)
+            .await
+            .unwrap();
+
+        assert_eq!(checkpoints.find_orphan(chain, digest).await.unwrap(), None);
+        assert_eq!(checkpoints.find(chain, digest).await, Some(body));
     }
 }

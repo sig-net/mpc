@@ -15,7 +15,7 @@ use crate::sign_bidirectional::{
     SignStatus,
 };
 use crate::storage::checkpoint_storage::CheckpointStorage;
-pub use checkpoints::{Checkpoint, CheckpointError, Checkpoints};
+pub use checkpoints::{Checkpoint, CheckpointError, Checkpoints, DemoteOutcome};
 
 use enum_map::EnumMap;
 use mpc_chain_integration_core::{StateManager, WatchKey, WatchedExecution};
@@ -771,6 +771,14 @@ impl Backlog {
         } else {
             checkpoint
         };
+        // Preserve pending bodies displaced by the new base as serve-only orphans,
+        // using the same atomic operation as startup. A crash between this demote and
+        // the reset below is safe: the bodies then exist in both `pending` and
+        // `orphan`, and startup recovery is idempotent — it simply moves or drops
+        // whatever is still pending.
+        self.checkpoints
+            .demote_to_orphan(durable.chain, durable.block_height)
+            .await?;
         self.checkpoints.regress(durable).await?;
         self.recover_by_checkpoint(&adopted).await;
         Ok(())

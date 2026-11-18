@@ -230,7 +230,7 @@ pub(crate) async fn find_consensus_checkpoint(
 #[cfg(test)]
 mod tests {
     use crate::backlog::consensus::{align_backlog_with_consensus, query_peers_checkpoint};
-    use crate::backlog::mock::{mock_sign_request, BacklogTestExt};
+    use crate::backlog::mock::{mock_root_pk, mock_sign_request, BacklogTestExt};
     use crate::backlog::{Backlog, BacklogEntry, Checkpoint, Checkpoints};
     use crate::mesh::connection::NodeStatus;
     use crate::mesh::MeshState;
@@ -773,8 +773,11 @@ mod tests {
         }));
         assert_eq!(digest_rx.borrow().unwrap().digest, digest);
 
-        // Naive cleanup: delete the pending body, with no orphan store.
-        checkpoints.clear_pending(chain).await.unwrap();
+        // Naive cleanup: treat the body as stale at its own height, so the atomic
+        // demote drops it without retaining a copy in the orphan store.
+        let outcome = checkpoints.demote_to_orphan(chain, 100).await.unwrap();
+        assert_eq!(outcome.demoted, 0);
+        assert_eq!(outcome.dropped, 1);
         checkpoints.hydrate(chain).await.unwrap();
 
         // The settled digest can no longer be found locally ...
@@ -812,9 +815,16 @@ mod tests {
         checkpoints.persist_pending(&cp).await.unwrap();
         let digest = cp.digest();
 
-        // Startup discard: retain serve-only, then clear pending.
-        checkpoints.persist_orphan(&cp).await.unwrap();
-        checkpoints.clear_pending(chain).await.unwrap();
+        // Startup discard: one atomic demote retains the body serve-only.
+        checkpoints.persist_pending(&cp).await.unwrap();
+        assert_eq!(
+            checkpoints
+                .demote_to_orphan(chain, 0)
+                .await
+                .unwrap()
+                .demoted,
+            1
+        );
         checkpoints.hydrate(chain).await.unwrap();
         assert_eq!(checkpoints.find(chain, digest).await, Some(cp.clone()));
 
@@ -859,6 +869,58 @@ mod tests {
         assert_eq!(checkpoints.find(chain, digest).await, None);
 
         mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn rebase_preserves_displaced_pending_body_in_orphan_store() {
+        // A rebase to a lower consensus base used to wipe pending wholesale, losing
+        // bodies whose votes could still settle. `regress` now demotes first.
+        let chain = Chain::Ethereum;
+        let storage = CheckpointStorage::in_memory();
+        storage
+            .persist(&Checkpoint::reset(chain, 90))
+            .await
+            .unwrap();
+        let displaced = Checkpoint {
+            chain,
+            block_height: 110,
+            pending_requests: vec![BacklogEntry::new(mock_sign_request(
+                SignId::new([9u8; 32]),
+                chain,
+            ))],
+            legacy_digest: None,
+        };
+        storage.persist_pending(&displaced).await.unwrap();
+        let backlog = Backlog::persisted(storage);
+        backlog.checkpoints().hydrate(chain).await.unwrap();
+        assert_eq!(backlog.checkpoints().count(chain), 1);
+
+        let new_base = Checkpoint::reset(chain, 100);
+        backlog.regress(&new_base, mock_root_pk()).await.unwrap();
+
+        assert!(backlog
+            .checkpoints()
+            .storage()
+            .load_pending(chain)
+            .await
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            backlog
+                .checkpoints()
+                .find_orphan(chain, displaced.digest())
+                .await
+                .unwrap(),
+            Some(displaced.clone())
+        );
+        assert_eq!(
+            backlog.checkpoints().find(chain, displaced.digest()).await,
+            Some(displaced)
+        );
+        assert_eq!(
+            backlog.checkpoints().latest(chain).await.unwrap(),
+            Some(new_base)
+        );
     }
 
     #[tokio::test]

@@ -152,7 +152,7 @@ Described for one node, one source chain; `backlog` is the node's backlog.
   * Nothing new has settled: the node does nothing.
   * The settled checkpoint is the one the node stored at that height: it becomes the base and the node carries on.
   * The settled checkpoint is another one: the node stops indexing, fetches it from a peer, makes it the base, drops all of `pending` and re-indexes from it.
-* On a restart the node resumes from the settled base, not from `pending`: unconfirmed pending bodies are discarded and no vote is resubmitted for them. Hydration is the exception (§7, no backfill). A vote in flight for a discarded body may still settle, so the body is kept in a serve-only `orphan` store and can be fetched by peers (§6). New requests build the next body on top of the settled checkpoint, which is recovered from peers when the node does not hold it — it is never rebuilt locally.
+* On a restart the node resumes from the settled base, not from `pending`: unconfirmed pending bodies are discarded and no vote is resubmitted for them. Hydration is the exception (§7, no backfill). A vote in flight for a discarded body may still settle, so the body is kept in a serve-only `orphan` store and can be fetched by peers (§6). New requests build the next body on top of the settled checkpoint, which is recovered from peers when the node does not hold it; the one exception is a canonical reset checkpoint, which the node rebuilds deterministically from the settled height (`consensus.rs:73–81`) instead of polling peers.
 * A node is *at the cap* when `pending` holds `MAX_PENDING` checkpoints.
   There it processes no block and waits for a settlement, caught up or not.
   This bounds how far the network signs from state nobody has agreed to.
@@ -188,9 +188,10 @@ in memory:
 on start:
   base = the one held, or the genesis checkpoint
   if chain != Hydration:                   // §7: Hydration has no backfill
-    for c in pending where c.height > base.height:
-      orphan[c.digest] = c                 // serve only, never rebuilt from
-    pending = {}                           // one atomic clear for the chain
+    orphan, pending = demote_to_orphan(base.height)
+                                           // one atomic step: bodies above the base
+                                           // move to `orphan` (serve only), the rest drop
+    release orphans at or below base.height
   top = base                               // settled checkpoint is authoritative
   backlog, processed_height = top.backlog, top.height
   // no vote(c) for discarded bodies: an in-flight vote may still settle,
@@ -269,6 +270,7 @@ If the node takes a stale head for the real head, it deletes the record of a req
 rebase(c):                                        // c settled, above base
   aligned = pending[c.height] has c's digest      // backlog descends from c
             and processed_height >= c.height
+  orphan, pending = demote_to_orphan(c.height)    // keep bodies above the new base
   base = c
   if aligned: pending.drop_up_to(c.height)
   else: pending = {}
@@ -413,7 +415,7 @@ Each closes one of the limits above, at a price.
   Every correct voter of a settled checkpoint then still holds it when it settles, at any threshold.
   The price is a second store per chain.
 
-  This is implemented as the `orphan` store. Startup cleanup moves pending bodies above the settled checkpoint there before clearing `pending`; the body is never used to rebuild local state. `find(chain, digest)` searches pending, then `orphan`, then the settled checkpoint (which needs a digest comparison and can hide an orphan if it is checked first), so the peer `/checkpoint` endpoint serves an orphaned body without any special case. An orphan is cleared when a checkpoint at or above its height settles (inclusive), since a lower body can no longer settle once consensus has passed its height. Heights on the Redis side are compared as fixed-width decimal strings in Lua, not with `tonumber`, so the boundary is exact even above 2^53.
+  This is implemented as the `orphan` store. One atomic `demote_to_orphan(chain, settled_height)` moves every pending body above the boundary there and drops those at or below it, removing `pending` and its digest index in the same step. It runs both at startup and just before a rebase/regression, so bodies displaced by either path remain servable; none is used to rebuild local state. `find(chain, digest)` searches pending, then `orphan`, then the settled checkpoint (which needs a digest comparison and can hide an orphan if it is checked first), so the peer `/checkpoint` endpoint serves an orphaned body without any special case. An orphan is cleared when a checkpoint at or above its height settles (inclusive), and orphans at or below the settled height are also pruned at startup, since a lower body can no longer settle once consensus has passed its height. Heights on the Redis side are compared as fixed-width decimal strings in Lua, not with `tonumber`, so the boundary is exact even above 2^53.
 * Re-index at the cap: a node at the cap that sees, in a view of the vote counts, more than 2f votes at the first boundary above its base settling nothing re-indexes from its base, on a backoff that grows each time and resets on a rebase.
   For a correct node in the model this changes nothing, it builds the same checkpoints again.
   It gives a second attempt, without an operator, where building the backlog again can come out differently, and not where a node repeats the same result.
@@ -463,7 +465,7 @@ The interval is `checkpoint_interval`, a per-chain constant with no per-node ove
 ### Node: restart and rollout
 
 7. Unconfirmed pending on restart (§4 "on start", §6).
-   Now: on startup each chain except Hydration moves pending bodies above the canonical settled checkpoint to a serve-only `orphan` store, clears `pending` in one step, re-hydrates the counter and recovers from the settled checkpoint. No vote is resubmitted for a discarded body; if one settles, peers can still fetch it by digest from `orphan` until a checkpoint at or above its height settles. With no settled checkpoint yet the cleanup is skipped. In-process indexer restarts do not repeat it.
+   Now: on startup each chain except Hydration calls `demote_to_orphan` with the canonical settled height — one atomic step that moves pending bodies above it to a serve-only `orphan` store and drops those at or below it — then prunes orphans at or below that height, re-hydrates the counter and recovers from the settled checkpoint. The same demote runs just before a rebase/regression, so bodies displaced there are also preserved. No vote is resubmitted for a discarded body; if one settles, peers can still fetch it by digest from `orphan` until a checkpoint at or above its height settles. With no settled checkpoint yet the cleanup is skipped. In-process indexer restarts do not repeat it.
    Design: the settled checkpoint is the authority and is recovered from peers when absent locally; new requests build the next body on top of it. The orphan store is the implementation of the §6 option "Keep the checkpoints a rebase drops".
 8. Mixed-version rollout.
    Now: nodes running an older checkpoint format are not detected by node code. There is no activation height and no version marker in a checkpoint or a vote. The rollout is operational: once a threshold of nodes agree on a digest at a boundary it settles, and nodes still on the old format rebase onto it like any other settled checkpoint. A discarded cohort stays servable from `orphan` in the meantime, so a vote that was in flight at the upgrade can still settle.

@@ -1,4 +1,4 @@
-use crate::backlog::{consensus, Backlog, CheckpointError};
+use crate::backlog::{consensus, Backlog, CheckpointError, DemoteOutcome};
 use crate::mesh::MeshState;
 use crate::node_client::NodeClient;
 use crate::types::CheckpointWatcher;
@@ -15,26 +15,25 @@ use tokio::sync::watch;
 /// The canonical settled checkpoint is the sole authority: it is recovered from peers
 /// by the ordinary alignment path, and new requests build on top of it.
 ///
-/// Bodies are moved to a serve-only orphan store, then all pending entries are cleared
-/// in one step. Only bodies strictly above the settled height are orphaned — a pending
-/// at or below it is stale history that a forward-moving consensus can never settle,
-/// and it is dropped along with the rest by `clear_pending`.
+/// Bodies above the settled height are moved to a serve-only orphan store and those at
+/// or below it are dropped, both by a single atomic `demote_to_orphan` per chain. A
+/// pending at or below the settled height is stale history that a forward-moving
+/// consensus can never settle, so it is removed even when nothing is demoted.
+/// Orphans at or below the settled height are pruned on startup too.
 ///
 /// Hydration is excluded: its indexer has no backfill, so discarding pending bodies and
 /// relying on the settled checkpoint plus peer replay would lose requests that cannot
 /// be rebuilt from chain history (doc/checkpoints.md §7).
-///
-/// Returns the number of bodies moved to the orphan store.
 pub(crate) async fn discard_unconfirmed_pending_on_restart(
     chain: Chain,
     backlog: &Backlog,
-) -> Result<usize, CheckpointError> {
+) -> Result<DemoteOutcome, CheckpointError> {
     if chain == Chain::Hydration {
         tracing::info!(
             ?chain,
             "keeping pending checkpoints on restart (no backfill)"
         );
-        return Ok(0);
+        return Ok(DemoteOutcome::default());
     }
 
     let checkpoints = backlog.checkpoints();
@@ -47,25 +46,19 @@ pub(crate) async fn discard_unconfirmed_pending_on_restart(
         // Nothing settled yet: there is no authoritative base to build on, so the
         // pending bodies are all this node has. Keep them.
         tracing::info!(?chain, "no settled checkpoint on startup; keeping pending");
-        return Ok(0);
+        return Ok(DemoteOutcome::default());
     };
 
-    let pending = checkpoints.load_pending(chain).await?;
-    let discarded: Vec<_> = pending
-        .into_iter()
-        .filter(|cp| cp.block_height > settled.block_height)
-        .collect();
-    if discarded.is_empty() {
-        return Ok(0);
-    }
-
-    for checkpoint in &discarded {
-        checkpoints.persist_orphan(checkpoint).await?;
-    }
-    // One atomic clear for the whole chain, after every body is safely retained.
-    checkpoints.clear_pending(chain).await?;
+    let outcome = checkpoints
+        .demote_to_orphan(chain, settled.block_height)
+        .await?;
+    // Orphans at or below the settled height can no longer settle; prune them so they
+    // do not linger across restarts (review M1).
+    checkpoints
+        .clear_orphan_up_to(chain, settled.block_height)
+        .await?;
     // Re-hydration happens in `recover_backlog` below, after this returns.
-    Ok(discarded.len())
+    Ok(outcome)
 }
 
 /// Node-side checkpoint recovery:
@@ -89,9 +82,14 @@ pub(crate) async fn recover_backlog(
     // Startup only (not in-process indexer restarts): discard pending bodies from
     // an older format before hydration/regression, retaining them serve-only.
     if load_local {
-        let discarded = discard_unconfirmed_pending_on_restart(chain, backlog).await?;
-        if discarded > 0 {
-            tracing::info!(%chain, discarded, "discarded unconfirmed pending checkpoints on startup");
+        let outcome = discard_unconfirmed_pending_on_restart(chain, backlog).await?;
+        if outcome.demoted > 0 || outcome.dropped > 0 {
+            tracing::info!(
+                %chain,
+                demoted = outcome.demoted,
+                dropped = outcome.dropped,
+                "demoted unconfirmed pending checkpoints on startup"
+            );
         }
     }
 
@@ -134,7 +132,7 @@ pub(crate) async fn recover_backlog(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::backlog::Checkpoint;
+    use crate::backlog::{Checkpoint, Checkpoints};
     use crate::storage::checkpoint_storage::CheckpointStorage;
     use mpc_chain_integration_core::StateManager;
 
@@ -164,13 +162,14 @@ mod tests {
         backlog.checkpoints().hydrate(chain).await.unwrap();
         assert_eq!(backlog.checkpoints().count(chain), 3);
 
-        let discarded = discard_unconfirmed_pending_on_restart(chain, &backlog)
+        let outcome = discard_unconfirmed_pending_on_restart(chain, &backlog)
             .await
             .unwrap();
         assert_eq!(
-            discarded, 2,
+            outcome.demoted, 2,
             "only bodies above the settled height are moved"
         );
+        assert_eq!(outcome.dropped, 1, "the stale pending at 90 is dropped");
 
         assert!(backlog
             .checkpoints()
@@ -220,10 +219,10 @@ mod tests {
         let digest = settled(chain, 110).digest();
         backlog.checkpoints().hydrate(chain).await.unwrap();
 
-        let discarded = discard_unconfirmed_pending_on_restart(chain, &backlog)
+        let outcome = discard_unconfirmed_pending_on_restart(chain, &backlog)
             .await
             .unwrap();
-        assert_eq!(discarded, 0);
+        assert_eq!(outcome, DemoteOutcome::default());
         assert_eq!(backlog.checkpoints().count(chain), 1);
         assert_eq!(
             backlog.checkpoints().load_pending(chain).await.unwrap(),
@@ -260,7 +259,8 @@ mod tests {
         assert_eq!(
             discard_unconfirmed_pending_on_restart(Chain::Ethereum, &backlog)
                 .await
-                .unwrap(),
+                .unwrap()
+                .demoted,
             1
         );
         assert!(backlog
@@ -303,11 +303,67 @@ mod tests {
             discard_unconfirmed_pending_on_restart(chain, &backlog)
                 .await
                 .unwrap(),
-            0
+            DemoteOutcome::default()
         );
         assert_eq!(
             backlog.checkpoints().load_pending(chain).await.unwrap(),
             vec![settled(chain, 110)]
+        );
+    }
+
+    #[tokio::test]
+    async fn startup_discard_prunes_orphans_at_or_below_the_settled_height() {
+        let chain = Chain::Ethereum;
+        let storage = CheckpointStorage::in_memory();
+        storage.persist(&settled(chain, 100)).await.unwrap();
+        let old = settled(chain, 95);
+        let future = settled(chain, 110);
+        let fresh = settled(chain, 120);
+        // Seed two orphans with an unrelated low boundary, then leave one fresh
+        // pending body for the startup path to demote.
+        storage.persist_pending(&old).await.unwrap();
+        storage.persist_pending(&future).await.unwrap();
+        let checkpoints = Checkpoints::new(storage.clone());
+        assert_eq!(
+            checkpoints
+                .demote_to_orphan(chain, 0)
+                .await
+                .unwrap()
+                .demoted,
+            2
+        );
+        storage.persist_pending(&fresh).await.unwrap();
+        let backlog = Backlog::persisted(storage);
+
+        let outcome = discard_unconfirmed_pending_on_restart(chain, &backlog)
+            .await
+            .unwrap();
+        assert_eq!(outcome.demoted, 1);
+        assert_eq!(outcome.dropped, 0);
+        assert_eq!(
+            backlog
+                .checkpoints()
+                .find_orphan(chain, old.digest())
+                .await
+                .unwrap(),
+            None,
+            "orphan at or below the settled height is pruned on startup"
+        );
+        assert_eq!(
+            backlog
+                .checkpoints()
+                .find_orphan(chain, future.digest())
+                .await
+                .unwrap(),
+            Some(future)
+        );
+        assert_eq!(
+            backlog
+                .checkpoints()
+                .find_orphan(chain, fresh.digest())
+                .await
+                .unwrap(),
+            Some(fresh)
         );
     }
 
