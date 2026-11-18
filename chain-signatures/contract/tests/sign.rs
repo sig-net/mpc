@@ -608,3 +608,94 @@ async fn test_checkpoint_votes_view() -> anyhow::Result<()> {
 
     Ok(())
 }
+
+/// A node can move its vote at a height, but it can never hold two there. The
+/// tally view reflects replacement and splits between distinct voters.
+#[tokio::test]
+async fn test_checkpoint_vote_replacement() -> anyhow::Result<()> {
+    let (_worker, contract, accounts, _) = init_env().await;
+
+    let a = CheckpointDigest::new(Chain::Solana, 300, [1u8; 32]);
+    let b = CheckpointDigest::new(Chain::Solana, 300, [2u8; 32]);
+
+    async fn vote(
+        account: &near_workspaces::Account,
+        contract: &near_workspaces::Contract,
+        checkpoint: CheckpointDigest,
+    ) -> anyhow::Result<bool> {
+        let result = account
+            .call(contract.id(), "vote_checkpoint")
+            .args_json(serde_json::json!({ "checkpoint": checkpoint }))
+            .max_gas()
+            .transact()
+            .await?;
+        assert!(result.is_success());
+        Ok(result.json::<bool>()?)
+    }
+
+    async fn tallies(
+        contract: &near_workspaces::Contract,
+    ) -> anyhow::Result<HashMap<Chain, Vec<CheckpointVoteTally>>> {
+        let views: Vec<View> = contract
+            .view("read")
+            .args_json(serde_json::json!({ "reads": [Read::CheckpointVotes] }))
+            .await?
+            .json()?;
+        Ok(views
+            .into_iter()
+            .find_map(|view| match view {
+                View::CheckpointVotes(tallies) => Some(tallies),
+                _ => None,
+            })
+            .expect("read should return a CheckpointVotes view"))
+    }
+
+    assert!(!vote(&accounts[0], &contract, a).await?);
+    assert_eq!(
+        tallies(&contract).await?.get(&Chain::Solana),
+        Some(&vec![CheckpointVoteTally {
+            height: 300,
+            votes: vec![([1u8; 32], 1)],
+        }])
+    );
+
+    // Same node, same height, different digest: replaces rather than adds.
+    assert!(!vote(&accounts[0], &contract, b).await?);
+    assert_eq!(
+        tallies(&contract).await?.get(&Chain::Solana),
+        Some(&vec![CheckpointVoteTally {
+            height: 300,
+            votes: vec![([2u8; 32], 1)],
+        }])
+    );
+
+    // Re-voting the same digest is a no-op.
+    assert!(!vote(&accounts[0], &contract, b).await?);
+    assert_eq!(
+        tallies(&contract).await?.get(&Chain::Solana),
+        Some(&vec![CheckpointVoteTally {
+            height: 300,
+            votes: vec![([2u8; 32], 1)],
+        }])
+    );
+
+    // A distinct voter backing a gives a split at the same height.
+    assert!(!vote(&accounts[1], &contract, a).await?);
+    assert_eq!(
+        tallies(&contract).await?.get(&Chain::Solana),
+        Some(&vec![CheckpointVoteTally {
+            height: 300,
+            votes: vec![([1u8; 32], 1), ([2u8; 32], 1)],
+        }])
+    );
+
+    // One more distinct voter on b reaches the threshold (2): b settles and
+    // the height's votes are pruned.
+    assert!(vote(&accounts[2], &contract, b).await?);
+    assert!(tallies(&contract)
+        .await?
+        .get(&Chain::Solana)
+        .map_or(true, Vec::is_empty));
+
+    Ok(())
+}
