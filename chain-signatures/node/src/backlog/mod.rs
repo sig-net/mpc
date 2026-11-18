@@ -15,7 +15,7 @@ use crate::sign_bidirectional::{
     SignStatus,
 };
 use crate::storage::checkpoint_storage::CheckpointStorage;
-pub use checkpoints::{Checkpoint, CheckpointError, Checkpoints, SharedCheckpoint, SharedEntry};
+pub use checkpoints::{Checkpoint, CheckpointError, CheckpointFacts, Checkpoints, EntryFacts};
 
 use enum_map::EnumMap;
 use mpc_chain_integration_core::{StateManager, WatchKey, WatchedExecution};
@@ -892,17 +892,17 @@ pub struct BacklogEntry {
     pub unviable_at: Option<u64>,
 }
 
-impl From<SharedEntry> for BacklogEntry {
-    fn from(shared: SharedEntry) -> Self {
+impl From<EntryFacts> for BacklogEntry {
+    fn from(facts: EntryFacts) -> Self {
         let mut entry = Self::new(Arc::new(IndexedSignRequest {
-            id: shared.id,
-            args: shared.args,
-            chain: shared.chain,
+            id: facts.id,
+            args: facts.args,
+            chain: facts.chain,
             unix_timestamp_indexed: None,
-            kind: shared.kind,
+            kind: facts.kind,
         }));
-        entry.tx_ids = shared.tx_ids;
-        entry.unviable_at = shared.unviable_at;
+        entry.tx_ids = facts.tx_ids;
+        entry.unviable_at = facts.unviable_at;
         entry
     }
 }
@@ -951,9 +951,9 @@ impl BacklogEntry {
     }
 
     /// The source-chain facts the digest covers; indexing times are node-local.
-    pub(crate) fn shared(&self) -> SharedEntry {
+    pub(crate) fn facts(&self) -> EntryFacts {
         let request = &self.request;
-        SharedEntry {
+        EntryFacts {
             id: request.id,
             args: request.args.clone(),
             chain: request.chain,

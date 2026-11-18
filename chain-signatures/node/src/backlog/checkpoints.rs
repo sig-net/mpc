@@ -11,7 +11,7 @@ use std::sync::Arc;
 /// One request as nodes send it to each other. The digest hashes every field.
 /// A new field breaks the build until `digest_bytes` hashes it too.
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct SharedEntry {
+pub struct EntryFacts {
     pub id: SignId,
     pub args: SignArgs,
     pub chain: Chain,
@@ -20,7 +20,7 @@ pub struct SharedEntry {
     pub unviable_at: Option<u64>,
 }
 
-impl SharedEntry {
+impl EntryFacts {
     fn digest_bytes(&self) -> Vec<u8> {
         let Self {
             id,
@@ -39,18 +39,18 @@ impl SharedEntry {
 
 /// The checkpoint as peers exchange it; a node's own copy adds its progress.
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct SharedCheckpoint {
+pub struct CheckpointFacts {
     pub chain: Chain,
     pub block_height: u64,
-    pub entries: Vec<SharedEntry>,
+    pub entries: Vec<EntryFacts>,
 }
 
-impl From<SharedCheckpoint> for Checkpoint {
-    fn from(shared: SharedCheckpoint) -> Self {
+impl From<CheckpointFacts> for Checkpoint {
+    fn from(facts: CheckpointFacts) -> Self {
         Self {
-            chain: shared.chain,
-            block_height: shared.block_height,
-            pending_requests: shared.entries.into_iter().map(Into::into).collect(),
+            chain: facts.chain,
+            block_height: facts.block_height,
+            pending_requests: facts.entries.into_iter().map(Into::into).collect(),
             legacy_digest: None,
         }
     }
@@ -142,20 +142,20 @@ impl Checkpoint {
     fn entries_digest(&self) -> [u8; 32] {
         let mut hasher = sha3::Sha3_256::new();
         for entry in &self.pending_requests {
-            hasher.update(entry.shared().digest_bytes());
+            hasher.update(entry.facts().digest_bytes());
         }
         hasher.finalize().into()
     }
 
     /// What a peer gets of this checkpoint.
-    pub(crate) fn shared(&self) -> SharedCheckpoint {
-        SharedCheckpoint {
+    pub(crate) fn facts(&self) -> CheckpointFacts {
+        CheckpointFacts {
             chain: self.chain,
             block_height: self.block_height,
             entries: self
                 .pending_requests
                 .iter()
-                .map(BacklogEntry::shared)
+                .map(BacklogEntry::facts)
                 .collect(),
         }
     }

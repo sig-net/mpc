@@ -1839,7 +1839,7 @@ async fn an_operator_gets_the_whole_body() {
     let body = backlog.checkpoint(chain).await.unwrap();
 
     let response = peer_response(chain, false, body.clone());
-    assert!(response.shared.is_empty());
+    assert!(response.facts.is_empty());
     assert_eq!(
         response.checkpoints[&chain].pending_requests,
         body.pending_requests

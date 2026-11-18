@@ -1223,7 +1223,7 @@ async fn adopting_a_body_ignores_its_progress() {
     assert_eq!(answered.digest(), executing.digest());
 
     let adopter = Backlog::new();
-    let fetched = crate::backlog::Checkpoint::from(answered.shared());
+    let fetched = crate::backlog::Checkpoint::from(answered.facts());
     adopter.regress(&fetched, test_root_pk()).await.unwrap();
 
     let entry = adopter.get(Chain::Solana, &request.id).await.unwrap();

@@ -72,7 +72,7 @@ async fn test_web_server_serves_checkpoint() {
     let response: mpc_node::web::CheckpointResponse =
         ciborium::from_reader(body.as_ref()).expect("should deserialize checkpoint");
     assert_eq!(response.version, mpc_node::CHECKPOINT_VERSION);
-    let checkpoints = response.shared;
+    let checkpoints = response.facts;
 
     let retrieved = checkpoints
         .get(&chain)
@@ -135,7 +135,7 @@ async fn test_consensus_alignment_peer_fetch() {
             ciborium::from_reader(body.as_ref()).unwrap();
         assert_eq!(response.version, mpc_node::CHECKPOINT_VERSION);
         assert!(
-            response.shared.contains_key(&chain),
+            response.facts.contains_key(&chain),
             "web server should serve the checkpoint"
         );
     }

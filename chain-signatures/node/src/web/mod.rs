@@ -7,7 +7,7 @@ pub mod mock;
 pub mod debug;
 
 use self::error::Error;
-use crate::backlog::{Backlog, Checkpoint, SharedCheckpoint};
+use crate::backlog::{Backlog, Checkpoint, CheckpointFacts};
 use crate::config::NetworkConfig;
 use crate::metrics::messaging::WEB_ENDPOINT_LATENCY;
 use crate::protocol::state::{NodeStateWatcher, NodeStatus};
@@ -182,14 +182,14 @@ pub struct CheckpointResponse {
     pub version: u64,
     pub checkpoints: HashMap<Chain, Checkpoint>,
     #[serde(default)]
-    pub shared: HashMap<Chain, SharedCheckpoint>,
+    pub facts: HashMap<Chain, CheckpointFacts>,
 }
 
 impl CheckpointResponse {
     /// Peers ask by digest and get what it covers; an old-format digest needs the whole body.
     pub(crate) fn insert(&mut self, chain: Chain, by_digest: bool, checkpoint: Checkpoint) {
         if by_digest && checkpoint.legacy_digest.is_none() {
-            self.shared.insert(chain, checkpoint.shared());
+            self.facts.insert(chain, checkpoint.facts());
         } else {
             self.checkpoints.insert(chain, checkpoint);
         }
@@ -197,9 +197,9 @@ impl CheckpointResponse {
 
     /// The body to adopt for `chain`. A peer sends only an old-format one whole.
     pub(crate) fn adoptable(mut self, chain: Chain) -> Option<Checkpoint> {
-        let shared = self.shared.remove(&chain).map(Checkpoint::from);
+        let facts = self.facts.remove(&chain).map(Checkpoint::from);
         let whole = self.checkpoints.remove(&chain);
-        shared.or(whole.filter(|checkpoint| checkpoint.legacy_digest.is_some()))
+        facts.or(whole.filter(|checkpoint| checkpoint.legacy_digest.is_some()))
     }
 }
 
