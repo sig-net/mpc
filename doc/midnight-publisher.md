@@ -50,7 +50,7 @@ A submit has one budget, `PublisherConfig::submit_timeout` (420 s): waiting for 
 
 A node failure (`internal`) is terminal only when the transport refused a read inside the submit — the runtime-metadata fetch, or the fee's head and parameter reads — with a classic client error (400, 401, 403, 404 or 405); any other status retries, like the publisher's own reads, which carry the same partition: another backend may serve it, so a shared provider's transient 409 does not drop the publish. A failure carrying no status retries. The submit call itself never lands here: its transport failures are watched for landing and end `ambiguous_submit`, so they retry.
 
-The node counts each failed publish that carries a class in `multichain_publish_refusals`; the publisher's own reads (`finalized_head`, the state pin, the awaited check) carry no class — their verdicts ride typed carriers, but they are not refusal classes. A landed publish sets `multichain_funding_wallet_balance` to the spendable DUST its fee was planned from.
+The node counts each failed publish that carries a class in `multichain_publish_refusals`; the publisher's node reads (`finalized_head`, the state and parameter pin) carry verdicts on typed carriers but no refusal class, and the awaited check — an in-process backlog read — carries neither. A landed publish sets `multichain_funding_wallet_balance` to the spendable DUST its fee was planned from.
 
 ## Configuration and artifacts
 
