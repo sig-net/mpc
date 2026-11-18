@@ -884,7 +884,7 @@ pub(crate) fn read_verdict(error: &anyhow::Error) -> RpcFailure {
     if is_oversized_contract_state(error) {
         return RpcFailure::terminal(format!("{error:#}"));
     }
-    if let Some(failure) = RpcFailure::from_chain(error) {
+    if let Some(failure) = RpcFailure::from_read_chain(error) {
         return failure;
     }
     match rejected_http_status(error) {
