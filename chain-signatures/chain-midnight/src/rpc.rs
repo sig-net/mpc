@@ -9,7 +9,7 @@ use jsonrpsee::core::traits::ToRpcParams;
 use jsonrpsee::http_client::{HttpClient, HttpClientBuilder};
 use jsonrpsee::types::error::{INVALID_PARAMS_CODE, OVERSIZED_RESPONSE_CODE};
 use mpc_chain_integration_core::utils::retry::{
-    exhausted, http_status_read_retryable, is_retryable, RetryConfig,
+    exhausted, http_status_read_retryable, is_retryable, RpcFailure, RetryConfig,
 };
 use subxt::backend::legacy::rpc_methods::{BlockDetails, NumberOrHex};
 use subxt::backend::legacy::LegacyRpcMethods;
@@ -877,6 +877,36 @@ pub(crate) trait PinnedReads: Send + Sync {
     async fn ledger_parameters(&self, at_hash: &BlockHash) -> anyhow::Result<Vec<u8>>;
 }
 
+/// Verdict for an error off the node transport on a read path: the
+/// oversized-state refusal terminal, an upstream carrier verbatim, else the
+/// read partition over the transport's typed status.
+pub(crate) fn read_verdict(error: &anyhow::Error) -> RpcFailure {
+    if is_oversized_contract_state(error) {
+        return RpcFailure::terminal(format!("{error:#}"));
+    }
+    if let Some(failure) = RpcFailure::from_chain(error) {
+        return failure;
+    }
+    match rejected_http_status(error) {
+        Some(status) => RpcFailure::read_status(status, format!("{error:#}")),
+        None => RpcFailure::retryable(format!("{error:#}")),
+    }
+}
+
+/// Holds the failed read above its carrier at the root: anyhow's `chain()`
+/// never yields `context` values, so a context-attached carrier is invisible
+/// to chain walks — the `SubmitError::Node` shape.
+#[derive(Debug, thiserror::Error)]
+#[error("a publisher read failed")]
+struct ReadFailed {
+    #[source]
+    source: anyhow::Error,
+}
+
+fn attach_read_carrier(error: anyhow::Error) -> anyhow::Error {
+    anyhow::Error::new(read_verdict(&error)).context(ReadFailed { source: error })
+}
+
 #[async_trait::async_trait]
 impl PinnedReads for MidnightPublisherRpc {
     async fn finalized_head(&self) -> anyhow::Result<BlockHash> {
@@ -884,7 +914,8 @@ impl PinnedReads for MidnightPublisherRpc {
             .legacy
             .chain_get_finalized_head()
             .await
-            .context("failed to fetch the midnight finalized head")?;
+            .context("failed to fetch the midnight finalized head")
+            .map_err(attach_read_carrier)?;
         Ok(finalized.into())
     }
 
@@ -893,7 +924,9 @@ impl PinnedReads for MidnightPublisherRpc {
         address: &MidnightAddress,
         at_hash: &BlockHash,
     ) -> anyhow::Result<Option<Vec<u8>>> {
-        publisher_contract_state(&self.rpc, address, at_hash).await
+        publisher_contract_state(&self.rpc, address, at_hash)
+            .await
+            .map_err(attach_read_carrier)
     }
 
     async fn ledger_parameters(&self, at_hash: &BlockHash) -> anyhow::Result<Vec<u8>> {
@@ -902,9 +935,11 @@ impl PinnedReads for MidnightPublisherRpc {
             .legacy
             .state_call(LEDGER_PARAMETERS_ENTRY, Some(&[]), Some(at))
             .await
-            .context("failed to fetch midnight ledger parameters")?;
+            .context("failed to fetch midnight ledger parameters")
+            .map_err(attach_read_carrier)?;
         unwrap_runtime_api_result(&answer)?
             .with_context(|| format!("midnight node has no ledger parameters at {at_hash}"))
+            .map_err(attach_read_carrier)
     }
 }
 
@@ -2497,6 +2532,88 @@ mod tests {
                 "HTTP {status} used the wrong retry policy"
             );
         }
+    }
+
+    /// jsonrpsee's `Rejected` wire shape (jsonrpsee-http-client 0.24.10
+    /// transport.rs:376), as a raw HTTP status fails these reads.
+    fn rejected_read(status: u16) -> anyhow::Error {
+        let transport = jsonrpsee::http_client::transport::Error::Rejected { status_code: status };
+        let client = JsonrpseeClientError::Transport(Box::new(transport));
+        anyhow::Error::new(RawRpcError::Client(Box::new(client)))
+            .context("failed to fetch the midnight finalized head")
+    }
+
+    #[test]
+    fn publish_reads_carry_the_read_partition_verdict() {
+        // Classic client errors terminal (failover covers delivery), the rest
+        // retries; 402/429 engage the gate by typed status, never the render.
+        for (status, retryable, throttled) in [
+            (400u16, false, false),
+            (401, false, false),
+            (403, false, false),
+            (404, false, false),
+            (405, false, false),
+            (402, true, true),
+            (408, true, false),
+            (409, true, false), // the send table's terminal arm — reads diverge (#1469)
+            (429, true, true),
+            (500, true, false),
+        ] {
+            let error = attach_read_carrier(rejected_read(status)).context("publishing");
+            assert_eq!(
+                is_retryable(&error),
+                retryable,
+                "status {status}: {error:#}"
+            );
+            assert_eq!(
+                is_provider_throttled(&error),
+                throttled,
+                "status {status}: {error:#}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_oversized_state_read_is_terminal() {
+        let error =
+            attach_read_carrier(oversized_contract_state("server cap 1024 bytes").context("the pin"));
+        assert!(!is_retryable(&error), "{error:#}");
+        assert!(!is_provider_throttled(&error), "{error:#}");
+    }
+
+    #[test]
+    fn a_statusless_read_failure_is_retryable_and_never_throttled() {
+        // No typed status means no gate, however status-like the render.
+        let node_answer = RawRpcError::User(UserError {
+            code: 4000,
+            message: "429 Too Many Requests".into(),
+            data: None,
+        });
+        let error = attach_read_carrier(
+            anyhow::Error::new(node_answer).context("midnight_contractState failed"),
+        );
+        assert!(is_retryable(&error), "{error:#}");
+        assert!(!is_provider_throttled(&error), "{error:#}");
+    }
+
+    #[test]
+    fn upstream_carriers_win_over_the_read_derivation() {
+        let terminal = attach_read_carrier(
+            anyhow::Error::new(RpcFailure::terminal("upstream refused".to_string()))
+                .context("a read"),
+        );
+        assert!(!is_retryable(&terminal), "{terminal:#}");
+
+        // The carrier's verdict wins over the read partition its status implies.
+        let retryable = attach_read_carrier(
+            anyhow::Error::new(RpcFailure::retryable_with_status(
+                StatusCode::FORBIDDEN,
+                "upstream retry".to_string(),
+            ))
+            .context("a read"),
+        );
+        assert!(is_retryable(&retryable), "{retryable:#}");
+        assert!(!is_provider_throttled(&retryable), "{retryable:#}");
     }
 
     /// A keep-alive HTTP server whose first connection reaches a node that has fallen
