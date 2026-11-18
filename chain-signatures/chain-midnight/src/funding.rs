@@ -71,6 +71,10 @@ const RESUME_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 /// between, before its checkpoint is dropped: the intent builder's snapshot strikes.
 /// Above one, because a healthy wallet is also refused at times.
 const RESTORE_STRIKES: u32 = 3;
+/// How long a live subscription that holds itself caught up may apply nothing while
+/// the indexer names a newer event before it is replaced: a connection can stall
+/// without closing.
+const STALL_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// The DUST key of account 0 at index 0, derived the way the Midnight wallet SDK
 /// derives it from the same seed: BIP-32 `m/44'/2400'/0'/2/0`, then the ledger's
@@ -124,7 +128,7 @@ pub(crate) fn parse_seed(seed: &str) -> anyhow::Result<Vec<u8>> {
 /// driven without an indexer.
 pub(crate) trait FeePayer: Send + Sync {
     /// Waits, until `deadline`, for the replayed state to catch up with the newest
-    /// event the indexer has reported.
+    /// event the indexer has reported or named.
     fn ready_by(
         &self,
         deadline: Instant,
@@ -133,7 +137,9 @@ pub(crate) trait FeePayer: Send + Sync {
     /// roots are the ones the replayed state proves against.
     fn sync_time(&self) -> Timestamp;
     /// The block time of the newest block the event source has indexed: past it,
-    /// the chain may hold DUST events the replay has not seen.
+    /// the chain may hold DUST events the replay has not seen. When the source also names
+    /// its newest event, the replay is not ready again until it has applied it or a
+    /// subscription opened since reports the newest event itself.
     fn indexed_time(
         &self,
     ) -> impl std::future::Future<Output = Result<Timestamp, SubmitError>> + Send;
@@ -260,6 +266,8 @@ struct Synced {
     applied_hash: Option<[u8; 32]>,
     /// The newest event id the indexer has reported.
     max_id: u64,
+    /// The newest event id the indexer named when asked apart from the subscription.
+    named: u64,
     /// Whether a subscription is currently delivering.
     connected: bool,
     /// The event a restored checkpoint expects the next subscription to start with.
@@ -268,6 +276,8 @@ struct Synced {
     restored: bool,
     /// A failed submit asked for the replay to start over from the latest checkpoint.
     reload: bool,
+    /// A wait for the replay asked for the live subscription to be replaced.
+    resubscribe: bool,
     reservations: Vec<Reservation>,
 }
 
@@ -278,10 +288,12 @@ impl Synced {
             applied: None,
             applied_hash: None,
             max_id: 0,
+            named: 0,
             connected: false,
             resume: None,
             restored: false,
             reload: false,
+            resubscribe: false,
             reservations: Vec::new(),
         }
     }
@@ -298,9 +310,14 @@ impl Synced {
         self.connected && self.is_caught_up() && !self.reload
     }
 
-    /// Replayed up to the newest event the indexer reported, live or not.
+    /// Replayed up to the newest event the indexer reported or named, live or not.
     fn is_caught_up(&self) -> bool {
-        self.applied.is_some_and(|applied| applied >= self.max_id)
+        self.applied.is_some_and(|applied| applied >= self.newest())
+    }
+
+    /// The newest event id the indexer has reported or named.
+    fn newest(&self) -> u64 {
+        self.max_id.max(self.named)
     }
 }
 
@@ -310,7 +327,7 @@ struct Shared {
     state: Mutex<Synced>,
     progress: watch::Sender<()>,
     snapshots: Mutex<Snapshots>,
-    /// Wakes the subscription to act on `Synced::reload`.
+    /// Wakes the subscription to act on `Synced::reload` or `Synced::resubscribe`.
     wake: tokio::sync::Notify,
     store: Option<Arc<dyn DustCheckpointStore>>,
     /// Held while a checkpoint is kept and while a forgotten one is cleared, so a clear
@@ -388,7 +405,8 @@ impl FundingWallet {
 /// How one subscription ended.
 #[derive(Clone, Copy)]
 enum Ended {
-    /// The connection or the stream ended; the replay goes on from where it is.
+    /// The connection or the stream ended, or a stalled one was replaced; the replay
+    /// goes on from where it is.
     Dropped,
     /// The subscription could not be opened; the replay goes on from where it is.
     Refused,
@@ -399,7 +417,7 @@ enum Ended {
 }
 
 /// Follows the event stream for the wallet's lifetime: resubscribes after any
-/// failure from the newest applied event, and starts over from the first event when
+/// failure or stall from the newest applied event, and starts over from the first event when
 /// the replayed state can no longer absorb what the indexer sends, backing off while
 /// that keeps happening before the replay catches up, or while the indexer refuses to
 /// open a subscription at all.
@@ -516,6 +534,13 @@ async fn subscribe_once(shared: Arc<Shared>, source: Arc<dyn DustEventSource>) -
     let mut caught_up = false;
     match source.subscribe(from).await {
         Ok(stream) => {
+            {
+                // What either asked of the subscription before is not for this one,
+                // which reports the newest event itself.
+                let mut state = shared.state();
+                state.resubscribe = false;
+                state.named = 0;
+            }
             let mut batches = stream.ready_chunks(REPLAY_BATCH);
             let resume_deadline = Instant::now() + RESUME_TIMEOUT;
             loop {
@@ -526,11 +551,14 @@ async fn subscribe_once(shared: Arc<Shared>, source: Arc<dyn DustEventSource>) -
                         None => break,
                     },
                     () = shared.wake.notified() => {
-                        if !std::mem::take(&mut shared.state().reload) {
-                            continue;
+                        if std::mem::take(&mut shared.state().reload) {
+                            reload(&shared);
+                            return Ended::Reloaded;
                         }
-                        reload(&shared);
-                        return Ended::Reloaded;
+                        if std::mem::take(&mut shared.state().resubscribe) {
+                            return Ended::Dropped;
+                        }
+                        continue;
                     }
                     () = tokio::time::sleep_until(resume_deadline), if resuming => {
                         tracing::warn!(
@@ -769,22 +797,78 @@ fn now() -> Timestamp {
     Timestamp::from_secs(mpc_utils::time::current_unix_timestamp())
 }
 
+impl FundingWallet {
+    /// Holds the replay back from ready until it has applied `newest`, the newest event
+    /// the indexer named apart from the live subscription. That subscription can stall
+    /// without closing and keep the older newest id it last served, and a fee proven
+    /// over the roots it left is refused. A subscription opened later reports the
+    /// newest event itself, so the name is dropped then.
+    fn name_newest_event(&self, newest: u64) {
+        let mut state = self.shared.state();
+        if state.applied.is_none_or(|applied| applied < newest) {
+            tracing::info!(
+                applied = ?state.applied,
+                reported = state.max_id,
+                newest,
+                "midnight funding wallet: the indexer holds DUST events the replay has not \
+                 applied"
+            );
+        }
+        state.named = state.named.max(newest);
+    }
+}
+
 impl FeePayer for FundingWallet {
+    /// A live subscription that holds itself caught up and applies nothing for
+    /// `STALL_GRACE` while the indexer names a newer event is replaced. One still behind
+    /// its own newest event is taken to be delivering and is not.
     async fn ready_by(&self, deadline: Instant) -> Result<(), SubmitError> {
         let mut progress = self.shared.progress.subscribe();
+        let mut applied = self.shared.state().applied;
+        let mut moved = Instant::now();
         loop {
-            if self.shared.state().is_ready() {
-                return Ok(());
-            }
-            match tokio::time::timeout_at(deadline, progress.changed()).await {
+            let until = {
+                let mut state = self.shared.state();
+                if state.is_ready() {
+                    return Ok(());
+                }
+                if state.applied != applied {
+                    applied = state.applied;
+                    moved = Instant::now();
+                } else if moved.elapsed() >= STALL_GRACE
+                    && state.connected
+                    && !state.reload
+                    && state
+                        .applied
+                        .is_some_and(|applied| applied >= state.max_id && applied < state.named)
+                {
+                    tracing::warn!(
+                        applied = ?state.applied,
+                        newest = state.newest(),
+                        "midnight funding wallet: the DUST subscription applied nothing while \
+                         behind the indexer; resubscribing"
+                    );
+                    state.resubscribe = true;
+                    moved = Instant::now();
+                    self.shared.wake.notify_one();
+                }
+                // A subscription that is down or reloading wakes this wait itself.
+                if moved.elapsed() < STALL_GRACE {
+                    deadline.min(moved + STALL_GRACE)
+                } else {
+                    deadline
+                }
+            };
+            match tokio::time::timeout_at(until, progress.changed()).await {
                 Ok(Ok(())) => {}
+                Err(_) if Instant::now() < deadline => {}
                 Ok(Err(_)) | Err(_) => {
                     let state = self.shared.state();
                     return Err(SubmitError::WalletUnsynced(format!(
                         "DUST replay is at event {:?} of {} (subscription {}{}); nothing was \
                          posted",
                         state.applied,
-                        state.max_id,
+                        state.newest(),
                         if state.connected { "live" } else { "down" },
                         if state.reload {
                             ", reload after a failed submit pending"
@@ -802,11 +886,16 @@ impl FeePayer for FundingWallet {
     }
 
     async fn indexed_time(&self) -> Result<Timestamp, SubmitError> {
-        self.source.indexed_time().await.map_err(|error| {
+        let from = self.shared.state().applied;
+        let indexed = self.source.indexed(from).await.map_err(|error| {
             SubmitError::WalletUnsynced(format!(
                 "the indexer did not report its newest block: {error:#}; nothing was posted"
             ))
-        })
+        })?;
+        if let Some(newest) = indexed.newest_event {
+            self.name_newest_event(newest);
+        }
+        Ok(indexed.time)
     }
 
     fn plan(
@@ -827,7 +916,8 @@ impl FeePayer for FundingWallet {
                 return Err(SubmitError::WalletUnsynced(format!(
                     "the DUST replay is restarting or resuming from a checkpoint and is at \
                      event {:?} of {}; nothing was posted",
-                    state.applied, state.max_id
+                    state.applied,
+                    state.newest()
                 )));
             }
             let wall = now();
@@ -1070,9 +1160,11 @@ fn fee_transaction(
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use crate::dust_feed::Indexed;
     use async_trait::async_trait;
     use futures_util::stream::BoxStream;
     use rand::SeedableRng as _;
+    use std::collections::VecDeque;
 
     /// The publisher seed `midnight-devtools`' real-stack driver funds.
     const FUNDED_SEED: &str = "0404040404040404040404040404040404040404040404040404040404040404";
@@ -2257,6 +2349,527 @@ pub(crate) mod tests {
         assert_eq!(attempts(), 5);
         tokio::time::sleep(std::time::Duration::from_secs(540)).await;
         assert_eq!(attempts(), 14);
+    }
+
+    /// Its first subscription serves the fixture up to `stalls_at`, naming the last of
+    /// those the newest, then nothing, as a connection that stalled without closing;
+    /// every later one serves the whole fixture. Asked apart, it names each of `names`
+    /// in turn, then the last of them again.
+    struct StallsAt {
+        stalls_at: usize,
+        updates: Vec<DustEventUpdate>,
+        names: Mutex<VecDeque<Option<u64>>>,
+        /// When each subscription opened.
+        opened: Mutex<Vec<Instant>>,
+    }
+
+    impl StallsAt {
+        fn new(stalls_at: usize, names: impl IntoIterator<Item = Option<u64>>) -> Arc<Self> {
+            Arc::new(Self {
+                stalls_at,
+                updates: fixture_updates(),
+                names: Mutex::new(names.into_iter().collect()),
+                opened: Mutex::default(),
+            })
+        }
+
+        fn subscriptions(&self) -> usize {
+            self.opened.lock().unwrap().len()
+        }
+    }
+
+    #[async_trait]
+    impl DustEventSource for StallsAt {
+        async fn subscribe(
+            &self,
+            from: Option<u64>,
+        ) -> anyhow::Result<BoxStream<'static, anyhow::Result<DustEventUpdate>>> {
+            let first = {
+                let mut opened = self.opened.lock().unwrap();
+                opened.push(Instant::now());
+                opened.len() == 1
+            };
+            if !first {
+                return OnceSource(self.updates.clone()).subscribe(from).await;
+            }
+            let mut served = self.updates[..self.stalls_at].to_vec();
+            let newest = served.last().unwrap().id;
+            for update in &mut served {
+                update.max_id = newest;
+            }
+            Ok(futures_util::stream::iter(served.into_iter().map(Ok))
+                .chain(futures_util::stream::pending())
+                .boxed())
+        }
+
+        async fn indexed_time(&self) -> anyhow::Result<Timestamp> {
+            Ok(replayed().sync_time)
+        }
+
+        async fn indexed(&self, _from: Option<u64>) -> anyhow::Result<Indexed> {
+            let mut names = self.names.lock().unwrap();
+            let newest_event = if names.len() > 1 {
+                names.pop_front().unwrap()
+            } else {
+                names.front().copied().flatten()
+            };
+            Ok(Indexed {
+                time: replayed().sync_time,
+                newest_event,
+            })
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_stalled_subscription_behind_the_indexer_is_replaced_before_paying() {
+        let updates = fixture_updates();
+        let newest = updates.last().unwrap().id;
+        let source = StallsAt::new(updates.len() - 2, [Some(newest)]);
+        let wallet = FundingWallet::start(funded_key(), source.clone(), None);
+        // The stalled subscription still names the last event it served the newest.
+        wallet
+            .ready_by(Instant::now() + std::time::Duration::from_secs(30))
+            .await
+            .unwrap();
+        assert_eq!(
+            wallet.shared.state().applied,
+            Some(updates[updates.len() - 3].id)
+        );
+
+        wallet.indexed_time().await.unwrap();
+        assert!(
+            !wallet.shared.state().is_ready(),
+            "the indexer holds two events the replay has not applied"
+        );
+        let waited = Instant::now();
+        wallet
+            .ready_by(Instant::now() + std::time::Duration::from_secs(60))
+            .await
+            .unwrap();
+        assert_eq!(wallet.shared.state().applied, Some(newest));
+        assert_eq!(source.subscriptions(), 2);
+        let replaced_after = source.opened.lock().unwrap()[1] - waited;
+        assert!(
+            replaced_after >= STALL_GRACE
+                && replaced_after
+                    <= STALL_GRACE + RESUBSCRIBE_DELAY + std::time::Duration::from_secs(1),
+            "replaced {replaced_after:?} into the wait"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_newest_event_no_subscription_serves_costs_one_replacement_at_most() {
+        let updates = fixture_updates();
+        let newest = updates.last().unwrap().id;
+        // A broken or mismatched indexer names an event once that it never serves.
+        let source = StallsAt::new(updates.len(), [Some(newest + 1_000_000), Some(newest)]);
+        let wallet = FundingWallet::start(funded_key(), source.clone(), None);
+        ready(&wallet).await;
+        wallet.indexed_time().await.unwrap();
+        assert!(!wallet.shared.state().is_ready());
+
+        let waited = Instant::now();
+        wallet
+            .ready_by(Instant::now() + std::time::Duration::from_secs(60))
+            .await
+            .unwrap();
+        assert!(
+            waited.elapsed() <= STALL_GRACE + RESUBSCRIBE_DELAY + std::time::Duration::from_secs(1),
+            "{:?}",
+            waited.elapsed()
+        );
+        assert_eq!(source.subscriptions(), 2);
+        // The next publish is not held by it.
+        wallet.indexed_time().await.unwrap();
+        ready(&wallet).await;
+        assert_eq!(source.subscriptions(), 2);
+    }
+
+    /// Serves the fixture one event a second, each naming itself the newest. Asked
+    /// apart, it names the fixture's newest.
+    #[derive(Default)]
+    struct Trickles {
+        subscriptions: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait]
+    impl DustEventSource for Trickles {
+        async fn subscribe(
+            &self,
+            _from: Option<u64>,
+        ) -> anyhow::Result<BoxStream<'static, anyhow::Result<DustEventUpdate>>> {
+            self.subscriptions
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let updates = fixture_updates().into_iter().map(|mut update| {
+                update.max_id = update.id;
+                update
+            });
+            Ok(futures_util::stream::iter(updates)
+                .then(|update| async move {
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                    Ok(update)
+                })
+                .chain(futures_util::stream::pending())
+                .boxed())
+        }
+
+        async fn indexed_time(&self) -> anyhow::Result<Timestamp> {
+            Ok(replayed().sync_time)
+        }
+
+        async fn indexed(&self, _from: Option<u64>) -> anyhow::Result<Indexed> {
+            Ok(Indexed {
+                time: replayed().sync_time,
+                newest_event: Some(fixture_updates().last().unwrap().id),
+            })
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_replay_still_moving_toward_the_indexer_keeps_its_subscription() {
+        let source = Arc::new(Trickles::default());
+        let wallet = FundingWallet::start(funded_key(), source.clone(), None);
+        wallet
+            .ready_by(Instant::now() + std::time::Duration::from_secs(30))
+            .await
+            .unwrap();
+        wallet.indexed_time().await.unwrap();
+        assert!(!wallet.shared.state().is_ready());
+        // 28 events still to come, a second apart: past the grace, never stalled for it.
+        wallet
+            .ready_by(Instant::now() + std::time::Duration::from_secs(120))
+            .await
+            .unwrap();
+        assert_eq!(
+            wallet.shared.state().applied,
+            Some(fixture_updates().last().unwrap().id)
+        );
+        assert_eq!(
+            source
+                .subscriptions
+                .load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "a subscription applying an event a second is not stalled"
+        );
+    }
+
+    /// Serves the fixture one event every `gap`, each naming the fixture's newest, as a
+    /// catch-up does; asked apart, it names the same.
+    struct CatchesUpSlowly {
+        gap: std::time::Duration,
+        subscriptions: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait]
+    impl DustEventSource for CatchesUpSlowly {
+        async fn subscribe(
+            &self,
+            _from: Option<u64>,
+        ) -> anyhow::Result<BoxStream<'static, anyhow::Result<DustEventUpdate>>> {
+            self.subscriptions
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let gap = self.gap;
+            Ok(futures_util::stream::iter(fixture_updates())
+                .then(move |update| async move {
+                    tokio::time::sleep(gap).await;
+                    Ok(update)
+                })
+                .chain(futures_util::stream::pending())
+                .boxed())
+        }
+
+        async fn indexed_time(&self) -> anyhow::Result<Timestamp> {
+            Ok(replayed().sync_time)
+        }
+
+        async fn indexed(&self, _from: Option<u64>) -> anyhow::Result<Indexed> {
+            Ok(Indexed {
+                time: replayed().sync_time,
+                newest_event: Some(fixture_updates().last().unwrap().id),
+            })
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_subscription_behind_its_own_newest_event_is_never_replaced() {
+        let source = Arc::new(CatchesUpSlowly {
+            gap: STALL_GRACE * 2,
+            subscriptions: Default::default(),
+        });
+        let wallet = FundingWallet::start(funded_key(), source.clone(), None);
+        tokio::time::sleep(STALL_GRACE * 3).await;
+        wallet.indexed_time().await.unwrap();
+        wallet
+            .ready_by(Instant::now() + std::time::Duration::from_secs(600))
+            .await
+            .unwrap();
+        assert_eq!(
+            source
+                .subscriptions
+                .load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "a catch-up slower than the grace is still delivering"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_indexer_that_names_no_newest_event_leaves_the_replay_ready() {
+        let updates = fixture_updates();
+        let source = StallsAt::new(updates.len() - 2, [None]);
+        let wallet = FundingWallet::start(funded_key(), source.clone(), None);
+        ready(&wallet).await;
+        wallet.indexed_time().await.unwrap();
+        assert!(wallet.shared.state().is_ready());
+        assert_eq!(source.subscriptions(), 1);
+    }
+
+    /// Subscription 1 serves the fixture up to `upto`, naming the last of those the
+    /// newest, then ends; the next `refusals` subscriptions are refused; every later one
+    /// serves event `from` at once, then one more event a second. Asked apart, it names
+    /// the fixture's newest.
+    struct DownThenTrickle {
+        upto: usize,
+        refusals: usize,
+        opened: Mutex<Vec<Instant>>,
+    }
+
+    #[async_trait]
+    impl DustEventSource for DownThenTrickle {
+        async fn subscribe(
+            &self,
+            from: Option<u64>,
+        ) -> anyhow::Result<BoxStream<'static, anyhow::Result<DustEventUpdate>>> {
+            let attempt = {
+                let mut opened = self.opened.lock().unwrap();
+                opened.push(Instant::now());
+                opened.len()
+            };
+            let updates = fixture_updates();
+            if attempt == 1 {
+                let mut served = updates[..self.upto].to_vec();
+                let newest = served.last().unwrap().id;
+                for update in &mut served {
+                    update.max_id = newest;
+                }
+                return Ok(futures_util::stream::iter(served.into_iter().map(Ok)).boxed());
+            }
+            if attempt <= 1 + self.refusals {
+                anyhow::bail!("connection refused");
+            }
+            let mut rest = updates
+                .into_iter()
+                .filter(move |update| from.is_none_or(|from| update.id >= from));
+            let first = rest.next().unwrap();
+            Ok(futures_util::stream::iter([Ok(first)])
+                .chain(futures_util::stream::iter(rest).then(|update| async move {
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                    Ok(update)
+                }))
+                .chain(futures_util::stream::pending())
+                .boxed())
+        }
+
+        async fn indexed_time(&self) -> anyhow::Result<Timestamp> {
+            Ok(replayed().sync_time)
+        }
+
+        async fn indexed(&self, _from: Option<u64>) -> anyhow::Result<Indexed> {
+            Ok(Indexed {
+                time: replayed().sync_time,
+                newest_event: Some(fixture_updates().last().unwrap().id),
+            })
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_subscription_reopened_after_a_long_outage_is_not_replaced_at_once() {
+        let updates = fixture_updates();
+        let source = Arc::new(DownThenTrickle {
+            upto: updates.len() - 2,
+            refusals: 2,
+            opened: Mutex::default(),
+        });
+        let wallet = FundingWallet::start(funded_key(), source.clone(), None);
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        assert_eq!(
+            wallet.shared.state().applied,
+            Some(updates[updates.len() - 3].id)
+        );
+        wallet.indexed_time().await.unwrap();
+        wallet
+            .ready_by(Instant::now() + std::time::Duration::from_secs(120))
+            .await
+            .unwrap();
+        assert_eq!(
+            source.opened.lock().unwrap().len(),
+            4,
+            "one ended, two refused, one back and kept"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_failure_and_a_replacement_asked_at_once_still_reload() {
+        let wallet =
+            FundingWallet::start(funded_key(), Arc::new(OnceSource(fixture_updates())), None);
+        ready(&wallet).await;
+        // A stall replacement was asked, then a submit failed, before the subscription woke.
+        wallet.shared.state().resubscribe = true;
+        wallet.failed(false);
+        tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+        assert!(!wallet.shared.state().reload, "the reload was acted on");
+        ready(&wallet).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_replacement_asked_of_an_ended_subscription_spares_the_next() {
+        let source = Arc::new(DownThenTrickle {
+            upto: fixture_updates().len(),
+            refusals: 0,
+            opened: Mutex::default(),
+        });
+        let wallet = FundingWallet::start(funded_key(), source.clone(), None);
+        // The first subscription served everything and ended; follow waits to resubscribe.
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        assert_eq!(source.opened.lock().unwrap().len(), 1);
+        assert!(!wallet.shared.state().connected);
+        // A replacement asked of it just before it ended, never acted on.
+        wallet.shared.state().resubscribe = true;
+        wallet.shared.wake.notify_one();
+        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+        assert_eq!(source.opened.lock().unwrap().len(), 2);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_lower_name_does_not_lower_the_hold() {
+        let updates = fixture_updates();
+        let newest = updates.last().unwrap().id;
+        let source = StallsAt::new(updates.len() - 3, [Some(newest), Some(newest - 1)]);
+        let wallet = FundingWallet::start(funded_key(), source.clone(), None);
+        ready(&wallet).await;
+        wallet.indexed_time().await.unwrap();
+        wallet.indexed_time().await.unwrap();
+        assert_eq!(wallet.shared.state().named, newest);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn ready_after_a_name_the_replacement_serves_means_the_name_is_applied() {
+        let updates = fixture_updates();
+        let newest = updates.last().unwrap().id;
+        for stalls_at in [1, 3, updates.len() - 1] {
+            let source = StallsAt::new(stalls_at, [Some(newest)]);
+            let wallet = FundingWallet::start(funded_key(), source.clone(), None);
+            ready(&wallet).await;
+            wallet.indexed_time().await.unwrap();
+            wallet
+                .ready_by(Instant::now() + std::time::Duration::from_secs(60))
+                .await
+                .unwrap();
+            assert_eq!(
+                wallet.shared.state().applied,
+                Some(newest),
+                "stalled after {stalls_at} events"
+            );
+        }
+    }
+
+    /// Subscription 1 serves the fixture up to `upto`, naming the last of those the
+    /// newest, then ends; every later one serves its first events only after `first`.
+    /// Asked apart, it names the fixture's newest.
+    struct SlowFirst {
+        upto: usize,
+        first: std::time::Duration,
+        opened: Mutex<Vec<Instant>>,
+    }
+
+    #[async_trait]
+    impl DustEventSource for SlowFirst {
+        async fn subscribe(
+            &self,
+            from: Option<u64>,
+        ) -> anyhow::Result<BoxStream<'static, anyhow::Result<DustEventUpdate>>> {
+            let attempt = {
+                let mut opened = self.opened.lock().unwrap();
+                opened.push(Instant::now());
+                opened.len()
+            };
+            let updates = fixture_updates();
+            if attempt == 1 {
+                let mut served = updates[..self.upto].to_vec();
+                let newest = served.last().unwrap().id;
+                for update in &mut served {
+                    update.max_id = newest;
+                }
+                return Ok(futures_util::stream::iter(served.into_iter().map(Ok)).boxed());
+            }
+            let rest: Vec<_> = updates
+                .into_iter()
+                .filter(|update| from.is_none_or(|from| update.id >= from))
+                .collect();
+            let first = self.first;
+            Ok(
+                futures_util::stream::once(async move { tokio::time::sleep(first).await })
+                    .flat_map(move |()| {
+                        futures_util::stream::iter(rest.clone().into_iter().map(Ok))
+                    })
+                    .chain(futures_util::stream::pending())
+                    .boxed(),
+            )
+        }
+
+        async fn indexed_time(&self) -> anyhow::Result<Timestamp> {
+            Ok(replayed().sync_time)
+        }
+
+        async fn indexed(&self, _from: Option<u64>) -> anyhow::Result<Indexed> {
+            Ok(Indexed {
+                time: replayed().sync_time,
+                newest_event: Some(fixture_updates().last().unwrap().id),
+            })
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_open_subscription_slow_to_deliver_is_not_replaced() {
+        let updates = fixture_updates();
+        let source = Arc::new(SlowFirst {
+            upto: updates.len() - 2,
+            first: STALL_GRACE + std::time::Duration::from_secs(3),
+            opened: Mutex::default(),
+        });
+        let wallet = FundingWallet::start(funded_key(), source.clone(), None);
+        // Subscription 1 has ended; 2 opened `RESUBSCRIBE_DELAY` later.
+        tokio::time::sleep(RESUBSCRIBE_DELAY + std::time::Duration::from_secs(1)).await;
+        assert_eq!(source.opened.lock().unwrap().len(), 2);
+        assert!(!wallet.shared.state().connected);
+        // Named after it opened, so the name stands while it is slow to deliver.
+        wallet.indexed_time().await.unwrap();
+        wallet
+            .ready_by(Instant::now() + std::time::Duration::from_secs(120))
+            .await
+            .unwrap();
+        assert_eq!(
+            source.opened.lock().unwrap().len(),
+            2,
+            "the slow one was kept"
+        );
+    }
+
+    #[test]
+    fn a_newest_event_named_apart_holds_the_replay_until_it_applies_it() {
+        let shared = shared();
+        let updates = fixture_updates();
+        let newest = updates.last().unwrap().id;
+        apply(&shared, updates.iter().cloned().map(Ok).collect()).unwrap();
+        assert!(shared.state().is_ready());
+        // Asked apart, the indexer named an event the subscription has yet to serve.
+        shared.state().named = newest + 1;
+        assert!(!shared.state().is_ready());
+        // The subscription naming an older newest event does not release it.
+        apply(&shared, vec![Ok(updates.last().unwrap().clone())]).unwrap();
+        assert!(!shared.state().is_ready());
+        // Reaching the named event does.
+        shared.state().applied = Some(newest + 1);
+        assert!(shared.state().is_ready());
     }
 
     /// How one subscription of [`RefusesAndRestarts`] goes.
