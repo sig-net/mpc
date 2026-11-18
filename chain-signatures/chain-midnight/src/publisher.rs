@@ -9,6 +9,7 @@ use anyhow::Context as _;
 use async_trait::async_trait;
 use k256::elliptic_curve::sec1::ToEncodedPoint as _;
 use minocrab_publisher::{Attestation, EcdsaSignature};
+use mpc_chain_integration_core::utils::retry::RpcFailure;
 use mpc_chain_integration_core::{ChainPublisher, PublishAction, PublisherTelemetry};
 use mpc_primitives::{Chain, SignKind, Signature};
 use mpc_utils::task::AbortOnDrop;
@@ -24,7 +25,7 @@ use crate::intent::{IntentRequest, RespondCircuit, Submitted};
 use crate::native::{NativeIntentClient, Provers};
 use crate::output_storage::{OutputStore, RecoveringOutputStore};
 use crate::rpc::{MidnightPublisherRpc, PinnedReads};
-use crate::submit_error::refusal_code;
+use crate::submit_error::{refusal_code, SubmitError};
 
 const SPECK_PER_DUST: f64 = 1e15;
 
@@ -148,7 +149,7 @@ impl MidnightPublisher {
         }
     }
 
-    /// Counts a failed build or submit by its error class.
+    /// Counts a failed publish that carries an error class.
     fn record_refusal(&self, error: &anyhow::Error) {
         if let Some(code) = refusal_code(error) {
             self.telemetry.publish_refused(code);
@@ -190,12 +191,12 @@ impl MidnightPublisher {
     }
 }
 
-#[async_trait]
-impl ChainPublisher for MidnightPublisher {
+impl MidnightPublisher {
     // TODO: Batch responses if one-response-per-transaction publication becomes a bottleneck.
     // Retries currently operate per request.
-    async fn publish_signature(&self, action: &PublishAction) -> anyhow::Result<()> {
-        let call = respond_call(action)?;
+    async fn publish(&self, action: &PublishAction) -> anyhow::Result<()> {
+        let call = respond_call(action)
+            .map_err(|refusal| SubmitError::GateRefusal { source: refusal }.into_publish_error())?;
         if let (Some(store), SignKind::RespondBidirectional(response)) =
             (&self.output_store, &action.request.kind)
         {
@@ -251,11 +252,7 @@ impl ChainPublisher for MidnightPublisher {
             ttl_seconds: ttl_seconds(&self.config, current_unix_timestamp()),
         };
         let building = Instant::now();
-        let bytes = self
-            .client
-            .build(&request)
-            .await
-            .inspect_err(|error| self.record_refusal(error))?;
+        let bytes = self.client.build(&request).await?;
         let build_took = building.elapsed();
         if !self.still_awaited(action, "built").await? {
             return Ok(());
@@ -263,12 +260,14 @@ impl ChainPublisher for MidnightPublisher {
 
         // Both proofs and the wait for finality run inside submit.
         let submitting = Instant::now();
-        let submitted = self
-            .client
-            .submit(&bytes)
-            .await
-            .inspect_err(|error| self.record_refusal(error))
-            .with_context(|| submit_failed(&chain.at_hash, submitting.elapsed()))?;
+        let submitted = self.client.submit(&bytes).await.with_context(|| {
+            format!(
+                "submitting the midnight respond intent built over the chain at {} \
+                     failed after {:?}",
+                chain.at_hash,
+                submitting.elapsed()
+            )
+        })?;
         let submit_took = submitting.elapsed();
         self.telemetry
             .funding_wallet_observed(submitted.dust_balance as f64 / SPECK_PER_DUST);
@@ -285,6 +284,17 @@ impl ChainPublisher for MidnightPublisher {
         );
         self.telemetry.record_publish_metrics(action);
         Ok(())
+    }
+}
+
+#[async_trait]
+impl ChainPublisher for MidnightPublisher {
+    async fn publish_signature(&self, action: &PublishAction) -> anyhow::Result<()> {
+        let result = self.publish(action).await;
+        if let Err(error) = &result {
+            self.record_refusal(error);
+        }
+        result
     }
 }
 
@@ -356,12 +366,12 @@ impl RecoveringMidnightPublisher {
 #[async_trait]
 impl ChainPublisher for RecoveringMidnightPublisher {
     async fn publish_signature(&self, action: &PublishAction) -> anyhow::Result<()> {
-        // The message carries no status-like digits, so the publish loop keeps retrying.
-        self.ready
-            .get()
-            .context("midnight publisher is still connecting")?
-            .publish_signature(action)
-            .await
+        let publisher = self.ready.get().ok_or_else(|| {
+            anyhow::Error::new(RpcFailure::retryable(
+                "midnight publisher is still connecting".to_string(),
+            ))
+        })?;
+        publisher.publish_signature(action).await
     }
 }
 
@@ -434,15 +444,6 @@ fn circuit_signature(signature: &Signature) -> anyhow::Result<EcdsaSignature> {
     })
 }
 
-/// Whole milliseconds, never `Duration`'s `401.3s`: the publish loop's retry reads
-/// a bare 400-405 in the message as an HTTP status and drops the publish.
-fn submit_failed(at_hash: &str, elapsed: Duration) -> String {
-    format!(
-        "submitting the midnight respond intent built over the chain at {at_hash} failed after {}ms",
-        elapsed.as_millis()
-    )
-}
-
 /// The respond intent's expiry, as absolute unix seconds: one publish's build and
 /// submit budgets summed. The fee intent the submit adds expires first, so its TTL
 /// is the one that bounds how late the transaction can land.
@@ -456,11 +457,15 @@ mod tests {
     use super::*;
 
     use crate::submit_error::SubmitError;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Mutex;
     use std::time::Duration;
 
     use crate::output_storage::GcsOutputStore;
-    use mpc_chain_integration_core::utils::test::make_publish_action;
+    use mpc_chain_integration_core::utils::{
+        retry::{is_provider_throttled, is_retryable},
+        test::make_publish_action,
+    };
     use mpc_chain_integration_core::NoopPublisherTelemetry;
     use mpc_primitives::{
         AttestationMetadata, BidirectionalTxId, Chain, RespondBidirectionalTx,
@@ -829,9 +834,13 @@ mod tests {
             let store = Arc::new(StubOutputStore::default());
             let mut publisher = publisher(reads.clone(), client.clone());
             publisher.output_store = Some(store.clone());
+            let err = publisher
+                .publish_signature(&action)
+                .await
+                .expect_err(&format!("case {case}"));
             assert!(
-                publisher.publish_signature(&action).await.is_err(),
-                "case {case}"
+                !is_retryable(&err),
+                "case {case}: an attestation refusal must be terminal: {err:#}"
             );
             assert!(store.outputs.lock().unwrap().is_empty());
             assert!(reads.reads().is_empty());
@@ -1167,8 +1176,10 @@ mod tests {
 
     #[tokio::test]
     async fn publish_signature_rejects_actions_neither_circuit_answers() {
-        // Four gates, one property: a refused action must not reach the node, the
-        // builder or the submitter.
+        // Five gates here, the attestation gates in their own test: one property —
+        // a refused action must not reach the node, the builder or the submitter,
+        // its verdict is terminal, and it is counted.
+        let telemetry = Arc::new(WalletTelemetry::default());
         let cases = [
             (
                 make_publish_action(
@@ -1198,17 +1209,37 @@ mod tests {
                 },
                 "recovery_id 2",
             ),
+            (
+                {
+                    let mut action = respond_action();
+                    action.signature.big_r = k256::AffinePoint::IDENTITY;
+                    action
+                },
+                "identity point",
+            ),
         ];
         for (action, named) in cases {
             let reads = StubReads::new();
             let client = StubClient::new();
-            let publisher = publisher(reads.clone(), client.clone());
+            let publisher = MidnightPublisher::new(
+                &config(),
+                MidnightAddress::from_hex(RESPONDER).expect("RESPONDER is a 32-byte hex address"),
+                reads.clone(),
+                client.clone(),
+                None,
+                telemetry.clone(),
+                ScriptedAwaiter::new(&[]),
+            );
 
             let err = publisher
                 .publish_signature(&action)
                 .await
                 .expect_err("neither circuit answers this action");
             assert!(format!("{err:#}").contains(named), "got: {err:#}");
+            assert!(
+                !is_retryable(&err),
+                "a fixed-input refusal must be terminal: {err:#}"
+            );
             assert!(reads.reads().is_empty(), "a refused action read the node");
             assert!(
                 client.built().is_empty(),
@@ -1216,6 +1247,7 @@ mod tests {
             );
             assert_eq!(client.submissions(), 0);
         }
+        assert_eq!(*telemetry.refusals.lock().unwrap(), vec!["gate_refusal"; 5]);
     }
 
     #[tokio::test]
@@ -1347,18 +1379,21 @@ mod tests {
 
     #[test]
     fn a_submit_failing_at_any_time_stays_retryable() {
+        // The carrier carries the verdict; the elapsed render is diagnostics.
         for elapsed in [
             Duration::from_millis(400),
             Duration::from_millis(401_300),
             Duration::from_secs(403),
             Duration::from_secs(405),
         ] {
-            let error = anyhow::anyhow!("[state_conflict] expired")
-                .context(submit_failed(HEAD_ONE, elapsed));
-            assert!(
-                mpc_chain_integration_core::utils::retry::is_retryable(&error),
-                "{error:#}"
+            let wrapped = format!(
+                "submitting the midnight respond intent built over the chain at \
+                 {HEAD_ONE} failed after {elapsed:?}"
             );
+            let error = SubmitError::StateConflict("expired".into())
+                .into_publish_error()
+                .context(wrapped);
+            assert!(is_retryable(&error), "{error:#}");
         }
     }
 
@@ -1402,7 +1437,7 @@ mod tests {
                     "the ambiguity must survive to the caller: {error:#}"
                 );
                 assert!(
-                    mpc_chain_integration_core::utils::retry::is_retryable(&error),
+                    is_retryable(&error),
                     "an ambiguous submit remains retryable: {error:#}"
                 );
                 assert!(
@@ -1411,13 +1446,13 @@ mod tests {
                     "the error must disclose the duplicate-post policy: {error:#}"
                 );
                 assert_eq!(
-                    client.attempts.load(std::sync::atomic::Ordering::SeqCst),
+                    client.attempts.load(Ordering::SeqCst),
                     expected_attempts,
                     "each publish attempt submits exactly once"
                 );
             }
             assert_eq!(
-                client.attempts.load(std::sync::atomic::Ordering::SeqCst),
+                client.attempts.load(Ordering::SeqCst),
                 2,
                 "the retry must repost when settlement is handled by the backlog"
             );
@@ -1461,32 +1496,32 @@ mod tests {
             .await
             .expect("the second task returns")
             .expect("the second publish succeeds");
-        assert_eq!(client.attempts.load(std::sync::atomic::Ordering::SeqCst), 2);
+        assert_eq!(client.attempts.load(Ordering::SeqCst), 2);
     }
 
     /// Answers each ask from a script, then `true`, counting the asks.
     struct ScriptedAwaiter {
         answers: Mutex<std::collections::VecDeque<bool>>,
-        asks: std::sync::atomic::AtomicUsize,
+        asks: AtomicUsize,
     }
 
     impl ScriptedAwaiter {
         fn new(answers: &[bool]) -> Arc<Self> {
             Arc::new(Self {
                 answers: Mutex::new(answers.iter().copied().collect()),
-                asks: std::sync::atomic::AtomicUsize::new(0),
+                asks: AtomicUsize::new(0),
             })
         }
 
         fn asks(&self) -> usize {
-            self.asks.load(std::sync::atomic::Ordering::SeqCst)
+            self.asks.load(Ordering::SeqCst)
         }
     }
 
     #[async_trait]
     impl ResponseAwaiter for ScriptedAwaiter {
         async fn still_awaited(&self, _action: &PublishAction) -> anyhow::Result<bool> {
-            self.asks.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.asks.fetch_add(1, Ordering::SeqCst);
             Ok(self.answers.lock().unwrap().pop_front().unwrap_or(true))
         }
     }
@@ -1603,7 +1638,7 @@ mod tests {
             .expect("the second publish is settled by the landed response");
         assert_eq!(awaiter.asks(), 3);
         assert_eq!(
-            client.attempts.load(std::sync::atomic::Ordering::SeqCst),
+            client.attempts.load(Ordering::SeqCst),
             1,
             "only the first publish reached submit"
         );
@@ -1717,7 +1752,6 @@ mod tests {
 
     #[tokio::test]
     async fn publishes_fail_retryably_until_the_publisher_connects() {
-        use std::sync::atomic::{AtomicUsize, Ordering};
         let client = StubClient::new();
         let mut connected = Some(publisher(StubReads::new(), client.clone()));
         let attempts = Arc::new(AtomicUsize::new(0));
@@ -1739,9 +1773,10 @@ mod tests {
             .await
             .expect_err("nothing is connected yet");
         assert!(
-            mpc_chain_integration_core::utils::retry::is_retryable(&error),
+            is_retryable(&error),
             "a publish before the connection must stay retryable: {error:#}"
         );
+        assert!(!is_provider_throttled(&error), "{error:#}");
         assert_eq!(client.submissions(), 0);
 
         tokio::time::sleep(Duration::from_secs(1)).await;

@@ -252,7 +252,7 @@ impl Redis {
         let password = enable_debug.then(|| uuid::Uuid::new_v4().simple().to_string());
         let container = start_container_with_network_retry(
             || {
-                let container = GenericImage::new("redis", "7.4.2")
+                let container = GenericImage::new("redis", "7.4.12")
                     .with_exposed_port(Self::DEFAULT_REDIS_PORT.tcp())
                     .with_wait_for(WaitFor::message_on_stdout("Ready to accept connections"))
                     .with_network(&spawner.network);

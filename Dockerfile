@@ -1,9 +1,11 @@
-FROM redis:7.4.2 AS redis-bin
+# Only redis-server is copied into the runtime stage, so the Redis image must be
+# built on the same Debian release.
+FROM redis:7.4.12-bookworm AS redis-bin
 
-FROM node:20 AS eth-builder
+FROM node:22 AS eth-builder
 WORKDIR /usr/src/app/contract-eth
 COPY chain-signatures/contract-eth/package.json chain-signatures/contract-eth/package-lock.json ./
-RUN npm install
+RUN npm ci
 COPY chain-signatures/contract-eth ./
 RUN npx hardhat compile
 
@@ -35,7 +37,7 @@ RUN curl -fsSL --retry 4 -o responder.tgz \
       "d211cacb22391b9db60f945787d98c16d344cbb4790246132117084c080399c1  dust/10/spend.bzkir" \
       | sha256sum -c
 
-FROM rust:1.95-bookworm AS node-builder
+FROM rust:1.95.0-bookworm AS node-builder
 RUN rustc --version --verbose
 WORKDIR /usr/src/app
 ARG GIT_COMMIT_HASH
@@ -49,7 +51,7 @@ COPY signet-crypto/ ./signet-crypto
 COPY Cargo.toml .
 COPY Cargo.lock .
 COPY --from=eth-builder /usr/src/app/contract-eth/artifacts chain-signatures/contract-eth/artifacts
-RUN cargo build --release --package mpc-node
+RUN cargo build --release --locked --package mpc-node
 
 FROM debian:bookworm-slim AS runtime
 RUN apt-get update && apt-get install --assume-yes libssl-dev ca-certificates curl
