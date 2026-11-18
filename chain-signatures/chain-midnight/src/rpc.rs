@@ -9,7 +9,7 @@ use jsonrpsee::core::traits::ToRpcParams;
 use jsonrpsee::http_client::{HttpClient, HttpClientBuilder};
 use jsonrpsee::types::error::{INVALID_PARAMS_CODE, OVERSIZED_RESPONSE_CODE};
 use mpc_chain_integration_core::utils::retry::{
-    exhausted, http_status_read_retryable, is_retryable, RetryConfig, RpcFailure,
+    exhausted, is_retryable, RpcFailure, RetryConfig,
 };
 use subxt::backend::legacy::rpc_methods::{BlockDetails, NumberOrHex};
 use subxt::backend::legacy::LegacyRpcMethods;
@@ -1321,24 +1321,10 @@ pub(crate) fn rejected_http_status(error: &anyhow::Error) -> Option<StatusCode> 
     })
 }
 
+/// The indexer loop's bool form of the publisher reads' verdict
+/// ([`read_verdict`]): one partition, one derivation.
 fn is_read_retryable(error: &anyhow::Error) -> bool {
-    if is_oversized_contract_state(error) {
-        return false;
-    }
-    if let Some(status) = rejected_http_status(error) {
-        // reads stay conservative: a retry reconnects onto a healthy LB
-        // backend (#1469), so only classic client errors are terminal
-        return http_status_read_retryable(status);
-    }
-    if error.chain().any(|cause| {
-        matches!(
-            cause.downcast_ref::<RawRpcError>(),
-            Some(RawRpcError::User(_))
-        )
-    }) {
-        return true;
-    }
-    is_retryable(error)
+    !read_verdict(error).is_terminal()
 }
 
 async fn retry_read<T, F, Fut>(
@@ -2624,6 +2610,12 @@ mod tests {
                     "{code}: {error:#}"
                 );
             }
+            // The indexer loop's bool form, on the raw error `retry_read` sees.
+            assert_eq!(
+                is_read_retryable(&rejected_read(code)),
+                !matches!(code, 400 | 401 | 403 | 404 | 405),
+                "{code}"
+            );
         }
     }
 
