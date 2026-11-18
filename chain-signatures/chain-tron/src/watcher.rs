@@ -202,9 +202,7 @@ impl<S: StateManager, T: ChainTelemetry> TronWatcher<S, T> {
                 for (sign_id, tx, _) in &group {
                     tracing::info!(?sign_id, ?tx.id,
                         "expired window with inclusion; re-registered for the receipt arm");
-                    self.state_manager
-                        .watch_execution(Chain::Tron, Arc::clone(tx))
-                        .await;
+                    self.state_manager.watch_execution(Arc::clone(tx)).await;
                 }
                 Vec::new()
             }
@@ -283,7 +281,7 @@ mod tests {
     use mockito::Matcher;
     use mpc_chain_integration_core::utils::retry::RetryConfig;
     use mpc_chain_integration_core::{
-        ExtractionFailureKind, MockStateManager, NoopChainTelemetry, StateManager,
+        ExtractionFailureKind, MockStateManager, NoopChainTelemetry, StateManager, WatchKey,
     };
     use mpc_primitives::{
         BidirectionalTx, BidirectionalTxId, ExecutionOutcome, RequestKind, SignId,
@@ -410,8 +408,8 @@ mod tests {
             .create();
 
         let state = MockStateManager::new();
-        state.watch_execution(Chain::Tron, watcher_tx(1).2).await;
-        state.watch_execution(Chain::Tron, watcher_tx(2).2).await;
+        state.watch_execution(watcher_tx(1).2).await;
+        state.watch_execution(watcher_tx(2).2).await;
 
         let mut run = spawn_watcher(config, state, NoopChainTelemetry);
         first_is_catchup_completed(&mut run).await;
@@ -441,7 +439,7 @@ mod tests {
             .create();
 
         let state = MockStateManager::new();
-        state.watch_execution(Chain::Tron, watcher_tx(1).2).await;
+        state.watch_execution(watcher_tx(1).2).await;
 
         let mut run = spawn_watcher(config, state, NoopChainTelemetry);
         first_is_catchup_completed(&mut run).await;
@@ -465,7 +463,7 @@ mod tests {
         receipt_stub(&mut server, 1, success_body(1)).create();
 
         let state = MockStateManager::new();
-        state.watch_execution(Chain::Tron, watcher_tx(1).2).await;
+        state.watch_execution(watcher_tx(1).2).await;
 
         let mut run = spawn_watcher(config, state, NoopChainTelemetry);
         first_is_catchup_completed(&mut run).await;
@@ -492,8 +490,8 @@ mod tests {
         receipt_stub(&mut server, 2, resultless).create();
 
         let state = MockStateManager::new();
-        state.watch_execution(Chain::Tron, watcher_tx(1).2).await;
-        state.watch_execution(Chain::Tron, watcher_tx(2).2).await;
+        state.watch_execution(watcher_tx(1).2).await;
+        state.watch_execution(watcher_tx(2).2).await;
 
         let telemetry = CountingTelemetry::default();
         let mut run = spawn_watcher(config, state, telemetry.clone());
@@ -529,9 +527,7 @@ mod tests {
             .create();
 
         let state = MockStateManager::new();
-        state
-            .watch_execution(Chain::Tron, schema_carrying_tx(1).2)
-            .await;
+        state.watch_execution(schema_carrying_tx(1).2).await;
 
         let telemetry = CountingTelemetry::default();
         let mut run = spawn_watcher(config, state, telemetry.clone());
@@ -558,9 +554,7 @@ mod tests {
             .create();
 
         let state = MockStateManager::new();
-        state
-            .watch_execution(Chain::Tron, schema_carrying_tx(1).2)
-            .await;
+        state.watch_execution(schema_carrying_tx(1).2).await;
 
         let telemetry = CountingTelemetry::default();
         let mut run = spawn_watcher(config, state, telemetry.clone());
@@ -586,9 +580,7 @@ mod tests {
             .create();
 
         let state = MockStateManager::new();
-        state
-            .watch_execution(Chain::Tron, schema_carrying_tx(1).2)
-            .await;
+        state.watch_execution(schema_carrying_tx(1).2).await;
 
         let telemetry = CountingTelemetry::default();
         let mut run = spawn_watcher(config, state, telemetry.clone());
@@ -613,7 +605,7 @@ mod tests {
             .create();
 
         let state = MockStateManager::new();
-        state.watch_execution(Chain::Tron, calling_tx(1).2).await;
+        state.watch_execution(calling_tx(1).2).await;
 
         let telemetry = CountingTelemetry::default();
         let mut run = spawn_watcher(config, state, telemetry.clone());
@@ -640,7 +632,7 @@ mod tests {
         receipt_stub(&mut server, 3, malformed).create();
 
         let state = MockStateManager::new();
-        state.watch_execution(Chain::Tron, watcher_tx(3).2).await;
+        state.watch_execution(watcher_tx(3).2).await;
 
         let telemetry = CountingTelemetry::default();
         let mut run = spawn_watcher(config, state, telemetry.clone());
@@ -692,8 +684,8 @@ mod tests {
             .create();
 
         let state = MockStateManager::new();
-        state.watch_execution(Chain::Tron, watcher_tx(1).2).await;
-        state.watch_execution(Chain::Tron, watcher_tx(2).2).await;
+        state.watch_execution(watcher_tx(1).2).await;
+        state.watch_execution(watcher_tx(2).2).await;
 
         let mut run = spawn_watcher(config, state, NoopChainTelemetry);
         first_is_catchup_completed(&mut run).await;
@@ -729,8 +721,8 @@ mod tests {
         receipt_stub(&mut server, 2, success_body(2)).create();
 
         let state = MockStateManager::new();
-        state.watch_execution(Chain::Tron, watcher_tx(1).2).await;
-        state.watch_execution(Chain::Tron, watcher_tx(2).2).await;
+        state.watch_execution(watcher_tx(1).2).await;
+        state.watch_execution(watcher_tx(2).2).await;
 
         let telemetry = CountingTelemetry::default();
         let mut run = spawn_watcher(config, state, telemetry.clone());
@@ -967,7 +959,12 @@ mod tests {
             .remove_pending_execution(Chain::Midnight, sign_id)
             .await;
         state
-            .remove_execution_watch(Chain::Tron, &id, Chain::Midnight, sign_id)
+            .remove_execution_watch(WatchKey {
+                flat_id: id,
+                source: Chain::Midnight,
+                sign_id,
+                target: Chain::Tron,
+            })
             .await;
         let next_tick = until_blocks(&mut run, 1).await;
         assert!(
@@ -996,8 +993,8 @@ mod tests {
         let displaced = displaced_tx.sign_id();
         let displaced_tx: Arc<BidirectionalTx> = displaced_tx.into();
         state.add_pending_execution(Arc::clone(&displaced_tx)).await;
-        state.watch_execution(Chain::Tron, tx).await;
-        state.watch_execution(Chain::Tron, displaced_tx).await;
+        state.watch_execution(tx).await;
+        state.watch_execution(displaced_tx).await;
         receipt_for(&mut server, &id, success_receipt(&id));
 
         let confirmed_state = state.clone();
@@ -1052,7 +1049,7 @@ mod tests {
         let mut twin = (*tx).clone();
         twin.request_id = [0x7f; 32];
         let second = twin.sign_id();
-        state.watch_execution(Chain::Tron, Arc::new(twin)).await;
+        state.watch_execution(Arc::new(twin)).await;
         let receipt = receipt_for_once(&mut server, &id, success_receipt(&id));
 
         let watcher = TronWatcher::new(config, state, NoopChainTelemetry).unwrap();
@@ -1083,7 +1080,7 @@ mod tests {
         let parked = twin.sign_id();
         twin.output_deserialization_schema =
             br#"[{\"name\":\"output\",\"type\":\"bool\"}]"#.to_vec();
-        state.watch_execution(Chain::Tron, twin.into()).await;
+        state.watch_execution(twin.into()).await;
         let receipt = receipt_for_once(&mut server, &id, success_receipt(&id));
 
         let telemetry = CountingTelemetry::default();
@@ -1223,7 +1220,7 @@ mod tests {
         let (id, _, tx) =
             expiry_tx_assembled_at(1_728_000_050_000, 9, Chain::Midnight, SOLIDITY_TS - 40_000);
         state.add_pending_execution(Arc::clone(&tx)).await;
-        state.watch_execution(Chain::Tron, Arc::clone(&tx)).await;
+        state.watch_execution(Arc::clone(&tx)).await;
         receipt_for(&mut server, &id, success_receipt(&id));
         solid_block_ladder(&mut server, &[(1, id.0)]);
 

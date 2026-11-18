@@ -7647,6 +7647,7 @@ dependencies = [
  "async-trait",
  "backon",
  "cait-sith",
+ "enum-map",
  "http 1.5.0",
  "k256 0.13.4",
  "mockito",
