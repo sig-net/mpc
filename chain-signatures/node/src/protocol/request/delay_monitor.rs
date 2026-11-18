@@ -7,14 +7,16 @@ use std::time::Duration;
 
 use futures_util::StreamExt;
 use lru::LruCache;
-use mpc_primitives::{Chain, RequestKind, SignId};
+use mpc_primitives::{Chain, ChainConfig as _, RequestKind, SignId};
 use mpc_utils::time::unix_elapsed;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
 use tokio_util::time::delay_queue::{DelayQueue, Key};
 
-use crate::metrics::requests::{record_request_latency_since, SignRequestStep};
+use crate::metrics::requests::{
+    record_request_latency_since, SignRequestStep, SIGN_REQUEST_DELAYED,
+};
 
 /// How many late, unanswered legs are remembered.
 const MAX_LATE: usize = 8192;
@@ -45,7 +47,7 @@ enum DelayCommand {
 
 /// The deadline of a request indexed at `unix_timestamp_indexed`, `None` if it
 /// lies before the earliest representable instant.
-pub fn deadline(unix_timestamp_indexed: u64, expected: Duration) -> Option<Instant> {
+fn deadline(unix_timestamp_indexed: u64, expected: Duration) -> Option<Instant> {
     let now = Instant::now();
     let elapsed = unix_elapsed(unix_timestamp_indexed);
     match expected.checked_sub(elapsed) {
@@ -75,10 +77,23 @@ impl DelayMonitor {
         Self { tx, handle }
     }
 
-    /// Watches a leg until its response is observed or `deadline` passes. A
-    /// deadline already passed counts at once, unless it passed before this
-    /// monitor started: the node was not running to see it.
+    /// Watches a leg until its response is observed or its chain's expected
+    /// response time passes. A deadline already passed counts at once, unless it
+    /// passed before this monitor started: the node was not running to see it.
     pub fn watch(
+        &self,
+        sign_id: SignId,
+        kind: RequestKind,
+        chain: Chain,
+        unix_timestamp_indexed: u64,
+    ) {
+        let expected = Duration::from_secs(chain.expected_response_time_secs());
+        if let Some(deadline) = deadline(unix_timestamp_indexed, expected) {
+            self.watch_until(sign_id, kind, chain, unix_timestamp_indexed, deadline);
+        }
+    }
+
+    fn watch_until(
         &self,
         sign_id: SignId,
         kind: RequestKind,
@@ -155,7 +170,8 @@ impl DelayState {
                     return;
                 }
                 if deadline < self.started {
-                    tracing::debug!(sign_id = ?leg.0, "deadline passed before the node started");
+                    let (sign_id, _) = leg;
+                    tracing::debug!(?sign_id, "deadline passed before the node started");
                     return;
                 }
                 let key = self.queue.insert_at(leg, deadline.max(Instant::now()));
@@ -165,17 +181,18 @@ impl DelayState {
             DelayCommand::AbortChain(chain) => {
                 let queue = &mut self.queue;
                 self.watched.retain(|_, watched| {
-                    let keep = watched.indexed.chain != chain;
-                    if !keep {
-                        queue.remove(&watched.key);
+                    if watched.indexed.chain != chain {
+                        return true;
                     }
-                    keep
+                    queue.remove(&watched.key);
+                    false
                 });
             }
         }
     }
 
     fn responded(&mut self, leg: Leg) {
+        let (_, kind) = leg;
         let (indexed, status) = if let Some(watched) = self.watched.remove(&leg) {
             self.queue.remove(&watched.key);
             (watched.indexed, "in_time")
@@ -188,7 +205,7 @@ impl DelayState {
             indexed.chain,
             SignRequestStep::Total,
             status,
-            leg.1,
+            kind,
             indexed.unix_timestamp,
         );
     }
@@ -210,7 +227,7 @@ impl DelayState {
             "signature request delayed beyond expected response time"
         );
         self.late.put(leg, watched.indexed);
-        crate::metrics::requests::SIGN_REQUEST_DELAYED
+        SIGN_REQUEST_DELAYED
             .with_label_values(&[chain.as_str(), kind.as_str()])
             .inc();
     }
@@ -219,16 +236,10 @@ impl DelayState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::metrics::requests::request_latency_count;
+    use crate::metrics::requests::{delayed_count, request_latency_count};
 
     fn sign_id(byte: u8) -> SignId {
         SignId::new([byte; 32])
-    }
-
-    fn delayed(chain: Chain, kind: RequestKind) -> u64 {
-        crate::metrics::requests::SIGN_REQUEST_DELAYED
-            .with_label_values(&[chain.as_str(), kind.as_str()])
-            .get() as u64
     }
 
     fn total(chain: Chain, kind: RequestKind, status: &str) -> u64 {
@@ -248,35 +259,35 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn a_leg_past_its_deadline_counts_as_delayed_once() {
         let (chain, kind) = (Chain::Ethereum, RequestKind::Sign);
-        let before = delayed(chain, kind);
+        let before = delayed_count(chain, kind);
         let monitor = DelayMonitor::spawn();
 
-        monitor.watch(sign_id(1), kind, chain, 0, after(20));
+        monitor.watch_until(sign_id(1), kind, chain, 0, after(20));
         settle(10).await;
-        assert_eq!(delayed(chain, kind) - before, 0);
+        assert_eq!(delayed_count(chain, kind) - before, 0);
         settle(20).await;
-        assert_eq!(delayed(chain, kind) - before, 1);
+        assert_eq!(delayed_count(chain, kind) - before, 1);
 
         // Re-admission, e.g. after a rebase, does not count it again.
-        monitor.watch(sign_id(1), kind, chain, 0, after(0));
+        monitor.watch_until(sign_id(1), kind, chain, 0, after(0));
         settle(10).await;
-        assert_eq!(delayed(chain, kind) - before, 1);
+        assert_eq!(delayed_count(chain, kind) - before, 1);
     }
 
     #[tokio::test(start_paused = true)]
     async fn a_response_before_the_deadline_counts_as_in_time() {
         let (chain, kind) = (Chain::Solana, RequestKind::Sign);
         let (delayed_before, in_time_before) =
-            (delayed(chain, kind), total(chain, kind, "in_time"));
+            (delayed_count(chain, kind), total(chain, kind, "in_time"));
         let monitor = DelayMonitor::spawn();
 
-        monitor.watch(sign_id(2), kind, chain, 0, after(20));
+        monitor.watch_until(sign_id(2), kind, chain, 0, after(20));
         settle(5).await;
         monitor.responded(sign_id(2), kind);
         settle(30).await;
 
         assert_eq!(total(chain, kind, "in_time") - in_time_before, 1);
-        assert_eq!(delayed(chain, kind) - delayed_before, 0);
+        assert_eq!(delayed_count(chain, kind) - delayed_before, 0);
 
         // A replayed response does not count again.
         monitor.responded(sign_id(2), kind);
@@ -288,16 +299,16 @@ mod tests {
     async fn a_late_response_records_its_latency_as_expired() {
         let (chain, kind) = (Chain::Canton, RequestKind::Sign);
         let (delayed_before, expired_before) =
-            (delayed(chain, kind), total(chain, kind, "expired"));
+            (delayed_count(chain, kind), total(chain, kind, "expired"));
         let monitor = DelayMonitor::spawn();
 
-        monitor.watch(sign_id(3), kind, chain, 0, after(10));
+        monitor.watch_until(sign_id(3), kind, chain, 0, after(10));
         settle(20).await;
         monitor.responded(sign_id(3), kind);
         monitor.responded(sign_id(3), kind);
         settle(5).await;
 
-        assert_eq!(delayed(chain, kind) - delayed_before, 1);
+        assert_eq!(delayed_count(chain, kind) - delayed_before, 1);
         assert_eq!(total(chain, kind, "expired") - expired_before, 1);
         assert_eq!(total(chain, kind, "in_time"), 0);
     }
@@ -305,30 +316,30 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn an_answered_leg_is_forgotten() {
         let (chain, kind) = (Chain::Canton, RequestKind::SignBidirectional);
-        let before = delayed(chain, kind);
+        let before = delayed_count(chain, kind);
         let monitor = DelayMonitor::spawn();
 
-        monitor.watch(sign_id(9), kind, chain, 0, after(10));
+        monitor.watch_until(sign_id(9), kind, chain, 0, after(10));
         settle(20).await;
         monitor.responded(sign_id(9), kind);
         settle(1).await;
-        assert_eq!(delayed(chain, kind) - before, 1);
+        assert_eq!(delayed_count(chain, kind) - before, 1);
 
         // An answered request is never requeued, so nothing is kept to stop a recount.
-        monitor.watch(sign_id(9), kind, chain, 0, after(0));
+        monitor.watch_until(sign_id(9), kind, chain, 0, after(0));
         settle(1).await;
-        assert_eq!(delayed(chain, kind) - before, 2);
+        assert_eq!(delayed_count(chain, kind) - before, 2);
     }
 
     #[tokio::test(start_paused = true)]
     async fn a_leg_admitted_after_its_deadline_counts_at_once() {
         let (chain, kind) = (Chain::Hydration, RequestKind::RespondBidirectional);
-        let before = delayed(chain, kind);
+        let before = delayed_count(chain, kind);
         let monitor = DelayMonitor::spawn();
         settle(50).await;
 
         // Its deadline passed while the node was running.
-        monitor.watch(
+        monitor.watch_until(
             sign_id(4),
             kind,
             chain,
@@ -336,7 +347,7 @@ mod tests {
             Instant::now() - Duration::from_millis(10),
         );
         settle(1).await;
-        assert_eq!(delayed(chain, kind) - before, 1);
+        assert_eq!(delayed_count(chain, kind) - before, 1);
     }
 
     #[tokio::test(start_paused = true)]
@@ -344,12 +355,12 @@ mod tests {
         let (chain, kind) = (Chain::Midnight, RequestKind::RespondBidirectional);
         let deadline = Instant::now();
         settle(10).await;
-        let before = delayed(chain, kind);
+        let before = delayed_count(chain, kind);
         let monitor = DelayMonitor::spawn();
 
-        monitor.watch(sign_id(5), kind, chain, 0, deadline);
+        monitor.watch_until(sign_id(5), kind, chain, 0, deadline);
         settle(10).await;
-        assert_eq!(delayed(chain, kind) - before, 0);
+        assert_eq!(delayed_count(chain, kind) - before, 0);
     }
 
     #[tokio::test(start_paused = true)]
@@ -357,15 +368,15 @@ mod tests {
         let chain = Chain::Midnight;
         let (leg1, leg2) = (RequestKind::SignBidirectional, RequestKind::Sign);
         let (leg1_before, leg2_in_time_before) =
-            (delayed(chain, leg1), total(chain, leg2, "in_time"));
+            (delayed_count(chain, leg1), total(chain, leg2, "in_time"));
         let monitor = DelayMonitor::spawn();
 
-        monitor.watch(sign_id(6), leg1, chain, 0, after(20));
-        monitor.watch(sign_id(6), leg2, chain, 0, after(20));
+        monitor.watch_until(sign_id(6), leg1, chain, 0, after(20));
+        monitor.watch_until(sign_id(6), leg2, chain, 0, after(20));
         monitor.responded(sign_id(6), leg2);
         settle(30).await;
 
-        assert_eq!(delayed(chain, leg1) - leg1_before, 1);
+        assert_eq!(delayed_count(chain, leg1) - leg1_before, 1);
         assert_eq!(total(chain, leg2, "in_time") - leg2_in_time_before, 1);
     }
 
@@ -373,48 +384,49 @@ mod tests {
     async fn aborting_a_chain_drops_its_watches_uncounted() {
         let kind = RequestKind::SignBidirectional;
         let (aborted, kept) = (Chain::Solana, Chain::Ethereum);
-        let (aborted_before, kept_before) = (delayed(aborted, kind), delayed(kept, kind));
+        let (aborted_before, kept_before) =
+            (delayed_count(aborted, kind), delayed_count(kept, kind));
         let monitor = DelayMonitor::spawn();
 
-        monitor.watch(sign_id(7), kind, aborted, 0, after(20));
-        monitor.watch(sign_id(8), kind, kept, 0, after(20));
+        monitor.watch_until(sign_id(7), kind, aborted, 0, after(20));
+        monitor.watch_until(sign_id(8), kind, kept, 0, after(20));
         monitor.abort_chain(aborted);
         settle(30).await;
 
-        assert_eq!(delayed(aborted, kind) - aborted_before, 0);
-        assert_eq!(delayed(kept, kind) - kept_before, 1);
+        assert_eq!(delayed_count(aborted, kind) - aborted_before, 0);
+        assert_eq!(delayed_count(kept, kind) - kept_before, 1);
 
         // Re-admitted after the rebase, it is watched again.
-        monitor.watch(sign_id(7), kind, aborted, 0, after(0));
+        monitor.watch_until(sign_id(7), kind, aborted, 0, after(0));
         settle(1).await;
-        assert_eq!(delayed(aborted, kind) - aborted_before, 1);
+        assert_eq!(delayed_count(aborted, kind) - aborted_before, 1);
     }
 
     #[tokio::test(start_paused = true)]
     async fn a_late_leg_is_not_recounted_after_its_chain_is_aborted() {
         let (chain, kind) = (Chain::Ethereum, RequestKind::RespondBidirectional);
-        let before = delayed(chain, kind);
+        let before = delayed_count(chain, kind);
         let monitor = DelayMonitor::spawn();
 
-        monitor.watch(sign_id(11), kind, chain, 0, after(10));
+        monitor.watch_until(sign_id(11), kind, chain, 0, after(10));
         settle(20).await;
         monitor.abort_chain(chain);
-        monitor.watch(sign_id(11), kind, chain, 0, after(0));
+        monitor.watch_until(sign_id(11), kind, chain, 0, after(0));
         settle(10).await;
 
-        assert_eq!(delayed(chain, kind) - before, 1);
+        assert_eq!(delayed_count(chain, kind) - before, 1);
     }
 
     #[tokio::test(start_paused = true)]
     async fn a_duplicate_watch_keeps_the_first_deadline() {
         let (chain, kind) = (Chain::Solana, RequestKind::RespondBidirectional);
-        let before = delayed(chain, kind);
+        let before = delayed_count(chain, kind);
         let monitor = DelayMonitor::spawn();
 
-        monitor.watch(sign_id(12), kind, chain, 0, after(20));
-        monitor.watch(sign_id(12), kind, chain, 0, after(100));
+        monitor.watch_until(sign_id(12), kind, chain, 0, after(20));
+        monitor.watch_until(sign_id(12), kind, chain, 0, after(100));
         settle(30).await;
 
-        assert_eq!(delayed(chain, kind) - before, 1);
+        assert_eq!(delayed_count(chain, kind) - before, 1);
     }
 }

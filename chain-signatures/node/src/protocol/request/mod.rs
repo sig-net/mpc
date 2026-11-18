@@ -22,7 +22,7 @@ use mpc_utils::{task::JoinMap, time::TimeoutBudget};
 use cait_sith::protocol::Participant;
 use enum_map::EnumMap;
 use lru::LruCache;
-use mpc_primitives::{ChainConfig as _, IndexedSignRequest, RequestKind, SignId};
+use mpc_primitives::{IndexedSignRequest, RequestKind, SignId};
 use std::collections::{BTreeSet, HashMap};
 use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -258,12 +258,8 @@ impl SignatureSpawner {
         );
 
         // Counts the leg in time or delayed once its response lands or its deadline passes.
-        let unix_timestamp_indexed = request.unix_timestamp_indexed;
-        let expected = Duration::from_secs(chain.expected_response_time_secs());
-        if let Some(deadline) = delay_monitor::deadline(unix_timestamp_indexed, expected) {
-            self.delay_monitor
-                .watch(sign_id, kind, chain, unix_timestamp_indexed, deadline);
-        }
+        self.delay_monitor
+            .watch(sign_id, kind, chain, request.unix_timestamp_indexed);
 
         if !governance.is_running {
             tracing::info!(?sign_id, "holding sign request until governance is running");
@@ -697,8 +693,10 @@ pub fn organize_posit_timeout() -> Duration {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::metrics::requests::delayed_count;
     use crate::protocol::contract::primitives::{ParticipantInfo, Participants};
     use crate::protocol::presignature::Presignature;
+    use mpc_primitives::ChainConfig as _;
 
     use cait_sith::protocol::Participant;
     use deadpool_redis::Runtime;
@@ -1394,12 +1392,6 @@ mod tests {
         assert!(!spawner.test_posit_mailboxes_contains(&sign_id, RequestKind::RespondBidirectional));
     }
 
-    fn delayed(chain: Chain, kind: RequestKind) -> u64 {
-        crate::metrics::requests::SIGN_REQUEST_DELAYED
-            .with_label_values(&[chain.as_str(), kind.as_str()])
-            .get() as u64
-    }
-
     fn in_time(chain: Chain, kind: RequestKind) -> u64 {
         crate::metrics::requests::request_latency_count(
             chain,
@@ -1423,7 +1415,7 @@ mod tests {
         let mut spawner = setup();
         let (sign_id, chain) = (SignId::new([105u8; 32]), Chain::Tron);
         let kind = RequestKind::SignBidirectional;
-        let before = delayed(chain, kind);
+        let before = delayed_count(chain, kind);
 
         // Its deadline passes while the node runs, before the request is admitted.
         tokio::time::sleep(Duration::from_secs(60)).await;
@@ -1435,7 +1427,7 @@ mod tests {
         );
         tokio::time::sleep(Duration::from_millis(1)).await;
 
-        assert_eq!(delayed(chain, kind) - before, 1);
+        assert_eq!(delayed_count(chain, kind) - before, 1);
     }
 
     /// Only the proposer of the round running at the deadline counted.
@@ -1444,14 +1436,14 @@ mod tests {
         let mut spawner = setup();
         let (sign_id, chain) = (SignId::new([106u8; 32]), Chain::Bitcoin);
         let kind = RequestKind::SignBidirectional;
-        let before = delayed(chain, kind);
+        let before = delayed_count(chain, kind);
 
         spawner.request_indexed_now(crate::backlog::mock::mock_bidi_request(sign_id, chain));
         let is_proposer = Arc::clone(&spawner.requests[&sign_id].is_proposer);
         past_the_deadline(chain).await;
 
         assert!(!is_proposer.load(Ordering::Relaxed));
-        assert_eq!(delayed(chain, kind) - before, 1);
+        assert_eq!(delayed_count(chain, kind) - before, 1);
     }
 
     /// The watch ended when the signature was produced, not when the response landed.
@@ -1459,26 +1451,26 @@ mod tests {
     async fn a_signed_request_is_watched_until_its_response() {
         let mut spawner = setup();
         let (sign_id, chain) = (SignId::new([100u8; 32]), Chain::Hydration);
-        let before = delayed(chain, RequestKind::Sign);
+        let before = delayed_count(chain, RequestKind::Sign);
 
         spawner.request_indexed_now(crate::backlog::mock::mock_sign_request(sign_id, chain));
         spawner.handle_task_exit(Ok(((sign_id, RequestKind::Sign), Ok(()))));
         past_the_deadline(chain).await;
 
-        assert_eq!(delayed(chain, RequestKind::Sign) - before, 1);
+        assert_eq!(delayed_count(chain, RequestKind::Sign) - before, 1);
     }
 
     #[tokio::test(start_paused = true)]
     async fn a_retired_request_still_counts_as_delayed() {
         let mut spawner = setup();
         let (sign_id, chain) = (SignId::new([101u8; 32]), Chain::Tron);
-        let before = delayed(chain, RequestKind::Sign);
+        let before = delayed_count(chain, RequestKind::Sign);
 
         spawner.request_indexed_now(crate::backlog::mock::mock_sign_request(sign_id, chain));
         spawner.retire(sign_id);
         past_the_deadline(chain).await;
 
-        assert_eq!(delayed(chain, RequestKind::Sign) - before, 1);
+        assert_eq!(delayed_count(chain, RequestKind::Sign) - before, 1);
     }
 
     #[tokio::test(start_paused = true)]
@@ -1486,7 +1478,7 @@ mod tests {
         let mut spawner = setup();
         let (sign_id, chain) = (SignId::new([102u8; 32]), Chain::NEAR);
         let (delayed_before, in_time_before) = (
-            delayed(chain, RequestKind::Sign),
+            delayed_count(chain, RequestKind::Sign),
             in_time(chain, RequestKind::Sign),
         );
 
@@ -1498,7 +1490,7 @@ mod tests {
         past_the_deadline(chain).await;
 
         assert_eq!(in_time(chain, RequestKind::Sign) - in_time_before, 1);
-        assert_eq!(delayed(chain, RequestKind::Sign) - delayed_before, 0);
+        assert_eq!(delayed_count(chain, RequestKind::Sign) - delayed_before, 0);
         assert!(!spawner.test_requests_contains(&sign_id));
     }
 
@@ -1507,26 +1499,26 @@ mod tests {
         let mut spawner = setup();
         let (sign_id, chain) = (SignId::new([103u8; 32]), Chain::Hydration);
         let kind = RequestKind::SignBidirectional;
-        let (delayed_before, in_time_before) = (delayed(chain, kind), in_time(chain, kind));
+        let (delayed_before, in_time_before) = (delayed_count(chain, kind), in_time(chain, kind));
 
         spawner.request_indexed_now(crate::backlog::mock::mock_bidi_request(sign_id, chain));
         spawner.leg_completed(sign_id, kind);
         past_the_deadline(chain).await;
 
         assert_eq!(in_time(chain, kind) - in_time_before, 1);
-        assert_eq!(delayed(chain, kind) - delayed_before, 0);
+        assert_eq!(delayed_count(chain, kind) - delayed_before, 0);
     }
 
     #[tokio::test(start_paused = true)]
     async fn aborting_a_chain_drops_its_watches() {
         let mut spawner = setup();
         let (sign_id, chain) = (SignId::new([104u8; 32]), Chain::Bitcoin);
-        let before = delayed(chain, RequestKind::Sign);
+        let before = delayed_count(chain, RequestKind::Sign);
 
         spawner.request_indexed_now(crate::backlog::mock::mock_sign_request(sign_id, chain));
         spawner.abort_chain(chain);
         past_the_deadline(chain).await;
 
-        assert_eq!(delayed(chain, RequestKind::Sign) - before, 0);
+        assert_eq!(delayed_count(chain, RequestKind::Sign) - before, 0);
     }
 }

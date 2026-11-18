@@ -111,6 +111,14 @@ pub(crate) fn request_latency_count(
         .get_sample_count()
 }
 
+/// How many legs were counted as delayed under these labels.
+#[cfg(test)]
+pub(crate) fn delayed_count(chain: Chain, kind: RequestKind) -> u64 {
+    SIGN_REQUEST_DELAYED
+        .with_label_values(&[chain.as_str(), kind.as_str()])
+        .get() as u64
+}
+
 /// Some chains do not provide information about the block time.
 /// For that reason we record indexing step reached with 0.0 latency.
 pub fn record_indexing_step_reached(chain: Chain, kind: RequestKind) {
