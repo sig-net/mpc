@@ -15,7 +15,7 @@ use crate::sign_bidirectional::{
     SignStatus,
 };
 use crate::storage::checkpoint_storage::CheckpointStorage;
-pub use checkpoints::{Checkpoint, CheckpointError, Checkpoints};
+pub use checkpoints::{Checkpoint, CheckpointError, CheckpointFacts, Checkpoints, EntryFacts};
 
 use enum_map::EnumMap;
 use mpc_chain_integration_core::{StateManager, WatchKey, WatchedExecution};
@@ -932,6 +932,21 @@ pub struct BacklogEntry {
     pub unviable_at: Option<u64>,
 }
 
+impl From<EntryFacts> for BacklogEntry {
+    fn from(facts: EntryFacts) -> Self {
+        let mut entry = Self::new(Arc::new(IndexedSignRequest {
+            id: facts.id,
+            args: facts.args,
+            chain: facts.chain,
+            unix_timestamp_indexed: None,
+            kind: facts.kind,
+        }));
+        entry.tx_ids = facts.tx_ids;
+        entry.unviable_at = facts.unviable_at;
+        entry
+    }
+}
+
 impl BacklogEntry {
     pub fn new(request: Arc<IndexedSignRequest>) -> Self {
         let status = match &request.kind {
@@ -976,19 +991,16 @@ impl BacklogEntry {
     }
 
     /// The source-chain facts the digest covers; indexing times are node-local.
-    fn digest_bytes(&self) -> Vec<u8> {
+    pub(crate) fn facts(&self) -> EntryFacts {
         let request = &self.request;
-        let fields = (
-            request.id,
-            &request.args,
-            request.chain,
-            &request.kind,
-            &self.tx_ids,
-            self.unviable_at,
-        );
-        let mut bytes = Vec::new();
-        ciborium::into_writer(&fields, &mut bytes).expect("encoding into memory cannot fail");
-        bytes
+        EntryFacts {
+            id: request.id,
+            args: request.args.clone(),
+            chain: request.chain,
+            kind: request.kind.clone(),
+            tx_ids: self.tx_ids.clone(),
+            unviable_at: self.unviable_at,
+        }
     }
 
     /// Whether this node still has to answer the request.

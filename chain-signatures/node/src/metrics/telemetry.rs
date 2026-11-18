@@ -26,24 +26,10 @@ impl PublisherTelemetry for NodeTelemetry {
     fn record_publish_metrics(&self, action: &PublishAction) {
         let chain = action.request.chain;
         let kind = action.request.request_kind();
-        let elapsed_secs = unix_elapsed(action.request.unix_timestamp_indexed).as_secs();
-
-        if elapsed_secs <= chain.expected_response_time_secs() {
-            record_request_latency_since(
-                chain,
-                SignRequestStep::Total,
-                "in_time",
-                kind,
-                action.request.unix_timestamp_indexed,
-            );
-        } else {
-            record_request_latency_since(
-                chain,
-                SignRequestStep::Total,
-                "expired",
-                kind,
-                action.request.unix_timestamp_indexed,
-            );
+        if let Some(indexed) = action.request.unix_timestamp_indexed {
+            let in_time = unix_elapsed(indexed).as_secs() <= chain.expected_response_time_secs();
+            let outcome = if in_time { "in_time" } else { "expired" };
+            record_request_latency_since(chain, SignRequestStep::Total, outcome, kind, indexed);
         }
         record_request_latency_since(
             chain,
