@@ -978,12 +978,14 @@ impl crate::native::SubmitChain for MidnightPublisherRpc {
         &self,
         at: &BlockHash,
     ) -> anyhow::Result<midnight_base_crypto::time::Timestamp> {
-        let at = H256::from(*at);
-        if let Some(time) = recall(&self.blocks().times, at) {
+        // Named for its type: interpolating `at` must render the full hash, and an
+        // H256 binding here once truncated that render to `0x4343…4343`.
+        let at_h256 = H256::from(*at);
+        if let Some(time) = recall(&self.blocks().times, at_h256) {
             return Ok(time);
         }
         let key = self
-            .client_for_block(at)
+            .client_for_block(at_h256)
             .await?
             .storage()
             .address_bytes(&subxt::dynamic::storage(
@@ -994,14 +996,14 @@ impl crate::native::SubmitChain for MidnightPublisherRpc {
             .context("the midnight runtime has no Timestamp::Now")?;
         let raw = self
             .legacy
-            .state_get_storage(&key, Some(at))
+            .state_get_storage(&key, Some(at_h256))
             .await
             .context("failed to fetch the midnight block time")?
             .with_context(|| format!("midnight node has no block time at {at}"))?;
         let millis =
             u64::decode_all(&mut &raw[..]).context("the midnight block time is not a u64")?;
         let time = midnight_base_crypto::time::Timestamp::from_secs(millis / 1000);
-        remember(&mut self.blocks().times, at, time);
+        remember(&mut self.blocks().times, at_h256, time);
         Ok(time)
     }
 
@@ -1036,12 +1038,12 @@ impl crate::native::SubmitChain for MidnightPublisherRpc {
         at: &BlockHash,
         tx_hash: LedgerTxHash,
     ) -> anyhow::Result<Option<Landing>> {
-        let at = H256::from(*at);
+        let at_h256 = H256::from(*at);
         let events = self
-            .client_for_block(at)
+            .client_for_block(at_h256)
             .await?
             .events()
-            .at(at)
+            .at(at_h256)
             .await
             .context("failed to fetch midnight block events")?;
         for event in events.iter() {
@@ -3648,7 +3650,7 @@ mod tests {
     /// `Timestamp::Now` at `millis`. The log names each node read, in order.
     async fn captured_landing_node(
         events: Vec<u8>,
-        millis: u64,
+        millis: Option<u64>,
     ) -> (
         MidnightPublisherRpc,
         jsonrpsee::server::ServerHandle,
@@ -3738,10 +3740,13 @@ mod tests {
                 assert_eq!(at, hash_of_byte(0x43));
                 if key == events_key {
                     logged.lock().unwrap().push("System::Events");
-                    format!("0x{}", hex::encode(&events))
+                    json!(format!("0x{}", hex::encode(&events)))
                 } else if key == now_key {
                     logged.lock().unwrap().push("Timestamp::Now");
-                    format!("0x{}", hex::encode(millis.encode()))
+                    match millis {
+                        Some(millis) => json!(format!("0x{}", hex::encode(millis.encode()))),
+                        None => serde_json::Value::Null,
+                    }
                 } else {
                     panic!("unexpected storage key {key}")
                 }
@@ -3760,6 +3765,21 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_missing_block_time_names_the_block_hash_in_full() {
+        use crate::native::SubmitChain as _;
+
+        let block = BlockHash::from_0x_hex(&hash_of_byte(0x43)).unwrap();
+        let (rpc, _handle, _log) = captured_landing_node(Vec::new(), None).await;
+        let err = rpc
+            .block_time(&block)
+            .await
+            .expect_err("a node with no Timestamp::Now has no block time");
+        let rendered = format!("{err:#}");
+        assert!(rendered.contains(&hash_of_byte(0x43)), "{rendered}");
+        assert!(!rendered.contains('\u{2026}'), "{rendered}");
+    }
+
+    #[tokio::test]
     async fn the_publisher_reads_a_landing_and_the_block_time_from_a_captured_block() {
         use crate::native::SubmitChain as _;
 
@@ -3773,7 +3793,7 @@ mod tests {
 
         let (rpc, _handle, _log) = captured_landing_node(
             include_bytes!("../fixtures/fallible-block-432-events.scale").to_vec(),
-            1_761_400_000_999,
+            Some(1_761_400_000_999),
         )
         .await;
         assert_eq!(
@@ -3790,7 +3810,7 @@ mod tests {
         let mut partial = captured_applied_status_record();
         partial[6] = 7; // TxPartialSuccess in the captured metadata.
         let (rpc, _handle, _log) =
-            captured_landing_node(encode_status_records(&[partial]), 0).await;
+            captured_landing_node(encode_status_records(&[partial]), Some(0)).await;
         assert_eq!(
             rpc.landing(&block, applied).await.unwrap(),
             Some(Landing::PartialSuccess)
@@ -3815,7 +3835,7 @@ mod tests {
         let block = BlockHash::from_0x_hex(&hash_of_byte(0x43)).unwrap();
         let (rpc, _handle, log) = captured_landing_node(
             include_bytes!("../fixtures/fallible-block-432-events.scale").to_vec(),
-            1_761_400_000_999,
+            Some(1_761_400_000_999),
         )
         .await;
 
