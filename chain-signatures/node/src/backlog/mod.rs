@@ -727,7 +727,6 @@ impl Backlog {
             ?chain,
             height,
             tx_count = checkpoint.len(),
-            ?checkpoint,
             "creating checkpoint"
         );
         Some(checkpoint)

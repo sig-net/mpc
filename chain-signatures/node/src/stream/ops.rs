@@ -835,7 +835,14 @@ pub(crate) async fn process_block_event<T: ChainTelemetry>(
     telemetry.checkpoint_created(checkpoint.block_height);
 
     let checkpoint_digest = mpc_primitives::CheckpointDigest::from(&checkpoint);
-    tracing::info!(block, ?checkpoint, %chain, ?checkpoint_digest, "created checkpoint");
+    tracing::info!(
+        block,
+        %chain,
+        tx_count = checkpoint.len(),
+        ?checkpoint,
+        ?checkpoint_digest,
+        "created checkpoint"
+    );
     ctx.rpc.vote_checkpoint(checkpoint_digest).await?;
 
     Ok(())
