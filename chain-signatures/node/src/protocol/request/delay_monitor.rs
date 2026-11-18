@@ -16,8 +16,8 @@ use tokio_util::time::delay_queue::{DelayQueue, Key};
 
 use crate::metrics::requests::{record_request_latency_since, SignRequestStep};
 
-/// How many counted legs are remembered, so a re-admitted one is not counted again.
-const MAX_COUNTED: usize = 65536;
+/// How many late, unanswered legs are remembered.
+const MAX_LATE: usize = 65536;
 
 type Leg = (SignId, RequestKind);
 
@@ -28,7 +28,6 @@ struct Watched {
 }
 
 /// A leg counted as delayed whose late response has not been observed yet.
-#[derive(Clone, Copy)]
 struct Late {
     chain: Chain,
     unix_timestamp_indexed: u64,
@@ -112,7 +111,7 @@ impl DelayMonitor {
             started: Instant::now(),
             watched: HashMap::new(),
             queue: DelayQueue::new(),
-            counted: LruCache::new(NonZeroUsize::new(MAX_COUNTED).unwrap()),
+            late: LruCache::new(NonZeroUsize::new(MAX_LATE).unwrap()),
         };
 
         loop {
@@ -137,8 +136,9 @@ struct Monitor {
     started: Instant,
     watched: HashMap<Leg, Watched>,
     queue: DelayQueue<Leg>,
-    /// Legs already counted, with what a late response still has to record.
-    counted: LruCache<Leg, Option<Late>>,
+    /// Legs counted as delayed and not answered yet: a re-admitted one is not
+    /// counted again, and its response records `expired`.
+    late: LruCache<Leg, Late>,
 }
 
 impl Monitor {
@@ -150,7 +150,7 @@ impl Monitor {
                 unix_timestamp_indexed,
                 deadline,
             } => {
-                if self.counted.contains(&leg) || self.watched.contains_key(&leg) {
+                if self.late.contains(&leg) || self.watched.contains_key(&leg) {
                     return;
                 }
                 if deadline < self.started {
@@ -185,7 +185,6 @@ impl Monitor {
         let (sign_id, kind) = leg;
         if let Some(watched) = self.watched.remove(&leg) {
             self.queue.remove(&watched.key);
-            self.counted.put(leg, None);
             record_request_latency_since(
                 watched.chain,
                 SignRequestStep::Total,
@@ -193,7 +192,7 @@ impl Monitor {
                 kind,
                 watched.unix_timestamp_indexed,
             );
-        } else if let Some(late) = self.counted.get_mut(&leg).and_then(Option::take) {
+        } else if let Some(late) = self.late.pop(&leg) {
             tracing::info!(?sign_id, "late response observed");
             record_request_latency_since(
                 late.chain,
@@ -217,12 +216,12 @@ impl Monitor {
             elapsed_secs = unix_elapsed(watched.unix_timestamp_indexed).as_secs(),
             "signature request delayed beyond expected response time"
         );
-        self.counted.put(
+        self.late.put(
             leg,
-            Some(Late {
+            Late {
                 chain: watched.chain,
                 unix_timestamp_indexed: watched.unix_timestamp_indexed,
-            }),
+            },
         );
         crate::metrics::requests::SIGN_REQUEST_DELAYED
             .with_label_values(&[watched.chain.as_str(), kind.as_str()])
@@ -314,6 +313,24 @@ mod tests {
         assert_eq!(delayed(chain, kind) - delayed_before, 1);
         assert_eq!(total(chain, kind, "expired") - expired_before, 1);
         assert_eq!(total(chain, kind, "in_time"), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_answered_leg_is_forgotten() {
+        let (chain, kind) = (Chain::Canton, RequestKind::SignBidirectional);
+        let before = delayed(chain, kind);
+        let monitor = DelayMonitor::spawn();
+
+        monitor.watch(sign_id(9), kind, chain, 0, after(10));
+        settle(20).await;
+        monitor.responded(sign_id(9), kind);
+        settle(1).await;
+        assert_eq!(delayed(chain, kind) - before, 1);
+
+        // An answered request is never requeued, so nothing is kept to stop a recount.
+        monitor.watch(sign_id(9), kind, chain, 0, after(0));
+        settle(1).await;
+        assert_eq!(delayed(chain, kind) - before, 2);
     }
 
     #[tokio::test(start_paused = true)]
