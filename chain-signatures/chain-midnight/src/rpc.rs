@@ -2602,32 +2602,28 @@ mod tests {
     }
 
     #[test]
-    fn publish_reads_carry_the_read_partition_verdict() {
-        // Classic client errors terminal (failover covers delivery), the rest
-        // retries; 402/429 engage the gate by typed status, never the render.
-        for (status, retryable, throttled) in [
-            (400u16, false, false),
-            (401, false, false),
-            (403, false, false),
-            (404, false, false),
-            (405, false, false),
-            (402, true, true),
-            (408, true, false),
-            (409, true, false), // the send table's terminal arm — reads diverge (#1469)
-            (429, true, true),
-            (500, true, false),
-        ] {
-            let error = attach_read_carrier(rejected_read(status)).context("publishing");
-            assert_eq!(
-                is_retryable(&error),
-                retryable,
-                "status {status}: {error:#}"
-            );
-            assert_eq!(
-                is_provider_throttled(&error),
-                throttled,
-                "status {status}: {error:#}"
-            );
+    fn every_http_status_classifies_under_the_read_partition() {
+        // Every status jsonrpsee can report — parsed StatusCode, so 100..=599
+        // (jsonrpsee-http-client 0.24.10 transport.rs:337) — at both call
+        // sites of the shared derivation.
+        for code in 100..=599u16 {
+            let read = attach_read_carrier(rejected_read(code));
+            let node = SubmitError::Node {
+                source: rejected_read(code),
+            }
+            .into_publish_error();
+            for error in [&read, &node] {
+                assert_eq!(
+                    is_retryable(error),
+                    !matches!(code, 400 | 401 | 403 | 404 | 405),
+                    "{code}: {error:#}"
+                );
+                assert_eq!(
+                    is_provider_throttled(error),
+                    matches!(code, 402 | 429),
+                    "{code}: {error:#}"
+                );
+            }
         }
     }
 
