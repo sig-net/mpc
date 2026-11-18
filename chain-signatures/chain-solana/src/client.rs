@@ -89,10 +89,12 @@ fn classify_transport(e: reqwest::Error) -> anyhow::Error {
 /// `classify_transport`, carrying a `Retry-After` pause read off the
 /// response before `error_for_status()` discards it.
 fn classify_transport_with(e: reqwest::Error, retry_after: Option<Duration>) -> anyhow::Error {
+    // the URL can carry the provider's key, and this message is logged
+    let e = e.without_url();
     let carrier = match e.status() {
         Some(status) => RpcFailure::read_status(status, format!("{e:#}")),
-        // statusless (connection): explicit retryable so the fallback
-        // can't misread a ":429" port
+        // statusless (connection): explicit retryable, so the string
+        // fallback is never asked
         None => RpcFailure::retryable(format!("{e:#}")),
     };
     let carrier = match retry_after {
@@ -1459,10 +1461,11 @@ mod tests {
 
     #[tokio::test]
     async fn statusless_failures_are_retryable_and_never_throttled() {
-        // the ":429" port renders in the error; the explicit retryable
-        // carrier keeps the string fallback from reading it as a throttle
+        // the URL, ":429" port included, stays out of the error, and the
+        // explicit retryable carrier keeps the string fallback out of it
         let client = test_client("http://127.0.0.1:429");
         let err = client.get_slot_finalized().await.unwrap_err();
+        assert!(!format!("{err:#}").contains(":429"), "{err:#}");
         assert!(is_retryable(&err), "{err:#}");
         assert!(!is_provider_throttled(&err), "{err:#}");
 

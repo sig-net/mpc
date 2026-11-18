@@ -1,3 +1,5 @@
+#![allow(clippy::disallowed_methods)]
+
 pub mod actions;
 pub mod canton;
 mod canton_auth;

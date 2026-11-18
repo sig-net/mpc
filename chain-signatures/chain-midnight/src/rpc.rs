@@ -925,9 +925,11 @@ pub(crate) enum SubmitRefusal {
     Refused(String),
     /// No answer arrived; the transaction may be in the pool.
     Unanswered(anyhow::Error),
-    /// The transaction was never sent: the node's runtime could not be read, or
-    /// the call does not match its metadata.
+    /// The transaction was never sent: the node's runtime could not be read.
     Unsent(anyhow::Error),
+    /// The call is not in the node's runtime metadata: this node cannot carry
+    /// the transaction, whatever its state.
+    Mismatch(anyhow::Error),
 }
 
 /// The pool's "already imported" answer: the transaction is in it.
@@ -1016,9 +1018,10 @@ impl crate::native::SubmitChain for MidnightPublisherRpc {
                 vec![subxt::dynamic::Value::from_bytes(transaction)],
             ))
             .map_err(|error| {
-                SubmitRefusal::Unsent(anyhow::anyhow!(
-                    "send_mn_transaction did not match metadata: {error}"
-                ))
+                SubmitRefusal::Mismatch(
+                    anyhow::Error::new(error)
+                        .context("send_mn_transaction did not match the node's metadata"),
+                )
             })?;
         let encoded = format!("0x{}", hex::encode(extrinsic.encoded()));
         classify_submit_reply(
@@ -1268,7 +1271,10 @@ struct Reads {
     retry: RetryConfig,
 }
 
-fn rejected_http_status(error: &anyhow::Error) -> Option<u16> {
+/// The HTTP status a transport rejection in `error`'s chain carries, if any.
+/// jsonrpsee stores a parsed `StatusCode` as u16 (jsonrpsee-http-client 0.24.10
+/// transport.rs:337), so `from_u16` cannot fail on what it produces.
+pub(crate) fn rejected_http_status(error: &anyhow::Error) -> Option<StatusCode> {
     error.chain().find_map(|cause| {
         let RawRpcError::Client(client_error) = cause.downcast_ref::<RawRpcError>()? else {
             return None;
@@ -1283,7 +1289,7 @@ fn rejected_http_status(error: &anyhow::Error) -> Option<u16> {
         else {
             return None;
         };
-        Some(*status_code)
+        StatusCode::from_u16(*status_code).ok()
     })
 }
 
@@ -1294,7 +1300,7 @@ fn is_read_retryable(error: &anyhow::Error) -> bool {
     if let Some(status) = rejected_http_status(error) {
         // reads stay conservative: a retry reconnects onto a healthy LB
         // backend (#1469), so only classic client errors are terminal
-        return StatusCode::from_u16(status).map_or(true, http_status_read_retryable);
+        return http_status_read_retryable(status);
     }
     if error.chain().any(|cause| {
         matches!(
@@ -1472,15 +1478,20 @@ impl Reads {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::native::SubmitChain as _;
+    use crate::submit_error::SubmitError;
     use jsonrpsee::server::ServerBuilder;
     use jsonrpsee::types::ErrorObjectOwned;
     use jsonrpsee::RpcModule;
+    use mpc_chain_integration_core::utils::retry::is_provider_throttled;
     use serde_json::json;
     use std::io::Write as _;
     use std::net::SocketAddr;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+    use subxt::ext::codec::Decode as _;
+    use subxt::ext::frame_metadata::{RuntimeMetadata, RuntimeMetadataPrefixed};
     use subxt::ext::scale_decode::DecodeAsType;
     use subxt::ext::subxt_rpcs::UserError;
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
@@ -2475,7 +2486,7 @@ mod tests {
 
             assert_eq!(
                 rejected_http_status(&err),
-                Some(status),
+                Some(StatusCode::from_u16(status).unwrap()),
                 "status {status} was lost from the typed error chain: {err:#}"
             );
             assert_eq!(
@@ -3515,6 +3526,121 @@ mod tests {
             other => panic!("expected an unsent submit, got {other:?}"),
         }
         assert_eq!(submits.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn a_runtime_without_the_call_is_a_mismatch_not_an_unsent() {
+        // The fixture's metadata, emptied of its pallets: the runtime reads fine,
+        // but no call named send_mn_transaction exists to build.
+        let raw = include_bytes!("../fixtures/fallible-block-432-metadata.scale");
+        let mut prefixed = RuntimeMetadataPrefixed::decode(&mut &raw[..]).unwrap();
+        match &mut prefixed.1 {
+            RuntimeMetadata::V14(v14) => v14.pallets.clear(),
+            RuntimeMetadata::V15(v15) => v15.pallets.clear(),
+            RuntimeMetadata::V16(v16) => v16.pallets.clear(),
+            _ => panic!("the fixture is a v14–v16 metadata"),
+        }
+        let served = format!("0x{}", hex::encode(prefixed.encode().encode()));
+
+        let server = ServerBuilder::default().build("127.0.0.1:0").await.unwrap();
+        let transport = connect_http(&http_config(server.local_addr().unwrap())).unwrap();
+        let submits = Arc::new(AtomicUsize::new(0));
+        let counted = submits.clone();
+        let metadata = served.clone();
+        let mut module = RpcModule::new(());
+        module
+            .register_method("chain_getBlockHash", |_, _, _| hash_of_byte(0x0b))
+            .unwrap();
+        module
+            .register_method("state_getRuntimeVersion", |_, _, _| {
+                json!({
+                    "specName": "midnight",
+                    "implName": "midnight",
+                    "authoringVersion": 1,
+                    "specVersion": 2,
+                    "implVersion": 0,
+                    "apis": [],
+                    "transactionVersion": 2,
+                    "stateVersion": 1
+                })
+            })
+            .unwrap();
+        module
+            .register_method("state_call", move |params, _, _| {
+                let (method, _data, _at) = params.parse::<(String, String, String)>().unwrap();
+                match method.as_str() {
+                    "Metadata_metadata_at_version" => "0x00".to_string(),
+                    "Metadata_metadata" => metadata.clone(),
+                    other => panic!("unexpected runtime call {other}"),
+                }
+            })
+            .unwrap();
+        module
+            .register_method("author_submitExtrinsic", move |_, _, _| {
+                counted.fetch_add(1, Ordering::SeqCst);
+                hash_of_byte(0x01)
+            })
+            .unwrap();
+        let _handle = server.start(module);
+        let rpc = MidnightPublisherRpc {
+            rpc: transport.clone(),
+            legacy: LegacyRpcMethods::<SubstrateConfig>::new(transport),
+            genesis_hash: H256([0x11; 32]),
+            clients: Default::default(),
+            blocks: Default::default(),
+            network_id: "undeployed".to_string(),
+        };
+
+        match rpc.submit(&[0x00]).await {
+            Err(SubmitRefusal::Mismatch(_)) => {}
+            other => panic!("expected a metadata mismatch, got {other:?}"),
+        }
+        assert_eq!(submits.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn real_submit_statuses_follow_the_read_partition() {
+        // The runtime read inside the submit path meets the status first, so
+        // nothing is sent.
+        for (status, reason, retryable, throttled) in [
+            (429u16, "Too Many Requests", true, true),
+            (500u16, "Internal Server Error", true, false),
+            // A shared provider's transient conflict retries, like midnight's
+            // other reads; a classic client error hands off to failover.
+            (409u16, "Conflict", true, false),
+            (404u16, "Not Found", false, false),
+        ] {
+            let (address, _calls, server) = http_status_server(status, reason).await;
+            let config = http_config(address);
+            let transport = connect_http(&config).unwrap();
+            let rpc = MidnightPublisherRpc {
+                rpc: transport.clone(),
+                legacy: LegacyRpcMethods::<SubstrateConfig>::new(transport),
+                genesis_hash: H256([0x11; 32]),
+                clients: Default::default(),
+                blocks: Default::default(),
+                network_id: "undeployed".to_string(),
+            };
+
+            let error = match rpc.submit(&[0x00]).await {
+                Err(SubmitRefusal::Unsent(error)) => error,
+                other => panic!("expected an unsent submit at {status}, got {other:?}"),
+            };
+            server.abort();
+            let _ = server.await;
+            assert_eq!(
+                rejected_http_status(&error),
+                Some(StatusCode::from_u16(status).unwrap()),
+                "{error:#}"
+            );
+
+            let publish = SubmitError::Node {
+                source: error.context("the transaction could not be sent; nothing was posted"),
+            }
+            .into_publish_error();
+            assert_eq!(is_retryable(&publish), retryable, "{publish:#}");
+            assert_eq!(is_provider_throttled(&publish), throttled, "{publish:#}");
+        }
     }
 
     /// Serves the captured block 432 as `0x43`, whose parent `0x42` runs the
