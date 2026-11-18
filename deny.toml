@@ -64,7 +64,15 @@ ignore = true
 
 [bans]
 multiple-versions = "warn"
-wildcards = "allow"
+wildcards = "deny"
+# Workspace crates depend on each other by path, without a version.
+allow-wildcard-paths = true
+
+# A crate declared more than once goes through [workspace.dependencies].
+[bans.workspace-dependencies]
+duplicates = "deny"
+include-path-dependencies = true
+unused = "deny"
 
 [sources]
 # Fail on any dependency from a registry or git repo not explicitly

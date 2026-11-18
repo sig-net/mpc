@@ -19,9 +19,8 @@ curl -LsSf https://get.nexte.st/latest/mac | tar zxf - -C ~/.cargo/bin
 2. Install the WebAssembly `wasm32-unknown-unknown` target:
 
 ```bash
+# rust-toolchain.toml lists the target, so rustup adds it on the first cargo run. To add it ahead:
 rustup target add wasm32-unknown-unknown
-# The contract build runs under the pinned toolchain, so add the target there too:
-rustup target add wasm32-unknown-unknown --toolchain 1.95.0
 ```
 
 3. Install [just](https://just.systems/man/en/packages.html):
@@ -37,11 +36,11 @@ cargo install just
 ## Basic guide
 
 Running integration tests requires a running Docker daemon (`just setup` installs
-Docker Desktop on macOS, docker.io on Linux). The `redis:7.4.2` image is pulled
+Docker Desktop on macOS, docker.io on Linux). The `redis:7.4.12` image is pulled
 automatically by testcontainers on first run; prefetch it to avoid waiting:
 
 ```BASH
-docker pull redis:7.4.2
+docker pull redis:7.4.12
 ```
 
 In case of authorization issues make sure you have logged into docker using your [access token](https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry#authenticating-with-a-personal-access-token-classic).

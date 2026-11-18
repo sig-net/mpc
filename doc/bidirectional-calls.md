@@ -38,7 +38,9 @@ Organization:
   own.
 * *Signet contract*: our contract on the source chain, through which
   requests, signatures and responses are published. It holds no per-
-  application state.
+  application state. On Midnight it is two contracts: requests are notified
+  to the Signet singleton, and signatures and attestations are published to
+  the signet responder (Section 4.2).
 * *MPC network*: the nodes that sign and attest.
 * *Broadcaster*: whoever submits the signed transaction to the target
   chain. Untrusted; the design does not depend on who it is.
@@ -378,8 +380,12 @@ call. It emits three events:
   directly, which is how a response is delivered where the signet contract
   cannot call it, and again after a failed handler.
 
-On Midnight, a second contract, the signet responder, emits `Signature` and
-`Response`; see [midnight-publisher.md](midnight-publisher.md).
+On Midnight the singleton emits `SignRequest` as a notification that names
+the requesting contract, and the MPC reads the request itself from the
+requesting contract's state (Sections 4.3 and 6). A second contract, the
+signet responder, emits `Signature` and `Response`.
+[midnight-publisher.md](midnight-publisher.md) says how the node publishes
+to the responder and which events the MPC reads from each contract.
 
 ### 4.3 MPC network
 
@@ -491,12 +497,12 @@ on Response { rid, att, sig } finalised on the source chain:
 
 A node is *caught up* on a source chain when it has processed it up to its
 finalised head. A node that is behind, after a restart for instance, does
-not sign, attest or publish while it runs the handlers above: its backlog
-still holds requests the chain has already answered, and it cannot tell
-which of the signatures and attestations it holds are already published.
-Once caught up, it acts on each entry only for what is missing: it does
-not sign an entry that has a published signature, one it holds, or an
-`unviable_at`, attests Unviable for an entry with an `unviable_at` and no
+not start to sign, attest or publish while it runs the handlers above: its
+backlog still holds requests the chain has already answered, and it cannot
+tell which of the signatures and attestations it holds are already
+published. Once caught up, it acts on each entry only for what is missing:
+it does not sign an entry that has a published signature, one it holds, or
+an `unviable_at`, attests Unviable for an entry with an `unviable_at` and no
 outcome, and does not attest an entry it holds an attestation for.
 
 The MPC looks for a request's execution by transaction ID, under every
@@ -1117,7 +1123,8 @@ make `debug_traceTransaction` available only on paid tiers.
 A node configured to provide this cache writes the serialised output to
 `<prefix>/<networkId>/<signetContractAddress>/<requestId>.bin` before posting
 the attestation to the source chain. Here `networkId` identifies the source
-network and `signetContractAddress` its signet contract. Clients can fetch
+network and `signetContractAddress` its signet contract (on Midnight, the
+singleton, not the responder). Clients can fetch
 the bytes by request ID from the endpoint advertised for their deployment
 and retry while they are not yet available. Providing a cache is optional.
 

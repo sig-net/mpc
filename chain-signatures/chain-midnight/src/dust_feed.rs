@@ -31,9 +31,14 @@ const BUFFER: usize = 512;
 /// The largest message or frame accepted from the indexer. One message carries one
 /// hex-encoded DUST event; the largest in the captured fixture is about 2.7 KB.
 const MAX_MESSAGE: usize = 1 << 20;
+/// How long the indexer may take to name its newest event once it has answered its
+/// newest block; past it, the answer goes without one.
+const NEWEST_EVENT_TIMEOUT: Duration = Duration::from_secs(5);
 
 const SUBSCRIPTION: &str =
     "subscription DustLedgerEvents($id: Int) { dustLedgerEvents(id: $id) { id maxId raw } }";
+const NEWEST_EVENT: &str =
+    "subscription DustLedgerEvents($id: Int) { dustLedgerEvents(id: $id) { maxId } }";
 
 /// One event as the indexer serves it: the ledger's own tagged `Event` bytes.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -54,6 +59,22 @@ pub(crate) trait DustEventSource: Send + Sync + 'static {
 
     /// The block time of the newest block the source has indexed.
     async fn indexed_time(&self) -> anyhow::Result<Timestamp>;
+
+    /// The newest block's time and, asked after it from event `from` on, the newest
+    /// event id the source holds, when it names one.
+    async fn indexed(&self, _from: Option<u64>) -> anyhow::Result<Indexed> {
+        Ok(Indexed {
+            time: self.indexed_time().await?,
+            newest_event: None,
+        })
+    }
+}
+
+/// What the source has indexed, as [`DustEventSource::indexed`] reads it.
+pub(crate) struct Indexed {
+    pub time: Timestamp,
+    /// Covers every event of the block at `time`, as it was asked after it.
+    pub newest_event: Option<u64>,
 }
 
 pub(crate) struct IndexerDustEvents {
@@ -110,52 +131,117 @@ impl DustEventSource for IndexerDustEvents {
     async fn indexed_time(&self) -> anyhow::Result<Timestamp> {
         let query = async {
             let mut socket = open(&self.url).await?;
-            socket
-                .send(Message::text(
-                    json!({
-                        "id": "1",
-                        "type": "subscribe",
-                        "payload": { "query": "query { block { timestamp } }" },
-                    })
-                    .to_string(),
-                ))
-                .await
-                .context("asking the indexer for its newest block")?;
-            loop {
-                let frame = socket
-                    .next()
-                    .await
-                    .context("the indexer closed the connection before answering")?
-                    .context("reading the indexer's newest block")?;
-                let Message::Text(text) = frame else {
-                    if let Message::Close(close) = frame {
-                        return Err(closed(&mut socket, "the connection", close).await);
-                    }
-                    continue;
-                };
-                let message: serde_json::Value = serde_json::from_str(&text)
-                    .context("the indexer sent a message that is not JSON")?;
-                match message["type"].as_str() {
-                    Some("next") => {
-                        let millis = message["payload"]["data"]["block"]["timestamp"]
-                            .as_u64()
-                            .with_context(|| {
-                                format!("the indexer's newest block has no time: {text}")
-                            })?;
-                        return anyhow::Ok(Timestamp::from_secs(millis / 1000));
-                    }
-                    Some("ping") => {
-                        socket
-                            .send(Message::text(json!({ "type": "pong" }).to_string()))
-                            .await?;
-                    }
-                    _ => anyhow::bail!("the indexer did not answer with its newest block: {text}"),
-                }
-            }
+            newest_block(&mut socket).await
         };
         tokio::time::timeout(KEEPALIVE, query)
             .await
             .context("timed out asking the indexer for its newest block")?
+    }
+
+    /// Both questions go over one connection of their own, never the live one, which
+    /// may have stalled: the first event the subscription from `from` serves carries the
+    /// newest id when it is served.
+    async fn indexed(&self, from: Option<u64>) -> anyhow::Result<Indexed> {
+        let query = async {
+            let mut socket = open(&self.url).await?;
+            let time = newest_block(&mut socket).await?;
+            anyhow::Ok((socket, time))
+        };
+        let (mut socket, time) = tokio::time::timeout(KEEPALIVE, query)
+            .await
+            .context("timed out asking the indexer for its newest block")??;
+        let newest_event =
+            match tokio::time::timeout(NEWEST_EVENT_TIMEOUT, newest_event(&mut socket, from)).await
+            {
+                Ok(Ok(newest)) => Some(newest),
+                Ok(Err(error)) => {
+                    tracing::warn!(
+                        error = %format_args!("{error:#}"),
+                        "midnight funding wallet: the indexer named no newest DUST event"
+                    );
+                    None
+                }
+                Err(_) => {
+                    tracing::warn!(
+                        "midnight funding wallet: the indexer named no newest DUST event in time"
+                    );
+                    None
+                }
+            };
+        Ok(Indexed { time, newest_event })
+    }
+}
+
+async fn newest_block(socket: &mut Socket) -> anyhow::Result<Timestamp> {
+    let data = first_result(
+        socket,
+        "1",
+        json!({ "query": "query { block { timestamp } }" }),
+        "its newest block",
+    )
+    .await?;
+    let millis = data["block"]["timestamp"]
+        .as_u64()
+        .with_context(|| format!("the indexer's newest block has no time: {data}"))?;
+    Ok(Timestamp::from_secs(millis / 1000))
+}
+
+async fn newest_event(socket: &mut Socket, from: Option<u64>) -> anyhow::Result<u64> {
+    let data = first_result(
+        socket,
+        "2",
+        json!({ "query": NEWEST_EVENT, "variables": { "id": from } }),
+        "its newest DUST event",
+    )
+    .await?;
+    data["dustLedgerEvents"]["maxId"]
+        .as_u64()
+        .with_context(|| format!("the indexer's DUST event names no newest id: {data}"))
+}
+
+/// The `data` of operation `id`'s first result. Messages of the connection's other
+/// operations, such as an earlier query's `complete`, are passed over.
+async fn first_result(
+    socket: &mut Socket,
+    id: &str,
+    payload: serde_json::Value,
+    what: &str,
+) -> anyhow::Result<serde_json::Value> {
+    socket
+        .send(Message::text(
+            json!({ "id": id, "type": "subscribe", "payload": payload }).to_string(),
+        ))
+        .await
+        .with_context(|| format!("asking the indexer for {what}"))?;
+    loop {
+        let frame = socket
+            .next()
+            .await
+            .context("the indexer closed the connection before answering")?
+            .with_context(|| format!("reading the indexer's answer for {what}"))?;
+        let Message::Text(text) = frame else {
+            continue;
+        };
+        let mut message: serde_json::Value =
+            serde_json::from_str(&text).context("the indexer sent a message that is not JSON")?;
+        if message["id"].as_str().is_some_and(|other| other != id) {
+            continue;
+        }
+        match message["type"].as_str() {
+            Some("next") => {
+                if let Some(errors) = message["payload"].get("errors") {
+                    anyhow::bail!("the indexer answered {what} with errors: {errors}");
+                }
+                return Ok(message["payload"]["data"].take());
+            }
+            Some("ping") => {
+                socket
+                    .send(Message::text(json!({ "type": "pong" }).to_string()))
+                    .await?;
+            }
+            Some("pong") => {}
+            _ => anyhow::bail!("the indexer did not answer with {what}: {text}"),
+        }
     }
 }
 
@@ -613,94 +699,180 @@ mod tests {
         assert_eq!(time, Timestamp::from_secs(1_761_400_000));
     }
 
-    /// Closes the connection, and checks the client answers the close as RFC 6455 asks
-    /// instead of dropping the connection.
-    async fn close(socket: &mut ServerSocket, close: Option<(u16, &'static str)>) {
-        let frame = close.map(|(code, reason)| CloseFrame {
-            code: code.into(),
-            reason: reason.into(),
-        });
-        socket.send(Message::Close(frame)).await.unwrap();
-        loop {
-            match socket.next().await {
-                Some(Ok(Message::Close(_))) => return,
-                Some(Ok(_)) => {}
-                other => panic!("the client dropped the connection unanswered: {other:?}"),
-            }
-        }
+    /// Answers the newest-block query as operation 1, then completes it.
+    async fn answer_newest_block(socket: &mut ServerSocket) {
+        let query = receive(socket).await;
+        assert_eq!(query["id"], "1");
+        assert_eq!(query["payload"]["query"], "query { block { timestamp } }");
+        send(
+            socket,
+            json!({ "id": "1", "type": "next", "payload": { "data": { "block": { "timestamp": 1_761_400_000_999u64 } } } }),
+        )
+        .await;
+        send(socket, json!({ "id": "1", "type": "complete" })).await;
     }
 
-    /// The indexer's close code and reason reach the error wherever it closes.
     #[tokio::test]
-    async fn the_indexer_s_close_code_and_reason_reach_the_error() {
+    async fn the_newest_event_is_asked_after_the_newest_block_on_the_same_connection() {
         let (url, server) = indexer(|mut socket| async move {
-            assert_eq!(receive(&mut socket).await["type"], "connection_init");
-            close(
+            accept(&mut socket).await;
+            answer_newest_block(&mut socket).await;
+            let question = receive(&mut socket).await;
+            assert_eq!(question["id"], "2");
+            assert_eq!(question["payload"]["query"], NEWEST_EVENT);
+            assert_eq!(question["payload"]["variables"]["id"], 117);
+            send(&mut socket, json!({ "type": "ping" })).await;
+            assert_eq!(receive(&mut socket).await["type"], "pong");
+            send(
                 &mut socket,
-                Some((4429, "Too many initialisation requests")),
+                json!({ "id": "2", "type": "next", "payload": { "data": { "dustLedgerEvents": { "maxId": 119 } } } }),
             )
             .await;
         })
         .await;
-        let refused =
-            tokio::time::timeout(TEST_TIMEOUT, IndexerDustEvents::new(url).subscribe(None))
-                .await
-                .expect("a close ends the handshake")
-                .err()
-                .expect("a closed handshake opens no subscription");
-        server.await.unwrap();
 
+        // The script's server accepts one connection only.
+        let indexed = IndexerDustEvents::new(url)
+            .indexed(Some(117))
+            .await
+            .unwrap();
+        tokio::time::timeout(TEST_TIMEOUT, server)
+            .await
+            .expect("the indexer script ends")
+            .unwrap();
+        assert_eq!(indexed.time, Timestamp::from_secs(1_761_400_000));
+        assert_eq!(indexed.newest_event, Some(119));
+    }
+
+    #[tokio::test]
+    async fn an_indexer_that_refuses_to_name_its_newest_event_still_answers_its_newest_block() {
         let (url, server) = indexer(|mut socket| async move {
             accept(&mut socket).await;
+            answer_newest_block(&mut socket).await;
             receive(&mut socket).await;
-            close(&mut socket, Some((1013, "try again later"))).await;
+            send(
+                &mut socket,
+                json!({ "id": "2", "type": "error", "payload": [{ "message": "boom" }] }),
+            )
+            .await;
+            // The connection stays open: only the refusal can end the wait early.
+            std::future::pending::<()>().await;
         })
         .await;
-        let unanswered =
-            tokio::time::timeout(TEST_TIMEOUT, IndexerDustEvents::new(url).indexed_time())
-                .await
-                .expect("a close ends the query")
-                .unwrap_err();
-        server.await.unwrap();
 
-        let (url, server) = indexer(|mut socket| async move {
-            accept(&mut socket).await;
-            receive(&mut socket).await;
-            close(&mut socket, Some((1001, "going\naway"))).await;
-        })
-        .await;
-        let mut stream = IndexerDustEvents::new(url).subscribe(None).await.unwrap();
-        let dropped = tokio::time::timeout(TEST_TIMEOUT, stream.next())
-            .await
-            .expect("a close ends the subscription")
-            .unwrap()
-            .unwrap_err();
-        server.await.unwrap();
-
-        let (url, server) = indexer(|mut socket| async move {
-            assert_eq!(receive(&mut socket).await["type"], "connection_init");
-            close(&mut socket, None).await;
-        })
-        .await;
-        let bare = tokio::time::timeout(TEST_TIMEOUT, IndexerDustEvents::new(url).subscribe(None))
-            .await
-            .expect("a close ends the handshake")
-            .err()
-            .expect("a closed handshake opens no subscription");
-        server.await.unwrap();
+        let asked = std::time::Instant::now();
+        let indexed = IndexerDustEvents::new(url).indexed(None).await.unwrap();
         assert!(
-            format!("{bare:#}").contains("without a close code"),
-            "{bare:#}"
+            asked.elapsed() < Duration::from_secs(2),
+            "a refusal ends the wait at once"
         );
+        server.abort();
+        assert_eq!(indexed.time, Timestamp::from_secs(1_761_400_000));
+        assert_eq!(indexed.newest_event, None);
+    }
 
-        for (error, code, reason) in [
-            (refused, "4429", "Too many initialisation requests"),
-            (unanswered, "1013", "try again later"),
-            (dropped, "1001", r#""going\naway""#),
-        ] {
-            let error = format!("{error:#}");
-            assert!(error.contains(code) && error.contains(reason), "{error}");
-            assert!(!error.contains('\n'), "one log line: {error}");
-        }
+    #[tokio::test]
+    async fn a_newest_event_the_indexer_answers_with_errors_is_none_at_once() {
+        let (url, server) = indexer(|mut socket| async move {
+            accept(&mut socket).await;
+            answer_newest_block(&mut socket).await;
+            receive(&mut socket).await;
+            send(
+                &mut socket,
+                json!({ "id": "2", "type": "next", "payload": { "data": null, "errors": [{ "message": "boom" }] } }),
+            )
+            .await;
+            std::future::pending::<()>().await;
+        })
+        .await;
+
+        let asked = std::time::Instant::now();
+        let indexed = IndexerDustEvents::new(url).indexed(Some(3)).await.unwrap();
+        assert!(
+            asked.elapsed() < Duration::from_secs(2),
+            "{:?}",
+            asked.elapsed()
+        );
+        server.abort();
+        assert_eq!(indexed.time, Timestamp::from_secs(1_761_400_000));
+        assert_eq!(indexed.newest_event, None);
+    }
+
+    #[tokio::test]
+    async fn a_newest_block_the_indexer_answers_with_errors_fails_and_names_them() {
+        let (url, server) = indexer(|mut socket| async move {
+            accept(&mut socket).await;
+            receive(&mut socket).await;
+            send(
+                &mut socket,
+                json!({ "id": "1", "type": "next", "payload": { "data": null, "errors": [{ "message": "database unavailable" }] } }),
+            )
+            .await;
+            std::future::pending::<()>().await;
+        })
+        .await;
+
+        let error = tokio::time::timeout(TEST_TIMEOUT, IndexerDustEvents::new(url).indexed(None))
+            .await
+            .expect("answers in time")
+            .err()
+            .expect("a newest block with errors is no newest block");
+        server.abort();
+        assert!(
+            format!("{error:#}").contains("database unavailable"),
+            "{error:#}"
+        );
+    }
+
+    #[tokio::test]
+    async fn operation_one_s_complete_and_heartbeats_after_operation_two_is_asked_pass_over() {
+        let (url, server) = indexer(|mut socket| async move {
+            accept(&mut socket).await;
+            let query = receive(&mut socket).await;
+            assert_eq!(query["id"], "1");
+            send(
+                &mut socket,
+                json!({ "id": "1", "type": "next", "payload": { "data": { "block": { "timestamp": 1_761_400_000_999u64 } } } }),
+            )
+            .await;
+            assert_eq!(receive(&mut socket).await["id"], "2");
+            send(&mut socket, json!({ "type": "ping" })).await;
+            send(&mut socket, json!({ "type": "pong" })).await;
+            send(&mut socket, json!({ "id": "1", "type": "complete" })).await;
+            assert_eq!(receive(&mut socket).await["type"], "pong");
+            for newest in [7, 8] {
+                send(
+                    &mut socket,
+                    json!({ "id": "2", "type": "next", "payload": { "data": { "dustLedgerEvents": { "maxId": newest } } } }),
+                )
+                .await;
+            }
+        })
+        .await;
+
+        let indexed = IndexerDustEvents::new(url).indexed(Some(3)).await.unwrap();
+        let _ = tokio::time::timeout(TEST_TIMEOUT, server).await;
+        assert_eq!(indexed.newest_event, Some(7), "the first result only");
+    }
+
+    #[tokio::test]
+    async fn an_indexer_silent_about_its_newest_event_is_waited_for_no_longer_than_its_timeout() {
+        let (url, server) = indexer(|mut socket| async move {
+            accept(&mut socket).await;
+            answer_newest_block(&mut socket).await;
+            receive(&mut socket).await;
+            std::future::pending::<()>().await;
+        })
+        .await;
+
+        let asked = std::time::Instant::now();
+        let indexed = IndexerDustEvents::new(url).indexed(None).await.unwrap();
+        let took = asked.elapsed();
+        server.abort();
+        assert_eq!(indexed.newest_event, None);
+        assert!(
+            took >= NEWEST_EVENT_TIMEOUT && took < NEWEST_EVENT_TIMEOUT + Duration::from_secs(3),
+            "{took:?}"
+        );
     }
 }

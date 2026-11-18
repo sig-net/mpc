@@ -306,7 +306,7 @@ impl SignEntry<Generating> {
             &output.s,
             self.request.args.payload,
         )
-        .map_err(|_| BacklogError::InvalidSignature)?;
+        .ok_or(BacklogError::InvalidSignature)?;
 
         let publish = Publishing::new(signature, participants, is_proposer);
         // Stored before the entry shows it, since anything that publishes reads the entry. A store
