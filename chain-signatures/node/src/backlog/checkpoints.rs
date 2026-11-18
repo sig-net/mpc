@@ -289,6 +289,42 @@ impl Checkpoints {
             .map_err(|source| CheckpointError::Storage { chain, source })
     }
 
+    // These wrappers are consumed by the settlement-stall handler in a later PR.
+
+    /// Durably records what this node voted for at a checkpoint height.
+    #[allow(dead_code)]
+    pub(crate) async fn persist_voted(
+        &self,
+        checkpoint: &Checkpoint,
+    ) -> Result<(), CheckpointError> {
+        let chain = checkpoint.chain;
+        self.storage
+            .persist_voted(checkpoint)
+            .await
+            .map_err(|source| CheckpointError::Storage { chain, source })
+    }
+
+    /// Loads every checkpoint this node voted for on `chain`, ordered by height.
+    #[allow(dead_code)]
+    pub(crate) async fn load_voted(
+        &self,
+        chain: Chain,
+    ) -> Result<Vec<Checkpoint>, CheckpointError> {
+        self.storage
+            .load_voted(chain)
+            .await
+            .map_err(|source| CheckpointError::Storage { chain, source })
+    }
+
+    /// Removes all voted checkpoints for `chain`.
+    #[allow(dead_code)]
+    pub(crate) async fn clear_voted(&self, chain: Chain) -> Result<(), CheckpointError> {
+        self.storage
+            .clear_voted(chain)
+            .await
+            .map_err(|source| CheckpointError::Storage { chain, source })
+    }
+
     /// Reports whether `chain` can create another pending checkpoint.
     pub(crate) fn has_slot(&self, chain: Chain) -> bool {
         self.count(chain) < MAX_PENDING_CHECKPOINTS
@@ -648,6 +684,45 @@ mod tests {
                 .unwrap(),
             Some(checkpoint)
         );
+    }
+
+    #[tokio::test]
+    async fn voted_wrappers_delegate_to_storage() {
+        let checkpoints = Checkpoints::new(CheckpointStorage::in_memory());
+        let first = checkpoint(1);
+        let second = checkpoint(2);
+
+        checkpoints.persist_voted(&first).await.unwrap();
+        checkpoints.persist_voted(&second).await.unwrap();
+        assert_eq!(
+            checkpoints.load_voted(first.chain).await.unwrap(),
+            vec![first.clone(), second]
+        );
+
+        checkpoints.clear_voted(first.chain).await.unwrap();
+        assert!(checkpoints
+            .load_voted(first.chain)
+            .await
+            .unwrap()
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn voted_wrappers_map_storage_errors() {
+        let checkpoints = Checkpoints::new(CheckpointStorage::failing());
+        let checkpoint = checkpoint(1);
+        assert!(matches!(
+            checkpoints.persist_voted(&checkpoint).await,
+            Err(CheckpointError::Storage { .. })
+        ));
+        assert!(matches!(
+            checkpoints.load_voted(checkpoint.chain).await,
+            Err(CheckpointError::Storage { .. })
+        ));
+        assert!(matches!(
+            checkpoints.clear_voted(checkpoint.chain).await,
+            Err(CheckpointError::Storage { .. })
+        ));
     }
 
     #[test]

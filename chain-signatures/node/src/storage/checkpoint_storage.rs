@@ -18,6 +18,9 @@ pub enum CheckpointStorage {
     InMemory {
         latest: Arc<RwLock<HashMap<Chain, Checkpoint>>>,
         pending: Arc<RwLock<HashMap<Chain, BTreeMap<u64, Checkpoint>>>>,
+        /// What this node voted for at each height, kept separately from `pending`
+        /// so a re-index cannot overwrite it (doc/checkpoints.md §4).
+        voted: Arc<RwLock<HashMap<Chain, BTreeMap<u64, Checkpoint>>>>,
         local: Arc<RwLock<HashMap<Chain, LocalRecords>>>,
         /// Upcoming calls to fail, for tests of transient errors.
         #[cfg(test)]
@@ -39,6 +42,7 @@ impl CheckpointStorage {
         Self::InMemory {
             latest: Arc::new(RwLock::new(HashMap::new())),
             pending: Arc::new(RwLock::new(HashMap::new())),
+            voted: Arc::new(RwLock::new(HashMap::new())),
             local: Arc::default(),
             #[cfg(test)]
             injected_failures: Arc::default(),
@@ -107,6 +111,10 @@ impl CheckpointStorage {
 
     fn pending_checkpoint_key(&self, chain: Chain) -> String {
         self.key("pending", chain)
+    }
+
+    fn voted_checkpoint_key(&self, chain: Chain) -> String {
+        self.key("voted", chain)
     }
 
     fn pending_digest_key(&self, chain: Chain) -> String {
@@ -336,6 +344,87 @@ impl CheckpointStorage {
                 anyhow::bail!("failing storage")
             }
         }
+    }
+
+    /// Persist what this node voted for at a checkpoint height, replacing any
+    /// record already stored at that same `(chain, height)`.
+    ///
+    /// This is deliberately a separate store from `pending`: a re-index rewrites
+    /// the rebuilt checkpoint in `pending`, but the original vote must survive
+    /// (doc/checkpoints.md §4).
+    pub async fn persist_voted(&self, checkpoint: &Checkpoint) -> anyhow::Result<()> {
+        match self {
+            CheckpointStorage::Redis(pool, _) => {
+                let mut conn = pool.get().await.context("failed to get redis connection")?;
+                let value = encode_checkpoint(checkpoint)
+                    .context("failed to serialize voted checkpoint")?;
+                conn.hset::<_, _, _, ()>(
+                    self.voted_checkpoint_key(checkpoint.chain),
+                    checkpoint.block_height,
+                    value,
+                )
+                .await
+                .context("failed to persist voted checkpoint to redis")?;
+            }
+            CheckpointStorage::InMemory { voted, .. } => {
+                voted
+                    .write()
+                    .await
+                    .entry(checkpoint.chain)
+                    .or_default()
+                    .insert(checkpoint.block_height, checkpoint.clone());
+            }
+            #[cfg(test)]
+            CheckpointStorage::Failing => anyhow::bail!("failing storage"),
+        }
+        Ok(())
+    }
+
+    /// Load all checkpoints this node voted for on `chain`, ordered by height.
+    pub async fn load_voted(&self, chain: Chain) -> anyhow::Result<Vec<Checkpoint>> {
+        match self {
+            CheckpointStorage::Redis(pool, _) => {
+                let mut conn = pool.get().await.context("failed to get redis connection")?;
+                let values: HashMap<String, Vec<u8>> = conn
+                    .hgetall(self.voted_checkpoint_key(chain))
+                    .await
+                    .context("failed to load voted checkpoints from redis")?;
+                let mut checkpoints = values
+                    .into_values()
+                    .map(|value| {
+                        decode_checkpoint(&value).context("failed to deserialize voted checkpoint")
+                    })
+                    .collect::<anyhow::Result<Vec<Checkpoint>>>()?;
+                checkpoints.sort_by_key(|checkpoint| checkpoint.block_height);
+                Ok(checkpoints)
+            }
+            CheckpointStorage::InMemory { voted, .. } => Ok(voted
+                .read()
+                .await
+                .get(&chain)
+                .map(|checkpoints| checkpoints.values().cloned().collect())
+                .unwrap_or_default()),
+            #[cfg(test)]
+            CheckpointStorage::Failing => anyhow::bail!("failing storage"),
+        }
+    }
+
+    /// Remove all voted checkpoints for `chain`, leaving other chains untouched.
+    pub async fn clear_voted(&self, chain: Chain) -> anyhow::Result<()> {
+        match self {
+            CheckpointStorage::Redis(pool, _) => {
+                let mut conn = pool.get().await.context("failed to get redis connection")?;
+                conn.del::<_, ()>(self.voted_checkpoint_key(chain))
+                    .await
+                    .context("failed to clear voted checkpoints from redis")?;
+            }
+            CheckpointStorage::InMemory { voted, .. } => {
+                voted.write().await.remove(&chain);
+            }
+            #[cfg(test)]
+            CheckpointStorage::Failing => anyhow::bail!("failing storage"),
+        }
+        Ok(())
     }
 
     /// Promote the durable pending checkpoint identified by its digest, or confirm
@@ -842,6 +931,99 @@ mod tests {
             .is_none());
         assert_eq!(storage.load_pending(Chain::Solana).await?, vec![checkpoint]);
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn voted_checkpoints_are_stored_per_height_and_sorted() -> anyhow::Result<()> {
+        let storage = CheckpointStorage::in_memory();
+        let chain = Chain::Solana;
+        let checkpoint = |block_height| Checkpoint {
+            chain,
+            block_height,
+            pending_requests: vec![],
+            legacy_digest: None,
+        };
+
+        assert!(storage.load_voted(chain).await?.is_empty());
+        let high = checkpoint(20);
+        storage.persist_voted(&high).await?;
+        assert_eq!(storage.load_voted(chain).await?, vec![high.clone()]);
+
+        // A second height coexists and the result is ordered by height ascending,
+        // even though the higher height was written first.
+        let low = checkpoint(10);
+        storage.persist_voted(&low).await?;
+        assert_eq!(
+            storage.load_voted(chain).await?,
+            vec![low.clone(), high.clone()]
+        );
+
+        // Replacing the record at an existing height leaves a single entry.
+        let mut replacement = checkpoint(10);
+        replacement
+            .pending_requests
+            .push(crate::backlog::BacklogEntry::new(
+                crate::backlog::mock::mock_sign_request(
+                    mpc_primitives::SignId::new([1; 32]),
+                    chain,
+                ),
+            ));
+        storage.persist_voted(&replacement).await?;
+        assert_eq!(storage.load_voted(chain).await?, vec![replacement, high]);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn voted_checkpoints_are_isolated_per_chain_and_clearable() -> anyhow::Result<()> {
+        let storage = CheckpointStorage::in_memory();
+        let solana = Checkpoint::reset(Chain::Solana, 1);
+        let ethereum = Checkpoint::reset(Chain::Ethereum, 2);
+        storage.persist_voted(&solana).await?;
+        storage.persist_voted(&ethereum).await?;
+
+        assert_eq!(
+            storage.load_voted(Chain::Solana).await?,
+            vec![solana.clone()]
+        );
+        assert_eq!(
+            storage.load_voted(Chain::Ethereum).await?,
+            vec![ethereum.clone()]
+        );
+
+        storage.clear_voted(Chain::Solana).await?;
+        assert!(storage.load_voted(Chain::Solana).await?.is_empty());
+        assert_eq!(storage.load_voted(Chain::Ethereum).await?, vec![ethereum]);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn voted_store_operations_leave_pending_and_latest_untouched() -> anyhow::Result<()> {
+        let storage = CheckpointStorage::in_memory();
+        let chain = Chain::Solana;
+        let pending = Checkpoint::reset(chain, 5);
+        let voted = Checkpoint::reset(chain, 6);
+        storage.persist_pending(&pending).await?;
+        storage.persist(&pending).await?;
+
+        storage.persist_voted(&voted).await?;
+        assert_eq!(storage.load_pending(chain).await?, vec![pending.clone()]);
+        assert_eq!(storage.load_latest(chain).await?, Some(pending.clone()));
+
+        storage.clear_voted(chain).await?;
+        assert_eq!(storage.load_pending(chain).await?, vec![pending.clone()]);
+        assert_eq!(storage.load_latest(chain).await?, Some(pending));
+        assert!(storage.load_voted(chain).await?.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn voted_store_errors_on_failing_storage() {
+        let storage = CheckpointStorage::failing();
+        let chain = Chain::Solana;
+        let checkpoint = Checkpoint::reset(chain, 1);
+        assert!(storage.persist_voted(&checkpoint).await.is_err());
+        assert!(storage.load_voted(chain).await.is_err());
+        assert!(storage.clear_voted(chain).await.is_err());
     }
 
     #[test]
