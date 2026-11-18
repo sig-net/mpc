@@ -1,12 +1,13 @@
 //! One respond call as the publisher hands it to the intent client, and what a
 //! finalized submit answers.
 
+use crate::types::{LedgerTxHash, MidnightAddress};
 use minocrab_publisher::{Attestation, EcdsaSignature};
 
 /// A finalized transaction and the funding wallet's DUST before it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Submitted {
-    pub tx_id: String,
+    pub tx_id: LedgerTxHash,
     /// Spendable DUST in SPECK.
     pub dust_balance: u128,
 }
@@ -15,7 +16,7 @@ pub(crate) struct Submitted {
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct IntentRequest {
     pub circuit: RespondCircuit,
-    pub contract_address: [u8; 32],
+    pub contract_address: MidnightAddress,
     pub request_id: [u8; 32],
     pub signature: EcdsaSignature,
     /// The reads this caller pinned, so the build is a pure function of them.
