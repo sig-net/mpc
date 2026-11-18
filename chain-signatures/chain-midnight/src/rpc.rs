@@ -893,8 +893,9 @@ pub(crate) fn read_verdict(error: &anyhow::Error) -> RpcFailure {
     }
 }
 
-/// The failed read above its carrier at the root: anyhow's `chain()` never
-/// yields `context` values, so the carrier must sit in the source chain.
+/// The failed read above its carrier at the root (anyhow's `chain()` skips
+/// `context` values): reachable only via `downcast_ref::<ReadFailed>`, the
+/// field preserves the typed cause beyond the carrier's render.
 #[derive(Debug, thiserror::Error)]
 #[error("a publisher read failed")]
 struct ReadFailed(#[source] anyhow::Error);
