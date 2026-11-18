@@ -806,40 +806,37 @@ impl Backlog {
             "recovering backlog to checkpoint"
         );
 
-        {
-            let mut pending = self.pending(&checkpoint.chain).write().await;
-            let previous_height = pending.processed_block_height().unwrap_or(0);
+        // One guard through replace and rebuild: a racing
+        // `add_published_tx` registers after the rebuild, not into rows
+        // it deletes.
+        let mut pending = self.pending(&chain).write().await;
+        let previous_height = pending.processed_block_height().unwrap_or(0);
 
-            // Execution watchers are ephemeral, we need to get all the execution watchers here
-            let cleared = pending.len();
-            let restored_len = restored.len();
-            *pending = restored;
-            // Otherwise the gauge shows nothing until the chain's next request.
-            self.observe_backlog_size(chain, restored_len);
+        // Execution watchers are ephemeral, we need to get all the execution watchers here
+        let cleared = pending.len();
+        let restored_len = restored.len();
+        *pending = restored;
+        // Otherwise the gauge shows nothing until the chain's next request.
+        self.observe_backlog_size(chain, restored_len);
 
-            // Update total pending count based on the difference between cleared and restored requests
-            if restored_len > cleared {
-                self.total_pending
-                    .fetch_add(restored_len - cleared, Ordering::Relaxed);
-            } else if cleared > restored_len {
-                self.total_pending
-                    .fetch_sub(cleared - restored_len, Ordering::Relaxed);
-            }
-
-            tracing::info!(
-                ?chain,
-                old_block = previous_height,
-                new_block = checkpoint_height,
-                cleared_requests = cleared,
-                restored_requests = restored_len,
-                "successfully recovered from checkpoint"
-            );
+        // Update total pending count based on the difference between cleared and restored requests
+        if restored_len > cleared {
+            self.total_pending
+                .fetch_add(restored_len - cleared, Ordering::Relaxed);
+        } else if cleared > restored_len {
+            self.total_pending
+                .fetch_sub(cleared - restored_len, Ordering::Relaxed);
         }
 
-        // Under the pending lock, as `add_published_tx` inserts: a
-        // racing publish registers after the rebuild, not into rows it
-        // deletes.
-        let pending = self.pending(&chain).write().await;
+        tracing::info!(
+            ?chain,
+            old_block = previous_height,
+            new_block = checkpoint_height,
+            cleared_requests = cleared,
+            restored_requests = restored_len,
+            "successfully recovered from checkpoint"
+        );
+
         let mut by_target: EnumMap<Chain, Vec<Arc<BidirectionalTx>>> = EnumMap::default();
         for tx in pending.execution_watches() {
             by_target[tx.target_chain].push(tx);
@@ -850,7 +847,6 @@ impl Backlog {
                 .await
                 .rebuild(chain, &by_target[destination_chain]);
         }
-        drop(pending);
     }
 }
 
