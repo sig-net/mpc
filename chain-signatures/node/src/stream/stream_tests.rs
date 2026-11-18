@@ -15,6 +15,7 @@ use async_trait::async_trait;
 use cait_sith::protocol::Participant;
 use mpc_chain_integration_core::{ChainIndexer, StateManager};
 use mpc_chain_solana::Pubkey;
+use mpc_contract::primitives::CheckpointVoteTally;
 use mpc_primitives::{Chain, ChainEvent, IndexedSignRequest, SignArgs, SignId};
 use mpc_utils::time::current_unix_timestamp;
 use near_primitives::types::AccountId;
@@ -120,6 +121,7 @@ async fn a_supervised_restart_publishes_a_stored_signature() {
             mesh_state_rx,
             NodeClient::new(),
             cp_rx,
+            watch::channel(Vec::<CheckpointVoteTally>::new()).1,
         ),
         mpc_chain_integration_core::NoopChainTelemetry,
     )
@@ -188,6 +190,7 @@ async fn test_stream_handles_sign_and_respond() {
             mesh_state_rx,
             node_client,
             cp_rx,
+            watch::channel(Vec::<CheckpointVoteTally>::new()).1,
         ),
         mpc_chain_integration_core::NoopChainTelemetry,
     )
@@ -304,6 +307,7 @@ async fn test_bidirectional_sign_request_enqueues_command() {
             mesh_state_rx,
             node_client,
             cp_rx,
+            watch::channel(Vec::<CheckpointVoteTally>::new()).1,
         ),
         mpc_chain_integration_core::NoopChainTelemetry,
     )
@@ -386,6 +390,7 @@ async fn test_respond_event_advances_to_pending_execution() {
             mesh_state_rx,
             node_client,
             cp_rx,
+            watch::channel(Vec::<CheckpointVoteTally>::new()).1,
         ),
         mpc_chain_integration_core::NoopChainTelemetry,
     )
@@ -636,6 +641,7 @@ async fn test_stream_resumes_pending_publish_after_catchup() {
                 mesh_state_rx,
                 node_client,
                 cp_rx,
+                watch::channel(Vec::<CheckpointVoteTally>::new()).1,
             ),
             mpc_chain_integration_core::NoopChainTelemetry,
         )
@@ -704,6 +710,7 @@ async fn test_stream_does_not_resume_non_proposer_pending_publish_after_catchup(
                 mesh_state_rx,
                 node_client,
                 cp_rx,
+                watch::channel(Vec::<CheckpointVoteTally>::new()).1,
             ),
             mpc_chain_integration_core::NoopChainTelemetry,
         )

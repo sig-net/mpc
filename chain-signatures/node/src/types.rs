@@ -2,6 +2,7 @@ use cait_sith::protocol::{Action, InitializationError, MessageData, Participant,
 use cait_sith::{protocol::Protocol, KeygenOutput};
 use cait_sith::{FullSignature, PresignOutput};
 use k256::{elliptic_curve::CurveArithmetic, Secp256k1};
+use mpc_contract::primitives::CheckpointVoteTally;
 use mpc_primitives::{Chain, CheckpointDigest, RequestKind, SignId};
 use tokio::sync::watch;
 
@@ -24,6 +25,10 @@ pub type SignatureProtocol = Box<dyn Protocol<Output = FullSignature<Secp256k1>>
 pub type Epoch = u64;
 
 pub type CheckpointWatcher = watch::Receiver<Option<CheckpointDigest>>;
+
+/// Per-chain receiver for the governance contract's outstanding checkpoint
+/// vote tallies, polled by the RPC task and consumed by later work.
+pub type CheckpointVoteTallyWatcher = watch::Receiver<Vec<CheckpointVoteTally>>;
 
 /// Messages sent into the node's sign-request processing queue.
 #[derive(Debug, Clone, PartialEq)]

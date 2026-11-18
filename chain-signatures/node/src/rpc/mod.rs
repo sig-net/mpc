@@ -22,7 +22,7 @@ use mpc_chain_integration_core::{
     utils::retry::{retry_op, retry_rpc, RetryConfig, SharedBackoff},
     ChainPublisher, PublishAction,
 };
-pub use mpc_contract::primitives::{Read, View};
+pub use mpc_contract::primitives::{CheckpointVoteTally, Read, View};
 use mpc_primitives::{CheckpointDigest, RequestKind, SignId, SignKind, Signature};
 
 use near_account_id::AccountId;
@@ -528,6 +528,7 @@ impl RpcExecutor {
         contract: watch::Sender<Option<ProtocolState>>,
         config: watch::Sender<Config>,
         checkpoints: EnumMap<Chain, watch::Sender<Option<CheckpointDigest>>>,
+        checkpoint_votes: EnumMap<Chain, watch::Sender<Vec<CheckpointVoteTally>>>,
     ) -> anyhow::Result<()> {
         // Checkpoint votes stop once the contract's consensus checkpoint reaches them.
         let consensus = EnumMap::from_fn(|chain| checkpoints[chain].subscribe());
@@ -539,7 +540,8 @@ impl RpcExecutor {
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             loop {
                 interval.tick().await;
-                update_contract_data(&near, &contract, &config, &checkpoints).await;
+                update_contract_data(&near, &contract, &config, &checkpoints, &checkpoint_votes)
+                    .await;
             }
         });
 
@@ -649,8 +651,14 @@ async fn update_contract_data(
     contract: &watch::Sender<Option<ProtocolState>>,
     config: &watch::Sender<Config>,
     checkpoints: &EnumMap<Chain, watch::Sender<Option<CheckpointDigest>>>,
+    checkpoint_votes: &EnumMap<Chain, watch::Sender<Vec<CheckpointVoteTally>>>,
 ) {
-    let reads = vec![Read::State, Read::Config, Read::Checkpoints];
+    let reads = vec![
+        Read::State,
+        Read::Config,
+        Read::Checkpoints,
+        Read::CheckpointVotes,
+    ];
     let views = match near.read(reads).await {
         Ok(views) => views,
         Err(error) => {
@@ -659,15 +667,30 @@ async fn update_contract_data(
         }
     };
 
+    apply_contract_views(views, contract, config, checkpoints, checkpoint_votes);
+}
+
+/// Apply the views returned by a governance `read` to the node's watch
+/// channels. Kept separate from the RPC call so it can be exercised with
+/// mocked view snapshots without standing up a NEAR RPC endpoint.
+fn apply_contract_views(
+    views: Vec<View>,
+    contract: &watch::Sender<Option<ProtocolState>>,
+    config: &watch::Sender<Config>,
+    checkpoints: &EnumMap<Chain, watch::Sender<Option<CheckpointDigest>>>,
+    checkpoint_votes: &EnumMap<Chain, watch::Sender<Vec<CheckpointVoteTally>>>,
+) {
     let mut state_view = None;
     let mut config_view = None;
     let mut checkpoints_view = None;
+    let mut checkpoint_votes_view = None;
 
     for view in views {
         match view {
             View::State(s) => state_view = Some(*s),
             View::Config(c) => config_view = Some(c),
             View::Checkpoints(cp) => checkpoints_view = Some(cp),
+            View::CheckpointVotes(tallies) => checkpoint_votes_view = Some(tallies),
         }
     }
 
@@ -697,6 +720,19 @@ async fn update_contract_data(
                     return false;
                 }
                 *old = new_digest;
+                true
+            });
+        }
+    }
+
+    if let Some(tallies_by_chain) = checkpoint_votes_view {
+        for (chain, tx) in checkpoint_votes {
+            let new_tallies = tallies_by_chain.get(&chain).cloned().unwrap_or_default();
+            tx.send_if_modified(|old| {
+                if *old == new_tallies {
+                    return false;
+                }
+                *old = new_tallies;
                 true
             });
         }
@@ -1910,5 +1946,75 @@ mod tests {
 
         throttled.abort();
         concurrent.abort();
+    }
+
+    /// A fresh tally snapshot from the governance `read` reaches the per-chain
+    /// watch channel; reapplying an unchanged snapshot must not re-notify.
+    #[tokio::test]
+    async fn checkpoint_votes_snapshot_reaches_watch_only_when_changed() {
+        let (contract_tx, _) = watch::channel::<Option<ProtocolState>>(None);
+        let (config_tx, _) = Config::channel();
+        let checkpoints: EnumMap<Chain, watch::Sender<Option<CheckpointDigest>>> =
+            EnumMap::from_fn(|_| watch::channel(None).0);
+        let checkpoint_votes: EnumMap<Chain, watch::Sender<Vec<CheckpointVoteTally>>> =
+            EnumMap::from_fn(|_| watch::channel(Vec::new()).0);
+
+        let mut sol_rx = checkpoint_votes[Chain::Solana].subscribe();
+        let snapshot = |count| {
+            HashMap::from([(
+                Chain::Solana,
+                vec![CheckpointVoteTally {
+                    height: 10,
+                    votes: vec![([7u8; 32], count)],
+                }],
+            )])
+        };
+        let apply = |views: Vec<View>| {
+            apply_contract_views(
+                views,
+                &contract_tx,
+                &config_tx,
+                &checkpoints,
+                &checkpoint_votes,
+            );
+        };
+
+        // A new snapshot reaches the watch channel.
+        apply(vec![View::CheckpointVotes(snapshot(2))]);
+        tokio::time::timeout(Duration::from_millis(100), sol_rx.changed())
+            .await
+            .expect("new tally snapshot should notify")
+            .expect("watch sender alive");
+        assert_eq!(
+            sol_rx.borrow().as_slice(),
+            &[CheckpointVoteTally {
+                height: 10,
+                votes: vec![([7u8; 32], 2)],
+            }]
+        );
+
+        // The identical snapshot must not wake the consumer again.
+        sol_rx.borrow_and_update();
+        apply(vec![View::CheckpointVotes(snapshot(2))]);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), sol_rx.changed())
+                .await
+                .is_err(),
+            "identical tally snapshot must not re-notify"
+        );
+
+        // A changed snapshot does wake it again.
+        apply(vec![View::CheckpointVotes(snapshot(3))]);
+        tokio::time::timeout(Duration::from_millis(100), sol_rx.changed())
+            .await
+            .expect("changed tally snapshot should notify")
+            .expect("watch sender alive");
+        assert_eq!(
+            sol_rx.borrow().as_slice(),
+            &[CheckpointVoteTally {
+                height: 10,
+                votes: vec![([7u8; 32], 3)],
+            }]
+        );
     }
 }

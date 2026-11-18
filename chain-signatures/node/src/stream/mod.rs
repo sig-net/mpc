@@ -12,7 +12,7 @@ use crate::stream::ops::{
     process_respond_bidirectional_event, process_respond_event, process_sign_request,
     publish_failover_due, requeue_pending_sign_requests, resume_pending_publish_requests,
 };
-use crate::types::{CheckpointWatcher, SignCommand};
+use crate::types::{CheckpointVoteTallyWatcher, CheckpointWatcher, SignCommand};
 
 use anyhow::Context;
 use mpc_chain_integration_core::ChainTelemetry;
@@ -29,6 +29,7 @@ pub struct StreamContext {
     pub mesh_state: watch::Receiver<MeshState>,
     pub node_client: NodeClient,
     pub checkpoints_rx: CheckpointWatcher,
+    pub checkpoint_votes_rx: CheckpointVoteTallyWatcher,
     pub caught_up: bool,
     /// Failover deadlines count from here at the earliest: this process's first catch-up on the
     /// chain since starting or rebasing.
@@ -52,6 +53,7 @@ impl StreamContext {
         mesh_state: watch::Receiver<MeshState>,
         node_client: NodeClient,
         checkpoints_rx: CheckpointWatcher,
+        checkpoint_votes_rx: CheckpointVoteTallyWatcher,
     ) -> Self {
         Self {
             backlog,
@@ -61,6 +63,7 @@ impl StreamContext {
             mesh_state,
             node_client,
             checkpoints_rx,
+            checkpoint_votes_rx,
             caught_up: false,
             failover_floor: None,
             local_records: Vec::new(),

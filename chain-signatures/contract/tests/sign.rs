@@ -4,7 +4,7 @@ use common::{
 };
 
 use mpc_contract::errors;
-use mpc_contract::primitives::{CandidateInfo, Read, SignRequest, View};
+use mpc_contract::primitives::{CandidateInfo, CheckpointVoteTally, Read, SignRequest, View};
 use mpc_primitives::CheckpointDigest;
 use near_workspaces::types::{AccountId, NearToken};
 use signet_primitives::{Chain, Signature, LATEST_MPC_KEY_VERSION};
@@ -531,6 +531,80 @@ async fn test_checkpoint_voting() -> anyhow::Result<()> {
         .transact()
         .await?;
     assert!(unauthorized.is_failure());
+
+    Ok(())
+}
+
+/// `Read::CheckpointVotes` exposes outstanding votes grouped by `(chain, height)`,
+/// alongside the ordinary `Read::Checkpoints` view. Votes that do not reach the
+/// threshold stay outstanding and show up in the tally.
+#[tokio::test]
+async fn test_checkpoint_votes_view() -> anyhow::Result<()> {
+    let (_worker, contract, accounts, _) = init_env().await;
+
+    // Threshold is 2, so each of these votes stays outstanding (no settlement).
+    let sol_a = CheckpointDigest::new(Chain::Solana, 120, [1u8; 32]);
+    let sol_b = CheckpointDigest::new(Chain::Solana, 120, [2u8; 32]);
+    let sol_next = CheckpointDigest::new(Chain::Solana, 121, [3u8; 32]);
+    let eth = CheckpointDigest::new(Chain::Ethereum, 50, [0xee; 32]);
+
+    for (account, checkpoint) in [
+        (&accounts[0], sol_a),
+        (&accounts[1], sol_b),
+        (&accounts[0], sol_next),
+        (&accounts[2], eth),
+    ] {
+        let result = account
+            .call(contract.id(), "vote_checkpoint")
+            .args_json(serde_json::json!({ "checkpoint": checkpoint }))
+            .max_gas()
+            .transact()
+            .await?;
+        assert!(result.is_success());
+        assert!(!result.json::<bool>()?);
+    }
+
+    let views: Vec<View> = contract
+        .view("read")
+        .args_json(serde_json::json!({ "reads": [Read::Checkpoints, Read::CheckpointVotes] }))
+        .await?
+        .json()?;
+
+    // Nothing settled: the plain Checkpoints view stays empty while the votes
+    // are still outstanding.
+    let checkpoints: HashMap<Chain, CheckpointDigest> = views
+        .iter()
+        .find_map(|view| match view {
+            View::Checkpoints(checkpoints) => Some(checkpoints.clone()),
+            _ => None,
+        })
+        .expect("read should return a Checkpoints view");
+    assert!(checkpoints.is_empty());
+
+    let tallies: HashMap<Chain, Vec<CheckpointVoteTally>> = views
+        .into_iter()
+        .find_map(|view| match view {
+            View::CheckpointVotes(tallies) => Some(tallies),
+            _ => None,
+        })
+        .expect("read should return a CheckpointVotes view");
+
+    let solana = tallies.get(&Chain::Solana).expect("solana tallies");
+    assert_eq!(solana.len(), 2);
+    assert_eq!(solana[0].height, 120);
+    assert_eq!(solana[0].votes, vec![([1u8; 32], 1), ([2u8; 32], 1)]);
+    assert_eq!(solana[1].height, 121);
+    assert_eq!(solana[1].votes, vec![([3u8; 32], 1)]);
+
+    let ethereum = tallies.get(&Chain::Ethereum).expect("ethereum tallies");
+    assert_eq!(
+        ethereum,
+        &vec![CheckpointVoteTally {
+            height: 50,
+            votes: vec![([0xee; 32], 1)],
+        }]
+    );
+    assert!(!tallies.contains_key(&Chain::Bitcoin));
 
     Ok(())
 }
