@@ -2525,9 +2525,21 @@ mod tests {
         }
     }
 
+    /// A publisher over an explicit transport, for tests that drive its reads.
+    fn publisher_rpc(transport: RpcClient) -> MidnightPublisherRpc {
+        MidnightPublisherRpc {
+            rpc: transport.clone(),
+            legacy: LegacyRpcMethods::<SubstrateConfig>::new(transport),
+            genesis_hash: H256([0x11; 32]),
+            clients: Default::default(),
+            blocks: Default::default(),
+            network_id: NetworkId::Undeployed,
+        }
+    }
+
     #[tokio::test]
     async fn real_publish_read_statuses_follow_the_read_partition() {
-        // The publisher's reads against a real transport: the carrier must
+        // Every read's own wrapper against a real transport: the carrier must
         // land on the wire shape, not just the synthetic one.
         for (status, reason, retryable, throttled) in [
             (403u16, "Forbidden", false, false),
@@ -2536,41 +2548,45 @@ mod tests {
             (500, "Internal Server Error", true, false),
         ] {
             let (address, _calls, server) = http_status_server(status, reason).await;
-            let transport = connect_http(&http_config(address)).expect("build request-only client");
-            let rpc = MidnightPublisherRpc {
-                rpc: transport.clone(),
-                legacy: LegacyRpcMethods::<SubstrateConfig>::new(transport),
-                genesis_hash: H256([0x11; 32]),
-                clients: Default::default(),
-                blocks: Default::default(),
-                network_id: NetworkId::Undeployed,
-            };
+            let transport =
+                connect_http(&http_config(address)).expect("build request-only client");
+            let rpc = publisher_rpc(transport);
+            let responder = test_address();
+            let at_hash = test_at_hash();
 
-            let error = PinnedReads::finalized_head(&rpc)
-                .await
-                .expect_err("an HTTP rejection must fail the read");
+            for error in [
+                PinnedReads::finalized_head(&rpc)
+                    .await
+                    .expect_err("an HTTP rejection must fail the read"),
+                PinnedReads::contract_state(&rpc, &responder, &at_hash)
+                    .await
+                    .expect_err("an HTTP rejection must fail the read"),
+                PinnedReads::ledger_parameters(&rpc, &at_hash)
+                    .await
+                    .expect_err("an HTTP rejection must fail the read"),
+            ] {
+                let carrier = error
+                    .chain()
+                    .find_map(|cause| cause.downcast_ref::<RpcFailure>())
+                    .unwrap_or_else(|| panic!("the read attaches its carrier: {error:#}"));
+                assert_eq!(
+                    carrier.status(),
+                    StatusCode::from_u16(status).ok(),
+                    "status {status} was lost from the carrier: {error:#}"
+                );
+                assert_eq!(
+                    is_retryable(&error),
+                    retryable,
+                    "status {status}: {error:#}"
+                );
+                assert_eq!(
+                    is_provider_throttled(&error),
+                    throttled,
+                    "status {status}: {error:#}"
+                );
+            }
             server.abort();
             let _ = server.await;
-
-            let carrier = error
-                .chain()
-                .find_map(|cause| cause.downcast_ref::<RpcFailure>())
-                .expect("the read attaches its carrier on the real path");
-            assert_eq!(
-                carrier.status(),
-                StatusCode::from_u16(status).ok(),
-                "status {status} was lost from the carrier: {error:#}"
-            );
-            assert_eq!(
-                is_retryable(&error),
-                retryable,
-                "status {status}: {error:#}"
-            );
-            assert_eq!(
-                is_provider_throttled(&error),
-                throttled,
-                "status {status}: {error:#}"
-            );
         }
     }
 
@@ -2627,14 +2643,7 @@ mod tests {
             Canned::ClientTooLarge,
         ] {
             let (transport, _calls) = stub_rpc(reply);
-            let rpc = MidnightPublisherRpc {
-                rpc: transport.clone(),
-                legacy: LegacyRpcMethods::<SubstrateConfig>::new(transport),
-                genesis_hash: H256([0x11; 32]),
-                clients: Default::default(),
-                blocks: Default::default(),
-                network_id: NetworkId::Undeployed,
-            };
+            let rpc = publisher_rpc(transport);
 
             let error = PinnedReads::contract_state(&rpc, &test_address(), &test_at_hash())
                 .await
