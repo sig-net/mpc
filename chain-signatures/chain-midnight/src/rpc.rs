@@ -864,8 +864,9 @@ async fn metadata_at(rpc: &RpcClient, at: H256) -> anyhow::Result<subxt::Metadat
         .context("failed to fetch the midnight runtime metadata")
 }
 
-/// Finalized reads used by the publisher and its in-process tests. Every read is
-/// addressed by the hash `finalized_head` answers with.
+/// Finalized reads used by the publisher and its in-process tests, every one
+/// addressed by the hash `finalized_head` answers with. Every error out of
+/// an impl carries a read-partition verdict carrier (`attach_read_carrier`).
 #[async_trait::async_trait]
 pub(crate) trait PinnedReads: Send + Sync {
     async fn finalized_head(&self) -> anyhow::Result<BlockHash>;
@@ -877,9 +878,8 @@ pub(crate) trait PinnedReads: Send + Sync {
     async fn ledger_parameters(&self, at_hash: &BlockHash) -> anyhow::Result<Vec<u8>>;
 }
 
-/// Verdict for an error off the node transport on a read path: the
-/// oversized-state refusal terminal, an upstream carrier verbatim, else the
-/// read partition over the transport's typed status.
+/// The read-path verdict for a node error: oversized state terminal, an
+/// upstream carrier verbatim, else the read partition over the typed status.
 pub(crate) fn read_verdict(error: &anyhow::Error) -> RpcFailure {
     if is_oversized_contract_state(error) {
         return RpcFailure::terminal(format!("{error:#}"));
@@ -893,18 +893,14 @@ pub(crate) fn read_verdict(error: &anyhow::Error) -> RpcFailure {
     }
 }
 
-/// Holds the failed read above its carrier at the root: anyhow's `chain()`
-/// never yields `context` values, so a context-attached carrier is invisible
-/// to chain walks — the `SubmitError::Node` shape.
+/// The failed read above its carrier at the root: anyhow's `chain()` never
+/// yields `context` values, so the carrier must sit in the source chain.
 #[derive(Debug, thiserror::Error)]
 #[error("a publisher read failed")]
-struct ReadFailed {
-    #[source]
-    source: anyhow::Error,
-}
+struct ReadFailed(#[source] anyhow::Error);
 
 fn attach_read_carrier(error: anyhow::Error) -> anyhow::Error {
-    anyhow::Error::new(read_verdict(&error)).context(ReadFailed { source: error })
+    anyhow::Error::new(read_verdict(&error)).context(ReadFailed(error))
 }
 
 #[async_trait::async_trait]
@@ -931,15 +927,16 @@ impl PinnedReads for MidnightPublisherRpc {
 
     async fn ledger_parameters(&self, at_hash: &BlockHash) -> anyhow::Result<Vec<u8>> {
         let at = H256::from(*at_hash);
-        let answer = self
-            .legacy
-            .state_call(LEDGER_PARAMETERS_ENTRY, Some(&[]), Some(at))
-            .await
-            .context("failed to fetch midnight ledger parameters")
-            .map_err(attach_read_carrier)?;
-        unwrap_runtime_api_result(&answer)?
-            .with_context(|| format!("midnight node has no ledger parameters at {at_hash}"))
-            .map_err(attach_read_carrier)
+        let read = async {
+            let answer = self
+                .legacy
+                .state_call(LEDGER_PARAMETERS_ENTRY, Some(&[]), Some(at))
+                .await
+                .context("failed to fetch midnight ledger parameters")?;
+            unwrap_runtime_api_result(&answer)?
+                .with_context(|| format!("midnight node has no ledger parameters at {at_hash}"))
+        };
+        read.await.map_err(attach_read_carrier)
     }
 }
 
