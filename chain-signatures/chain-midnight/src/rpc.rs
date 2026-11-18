@@ -3588,7 +3588,7 @@ mod tests {
             genesis_hash: H256([0x11; 32]),
             clients: Default::default(),
             blocks: Default::default(),
-            network_id: "undeployed".to_string(),
+            network_id: NetworkId::Undeployed,
         };
 
         match rpc.submit(&[0x00]).await {
@@ -3619,7 +3619,7 @@ mod tests {
                 genesis_hash: H256([0x11; 32]),
                 clients: Default::default(),
                 blocks: Default::default(),
-                network_id: "undeployed".to_string(),
+                network_id: NetworkId::Undeployed,
             };
 
             let error = match rpc.submit(&[0x00]).await {
