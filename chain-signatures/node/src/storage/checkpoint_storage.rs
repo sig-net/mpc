@@ -358,28 +358,50 @@ impl CheckpointStorage {
         match self {
             CheckpointStorage::Redis(pool, _) => {
                 let mut conn = pool.get().await.context("failed to get redis connection")?;
-                // Reuse the pending index rather than recomputing any digest: for
-                // each (digest, height) index entry, copy the body at that height
+                // Reuse the pending index rather than recomputing any digest. Each
+                // hash is read in a single pass up front (Redis is single-threaded,
+                // so per-entry HGETALL would block other clients): the pending
+                // bodies keyed by height, the pending (digest -> height) index that
+                // drives the loop, and a reverse (height -> digests) map of the
+                // orphan index. For each index entry, copy the body at that height
                 // into the orphan hash and its reverse index, then drop both
                 // pending keys. Empty pending is a no-op returning zero.
                 const DEMOTE: &str = r#"
                     local count = 0
+                    -- Single-pass reads: bodies[height] = body.
+                    local bodies = {}
+                    local pending = redis.call('HGETALL', KEYS[1])
+                    for i = 1, #pending, 2 do
+                        bodies[pending[i]] = pending[i+1]
+                    end
+                    -- The pending digest index is the loop source.
                     local index = redis.call('HGETALL', KEYS[2])
+                    -- Reverse orphan index: digests_at_height[height] = { digest, ... }.
+                    local digests_at_height = {}
+                    local reverse = redis.call('HGETALL', KEYS[4])
+                    for i = 1, #reverse, 2 do
+                        local height = reverse[i+1]
+                        if not digests_at_height[height] then
+                            digests_at_height[height] = {}
+                        end
+                        table.insert(digests_at_height[height], reverse[i])
+                    end
                     for i = 1, #index, 2 do
                         local height = index[i+1]
                         local digest = index[i]
-                        local body = redis.call('HGET', KEYS[1], height)
+                        local body = bodies[height]
                         if body then
-                            redis.call('HSET', KEYS[3], height, body)
                             -- A prior demotion may have indexed a different body at this
-                            -- height. Drop every digest pointing here before writing the
-                            -- incoming one so no stale digest can resolve to this body.
-                            local reverse = redis.call('HGETALL', KEYS[4])
-                            for j = 1, #reverse, 2 do
-                                if reverse[j+1] == height then
-                                    redis.call('HDEL', KEYS[4], reverse[j])
+                            -- height. Purge every digest pointing here (from the
+                            -- pre-read snapshot) before writing the incoming one so no
+                            -- stale digest can resolve to this body.
+                            local at_height = digests_at_height[height]
+                            if at_height then
+                                for j = 1, #at_height do
+                                    redis.call('HDEL', KEYS[4], at_height[j])
                                 end
                             end
+                            redis.call('HSET', KEYS[3], height, body)
                             redis.call('HSET', KEYS[4], digest, height)
                             count = count + 1
                         end
@@ -450,9 +472,9 @@ impl CheckpointStorage {
                 //    index (`KEYS[5]`), and fetches the matching body.
                 // 2. If found:
                 //    - Overwrites canonical latest (`KEYS[3]`).
-                //    - Retires the matched body from both stores and both indexes.
-                //    - Trims every other entry with `height <= num` from both stores and
-                //      both indexes (the matched digest is already retired).
+                //    - Trims every entry with `height <= num` from both stores and both
+                //      indexes; the matched body's height is `num`, so this retires it
+                //      too (no separate retire step is needed).
                 //    - Returns `{ true, remaining_pending_count, false }` — orphans never
                 //      count toward the pending cap.
                 // 3. If absent from both:
@@ -468,10 +490,6 @@ impl CheckpointStorage {
                     if body then
                         redis.call('SET', KEYS[3], body)
                         local num = tonumber(height)
-                        redis.call('HDEL', KEYS[1], height)
-                        redis.call('HDEL', KEYS[2], ARGV[1])
-                        redis.call('HDEL', KEYS[4], height)
-                        redis.call('HDEL', KEYS[5], ARGV[1])
                         local index = redis.call('HGETALL', KEYS[2])
                         for i = 1, #index, 2 do
                             if tonumber(index[i+1]) <= num then
