@@ -3,7 +3,6 @@
 use crate::types::MidnightAddress;
 use mpc_chain_integration_core::utils::retry::RetryConfig;
 use secrecy::{ExposeSecret as _, SecretString};
-use std::fmt;
 use std::path::PathBuf;
 use std::time::Duration;
 use url::Url;
@@ -85,16 +84,15 @@ impl OutputStorageConfig {
 }
 
 /// Builds, proves, pays for and posts respond transactions in process.
-#[derive(Clone, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct PublisherConfig {
     /// Optional output cache. Runtime storage failures warn and do not prevent on-chain responses.
     /// Initialization retries in the background with backoff until the cache is available.
     pub output_storage: Option<OutputStorageConfig>,
     /// Funds respond transactions.
     ///
-    /// Carried as a [`SecretString`]: the seed is only exposed when it is
-    /// validated or parsed into a signing key, so deriving `Debug` cannot
-    /// leak it.
+    /// Carried as a [`SecretString`] so derived `Debug` redacts it; exposed only
+    /// when validated or parsed into a signing key.
     pub funding_seed: SecretString,
     /// The indexer's GraphQL subscription URL: spendable DUST derives only from the
     /// ledger events it serves.
@@ -127,24 +125,8 @@ impl Default for PublisherConfig {
     }
 }
 
-/// Hand-written so `funding_seed` cannot reach the log via `Debug`. Redacted rather
-/// than skipped, so a later `derive(Debug)` cannot silently restore the leak.
-impl fmt::Debug for PublisherConfig {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("PublisherConfig")
-            .field("output_storage", &self.output_storage)
-            .field("funding_seed", &"<redacted>")
-            .field("indexer_ws_url", &self.indexer_ws_url)
-            .field("contract_artifacts_dir", &self.contract_artifacts_dir)
-            .field("zk_params_dir", &self.zk_params_dir)
-            .field("build_budget", &self.build_budget)
-            .field("submit_timeout", &self.submit_timeout)
-            .finish()
-    }
-}
-
 /// Midnight chain integration configuration.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct MidnightConfig {
     pub node_url: Url,
     /// Address of the central singleton contract, where clients notify their requests.
@@ -282,7 +264,7 @@ mod tests {
             "the funding seed reached Debug: {rendered}"
         );
         assert!(
-            rendered.contains("<redacted>"),
+            rendered.contains("[REDACTED]"),
             "the field must render redacted rather than vanish, or a later \
              derive(Debug) reinstates the leak unnoticed: {rendered}"
         );
@@ -314,7 +296,7 @@ mod tests {
             "the funding seed reached Debug: {rendered}"
         );
         assert!(
-            rendered.contains("<redacted>"),
+            rendered.contains("[REDACTED]"),
             "the funding seed must remain visibly redacted: {rendered}"
         );
     }

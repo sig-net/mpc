@@ -22,17 +22,17 @@ act (`expose_secret()`), never an accidental `#[derive(Debug)]` or `{:?}`.
 ## Rules
 
 1. **Wrap at entry.** A secret entering the process (CLI/env/file) goes into a
-   [`secrecy`](https://docs.rs/secrecy) wrapper (`SecretString`,
-   `SecretBox<T>`) immediately. Never carry a secret as a bare `String` or
+   redacting wrapper (`SecretString`, `SecretBox<T>`, or the CLI's
+   `Redacted<T>`) immediately. Never carry a secret as a bare `String` or
    `Vec<u8>` across a function boundary.
 2. **Redacting types.** Our own key types must have a fully redacting `Debug`
    and no `Display`. Third-party key types whose `Debug`/`Display` print key
    material (e.g. `near_crypto::SecretKey`) must not appear in structs that
-   derive `Debug`, `Display`, or `Serialize` — wrap them in `SecretBox`.
+   derive `Debug`, `Display`, or `Serialize` — wrap them in a redacting newtype
+   such as `SecretBox<T>` or the CLI's `Redacted<T>`.
    Redacted output never contains the value or any prefix of it. `secrecy`
-   wrappers render `[REDACTED]`; hand-written `Debug` impls on secret-bearing
-   structs print `<hidden>` and end with `finish_non_exhaustive()` so
-   later-added fields are omitted by default.
+   wrappers render `[REDACTED]`; custom redacting `Debug` implementations must
+   never format the inner secret.
 3. **Point-of-use exposure.** Unwrap (`expose_secret()`, `to_bytes()`) only to
    sign, decrypt, parse, or write to secret storage. Never store the exposed
    copy in a field, channel, or long-lived `String`; minimize clones and
@@ -71,8 +71,7 @@ Each rule gets a mechanical check; discipline is the fallback, not the plan.
 ### Test-time
 
 - **Redaction unit tests**: for every secret-bearing type, construct it with a
-  known key and assert `{:?}` prints its redaction marker (`[REDACTED]` for
-  `secrecy` wrappers, `<hidden>` for hand-written impls) and never the key
+  known key and assert `{:?}` prints its redaction marker (`[REDACTED]`) and never the key
   material — in raw, hex, or base58 form (rules 2, 4).
 - **CLI help redaction tests**: assert that `arg.is_hide_env_values_set()` is true
   for all secret, credential, and authenticated URL arguments in the Clap command

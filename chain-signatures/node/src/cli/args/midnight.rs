@@ -237,9 +237,30 @@ mod tests {
         crate::cli::tests::assert_midnight_env_unset();
 
         let config = configured_args().into_config().unwrap();
-        assert_eq!(config, Some(configured()));
+        let config = config.expect("configured args produce a MidnightConfig");
+        let expected = configured();
+        assert_eq!(config.node_url, expected.node_url);
+        assert_eq!(config.central_address, expected.central_address);
+        assert_eq!(config.responder_address, expected.responder_address);
+        assert_eq!(config.rpc, expected.rpc);
+        assert_eq!(config.indexer, expected.indexer);
+        assert_eq!(
+            config.publisher.funding_seed.expose_secret(),
+            expected.publisher.funding_seed.expose_secret()
+        );
+        assert_eq!(
+            config.publisher.indexer_ws_url,
+            expected.publisher.indexer_ws_url
+        );
+        assert_eq!(
+            config.publisher.output_storage,
+            expected.publisher.output_storage
+        );
+        assert_eq!(
+            config.publisher.submit_timeout,
+            expected.publisher.submit_timeout
+        );
         // Indexer and submission tuning have no CLI flags.
-        let config = config.unwrap();
         assert_eq!(config.indexer, IndexerConfig::default());
         assert_eq!(
             config.publisher.submit_timeout,
@@ -440,6 +461,39 @@ mod tests {
             "/opt/signet/zk-params".into(),
         ]);
         let reparsed = MidnightArgs::try_parse_from(argv).unwrap();
-        assert_eq!(reparsed.into_config().unwrap(), Some(cfg));
+        let reparsed = reparsed
+            .into_config()
+            .unwrap()
+            .expect("test-feature args produce a MidnightConfig");
+        assert_eq!(reparsed.node_url, cfg.node_url);
+        assert_eq!(reparsed.central_address, cfg.central_address);
+        assert_eq!(reparsed.responder_address, cfg.responder_address);
+        assert_eq!(reparsed.rpc, cfg.rpc);
+        assert_eq!(reparsed.indexer, cfg.indexer);
+        assert_eq!(
+            reparsed.publisher.funding_seed.expose_secret(),
+            cfg.publisher.funding_seed.expose_secret()
+        );
+        assert_eq!(
+            reparsed.publisher.indexer_ws_url,
+            cfg.publisher.indexer_ws_url
+        );
+        assert_eq!(
+            reparsed.publisher.output_storage,
+            cfg.publisher.output_storage
+        );
+        assert_eq!(
+            reparsed.publisher.contract_artifacts_dir,
+            cfg.publisher.contract_artifacts_dir
+        );
+        assert_eq!(
+            reparsed.publisher.zk_params_dir,
+            cfg.publisher.zk_params_dir
+        );
+        assert_eq!(reparsed.publisher.build_budget, cfg.publisher.build_budget);
+        assert_eq!(
+            reparsed.publisher.submit_timeout,
+            cfg.publisher.submit_timeout
+        );
     }
 }

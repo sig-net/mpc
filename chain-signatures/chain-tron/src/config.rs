@@ -1,18 +1,17 @@
 use mpc_chain_integration_core::utils::retry::RetryConfig;
 use secrecy::{ExposeSecret as _, SecretString};
-use std::fmt;
 use std::time::Duration;
 use url::Url;
 
 /// Tron chain integration configuration.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct TronConfig {
     /// Base URL of the provider's HTTP API
     pub endpoint: Url,
     /// `TRON-PRO-API-KEY` header value when the provider is TronGrid, None for other providers.
     ///
-    /// Carried as a [`SecretString`]: the key is only exposed when the request
-    /// header is set, so deriving `Debug` cannot leak it.
+    /// Carried as a [`SecretString`] so derived `Debug` redacts it; exposed only
+    /// when setting the request header.
     pub api_key: Option<SecretString>,
     /// Timeout for HTTP requests to the provider.
     pub request_timeout: Duration,
@@ -36,32 +35,6 @@ impl Default for TronConfig {
             },
             poll_interval: Duration::from_millis(Self::DEFAULT_POLL_INTERVAL_MS),
         }
-    }
-}
-
-/// `SecretString` does not implement `PartialEq`, so the key is compared through
-/// `expose_secret` and the remaining fields field by field.
-impl PartialEq for TronConfig {
-    fn eq(&self, other: &Self) -> bool {
-        self.endpoint == other.endpoint
-            && self.api_key.as_ref().map(|key| key.expose_secret())
-                == other.api_key.as_ref().map(|key| key.expose_secret())
-            && self.request_timeout == other.request_timeout
-            && self.retry == other.retry
-            && self.poll_interval == other.poll_interval
-    }
-}
-
-/// Custom `Debug` implementation that redacts the `api_key` field
-impl fmt::Debug for TronConfig {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("TronConfig")
-            .field("endpoint", &self.endpoint)
-            .field("api_key", &self.api_key)
-            .field("request_timeout", &self.request_timeout)
-            .field("retry", &self.retry)
-            .field("poll_interval", &self.poll_interval)
-            .finish()
     }
 }
 
