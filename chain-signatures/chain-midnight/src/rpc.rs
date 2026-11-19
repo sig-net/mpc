@@ -8,9 +8,7 @@ use jsonrpsee::core::client::{ClientT as _, Error as JsonrpseeClientError};
 use jsonrpsee::core::traits::ToRpcParams;
 use jsonrpsee::http_client::{HttpClient, HttpClientBuilder};
 use jsonrpsee::types::error::{INVALID_PARAMS_CODE, OVERSIZED_RESPONSE_CODE};
-use mpc_chain_integration_core::utils::retry::{
-    exhausted, http_status_read_retryable, is_retryable, RetryConfig,
-};
+use mpc_chain_integration_core::utils::retry::{exhausted, RetryConfig, RpcFailure};
 use subxt::backend::legacy::rpc_methods::{BlockDetails, NumberOrHex};
 use subxt::backend::legacy::LegacyRpcMethods;
 use subxt::backend::rpc::{RawRpcFuture, RawRpcSubscription, RawValue, RpcClient, RpcClientT};
@@ -60,10 +58,26 @@ const _: () = assert!(MIN_PROVING_RESPONSE_CAP <= MAX_RESPONSE_SIZE as usize);
 
 const STATE_TOO_LARGE: &str = "midnight contract state exceeds the protocol limit";
 
+/// What produced an [`OversizedContractState`] marker. The publish path treats
+/// only a client-cap refusal as terminal, because [`MAX_RESPONSE_SIZE`] is a
+/// compile-time constant.
+#[derive(Debug)]
+enum OversizedContractStateSource {
+    /// The jsonrpsee HTTP client refused the response before reading it.
+    ClientCap,
+    /// An RPC node returned [`OVERSIZED_RESPONSE_CODE`] with a cap at least as
+    /// large as [`MIN_PROVING_RESPONSE_CAP`].
+    NodeCap,
+    /// The decoded state exceeded [`MAX_CALLER_STATE_BYTES`]. Used by the
+    /// indexer admission path.
+    DecodedLimit,
+}
+
 #[derive(Debug)]
 struct OversizedContractState {
     detail: String,
     source: Option<RawRpcError>,
+    provenance: OversizedContractStateSource,
 }
 
 impl std::fmt::Display for OversizedContractState {
@@ -84,6 +98,7 @@ pub(crate) fn oversized_contract_state(detail: impl Into<String>) -> anyhow::Err
     anyhow::Error::new(OversizedContractState {
         detail: detail.into(),
         source: None,
+        provenance: OversizedContractStateSource::DecodedLimit,
     })
 }
 
@@ -864,8 +879,9 @@ async fn metadata_at(rpc: &RpcClient, at: H256) -> anyhow::Result<subxt::Metadat
         .context("failed to fetch the midnight runtime metadata")
 }
 
-/// Finalized reads used by the publisher and its in-process tests. Every read is
-/// addressed by the hash `finalized_head` answers with.
+/// Finalized reads used by the publisher and its in-process tests, every one
+/// addressed by the hash `finalized_head` answers with. Every error out of
+/// an impl carries a read-partition verdict carrier (`attach_read_carrier`).
 #[async_trait::async_trait]
 pub(crate) trait PinnedReads: Send + Sync {
     async fn finalized_head(&self) -> anyhow::Result<BlockHash>;
@@ -877,6 +893,32 @@ pub(crate) trait PinnedReads: Send + Sync {
     async fn ledger_parameters(&self, at_hash: &BlockHash) -> anyhow::Result<Vec<u8>>;
 }
 
+/// The read-path verdict for a node error: oversized state terminal, an
+/// upstream carrier verbatim, else the read partition over the typed status.
+pub(crate) fn read_verdict(error: &anyhow::Error) -> RpcFailure {
+    if is_oversized_contract_state(error) {
+        return RpcFailure::terminal(format!("{error:#}"));
+    }
+    if let Some(failure) = RpcFailure::from_read_chain(error) {
+        return failure;
+    }
+    match rejected_http_status(error) {
+        Some(status) => RpcFailure::read_status(status, format!("{error:#}")),
+        None => RpcFailure::retryable(format!("{error:#}")),
+    }
+}
+
+/// The failed read above its carrier at the root (anyhow's `chain()` skips
+/// `context` values): reachable only via `downcast_ref::<ReadFailed>`, the
+/// field preserves the typed cause beyond the carrier's render.
+#[derive(Debug, thiserror::Error)]
+#[error("a publisher read failed")]
+struct ReadFailed(#[source] anyhow::Error);
+
+fn attach_read_carrier(error: anyhow::Error) -> anyhow::Error {
+    anyhow::Error::new(read_verdict(&error)).context(ReadFailed(error))
+}
+
 #[async_trait::async_trait]
 impl PinnedReads for MidnightPublisherRpc {
     async fn finalized_head(&self) -> anyhow::Result<BlockHash> {
@@ -884,7 +926,8 @@ impl PinnedReads for MidnightPublisherRpc {
             .legacy
             .chain_get_finalized_head()
             .await
-            .context("failed to fetch the midnight finalized head")?;
+            .context("failed to fetch the midnight finalized head")
+            .map_err(attach_read_carrier)?;
         Ok(finalized.into())
     }
 
@@ -893,18 +936,23 @@ impl PinnedReads for MidnightPublisherRpc {
         address: &MidnightAddress,
         at_hash: &BlockHash,
     ) -> anyhow::Result<Option<Vec<u8>>> {
-        publisher_contract_state(&self.rpc, address, at_hash).await
+        publisher_contract_state(&self.rpc, address, at_hash)
+            .await
+            .map_err(attach_read_carrier)
     }
 
     async fn ledger_parameters(&self, at_hash: &BlockHash) -> anyhow::Result<Vec<u8>> {
         let at = H256::from(*at_hash);
-        let answer = self
-            .legacy
-            .state_call(LEDGER_PARAMETERS_ENTRY, Some(&[]), Some(at))
-            .await
-            .context("failed to fetch midnight ledger parameters")?;
-        unwrap_runtime_api_result(&answer)?
-            .with_context(|| format!("midnight node has no ledger parameters at {at_hash}"))
+        let read = async {
+            let answer = self
+                .legacy
+                .state_call(LEDGER_PARAMETERS_ENTRY, Some(&[]), Some(at))
+                .await
+                .context("failed to fetch midnight ledger parameters")?;
+            unwrap_runtime_api_result(&answer)?
+                .with_context(|| format!("midnight node has no ledger parameters at {at_hash}"))
+        };
+        read.await.map_err(attach_read_carrier)
     }
 }
 
@@ -1124,17 +1172,24 @@ async fn publisher_contract_state(
 
     match classify_contract_state_reply(response)? {
         ContractStateReply::State(state) => Ok(state),
-        // Not an admission verdict, so the marker type stays out of the chain. The
-        // detail names the cap that refused, the rpc node's or the client's.
-        ContractStateReply::TooLarge(OversizedContractState { detail, source }) => {
-            let cause = match source {
-                Some(source) => anyhow::Error::new(source).context(detail),
-                None => anyhow::anyhow!(detail),
-            };
-            Err(cause.context(
-                "the responder's state was refused for its size; it is exempt from \
-                 the admission limit, so the refusing cap is too small for it",
-            ))
+        // Only the client-cap refusal is terminal on the publish path: the cap
+        // is a compile-time constant, so retry cannot help. A node-cap refusal
+        // is retryable because the operator can raise the node's response cap.
+        ContractStateReply::TooLarge(marker)
+            if matches!(marker.provenance, OversizedContractStateSource::ClientCap) =>
+        {
+            Err(anyhow::Error::new(marker)
+                .context("the responder's state was refused by the client's own cap"))
+        }
+        ContractStateReply::TooLarge(marker) => {
+            let err = marker.source.unwrap_or_else(|| {
+                RawRpcError::User(UserError {
+                    code: OVERSIZED_RESPONSE_CODE,
+                    message: "response too large".into(),
+                    data: None,
+                })
+            });
+            Err(anyhow::Error::new(err).context("midnight_contractState failed"))
         }
         ContractStateReply::Other(err) => {
             Err(anyhow::Error::new(err).context("midnight_contractState failed"))
@@ -1175,6 +1230,7 @@ fn classify_contract_state_reply(
             ContractStateReply::TooLarge(OversizedContractState {
                 detail: format!("response over the client cap of {MAX_RESPONSE_SIZE} bytes"),
                 source: Some(err),
+                provenance: OversizedContractStateSource::ClientCap,
             })
         }
         // The RPC node refused the response for its size. Under a cap that fits every
@@ -1187,6 +1243,7 @@ fn classify_contract_state_reply(
                     ContractStateReply::TooLarge(OversizedContractState {
                         detail: format!("response over the rpc node's cap of {cap} bytes"),
                         source: Some(RawRpcError::User(reply)),
+                        provenance: OversizedContractStateSource::NodeCap,
                     })
                 }
                 cap => {
@@ -1295,24 +1352,10 @@ pub(crate) fn rejected_http_status(error: &anyhow::Error) -> Option<StatusCode> 
     })
 }
 
+/// The indexer loop's bool form of the publisher reads' verdict
+/// ([`read_verdict`]): one partition, one derivation.
 fn is_read_retryable(error: &anyhow::Error) -> bool {
-    if is_oversized_contract_state(error) {
-        return false;
-    }
-    if let Some(status) = rejected_http_status(error) {
-        // reads stay conservative: a retry reconnects onto a healthy LB
-        // backend (#1469), so only classic client errors are terminal
-        return http_status_read_retryable(status);
-    }
-    if error.chain().any(|cause| {
-        matches!(
-            cause.downcast_ref::<RawRpcError>(),
-            Some(RawRpcError::User(_))
-        )
-    }) {
-        return true;
-    }
-    is_retryable(error)
+    !read_verdict(error).is_terminal()
 }
 
 async fn retry_read<T, F, Fut>(
@@ -1485,7 +1528,7 @@ mod tests {
     use jsonrpsee::server::ServerBuilder;
     use jsonrpsee::types::ErrorObjectOwned;
     use jsonrpsee::RpcModule;
-    use mpc_chain_integration_core::utils::retry::is_provider_throttled;
+    use mpc_chain_integration_core::utils::retry::{is_provider_throttled, is_retryable};
     use serde_json::json;
     use std::io::Write as _;
     use std::net::SocketAddr;
@@ -2499,6 +2542,202 @@ mod tests {
         }
     }
 
+    /// A publisher over an explicit transport, for tests that drive its reads.
+    fn publisher_rpc(transport: RpcClient) -> MidnightPublisherRpc {
+        MidnightPublisherRpc {
+            rpc: transport.clone(),
+            legacy: LegacyRpcMethods::<SubstrateConfig>::new(transport),
+            genesis_hash: H256([0x11; 32]),
+            clients: Default::default(),
+            blocks: Default::default(),
+            network_id: NetworkId::Undeployed,
+        }
+    }
+
+    #[tokio::test]
+    async fn real_publish_read_statuses_follow_the_read_partition() {
+        // Every read's own wrapper against a real transport: the carrier must
+        // land on the wire shape, not just the synthetic one.
+        for (status, reason, retryable, throttled) in [
+            (403u16, "Forbidden", false, false),
+            (409, "Conflict", true, false),
+            (429, "Too Many Requests", true, true),
+            (500, "Internal Server Error", true, false),
+        ] {
+            let (address, _calls, server) = http_status_server(status, reason).await;
+            let transport = connect_http(&http_config(address)).expect("build request-only client");
+            let rpc = publisher_rpc(transport);
+            let responder = test_address();
+            let at_hash = test_at_hash();
+
+            for error in [
+                PinnedReads::finalized_head(&rpc)
+                    .await
+                    .expect_err("an HTTP rejection must fail the read"),
+                PinnedReads::contract_state(&rpc, &responder, &at_hash)
+                    .await
+                    .expect_err("an HTTP rejection must fail the read"),
+                PinnedReads::ledger_parameters(&rpc, &at_hash)
+                    .await
+                    .expect_err("an HTTP rejection must fail the read"),
+            ] {
+                let carrier = error
+                    .chain()
+                    .find_map(|cause| cause.downcast_ref::<RpcFailure>())
+                    .unwrap_or_else(|| panic!("the read attaches its carrier: {error:#}"));
+                assert_eq!(
+                    carrier.status(),
+                    StatusCode::from_u16(status).ok(),
+                    "status {status} was lost from the carrier: {error:#}"
+                );
+                assert_eq!(
+                    is_retryable(&error),
+                    retryable,
+                    "status {status}: {error:#}"
+                );
+                assert_eq!(
+                    is_provider_throttled(&error),
+                    throttled,
+                    "status {status}: {error:#}"
+                );
+            }
+            server.abort();
+            let _ = server.await;
+        }
+    }
+
+    /// jsonrpsee's `Rejected` wire shape (jsonrpsee-http-client 0.24.10
+    /// transport.rs:376), as a raw HTTP status fails these reads.
+    fn rejected_read(status: u16) -> anyhow::Error {
+        let transport = jsonrpsee::http_client::transport::Error::Rejected {
+            status_code: status,
+        };
+        let client = JsonrpseeClientError::Transport(Box::new(transport));
+        anyhow::Error::new(RawRpcError::Client(Box::new(client)))
+            .context("failed to fetch the midnight finalized head")
+    }
+
+    #[test]
+    fn every_http_status_classifies_under_the_read_partition() {
+        // Every status jsonrpsee can report — parsed StatusCode, so 100..=599
+        // (jsonrpsee-http-client 0.24.10 transport.rs:337) — at both call
+        // sites of the shared derivation.
+        for code in 100..=599u16 {
+            let read = attach_read_carrier(rejected_read(code));
+            let node = SubmitError::Node {
+                source: rejected_read(code),
+            }
+            .into_publish_error();
+            for error in [&read, &node] {
+                assert_eq!(
+                    is_retryable(error),
+                    !matches!(code, 400 | 401 | 403 | 404 | 405),
+                    "{code}: {error:#}"
+                );
+                assert_eq!(
+                    is_provider_throttled(error),
+                    matches!(code, 402 | 429),
+                    "{code}: {error:#}"
+                );
+            }
+            // The indexer loop's bool form, on the raw error `retry_read` sees.
+            assert_eq!(
+                is_read_retryable(&rejected_read(code)),
+                !matches!(code, 400 | 401 | 403 | 404 | 405),
+                "{code}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn client_cap_size_refusal_terminates_the_publish_read() {
+        let (transport, _calls) = stub_rpc(Canned::ClientTooLarge);
+        let rpc = publisher_rpc(transport);
+
+        let error = PinnedReads::contract_state(&rpc, &test_address(), &test_at_hash())
+            .await
+            .expect_err("the refusal must fail the read");
+        assert!(
+            error
+                .chain()
+                .find_map(|cause| cause.downcast_ref::<RpcFailure>())
+                .is_some(),
+            "the read attaches its carrier: {error:#}"
+        );
+        assert!(!is_retryable(&error), "{error:#}");
+        assert!(!is_provider_throttled(&error), "{error:#}");
+    }
+
+    #[tokio::test]
+    async fn node_cap_size_refusal_is_retryable_on_the_publish_read() {
+        // A proving cap and a small cap both stay retryable on the publish path;
+        // the operator can raise the node's response cap.
+        for (data, cap) in [
+            ("\"Exceeded max limit of 15728640\"", "proving"),
+            ("\"Exceeded max limit of 65536\"", "small"),
+        ] {
+            let (transport, calls) = stub_rpc(Canned::UserWithData(
+                OVERSIZED_RESPONSE_CODE,
+                "Response is too big",
+                data,
+            ));
+            let rpc = publisher_rpc(transport);
+
+            let error = PinnedReads::contract_state(&rpc, &test_address(), &test_at_hash())
+                .await
+                .expect_err("the refusal must fail the read");
+            assert!(
+                error
+                    .chain()
+                    .find_map(|cause| cause.downcast_ref::<RpcFailure>())
+                    .is_some(),
+                "{cap}: the read attaches its carrier: {error:#}"
+            );
+            assert!(is_retryable(&error), "{cap}: {error:#}");
+            assert!(!is_provider_throttled(&error), "{cap}: {error:#}");
+            assert_eq!(
+                calls.load(Ordering::SeqCst),
+                1,
+                "{cap}: no retries in the test"
+            );
+        }
+    }
+
+    #[test]
+    fn a_statusless_read_failure_is_retryable_and_never_throttled() {
+        // No typed status means no gate, however status-like the render.
+        let node_answer = RawRpcError::User(UserError {
+            code: 4000,
+            message: "429 Too Many Requests".into(),
+            data: None,
+        });
+        let error = attach_read_carrier(
+            anyhow::Error::new(node_answer).context("midnight_contractState failed"),
+        );
+        assert!(is_retryable(&error), "{error:#}");
+        assert!(!is_provider_throttled(&error), "{error:#}");
+    }
+
+    #[test]
+    fn upstream_carriers_win_over_the_read_derivation() {
+        let terminal = attach_read_carrier(
+            anyhow::Error::new(RpcFailure::terminal("upstream refused".to_string()))
+                .context("a read"),
+        );
+        assert!(!is_retryable(&terminal), "{terminal:#}");
+
+        // The carrier's verdict wins over the read partition its status implies.
+        let retryable = attach_read_carrier(
+            anyhow::Error::new(RpcFailure::retryable_with_status(
+                StatusCode::FORBIDDEN,
+                "upstream retry".to_string(),
+            ))
+            .context("a read"),
+        );
+        assert!(is_retryable(&retryable), "{retryable:#}");
+        assert!(!is_provider_throttled(&retryable), "{retryable:#}");
+    }
+
     /// A keep-alive HTTP server whose first connection reaches a node that has fallen
     /// out of sync: every request on that connection fails as such a node fails, and
     /// every later connection answers like a healthy node. A load balancer keeps one
@@ -2854,10 +3093,10 @@ mod tests {
         assert_eq!(calls.load(Ordering::SeqCst), 1, "a drop is not retried");
     }
 
-    /// The publisher reads the responder through the same classifier, but a
-    /// size refusal there is a read failure, never an admission drop.
+    /// The publisher reads the responder through the same classifier, but only
+    /// a client-cap size refusal is terminal; a node-cap refusal is retryable.
     #[tokio::test]
-    async fn a_size_refusal_on_the_publisher_read_is_not_an_admission_drop() {
+    async fn a_node_cap_refusal_on_the_publisher_read_is_retryable() {
         let server = ServerBuilder::default()
             .max_response_body_size(15 * 1024 * 1024)
             .build("127.0.0.1:0")
@@ -2876,15 +3115,9 @@ mod tests {
         let err = publisher_contract_state(&rpc, &test_address(), &test_at_hash())
             .await
             .expect_err("the server refuses the response");
-        assert!(!is_oversized_contract_state(&err), "{err:#}");
-        let rendered = format!("{err:#}");
         assert!(
-            rendered.contains("exempt from the admission limit"),
-            "{rendered}"
-        );
-        assert!(
-            rendered.contains("rpc node's cap of 15728640 bytes"),
-            "{rendered}"
+            !is_oversized_contract_state(&err),
+            "a node-cap refusal must not carry the oversized marker: {err:#}"
         );
     }
 

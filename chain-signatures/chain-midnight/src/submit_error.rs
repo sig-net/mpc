@@ -6,7 +6,7 @@
 
 use mpc_chain_integration_core::utils::retry::RpcFailure;
 
-use crate::rpc::rejected_http_status;
+use crate::rpc::read_verdict;
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum SubmitError {
@@ -54,7 +54,7 @@ pub(crate) enum SubmitError {
     #[error("[internal] {0}")]
     Internal(String),
     /// A read from the node failed. Counted as `internal`; the verdict reads
-    /// the typed HTTP status in its chain, never the render.
+    /// the typed signals in its chain, never the render.
     #[error("[internal] a node read or send failed")]
     Node {
         #[source]
@@ -96,19 +96,8 @@ impl SubmitError {
     /// and amounts can include a standalone 429 or 402.
     pub(crate) fn into_publish_error(self) -> anyhow::Error {
         match self {
-            // The read partition, as midnight's other reads (#1469): a retry
-            // may land on a healthy LB backend, so only classic client errors
-            // (400, 401, 403, 404, 405) go to failover.
-            // A carrier already inside the source rides as-is (`from_chain`) —
-            // its verdict, status and retry_after win over the derivation.
             Self::Node { source } => {
-                let failure = match RpcFailure::from_chain(&source) {
-                    Some(failure) => failure,
-                    None => match rejected_http_status(&source) {
-                        Some(status) => RpcFailure::read_status(status, format!("{source:#}")),
-                        None => RpcFailure::retryable(format!("{source:#}")),
-                    },
-                };
+                let failure = read_verdict(&source);
                 anyhow::Error::new(failure).context(Self::Node { source })
             }
             Self::GateRefusal { source } => {
