@@ -543,8 +543,7 @@ Properties:
   key lies under a reserved path that no request on any signing API may
   name (`processable`). Nothing keeps a bidirectional request's key from
   another signing API at key version 1: where one maps the same contract,
-  path and key version to the same key, as plain sign does on Solana and
-  Hydration, M1 holds only from key version 2.
+  path and key version to the same key, M1 holds only from key version 2.
 * M2 The MPC drops a request that is not authentic, that it cannot
   process, or whose rid is already in the backlog, and keeps nothing for
   it. A rid already in the backlog is the same transaction, already being
