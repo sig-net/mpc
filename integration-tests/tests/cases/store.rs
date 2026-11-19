@@ -621,7 +621,7 @@ async fn test_redis_demote_overwrite_drops_stale_digest_body() -> anyhow::Result
         storage
             .load_latest(chain)
             .await?
-            .map_or(true, |cp| cp.digest() != new.digest()),
+            .is_none_or(|cp| cp.digest() != new.digest()),
         "the stale digest promoted the new body as base"
     );
 

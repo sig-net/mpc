@@ -12,6 +12,9 @@ use tokio::sync::RwLock;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
+/// Per-chain digest-to-height index mirroring the Redis `orphan_digest` hash.
+type ChainDigestHeights = RwLock<HashMap<Chain, HashMap<[u8; 32], u64>>>;
+
 #[derive(Clone, Debug)]
 pub enum CheckpointStorage {
     Redis(Pool, AccountId),
@@ -19,7 +22,7 @@ pub enum CheckpointStorage {
         latest: Arc<RwLock<HashMap<Chain, Checkpoint>>>,
         pending: Arc<RwLock<HashMap<Chain, BTreeMap<u64, Checkpoint>>>>,
         orphan: Arc<RwLock<HashMap<Chain, BTreeMap<u64, Checkpoint>>>>,
-        orphan_digest: Arc<RwLock<HashMap<Chain, HashMap<[u8; 32], u64>>>>,
+        orphan_digest: Arc<ChainDigestHeights>,
         local: Arc<RwLock<HashMap<Chain, LocalRecords>>>,
         /// Upcoming calls to fail, for tests of transient errors.
         #[cfg(test)]
@@ -766,13 +769,12 @@ impl CheckpointStorage {
                 // replaced only by a strictly newer pending or orphan body, matching the
                 // Redis arm where the base height seeds the max comparison.
                 let mut best = confirmed;
-                for candidate in [newest_pending, newest_orphan] {
-                    if let Some(candidate) = candidate {
-                        if best.as_ref().map_or(true, |current| {
-                            candidate.block_height > current.block_height
-                        }) {
-                            best = Some(candidate);
-                        }
+                for candidate in [newest_pending, newest_orphan].into_iter().flatten() {
+                    if best
+                        .as_ref()
+                        .is_none_or(|current| candidate.block_height > current.block_height)
+                    {
+                        best = Some(candidate);
                     }
                 }
                 Ok(best)
@@ -1264,7 +1266,7 @@ mod tests {
             storage
                 .load_latest(chain)
                 .await?
-                .map_or(true, |cp| cp.digest() != new.digest()),
+                .is_none_or(|cp| cp.digest() != new.digest()),
             "the stale digest promoted the new body as base"
         );
 
@@ -1394,7 +1396,7 @@ mod tests {
             storage
                 .find(chain, stale.digest())
                 .await?
-                .map_or(true, |cp| cp.digest() == stale.digest()),
+                .is_none_or(|cp| cp.digest() == stale.digest()),
             "find returned the wrong body for a stale orphan digest"
         );
         assert!(storage.promote(chain, stale.digest()).await?.is_none());
@@ -1402,7 +1404,7 @@ mod tests {
             storage
                 .load_latest(chain)
                 .await?
-                .map_or(true, |cp| cp.digest() != real.digest()),
+                .is_none_or(|cp| cp.digest() != real.digest()),
             "promote wrote the wrong orphan body as base"
         );
         assert_eq!(
