@@ -2255,36 +2255,39 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn a_retryable_status_scan_read_keeps_the_watch_scanning() {
-        // A retryable-with-status 500: the watch must re-read, not exit.
-        let client = client_over(
-            managed_dir(|_, bytes| bytes),
-            ScriptedChain::new(10, 13, Some((13, Landing::Applied)))
-                .failing_once_with(13, scan_read_rejected(500)),
-        );
-        let landed = client
-            .post(
-                b"tx",
-                LedgerTxHash::from_bytes(TX_HASH),
-                &spent(),
-                10,
-                Timestamp::from_secs(5000),
-                deadline(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(landed, LedgerTxHash::from_bytes(TX_HASH));
-        assert_eq!(
-            client
-                .chain
-                .landing_reads
-                .lock()
-                .unwrap()
-                .iter()
-                .copied()
-                .collect::<Vec<_>>(),
-            [11, 12, 13, 13],
-            "the failed block is re-read, not exited on"
-        );
+        // Retryable-with-status — 409 included, a shared provider's transient:
+        // the watch must re-read, not exit.
+        for status in [500u16, 409] {
+            let client = client_over(
+                managed_dir(|_, bytes| bytes),
+                ScriptedChain::new(10, 13, Some((13, Landing::Applied)))
+                    .failing_once_with(13, scan_read_rejected(status)),
+            );
+            let landed = client
+                .post(
+                    b"tx",
+                    LedgerTxHash::from_bytes(TX_HASH),
+                    &spent(),
+                    10,
+                    Timestamp::from_secs(5000),
+                    deadline(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(landed, LedgerTxHash::from_bytes(TX_HASH));
+            assert_eq!(
+                client
+                    .chain
+                    .landing_reads
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .copied()
+                    .collect::<Vec<_>>(),
+                [11, 12, 13, 13],
+                "status {status}: the failed block is re-read, not exited on"
+            );
+        }
     }
 
     #[tokio::test(start_paused = true)]
