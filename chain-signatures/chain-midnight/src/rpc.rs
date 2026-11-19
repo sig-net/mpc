@@ -1178,9 +1178,8 @@ async fn publisher_contract_state(
         ContractStateReply::TooLarge(marker)
             if matches!(marker.provenance, OversizedContractStateSource::ClientCap) =>
         {
-            Err(anyhow::Error::new(marker).context(
-                "the responder's state was refused by the client's own cap",
-            ))
+            Err(anyhow::Error::new(marker)
+                .context("the responder's state was refused by the client's own cap"))
         }
         ContractStateReply::TooLarge(marker) => {
             let err = marker.source.unwrap_or_else(|| {
@@ -2696,7 +2695,11 @@ mod tests {
             );
             assert!(is_retryable(&error), "{cap}: {error:#}");
             assert!(!is_provider_throttled(&error), "{cap}: {error:#}");
-            assert_eq!(calls.load(Ordering::SeqCst), 1, "{cap}: no retries in the test");
+            assert_eq!(
+                calls.load(Ordering::SeqCst),
+                1,
+                "{cap}: no retries in the test"
+            );
         }
     }
 
