@@ -2250,6 +2250,35 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn an_early_exit_stops_the_resends_of_an_unanswered_submit() {
+        // The exit drops the resend task: past its 6 s delay, no second submit.
+        let client = client_over(
+            managed_dir(|_, bytes| bytes),
+            ScriptedChain::new(10, 20, None)
+                .refusing(SubmitRefusal::Unanswered(anyhow::anyhow!("no answer")))
+                .failing_once_with(13, scan_read_rejected(403)),
+        );
+        let error = client
+            .post(
+                b"tx",
+                LedgerTxHash::from_bytes(TX_HASH),
+                &spent(),
+                10,
+                Timestamp::from_secs(5000),
+                deadline(),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(error, SubmitError::Node { .. }), "{error:#}");
+        tokio::time::sleep(Duration::from_secs(20)).await;
+        assert_eq!(
+            client.chain.submits().len(),
+            1,
+            "the resend task died with the watch, not with the budget"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn a_throttled_scan_read_exits_and_engages_the_gate() {
         // A standing 429 — three consecutive scans — escapes the watch: only a
         // returned error reaches the gate wrapper.
