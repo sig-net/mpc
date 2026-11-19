@@ -554,7 +554,7 @@ async fn loading_an_old_format_body_rebuilds_its_progress() {
 
     let restarted = backlog.clone();
     restarted
-        .recover_local(Chain::Solana, mock_root_pk())
+        .hydrate(Chain::Solana, mock_root_pk())
         .await
         .unwrap();
 
@@ -1873,7 +1873,7 @@ async fn restarting_on_an_old_format_body_keeps_its_indexing_times() {
 
     let restarted = Backlog::persisted(storage);
     restarted
-        .recover_local(Chain::Solana, mock_root_pk())
+        .hydrate(Chain::Solana, mock_root_pk())
         .await
         .unwrap();
     for entry in &body.pending_requests {
@@ -1999,10 +1999,7 @@ async fn a_stored_attestation_is_published_after_a_restart() {
 
     let records = storage.load_local(chain).await.unwrap();
     let restarted = Backlog::persisted(storage);
-    restarted
-        .recover_local(chain, mock_root_pk())
-        .await
-        .unwrap();
+    restarted.hydrate(chain, mock_root_pk()).await.unwrap();
     restarted.claim_local(chain, records).await;
 
     assert_eq!(restarted.publishable_requests(chain).await.len(), 1);

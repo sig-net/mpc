@@ -248,7 +248,7 @@ async fn settled_checkpoint_survives_restart_before_promotion() {
         );
         assert!(
             backlog
-                .recover_local(chain, mock_root_pk())
+                .hydrate(chain, mock_root_pk())
                 .await
                 .unwrap()
                 .is_none(),
@@ -268,10 +268,7 @@ async fn settled_checkpoint_survives_restart_before_promotion() {
         // only possible seed is the confirmed base.
         let restarted = Backlog::persisted(storage.clone());
         assert_eq!(
-            restarted
-                .recover_local(chain, mock_root_pk())
-                .await
-                .unwrap(),
+            restarted.hydrate(chain, mock_root_pk()).await.unwrap(),
             Some(checkpoint.clone()),
             "a restarted backlog must seed from the confirmed base"
         );
