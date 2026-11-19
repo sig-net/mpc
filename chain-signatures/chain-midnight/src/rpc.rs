@@ -2680,10 +2680,11 @@ mod tests {
                     "{code}: {error:#}"
                 );
             }
-            // The landing watch's exit predicate, on the form its reads produce.
+            // The watch's throttle counter keys on this predicate; terminal
+            // verdicts (the classic set above) exit a scan without one.
             assert_eq!(
-                crate::native::exits_the_watch(&read),
-                matches!(code, 400 | 401 | 402 | 403 | 404 | 405 | 429),
+                crate::native::throttled_scan(&read_verdict(&read)),
+                matches!(code, 402 | 429),
                 "{code}"
             );
             // The indexer loop's bool form, on the raw error `retry_read` sees.

@@ -25,6 +25,7 @@ use midnight_onchain_state::state::ContractState;
 use midnight_storage::DefaultDB;
 use minocrab_publisher::intent::{build_intent, preimage_tx, PreimageIntent};
 use minocrab_publisher::{Deployment, InProcessProver, ManagedDir, SignerResolver};
+use mpc_chain_integration_core::utils::retry::RpcFailure;
 use mpc_utils::task::AbortOnDrop;
 use rand::rngs::StdRng;
 use rand::{Rng as _, SeedableRng as _};
@@ -48,6 +49,9 @@ const WORK_RESERVE: Duration = Duration::from_secs(120);
 /// How long past its TTL a landed transaction may take to finalize.
 const FINALITY_SLACK: Duration = Duration::from_secs(60);
 const LANDING_POLL: Duration = Duration::from_secs(2);
+/// Consecutive throttled scans before the watch escapes to the gate: a transient
+/// 429 keeps polling the posted submit; a standing one parks the chain.
+const THROTTLED_SCANS_TO_EXIT: u32 = 3;
 /// How long after a submit went unanswered the transaction is first sent again. Each
 /// further unanswered attempt doubles the wait, up to `MAX_RESEND_DELAY`, so a node
 /// shedding load is not asked again at a fixed pace.
@@ -445,6 +449,8 @@ impl<W: FeePayer, C: SubmitChain + 'static> NativeIntentClient<W, C> {
     /// Scans each finalized block after `after` for `tx_hash` until it lands, until a
     /// finalized block is past `ttl` without it (`Landing::Expired`), or until
     /// `deadline` — unknown, also for a verdict-carrying read the deadline outruns.
+    /// A terminal read verdict exits at once; `THROTTLED_SCANS_TO_EXIT`
+    /// consecutive throttled ones escape to the publisher's gate.
     async fn await_landing(
         &self,
         tx_hash: LedgerTxHash,
@@ -456,6 +462,8 @@ impl<W: FeePayer, C: SubmitChain + 'static> NativeIntentClient<W, C> {
         // The head a scan last finished at: while it stands, no block is new and its
         // time was already compared with the TTL.
         let mut scanned_head: Option<BlockHash> = None;
+        // Consecutive scans the provider throttled; any other outcome resets it.
+        let mut throttled_scans = 0u32;
         loop {
             let scan = async {
                 let head = self.chain.finalized_head().await?;
@@ -486,9 +494,18 @@ impl<W: FeePayer, C: SubmitChain + 'static> NativeIntentClient<W, C> {
             };
             match tokio::time::timeout_at(deadline, scan).await {
                 Ok(Ok(Some(landing))) => return Ok(landing),
-                Ok(Ok(None)) => {}
+                Ok(Ok(None)) => throttled_scans = 0,
                 Ok(Err(error)) => {
-                    if exits_the_watch(&error) {
+                    let failure = read_verdict(&error);
+                    if failure.is_terminal() {
+                        return Err(node(error));
+                    }
+                    if throttled_scan(&failure) {
+                        throttled_scans += 1;
+                    } else {
+                        throttled_scans = 0;
+                    }
+                    if throttled_scans >= THROTTLED_SCANS_TO_EXIT {
                         return Err(node(error));
                     }
                     tracing::warn!(
@@ -686,16 +703,14 @@ fn node(error: anyhow::Error) -> SubmitError {
     SubmitError::Node { source: error }
 }
 
-/// Whether a failed scan read ends the watch: terminal verdicts exit to
-/// failover, throttled ones (core's typed 402/429) escape so the publisher's
-/// gate engages — decided on `read_verdict` only; watch renders carry numbers.
-pub(crate) fn exits_the_watch(error: &anyhow::Error) -> bool {
-    let failure = read_verdict(error);
-    failure.is_terminal()
-        || matches!(
-            failure.status().map(|status| status.as_u16()),
-            Some(402 | 429)
-        )
+/// Whether a failed scan read is the provider throttling — core's typed 402/429
+/// set (`is_provider_throttled`'s carrier arm), never its text-scanning call:
+/// the watch's renders carry block numbers.
+pub(crate) fn throttled_scan(failure: &RpcFailure) -> bool {
+    matches!(
+        failure.status().map(|status| status.as_u16()),
+        Some(402 | 429)
+    )
 }
 
 #[cfg(test)]
@@ -819,8 +834,8 @@ mod tests {
         landing_reads: Mutex<VecDeque<u64>>,
         /// A block whose first landing read fails.
         failing_read: Mutex<Option<u64>>,
-        /// What `failing_read` fails with, if not the stock text.
-        failing_read_with: Mutex<Option<anyhow::Error>>,
+        /// Typed errors the landing read of the given block fails with, in turn.
+        failing_read_with: Mutex<VecDeque<(u64, anyhow::Error)>>,
         /// A block whose first time read fails.
         failing_time: Mutex<Option<u64>>,
         /// A block `block_hash_at` answers nothing for.
@@ -843,7 +858,7 @@ mod tests {
                 landing,
                 landing_reads: Mutex::new(VecDeque::new()),
                 failing_read: Mutex::new(None),
-                failing_read_with: Mutex::new(None),
+                failing_read_with: Mutex::new(VecDeque::new()),
                 failing_time: Mutex::new(None),
                 missing_hash_at: Mutex::new(None),
                 throttled_reads: Mutex::new(None),
@@ -861,8 +876,10 @@ mod tests {
         }
 
         fn failing_once_with(self, number: u64, error: anyhow::Error) -> Self {
-            *self.failing_read.lock().unwrap() = Some(number);
-            *self.failing_read_with.lock().unwrap() = Some(error);
+            self.failing_read_with
+                .lock()
+                .unwrap()
+                .push_back((number, error));
             self
         }
 
@@ -982,12 +999,16 @@ mod tests {
             if let Some(status) = *self.throttled_reads.lock().unwrap() {
                 return Err(scan_read_rejected(status));
             }
+            {
+                let mut queued = self.failing_read_with.lock().unwrap();
+                if queued.front().is_some_and(|&(at, _)| at == number) {
+                    let (_, error) = queued.pop_front().expect("checked");
+                    return Err(error);
+                }
+            }
             let mut failing = self.failing_read.lock().unwrap();
             if *failing == Some(number) {
                 *failing = None;
-                if let Some(error) = self.failing_read_with.lock().unwrap().take() {
-                    return Err(error);
-                }
                 anyhow::bail!("the node dropped the read of block {number}");
             }
             Ok(self
@@ -2229,11 +2250,11 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn a_throttled_scan_read_exits_and_engages_the_gate() {
-        // A 429 escapes the watch too: only a returned error reaches the gate wrapper.
+        // A standing 429 — three consecutive scans — escapes the watch: only a
+        // returned error reaches the gate wrapper.
         let client = client_over(
             managed_dir(|_, bytes| bytes),
-            ScriptedChain::new(10, 20, Some((13, Landing::Applied)))
-                .failing_once_with(13, scan_read_rejected(429)),
+            ScriptedChain::new(10, 20, None).throttling_landing_reads(429),
         );
         let error = client
             .post(
@@ -2247,6 +2268,18 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(error, SubmitError::Node { .. }), "{error:#}");
+        assert_eq!(
+            client
+                .chain
+                .landing_reads
+                .lock()
+                .unwrap()
+                .iter()
+                .copied()
+                .collect::<Vec<_>>(),
+            [11, 11, 11],
+            "the third consecutive throttled scan exits, re-reading the same block"
+        );
         let published = SubmitError::into_publish_error(error);
         assert!(is_retryable(&published), "{published:#}");
         let carrier = published
@@ -2349,6 +2382,83 @@ mod tests {
             "every attempt reserves UTXOs none release"
         );
         assert!(client.wallet.released.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_transient_scan_throttle_keeps_polling_the_posted_submit() {
+        // One throttled scan is under the escape count: the posted submit is
+        // re-read, not re-posted.
+        let client = client_over(
+            managed_dir(|_, bytes| bytes),
+            ScriptedChain::new(10, 13, Some((13, Landing::Applied)))
+                .failing_once_with(13, scan_read_rejected(429)),
+        );
+        let landed = client
+            .post(
+                b"tx",
+                LedgerTxHash::from_bytes(TX_HASH),
+                &spent(),
+                10,
+                Timestamp::from_secs(5000),
+                deadline(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(landed, LedgerTxHash::from_bytes(TX_HASH));
+        assert_eq!(
+            client
+                .chain
+                .landing_reads
+                .lock()
+                .unwrap()
+                .iter()
+                .copied()
+                .collect::<Vec<_>>(),
+            [11, 12, 13, 13],
+            "the throttled block is re-read"
+        );
+        assert_eq!(
+            client.chain.submits().len(),
+            1,
+            "a transient throttle re-posts nothing"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_non_throttled_scan_resets_the_escape_count() {
+        // 429, then a statusless failure, then 429: only consecutive throttles
+        // count — the watch lands instead of exiting.
+        let client = client_over(
+            managed_dir(|_, bytes| bytes),
+            ScriptedChain::new(10, 11, Some((11, Landing::Applied)))
+                .failing_once_with(11, scan_read_rejected(429))
+                .failing_once_with(11, anyhow::anyhow!("the node dropped the read"))
+                .failing_once_with(11, scan_read_rejected(429)),
+        );
+        let landed = client
+            .post(
+                b"tx",
+                LedgerTxHash::from_bytes(TX_HASH),
+                &spent(),
+                10,
+                Timestamp::from_secs(5000),
+                deadline(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(landed, LedgerTxHash::from_bytes(TX_HASH));
+        assert_eq!(
+            client
+                .chain
+                .landing_reads
+                .lock()
+                .unwrap()
+                .iter()
+                .copied()
+                .collect::<Vec<_>>(),
+            [11, 11, 11, 11],
+            "the reset leaves the count at one, so the fourth scan lands"
+        );
     }
 
     #[tokio::test(start_paused = true)]
