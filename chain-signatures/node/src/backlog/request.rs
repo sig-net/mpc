@@ -938,6 +938,8 @@ impl SignEntry<SignStatus> {
     }
 
     /// Consume and convert this dynamic entry into a specific typestate.
+    // The error is the consumed entry by design; boxing it would change the public API.
+    #[allow(clippy::result_large_err)]
     pub fn try_into<State: SignState>(self) -> Result<SignEntry<State>, Self> {
         if let Some(state) = State::try_from_status(&self.state) {
             Ok(SignEntry {
