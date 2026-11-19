@@ -1,13 +1,16 @@
 # Glossary
 
-Terms used across the docs, in alphabetical order. An entry:
+Terms specific to this project and used across the docs, in alphabetical
+order. General terms, such as ECDSA, get no entry. An entry:
 
-- Says what the term is, in a few sentences: what kind of thing it is and
-  what sets it apart, or the cases it covers. How it works, why it is
-  designed so and how it changed belong in the doc that defines the term,
-  or in the code.
+- Opens with one sentence that defines the term on its own: what kind of
+  thing it is and what sets it apart, or the cases it covers. Any further
+  sentences extend it. How it works, why it is designed so and how it
+  changed belong in the doc that defines the term, or in the code.
+- Does not define the term through itself, directly or through another
+  entry.
 - Gives the term's abbreviation or other names, and the term it is easily
-  confused with, if any.
+  confused with, if any. An entry for another name only links the main one.
 - Names the code that implements the term, if any: the symbol and its file.
   Paths are relative to `chain-signatures/node/src/`, except those starting
   with `chain-signatures/` or `signet-`, which are relative to the repository
@@ -53,8 +56,8 @@ its [digest](#digest). See [bidirectional-calls.md
 
 ## Backlog
 
-Each node keeps one backlog per [source chain](#source-chain), with one entry
-per [admitted](#admitted-request) [request](#request) that is not finished. An
+A node's record of the [admitted](#admitted-request) [requests](#request) on
+one [source chain](#source-chain) that are not finished, one entry each. An
 entry holds the [request id](#request-id), the request and, for a
 [bidirectional request](#bidirectional-request), the signatures
 for it [published](#publish) in final source chain blocks (`Backlog`,
@@ -125,8 +128,8 @@ A short hash that stands for a larger structure. The docs use two:
 
 ## Entropy
 
-A value from the block that holds a [request](#request). The requester cannot
-know or influence it before that block is validated (`SignArgs::entropy`,
+A value from the block that holds a [request](#request), which the requester
+cannot know or influence before that block is validated (`SignArgs::entropy`,
 `chain-signatures/primitives/src/crypto.rs`). See
 [delta-derivation.md](delta-derivation.md).
 
