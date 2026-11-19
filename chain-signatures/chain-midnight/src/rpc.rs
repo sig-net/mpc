@@ -2661,15 +2661,20 @@ mod tests {
     #[test]
     fn every_http_status_classifies_under_the_read_partition() {
         // Every status jsonrpsee can report — parsed StatusCode, so 100..=599
-        // (jsonrpsee-http-client 0.24.10 transport.rs:337) — at both call
-        // sites of the shared derivation.
+        // (jsonrpsee-http-client 0.24.10 transport.rs:337) — at each call
+        // site of the shared derivation.
         for code in 100..=599u16 {
             let read = attach_read_carrier(rejected_read(code));
-            let node = SubmitError::Node {
+            let bare = SubmitError::Node {
                 source: rejected_read(code),
             }
             .into_publish_error();
-            for error in [&read, &node] {
+            // The watch's exits carry the carrier inside the Node source.
+            let carried = SubmitError::Node {
+                source: attach_read_carrier(rejected_read(code)),
+            }
+            .into_publish_error();
+            for error in [&read, &bare, &carried] {
                 assert_eq!(
                     is_retryable(error),
                     !matches!(code, 400 | 401 | 403 | 404 | 405),
