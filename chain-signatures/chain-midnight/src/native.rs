@@ -825,6 +825,8 @@ mod tests {
         failing_time: Mutex<Option<u64>>,
         /// A block `block_hash_at` answers nothing for.
         missing_hash_at: Mutex<Option<u64>>,
+        /// The status every landing read is rejected with, when set.
+        throttled_reads: Mutex<Option<u16>>,
     }
 
     impl ScriptedChain {
@@ -844,6 +846,7 @@ mod tests {
                 failing_read_with: Mutex::new(None),
                 failing_time: Mutex::new(None),
                 missing_hash_at: Mutex::new(None),
+                throttled_reads: Mutex::new(None),
             }
         }
 
@@ -865,6 +868,11 @@ mod tests {
 
         fn missing_hash_at(self, number: u64) -> Self {
             *self.missing_hash_at.lock().unwrap() = Some(number);
+            self
+        }
+
+        fn throttling_landing_reads(self, status: u16) -> Self {
+            *self.throttled_reads.lock().unwrap() = Some(status);
             self
         }
 
@@ -971,6 +979,9 @@ mod tests {
             assert_eq!(tx_hash, LedgerTxHash::from_bytes(TX_HASH));
             let number = block_number_of(at);
             self.landing_reads.lock().unwrap().push_back(number);
+            if let Some(status) = *self.throttled_reads.lock().unwrap() {
+                return Err(scan_read_rejected(status));
+            }
             let mut failing = self.failing_read.lock().unwrap();
             if *failing == Some(number) {
                 *failing = None;
@@ -2303,6 +2314,41 @@ mod tests {
                 "status {status}: the failed block is re-read, not exited on"
             );
         }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_standing_read_throttle_reposts_per_attempt() {
+        // The accepted cost of the throttle escape: one fresh fee transaction per
+        // gate-paced attempt, reservations held, where the old watch kept polling.
+        let client = client_over(
+            managed_dir(|_, bytes| bytes),
+            ScriptedChain::new(10, 20, None).throttling_landing_reads(429),
+        );
+        for _ in 0..2 {
+            let error = client
+                .post(
+                    b"tx",
+                    LedgerTxHash::from_bytes(TX_HASH),
+                    &spent(),
+                    10,
+                    Timestamp::from_secs(5000),
+                    deadline(),
+                )
+                .await
+                .unwrap_err();
+            assert!(matches!(error, SubmitError::Node { .. }), "{error:#}");
+        }
+        assert_eq!(
+            client.chain.submits().len(),
+            2,
+            "each attempt posts a fresh fee transaction"
+        );
+        assert_eq!(
+            *client.wallet.reserved.lock().unwrap(),
+            vec![spent(), spent()],
+            "every attempt reserves UTXOs none release"
+        );
+        assert!(client.wallet.released.lock().unwrap().is_empty());
     }
 
     #[tokio::test(start_paused = true)]
