@@ -1,4 +1,5 @@
 #![doc = include_str!("../README.md")]
+#![cfg_attr(test, allow(clippy::disallowed_methods))]
 
 #[cfg(feature = "bench")]
 pub mod bench;

@@ -258,8 +258,12 @@ impl SignatureSpawner {
         );
 
         // Counts the leg in time or delayed once its response lands or its deadline passes.
+        // An adopted request has no indexing time, so its budget starts here.
+        let unix_timestamp_indexed = request
+            .unix_timestamp_indexed
+            .unwrap_or_else(mpc_utils::time::current_unix_timestamp);
         self.delay_monitor
-            .watch(sign_id, kind, chain, request.unix_timestamp_indexed);
+            .watch(sign_id, kind, chain, unix_timestamp_indexed);
 
         if !governance.is_running {
             tracing::info!(?sign_id, "holding sign request until governance is running");
@@ -557,13 +561,15 @@ impl SignatureSpawner {
                     return;
                 }
 
-                record_request_latency_since(
-                    entry.chain(),
-                    SignRequestStep::AwaitingGeneration,
-                    "ok",
-                    entry.request().request_kind(),
-                    entry.request().unix_timestamp_indexed,
-                );
+                if let Some(indexed) = entry.request().unix_timestamp_indexed {
+                    record_request_latency_since(
+                        entry.chain(),
+                        SignRequestStep::AwaitingGeneration,
+                        "ok",
+                        entry.request().request_kind(),
+                        indexed,
+                    );
+                }
 
                 self.add_request(governance, entry, signature_timeout);
             }
@@ -795,7 +801,7 @@ mod tests {
         /// Admits a request indexed at `unix_timestamp`, without spawning its task.
         fn request_indexed_at(&mut self, mut req: Arc<IndexedSignRequest>, unix_timestamp: u64) {
             self.governance.is_running = false;
-            Arc::make_mut(&mut req).unix_timestamp_indexed = unix_timestamp;
+            Arc::make_mut(&mut req).unix_timestamp_indexed = Some(unix_timestamp);
             let entry = backlog::SignEntry::generating(req, &self.backlog);
             self.request(entry);
         }

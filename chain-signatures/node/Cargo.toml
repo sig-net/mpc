@@ -23,7 +23,7 @@ lru = "0.18"
 mime = "0.3.17"
 prometheus = "0.14.0"
 redis = "0.27.2"
-sysinfo = "0.32.0"
+sysinfo.workspace = true
 tracing-stackdriver = "0.10.0"
 tracing-opentelemetry = "0.30.0"
 opentelemetry = { version = "0.29.0", default-features = false, features = [

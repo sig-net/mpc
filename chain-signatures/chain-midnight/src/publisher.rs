@@ -16,9 +16,7 @@ use mpc_utils::task::AbortOnDrop;
 use mpc_utils::time::current_unix_timestamp;
 
 use crate::attestation::validate_attestation_response;
-use crate::config::{
-    validate_publisher_network_id, MidnightAddress, MidnightConfig, PublisherConfig,
-};
+use crate::config::{MidnightConfig, PublisherConfig};
 use crate::dust_feed::IndexerDustEvents;
 use crate::funding::{dust_secret_key, parse_seed, DustCheckpointStore, FundingWallet};
 use crate::intent::{IntentRequest, RespondCircuit, Submitted};
@@ -26,6 +24,7 @@ use crate::native::{NativeIntentClient, Provers};
 use crate::output_storage::{OutputStore, RecoveringOutputStore};
 use crate::rpc::{MidnightPublisherRpc, PinnedReads};
 use crate::submit_error::{refusal_code, SubmitError};
+use crate::types::{BlockHash, MidnightAddress};
 
 const SPECK_PER_DUST: f64 = 1e15;
 
@@ -33,7 +32,7 @@ const SPECK_PER_DUST: f64 = 1e15;
 /// drift per block, so parameters priced at one block against a state read at another
 /// produce an intent the node answers `OutOfGas`.
 pub(crate) struct PinnedState {
-    pub at_hash: String,
+    pub at_hash: BlockHash,
     pub contract_state: Vec<u8>,
     pub ledger_parameters: Vec<u8>,
 }
@@ -89,6 +88,8 @@ impl MidnightPublisher {
         checkpoints: Option<Arc<dyn DustCheckpointStore>>,
     ) -> anyhow::Result<Self> {
         config.publisher.validate_output_storage()?;
+        // The refusal an unsupported network meets: connect() fails on the id the
+        // node reports, before anything starts.
         let rpc = Arc::new(MidnightPublisherRpc::connect(config).await?);
         let output_store = RecoveringOutputStore::start(
             config.publisher.output_storage.as_ref(),
@@ -96,7 +97,6 @@ impl MidnightPublisher {
             config.central_address,
         )?
         .map(|store| Arc::new(store) as Arc<dyn OutputStore>);
-        validate_publisher_network_id(rpc.network_id())?;
         // Before the wallet starts: a failed connect leaves nothing replaying.
         let provers = Arc::new(Provers::new(
             &config.publisher.contract_artifacts_dir,
@@ -174,7 +174,11 @@ impl MidnightPublisher {
     }
 
     /// The contract state and ledger parameters at one finalized hash.
-    async fn pin(&self, responder_address: &str, at_hash: String) -> anyhow::Result<PinnedState> {
+    async fn pin(
+        &self,
+        responder_address: &MidnightAddress,
+        at_hash: BlockHash,
+    ) -> anyhow::Result<PinnedState> {
         let contract_state = self
             .reads
             .contract_state(responder_address, &at_hash)
@@ -227,7 +231,7 @@ impl MidnightPublisher {
         if !self.still_awaited(action, "queued").await? {
             return Ok(());
         }
-        let responder_address = self.responder_address.to_hex();
+        let responder_address = self.responder_address;
         let sign_id = action.request.id;
         tracing::info!(
             ?sign_id,
@@ -244,7 +248,7 @@ impl MidnightPublisher {
         let chain = self.pin(&responder_address, at_hash).await?;
         let request = IntentRequest {
             circuit: call.circuit,
-            contract_address: *self.responder_address.as_bytes(),
+            contract_address: responder_address,
             request_id: call.request_id,
             signature: call.signature,
             contract_state: chain.contract_state,
@@ -462,6 +466,7 @@ mod tests {
     use std::time::Duration;
 
     use crate::output_storage::GcsOutputStore;
+    use crate::types::NetworkId;
     use mpc_chain_integration_core::utils::{
         retry::{is_provider_throttled, is_retryable},
         test::make_publish_action,
@@ -501,7 +506,6 @@ mod tests {
         /// `false` makes `contract_state` answer "no contract here".
         contract_present: bool,
     }
-
     impl StubReads {
         fn new() -> Arc<Self> {
             Arc::new(Self {
@@ -522,7 +526,7 @@ mod tests {
             self.contract_addresses.lock().unwrap().clone()
         }
 
-        fn record(&self, method: &'static str, at_hash: &str) {
+        fn record(&self, method: &'static str, at_hash: &BlockHash) {
             self.calls.lock().unwrap().push(Read {
                 method,
                 at_hash: at_hash.to_string(),
@@ -532,27 +536,28 @@ mod tests {
 
     #[async_trait]
     impl PinnedReads for StubReads {
-        async fn finalized_head(&self) -> anyhow::Result<String> {
+        async fn finalized_head(&self) -> anyhow::Result<BlockHash> {
             let mut served = self.heads_served.lock().unwrap();
             *served += 1;
-            self.record("finalized_head", "");
-            Ok(if *served == 1 { HEAD_ONE } else { HEAD_TWO }.to_string())
+            let head = if *served == 1 { HEAD_ONE } else { HEAD_TWO };
+            self.record("finalized_head", &BlockHash::from_0x_hex(head).unwrap());
+            Ok(BlockHash::from_0x_hex(head).unwrap())
         }
 
         async fn contract_state(
             &self,
-            address: &str,
-            at_hash: &str,
+            address: &MidnightAddress,
+            at_hash: &BlockHash,
         ) -> anyhow::Result<Option<Vec<u8>>> {
             self.contract_addresses
                 .lock()
                 .unwrap()
-                .push(address.to_string());
+                .push(address.to_hex());
             self.record("contract_state", at_hash);
             Ok(self.contract_present.then(|| CONTRACT_STATE.to_vec()))
         }
 
-        async fn ledger_parameters(&self, at_hash: &str) -> anyhow::Result<Vec<u8>> {
+        async fn ledger_parameters(&self, at_hash: &BlockHash) -> anyhow::Result<Vec<u8>> {
             self.record("ledger_parameters", at_hash);
             Ok(LEDGER_PARAMETERS.to_vec())
         }
@@ -638,7 +643,7 @@ mod tests {
             self.submitted
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Ok(Submitted {
-                tx_id: "stub-receipt".to_string(),
+                tx_id: crate::types::LedgerTxHash::from_bytes([0x5a; 32]),
                 dust_balance: self.dust_balance,
             })
         }
@@ -688,7 +693,7 @@ mod tests {
                 self.release.notified().await;
             }
             Ok(Submitted {
-                tx_id: format!("receipt-{attempt}"),
+                tx_id: crate::types::LedgerTxHash::from_bytes([0x5b; 32]),
                 dust_balance: 0,
             })
         }
@@ -910,7 +915,7 @@ mod tests {
             .unwrap();
         GcsOutputStore::new(
             &crate::config::OutputStorageConfig::new("outputs".into(), "v1".into(), timeout),
-            "preprod",
+            NetworkId::Preprod,
             MidnightAddress::from_hex(CENTRAL).unwrap(),
             client,
         )
@@ -1693,7 +1698,7 @@ mod tests {
 
         let [request] = client.built().try_into().expect("one build per publish");
         assert_eq!(request.circuit, RespondCircuit::Respond);
-        assert_eq!(hex::encode(request.contract_address), RESPONDER);
+        assert_eq!(request.contract_address.to_hex(), RESPONDER);
         assert_eq!(reads.contract_addresses(), [RESPONDER]);
         assert_eq!(request.request_id, REQUEST_ID);
         assert_eq!(request.contract_state, CONTRACT_STATE);
@@ -1731,7 +1736,7 @@ mod tests {
             .expect("granted");
 
         let [request] = client.built().try_into().expect("one build per publish");
-        assert_eq!(hex::encode(request.contract_address), RESPONDER);
+        assert_eq!(request.contract_address.to_hex(), RESPONDER);
         assert_eq!(request.request_id, REQUEST_ID);
         assert_eq!(
             request.circuit,

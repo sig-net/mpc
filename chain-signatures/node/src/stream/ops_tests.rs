@@ -26,7 +26,7 @@ use alloy::primitives::B256;
 use cait_sith::protocol::Participant;
 use k256::{ProjectivePoint, Scalar};
 use mpc_chain_canton::CantonChainCtx;
-use mpc_chain_integration_core::{NoopChainTelemetry, StateManager};
+use mpc_chain_integration_core::{NoopChainTelemetry, StateManager, WatchKey};
 use mpc_primitives::{
     BidirectionalTx, BidirectionalTxId, IndexedSignRequest, SignArgs, SignBidirectionalEvent,
     SignKind, Signature,
@@ -38,7 +38,7 @@ use mpc_tron_wire::{
 use mpc_utils::time::current_unix_timestamp;
 use near_primitives::types::AccountId;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, watch};
 use tokio::time::timeout;
 
@@ -135,7 +135,7 @@ async fn recover_backlog_requeues_pending_signs() {
             assert_eq!(req.request().kind, SignKind::Sign);
             // Verify that the unix_timestamp_indexed is preserved from the original entry
             assert_eq!(req.request().unix_timestamp_indexed, expected_timestamp);
-            assert!(req.request().unix_timestamp_indexed <= current_unix_timestamp());
+            assert!(req.request().unix_timestamp_indexed.unwrap() <= current_unix_timestamp());
         }
         other => panic!("unexpected message: {:?}", other),
     }
@@ -301,9 +301,7 @@ async fn process_execution_confirmed_resolves_a_displaced_watch_by_sign_id() {
     backlog.insert_mock_executing(&tx).await;
     // A flat Tron id: an earlier confirmation consumed this entry's watch
     // while the entry itself is still Executing.
-    backlog
-        .unwatch_execution(tx.target_chain, &tx.id, tx.source_chain, &tx.sign_id())
-        .await;
+    backlog.unwatch_execution(WatchKey::of(&tx)).await;
 
     // No watch, no wait start: the resolution must count as unmeasured.
     let unmeasured = EXECUTION_WAIT_UNMEASURED
@@ -764,6 +762,70 @@ async fn a_signed_sibling_keeps_its_observation_time() {
     assert!(picked[0].respond_observed_at().is_some());
 }
 
+#[tokio::test]
+async fn unviable_sweep_consumes_every_watch_of_a_multi_signature_entry() {
+    let backlog = Backlog::new();
+    let taker = nonce_request(1, Chain::Midnight, "p", 7, 1);
+    let request = nonce_request(2, Chain::Midnight, "p", 7, 2);
+    let status_tx = signed_tx(&request, 7);
+    seed_executing_entry(&backlog, Arc::clone(&request), Arc::clone(&status_tx)).await;
+
+    let backdated = Instant::now() - Duration::from_secs(120);
+    let handle = backlog
+        .get_by::<Bidirectional<Executing>>(Chain::Midnight, &request.id)
+        .await
+        .expect("the entry is executing");
+    backlog
+        .watch_execution(
+            &handle
+                .with_execution_watch(ExecutionWatch::new(Arc::clone(&status_tx), Some(backdated))),
+        )
+        .await;
+
+    let replacement = Arc::new(BidirectionalTx {
+        id: BidirectionalTxId([request.id.request_id[0].wrapping_add(101); 32]),
+        ..(*status_tx).clone()
+    });
+    backlog.add_published_tx(Arc::clone(&replacement)).await;
+    let target = status_tx.target_chain;
+    assert_eq!(
+        backlog
+            .get_execution_watchers(target)
+            .await
+            .values()
+            .map(Vec::len)
+            .sum::<usize>(),
+        2,
+        "the entry is watched under both signatures"
+    );
+
+    backlog
+        .mark_unviable(Chain::Midnight, &signed_tx(&taker, 7), 500)
+        .await;
+    let picked = backlog
+        .unwatch_unviable(Chain::Midnight, test_root_pk())
+        .await;
+
+    assert_eq!(picked.len(), 1);
+    assert_eq!(picked[0].respond_observed_at(), Some(backdated));
+    assert!(
+        backlog.get_execution_watchers(target).await.is_empty(),
+        "the sweep took every watch"
+    );
+    for tx in [&status_tx, &replacement] {
+        StateManager::watch_execution(&backlog, Arc::clone(tx)).await;
+        let re_watched = backlog
+            .unwatch_execution(WatchKey::of(tx))
+            .await
+            .expect("the re-watched entry resolves");
+        assert_eq!(
+            re_watched.respond_observed_at(),
+            None,
+            "the sweep took the clock with the watch"
+        );
+    }
+}
+
 /// Two streams can pick one sibling before either answers it: the second sends nothing and
 /// leaves the first's progress alone.
 #[tokio::test]
@@ -966,7 +1028,7 @@ async fn an_execution_under_a_later_signature_is_found() {
         ..(*first).clone()
     });
     // The time this node first waited on the request carries over to the later signature.
-    let observed_at = std::time::Instant::now();
+    let observed_at = Instant::now();
     let watched = backlog
         .get_by::<Bidirectional<Executing>>(Chain::Solana, &request.id)
         .await
@@ -980,12 +1042,7 @@ async fn an_execution_under_a_later_signature_is_found() {
     );
 
     let found = backlog
-        .unwatch_execution(
-            Chain::Ethereum,
-            &later.id,
-            later.source_chain,
-            &later.sign_id(),
-        )
+        .unwatch_execution(WatchKey::of(&later))
         .await
         .unwrap();
     assert_eq!(found.execution_tx().id, later.id, "the response names it");
@@ -1082,9 +1139,7 @@ async fn a_later_signature_past_execution_only_records_its_id() {
         executing.watch_execution().await;
         if parked {
             executing.park().await.unwrap();
-            ctx.backlog
-                .unwatch_execution(Chain::Ethereum, &tx.id, tx.source_chain, &tx.sign_id())
-                .await;
+            ctx.backlog.unwatch_execution(WatchKey::of(&tx)).await;
         } else {
             process_execution_confirmed(
                 tx.id,
@@ -1223,13 +1278,15 @@ async fn adopting_a_body_ignores_its_progress() {
     assert_eq!(answered.digest(), executing.digest());
 
     let adopter = Backlog::new();
-    adopter.regress(&answered, test_root_pk()).await.unwrap();
+    let fetched = crate::backlog::Checkpoint::from(answered.facts());
+    adopter.regress(&fetched, test_root_pk()).await.unwrap();
 
     let entry = adopter.get(Chain::Solana, &request.id).await.unwrap();
     assert_matches!(
         entry.status(),
         SignStatus::Bidirectional(BidirectionalProgress::Executing(_))
     );
+    assert_eq!(entry.request().unix_timestamp_indexed, None);
     assert!(adopter
         .get_execution_watchers(Chain::Ethereum)
         .await
@@ -2774,7 +2831,7 @@ async fn publish_failover_fires_once_per_leg() {
 /// The rpc channel is fed from a spawned task, so a publish is not visible the
 /// instant the sweep returns.
 async fn next_publish(rx: &mut mpsc::Receiver<RpcAction>) -> Option<RpcAction> {
-    tokio::time::timeout(std::time::Duration::from_millis(200), rx.recv())
+    tokio::time::timeout(Duration::from_millis(200), rx.recv())
         .await
         .ok()
         .flatten()
@@ -3238,7 +3295,7 @@ async fn midnight_response_settles_entries_that_missed_the_outcome() {
         lagging.insert_mock_executing(&tx).await;
         if parked {
             lagging
-                .unwatch_execution(Chain::Ethereum, &tx.id, tx.source_chain, &tx.sign_id())
+                .unwatch_execution(WatchKey::of(&tx))
                 .await
                 .unwrap()
                 .park()
@@ -3515,7 +3572,7 @@ async fn unobserved_response_settles_when_it_verifies() {
         lagging.insert_mock_executing(&tx).await;
         if parked {
             lagging
-                .unwatch_execution(Chain::Ethereum, &tx.id, tx.source_chain, &tx.sign_id())
+                .unwatch_execution(WatchKey::of(&tx))
                 .await
                 .unwrap()
                 .park()

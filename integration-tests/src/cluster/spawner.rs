@@ -21,6 +21,7 @@ use crate::{execute, NodeBinarySource, NodeConfig, Nodes};
 
 use crate::cluster::Cluster;
 use mpc_primitives::SANDBOX_VERSION;
+use sysinfo::{Pid, ProcessRefreshKind, RefreshKind};
 
 thread_local! {
     static THREAD_NETWORK_NAME: RefCell<Option<String>> = const { RefCell::new(None) };
@@ -240,6 +241,61 @@ impl ClusterSpawner {
         Ok(self)
     }
 
+    /// This function removes old networks left over as a result of test
+    /// interruption.
+    /// Two behaviours to note:
+    /// 1.Containers kept by just to / just tk (TESTCONTAINERS=keep) are removed by the next test run.
+    /// 2.The process check only sees processes on this machine. On a shared Docker daemon, for example
+    /// act or a devcontainer using the host's Docker socket, another environment's tests that are still
+    /// running would look dead and have their containers force-removed.
+    pub async fn cleanup_old_networks(&self) -> anyhow::Result<()> {
+        let mut current_networks = self
+            .docker
+            .list_test_networks()
+            .await
+            .map_err(anyhow::Error::new)?;
+
+        let system = sysinfo::System::new_with_specifics(
+            RefreshKind::new().with_processes(ProcessRefreshKind::new()),
+        );
+        let live_processes = system.processes();
+
+        let dead_networks: Vec<String> = current_networks
+            .drain(..)
+            .map(|network| (network.name, network.created))
+            .filter_map(|(maybe_network_name, maybe_network_created)| {
+                maybe_network_name
+                    .clone()
+                    .and_then(|network_name| {
+                        network_name
+                            .clone()
+                            .strip_prefix("mpc_it_")
+                            .and_then(|r| r.split('_').next())
+                            .and_then(|p| p.parse::<Pid>().ok())
+                            .map(|p| (network_name, p))
+                    })
+                    .and_then(|(network_name, pid)| {
+                        let process = live_processes.get(&pid);
+                        if let Some(process) = process {
+                            if process.start_time()
+                                > maybe_network_created?.unix_timestamp().max(0) as u64
+                            {
+                                Some(network_name)
+                            } else {
+                                None
+                            }
+                        } else {
+                            Some(network_name)
+                        }
+                    })
+            })
+            .collect();
+
+        self.docker.remove_dead_networks(dead_networks).await?;
+
+        Ok(())
+    }
+
     pub fn nodes(mut self, nodes: usize) -> Self {
         self.cfg.nodes = nodes;
         // Resize the binary sources vector to match
@@ -448,6 +504,12 @@ impl IntoFuture for ClusterSpawner {
 
     fn into_future(mut self) -> Self::IntoFuture {
         Box::pin(async move {
+            // Ignoring the error so error in cleanup does not prevent cluster spawning
+            match self.cleanup_old_networks().await {
+                Ok(()) => tracing::info!("cleaned up old networks"),
+                Err(e) => tracing::warn!(error = %e, "failed to cleanup old networks"),
+            }
+
             self = self.load_pregenerated_keys().init_network().await?;
 
             // Check if Solana is enabled and spawn if needed

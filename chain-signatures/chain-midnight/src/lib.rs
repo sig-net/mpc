@@ -4,6 +4,8 @@
 //! `Midnight::send_mn_transaction` dispatched in `Phase::Initialization` is outside
 //! this scanner's discovery surface.
 
+#![cfg_attr(test, allow(clippy::disallowed_methods))]
+
 mod attestation;
 mod config;
 mod convert;
@@ -25,13 +27,13 @@ mod submit_error;
 #[cfg(test)]
 mod test_utils;
 mod tx;
+pub(crate) mod types;
 
 pub use attestation::validate_attestation_response;
-pub use config::{
-    IndexerConfig, MidnightAddress, MidnightConfig, OutputStorageConfig, PublisherConfig, RpcConfig,
-};
+pub use config::{IndexerConfig, MidnightConfig, OutputStorageConfig, PublisherConfig, RpcConfig};
 pub use funding::DustCheckpointStore;
 pub use indexer::MidnightIndexer;
 pub use publisher::{RecoveringMidnightPublisher, ResponseAwaiter};
 #[cfg(feature = "sandbox")]
 pub use rpc::probe_network_id;
+pub use types::{MidnightAddress, NetworkId, UnsupportedNetwork};
