@@ -371,7 +371,7 @@ digest never changes. See [checkpoints.md §1](checkpoints.md#1-background).
 The contract on a [source chain](#source-chain) that takes
 [requests](#request) and receives [published](#publish) signatures and
 [attestations](#attestation), for example `ChainSignatures.sol` on EVM chains
-(`chain-signatures/contract-eth/contracts/`) and `chain-signatures/contract-sol`
+([sig-net/ethereum-signet-contract](https://github.com/sig-net/ethereum-signet-contract)) and `chain-signatures/contract-sol`
 on Solana. On Midnight it is two contracts: requests are notified to the
 Signet singleton, and the signet responder receives published signatures
 and attestations. See [bidirectional-calls.md

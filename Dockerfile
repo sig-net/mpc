@@ -2,13 +2,6 @@
 # built on the same Debian release.
 FROM redis:7.4.12-bookworm AS redis-bin
 
-FROM node:22.23.5-bookworm AS eth-builder
-WORKDIR /usr/src/app/contract-eth
-COPY chain-signatures/contract-eth/package.json chain-signatures/contract-eth/package-lock.json ./
-RUN npm ci
-COPY chain-signatures/contract-eth ./
-RUN npx hardhat compile
-
 # What the Midnight publisher proves with: the responder's packaged keys and IR, the
 # KZG parameters its circuits and the DUST spend need, and the DUST spend's keys. The
 # node fetches a missing file at runtime, so baking them in keeps proving offline.
@@ -50,7 +43,6 @@ COPY signet-primitives/ ./signet-primitives
 COPY signet-crypto/ ./signet-crypto
 COPY Cargo.toml .
 COPY Cargo.lock .
-COPY --from=eth-builder /usr/src/app/contract-eth/artifacts chain-signatures/contract-eth/artifacts
 RUN cargo build --release --locked --package mpc-node
 
 FROM debian:bookworm-slim AS runtime
