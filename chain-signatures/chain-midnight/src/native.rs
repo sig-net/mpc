@@ -55,6 +55,9 @@ const RESEND_DELAY: Duration = Duration::from_secs(6);
 const MAX_RESEND_DELAY: Duration = Duration::from_secs(60);
 
 /// What the submit path needs from the node, beyond the pinned reads.
+/// Every read error carries a read-partition carrier; `submit`'s refusals
+/// classify themselves, and the watch's `Ok(None)`-to-error wraps stay
+/// carrier-less by design.
 #[async_trait]
 pub(crate) trait SubmitChain: PinnedReads {
     async fn block_number(&self, at: &BlockHash) -> anyhow::Result<u64>;

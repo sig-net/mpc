@@ -843,6 +843,81 @@ impl MidnightPublisherRpc {
         Ok(header)
     }
 
+    async fn number_at(&self, at: &BlockHash) -> anyhow::Result<u64> {
+        Ok(u64::from(self.header(H256::from(*at)).await?.number))
+    }
+
+    async fn hash_at(&self, number: u64) -> anyhow::Result<Option<BlockHash>> {
+        Ok(self
+            .legacy
+            .chain_get_block_hash(Some(NumberOrHex::Number(number)))
+            .await
+            .context("failed to fetch a midnight block hash by number")?
+            .map(BlockHash::from))
+    }
+
+    async fn time_at(
+        &self,
+        at: &BlockHash,
+    ) -> anyhow::Result<midnight_base_crypto::time::Timestamp> {
+        // Named for its type: interpolating `at` must render the full hash, and an
+        // H256 binding here once truncated that render to `0x4343…4343`.
+        let at_h256 = H256::from(*at);
+        if let Some(time) = recall(&self.blocks().times, at_h256) {
+            return Ok(time);
+        }
+        let key = self
+            .client_for_block(at_h256)
+            .await?
+            .storage()
+            .address_bytes(&subxt::dynamic::storage(
+                "Timestamp",
+                "Now",
+                Vec::<subxt::dynamic::Value>::new(),
+            ))
+            .context("the midnight runtime has no Timestamp::Now")?;
+        let raw = self
+            .legacy
+            .state_get_storage(&key, Some(at_h256))
+            .await
+            .context("failed to fetch the midnight block time")?
+            .with_context(|| format!("midnight node has no block time at {at}"))?;
+        let millis =
+            u64::decode_all(&mut &raw[..]).context("the midnight block time is not a u64")?;
+        let time = midnight_base_crypto::time::Timestamp::from_secs(millis / 1000);
+        remember(&mut self.blocks().times, at_h256, time);
+        Ok(time)
+    }
+
+    async fn landing_at(
+        &self,
+        at: &BlockHash,
+        tx_hash: LedgerTxHash,
+    ) -> anyhow::Result<Option<Landing>> {
+        let at_h256 = H256::from(*at);
+        let events = self
+            .client_for_block(at_h256)
+            .await?
+            .events()
+            .at(at_h256)
+            .await
+            .context("failed to fetch midnight block events")?;
+        for event in events.iter() {
+            let event = event.context("Midnight block events did not match metadata")?;
+            if let Some(TxApplied(details)) = event.as_event::<TxApplied>()? {
+                if details.tx_hash == *tx_hash.as_bytes() {
+                    return Ok(Some(Landing::Applied));
+                }
+            }
+            if let Some(TxPartialSuccess(details)) = event.as_event::<TxPartialSuccess>()? {
+                if details.tx_hash == *tx_hash.as_bytes() {
+                    return Ok(Some(Landing::PartialSuccess));
+                }
+            }
+        }
+        Ok(None)
+    }
+
     fn blocks(&self) -> std::sync::MutexGuard<'_, BlockMemo> {
         self.blocks
             .lock()
@@ -915,7 +990,7 @@ pub(crate) fn read_verdict(error: &anyhow::Error) -> RpcFailure {
 #[error("a publisher read failed")]
 struct ReadFailed(#[source] anyhow::Error);
 
-fn attach_read_carrier(error: anyhow::Error) -> anyhow::Error {
+pub(crate) fn attach_read_carrier(error: anyhow::Error) -> anyhow::Error {
     anyhow::Error::new(read_verdict(&error)).context(ReadFailed(error))
 }
 
@@ -1009,50 +1084,18 @@ fn classify_submit_reply(
 #[async_trait::async_trait]
 impl crate::native::SubmitChain for MidnightPublisherRpc {
     async fn block_number(&self, at: &BlockHash) -> anyhow::Result<u64> {
-        let header = self.header(H256::from(*at)).await?;
-        Ok(u64::from(header.number))
+        self.number_at(at).await.map_err(attach_read_carrier)
     }
 
     async fn block_hash_at(&self, number: u64) -> anyhow::Result<Option<BlockHash>> {
-        Ok(self
-            .legacy
-            .chain_get_block_hash(Some(NumberOrHex::Number(number)))
-            .await
-            .context("failed to fetch a midnight block hash by number")?
-            .map(BlockHash::from))
+        self.hash_at(number).await.map_err(attach_read_carrier)
     }
 
     async fn block_time(
         &self,
         at: &BlockHash,
     ) -> anyhow::Result<midnight_base_crypto::time::Timestamp> {
-        // Named for its type: interpolating `at` must render the full hash, and an
-        // H256 binding here once truncated that render to `0x4343…4343`.
-        let at_h256 = H256::from(*at);
-        if let Some(time) = recall(&self.blocks().times, at_h256) {
-            return Ok(time);
-        }
-        let key = self
-            .client_for_block(at_h256)
-            .await?
-            .storage()
-            .address_bytes(&subxt::dynamic::storage(
-                "Timestamp",
-                "Now",
-                Vec::<subxt::dynamic::Value>::new(),
-            ))
-            .context("the midnight runtime has no Timestamp::Now")?;
-        let raw = self
-            .legacy
-            .state_get_storage(&key, Some(at_h256))
-            .await
-            .context("failed to fetch the midnight block time")?
-            .with_context(|| format!("midnight node has no block time at {at}"))?;
-        let millis =
-            u64::decode_all(&mut &raw[..]).context("the midnight block time is not a u64")?;
-        let time = midnight_base_crypto::time::Timestamp::from_secs(millis / 1000);
-        remember(&mut self.blocks().times, at_h256, time);
-        Ok(time)
+        self.time_at(at).await.map_err(attach_read_carrier)
     }
 
     async fn submit(&self, transaction: &[u8]) -> Result<(), SubmitRefusal> {
@@ -1086,28 +1129,9 @@ impl crate::native::SubmitChain for MidnightPublisherRpc {
         at: &BlockHash,
         tx_hash: LedgerTxHash,
     ) -> anyhow::Result<Option<Landing>> {
-        let at_h256 = H256::from(*at);
-        let events = self
-            .client_for_block(at_h256)
-            .await?
-            .events()
-            .at(at_h256)
+        self.landing_at(at, tx_hash)
             .await
-            .context("failed to fetch midnight block events")?;
-        for event in events.iter() {
-            let event = event.context("Midnight block events did not match metadata")?;
-            if let Some(TxApplied(details)) = event.as_event::<TxApplied>()? {
-                if details.tx_hash == *tx_hash.as_bytes() {
-                    return Ok(Some(Landing::Applied));
-                }
-            }
-            if let Some(TxPartialSuccess(details)) = event.as_event::<TxPartialSuccess>()? {
-                if details.tx_hash == *tx_hash.as_bytes() {
-                    return Ok(Some(Landing::PartialSuccess));
-                }
-            }
-        }
-        Ok(None)
+            .map_err(attach_read_carrier)
     }
 }
 
@@ -1523,7 +1547,7 @@ impl Reads {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::native::SubmitChain as _;
+    use crate::native::SubmitChain;
     use crate::submit_error::SubmitError;
     use jsonrpsee::server::ServerBuilder;
     use jsonrpsee::types::ErrorObjectOwned;
@@ -2578,6 +2602,22 @@ mod tests {
                     .await
                     .expect_err("an HTTP rejection must fail the read"),
                 PinnedReads::ledger_parameters(&rpc, &at_hash)
+                    .await
+                    .expect_err("an HTTP rejection must fail the read"),
+                // The watch's reads: against an all-rejecting transport each
+                // fails at its first legacy call; subxt's wrappers forward
+                // `source()` to `RawRpcError` regardless (subxt 0.44.0
+                // error/mod.rs).
+                SubmitChain::block_number(&rpc, &at_hash)
+                    .await
+                    .expect_err("an HTTP rejection must fail the read"),
+                SubmitChain::block_hash_at(&rpc, 1)
+                    .await
+                    .expect_err("an HTTP rejection must fail the read"),
+                SubmitChain::block_time(&rpc, &at_hash)
+                    .await
+                    .expect_err("an HTTP rejection must fail the read"),
+                SubmitChain::landing(&rpc, &at_hash, LedgerTxHash::from_bytes([0x42; 32]))
                     .await
                     .expect_err("an HTTP rejection must fail the read"),
             ] {
