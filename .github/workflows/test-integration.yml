@@ -139,13 +139,6 @@ jobs:
       - name: Set OpenSSL to system
         run: echo "OPENSSL_NO_VENDOR=1" >> $GITHUB_ENV
 
-      - name: Install Node.js
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
-        with:
-          node-version: '22'
-          cache: 'npm'
-          cache-dependency-path: chain-signatures/contract-eth/package-lock.json
-
       - name: Setup Solana and Anchor
         uses: metadaoproject/setup-anchor@b29b81b9a4568aafb3faaf42eccc73cefdbfbc9f # v3.1
         with:
@@ -185,9 +178,6 @@ jobs:
           if ! command -v cargo-near >/dev/null; then
             curl --proto '=https' --tlsv1.2 -LsSf https://github.com/near/cargo-near/releases/latest/download/cargo-near-installer.sh | sh
           fi
-
-      - name: Build eth contract
-        run: just build eth
 
       # Build the tests before actually running them to see how long the tests take to run by itself
       # instead of including the build time in the test time report on Github.
@@ -242,12 +232,6 @@ jobs:
           # Only save the cache if there are dependency changes or it's not a merge group
           save-if: ${{ github.event_name != 'merge_group' && (github.event_name != 'pull_request' || steps.depchange.outputs.changed == 'true') }}
 
-      - name: Install Node.js
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
-        with:
-          node-version: '22'
-          cache: 'npm'
-          cache-dependency-path: chain-signatures/contract-eth/package-lock.json
       - name: Install Foundry (anvil)
         uses: foundry-rs/foundry-toolchain@908c540300062bd5a7e473851cdb4282204cee09 # v1
 
