@@ -367,6 +367,16 @@ The contract on a [source chain](#source-chain) that takes
 on Solana. See [bidirectional-calls.md
 §4.2](bidirectional-calls.md#42-signet-contract-per-source-chain).
 
+## Signing scheme
+
+The signature algorithm and curve a key signs with: ECDSA over secp256k1
+today, with EdDSA planned. A request names its signing scheme among its key
+parameters. The contracts call it `algo`: a string on most source chains, the
+enum `MPCSignatureAlgorithm` on Midnight (`SignBidirectionalEvent::algo`,
+`chain-signatures/primitives/src/bidirectional.rs`). See
+[bidirectional-calls.md
+§7.1](bidirectional-calls.md#71-request-signbidirectionaleventv1).
+
 ## Source chain
 
 The chain a [request](#request) is made on and answered on.

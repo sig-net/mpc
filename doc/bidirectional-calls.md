@@ -70,7 +70,8 @@ Happy path:
 * *Request*: what the contract asks for, the tuple (sender, tx, target, key,
   schema): the contract that makes it, the transaction, its target chain,
   the key parameters to sign it with (a derivation path, key version and
-  signing scheme), and the schema of its output. The MPC decodes the output
+  [signing scheme](glossary.md#signing-scheme)), and the schema of its
+  output. The MPC decodes the output
   with that schema and encodes the response from it, in the source chain's
   types. Written `req`, with fields `req.sender`, `req.tx`, `req.target`,
   `req.key` and `req.schema` (Section 7 maps them to the fields on the wire,
@@ -844,7 +845,7 @@ stay out.
 | `keyVersion` | `u8` | yes | MPC key version, at least 1 |
 | `sender` | `address` | yes | the requesting contract |
 | `path` | `bytes(32)` | yes | key derivation path; at key version 1 the reserved response-key path is refused |
-| `algo` | `enum MPCSignatureAlgorithm` | yes | signing scheme |
+| `algo` | `enum MPCSignatureAlgorithm` | yes | [signing scheme](glossary.md#signing-scheme) |
 | `txParamType` | `enum TxParamType` | yes | which transaction structure `txParams` holds |
 | `txParams` | per `txParamType` (7.3, 7.4) | as its digest | the transaction |
 | `executionDest` | `bytes(64)` | yes | CAIP-2 id of the target chain family in ASCII, zero padded, matched exactly; one fixed id per family, `eip155:1` for every Ethereum network. Which network the MPC executes on is set per deployment. An id contains no zero byte, so the padding is unambiguous |

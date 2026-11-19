@@ -27,12 +27,12 @@ We are using an extended version of the [CAIP-10](https://chainagnostic.org/CAIP
 
 A key's derivation path names the key version and the key's purpose, which is what the key signs. This section gives key version 2, the latest; [Earlier Key Versions](#earlier-key-versions) gives versions 0 and 1.
 
-| Purpose | Signs | `PURPOSE` | Derivation path |
-|---|---|---|---|
-| Plain | [plain sign requests](glossary.md#plain-sign-request) | `plain` | `{SIGNET_DERIVATION_PREFIX}:{KEY_VERSION}:{PURPOSE}:{CAIP2_CHAIN_ID}:{SENDER}:{DERIVATION_PATH}` |
-| Bidirectional | [bidirectional requests](glossary.md#bidirectional-request) | `bidirectional` | `{SIGNET_DERIVATION_PREFIX}:{KEY_VERSION}:{PURPOSE}:{CAIP2_CHAIN_ID}:{SENDER}:{DERIVATION_PATH}` |
-| Attestation | [attestations](glossary.md#attestation) of bidirectional requests | `attestation` | `{SIGNET_DERIVATION_PREFIX}:{KEY_VERSION}:{PURPOSE}:{CAIP2_CHAIN_ID}:{SENDER}` |
-| System account | transactions of a [system account](glossary.md#system-account) | `system` | `{SIGNET_DERIVATION_PREFIX}:{KEY_VERSION}:{PURPOSE}:{CAIP2_CHAIN_ID}:{DERIVATION_PATH}` |
+| `PURPOSE` | Signs | Derivation path |
+|---|---|---|
+| `plain` | [plain sign requests](glossary.md#plain-sign-request) | `{SIGNET_DERIVATION_PREFIX}:{KEY_VERSION}:{PURPOSE}:{CAIP2_CHAIN_ID}:{SENDER}:{DERIVATION_PATH}` |
+| `bidirectional` | [bidirectional requests](glossary.md#bidirectional-request) | `{SIGNET_DERIVATION_PREFIX}:{KEY_VERSION}:{PURPOSE}:{CAIP2_CHAIN_ID}:{SENDER}:{DERIVATION_PATH}` |
+| `attestation` | [attestations](glossary.md#attestation) of bidirectional requests | `{SIGNET_DERIVATION_PREFIX}:{KEY_VERSION}:{PURPOSE}:{CAIP2_CHAIN_ID}:{SENDER}` |
+| `system` | transactions of a [system account](glossary.md#system-account) | `{SIGNET_DERIVATION_PREFIX}:{KEY_VERSION}:{PURPOSE}:{CAIP2_CHAIN_ID}:{DERIVATION_PATH}` |
 
 Where:
 - **SIGNET_DERIVATION_PREFIX** = `sig.network derivation`
