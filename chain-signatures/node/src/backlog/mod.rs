@@ -717,17 +717,6 @@ impl Backlog {
         Ok(checkpoint)
     }
 
-    /// Hydrate the backlog from storage: initializes the pending checkpoint counter
-    /// and recovers local backlog state from the latest durable checkpoint if one exists.
-    pub async fn hydrate(
-        &self,
-        chain: Chain,
-        root_pk: PublicKey,
-    ) -> Result<Option<Checkpoint>, CheckpointError> {
-        self.checkpoints.hydrate(chain).await?;
-        self.recover_local(chain, root_pk).await
-    }
-
     /// Give each entry its stored records, once replay has rebuilt the backlog.
     pub(crate) async fn claim_local(&self, chain: Chain, records: Vec<(SignId, SignStatus)>) {
         let mut pending = self.pending(&chain).write().await;
@@ -793,7 +782,7 @@ impl Backlog {
     }
 
     /// Recover backlog state from a checkpoint into memory.
-    /// This is called when a node restarts (via `hydrate`) or regresses to consensus (via `regress`).
+    /// This is called when a node restarts (via `recover_local`) or regresses to consensus (via `regress`).
     pub async fn recover_by_checkpoint(&self, checkpoint: &Checkpoint) {
         let restored = PendingRequests::from_checkpoint(checkpoint);
         let chain = checkpoint.chain;

@@ -1873,7 +1873,7 @@ async fn restarting_on_an_old_format_body_keeps_its_indexing_times() {
 
     let restarted = Backlog::persisted(storage);
     restarted
-        .hydrate(Chain::Solana, mock_root_pk())
+        .recover_local(Chain::Solana, mock_root_pk())
         .await
         .unwrap();
     for entry in &body.pending_requests {

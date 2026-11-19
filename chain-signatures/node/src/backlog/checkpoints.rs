@@ -289,11 +289,7 @@ impl Checkpoints {
 
         // Not a fault by itself: a node behind consensus has no such checkpoint yet.
         let Some(remaining_count) = outcome else {
-            tracing::debug!(
-                ?chain,
-                ?digest,
-                "checkpoint not found for promotion"
-            );
+            tracing::debug!(?chain, ?digest, "checkpoint not found for promotion");
             return Ok(false);
         };
 
@@ -308,29 +304,28 @@ impl Checkpoints {
         Ok(true)
     }
 
-    /// Hydrates the pending checkpoint count from storage into the local counter.
-    pub(crate) async fn hydrate(&self, chain: Chain) -> Result<usize, CheckpointError> {
-        let count = self
-            .storage
-            .pending_count(chain)
-            .await
-            .map_err(|source| CheckpointError::Storage { chain, source })?;
-        self.pending_counts[chain].store(count, Ordering::Release);
-        self.observe(chain, count);
-        Ok(count)
+    /// Zeroes the locally tracked pending count. Recovery calls this after
+    /// durable pending has been cleared, so no storage read is needed.
+    pub(crate) fn reset_pending_count(&self, chain: Chain) {
+        self.pending_counts[chain].store(0, Ordering::Release);
+        self.observe(chain, 0);
     }
 
     /// Moves durable pending checkpoints into the orphan set at the start of a
-    /// recovery pass. Orphans remain servable and promotable but never seed the
-    /// backlog, so recovery deliberately demotes before hydrating or seeding.
+    /// recovery pass, then zeroes the locally tracked pending count because
+    /// durable pending has been cleared. Orphans remain servable and promotable
+    /// but never seed the backlog, so recovery deliberately demotes before seeding.
     pub(crate) async fn demote_pending_to_orphan(
         &self,
         chain: Chain,
     ) -> Result<usize, CheckpointError> {
-        self.storage
+        let demoted = self
+            .storage
             .demote_pending_to_orphan(chain)
             .await
-            .map_err(|source| CheckpointError::Storage { chain, source })
+            .map_err(|source| CheckpointError::Storage { chain, source })?;
+        self.reset_pending_count(chain);
+        Ok(demoted)
     }
 
     /// Replaces durable checkpoint state with a consensus checkpoint after regression.
@@ -556,41 +551,56 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn hydrate_initializes_pending_counter_after_restart() {
-        let storage = CheckpointStorage::in_memory();
-        let first = checkpoint(1);
-        let second = checkpoint(2);
-        let checkpoints = Checkpoints::new(storage.clone());
-        checkpoints.persist_pending(&first).await.unwrap();
-        checkpoints.persist_pending(&second).await.unwrap();
-
-        let restarted = Checkpoints::new(storage);
-        assert_eq!(restarted.hydrate(first.chain).await.unwrap(), 2);
-        assert_eq!(restarted.count(first.chain), 2);
-        assert_eq!(
-            restarted.find(first.chain, first.digest()).await,
-            Some(first)
-        );
+    // The checkpoint metric is process-global. These tests use a chain no other
+    // test observes so the metric assertion is deterministic under parallel runs.
+    fn pending_checkpoint_metric(chain: Chain) -> i64 {
+        crate::metrics::requests::PENDING_CHECKPOINTS
+            .with_label_values(&[chain.as_str()])
+            .get()
     }
 
     #[tokio::test]
-    async fn hydrate_loads_durable_pending_count() {
-        let storage = CheckpointStorage::in_memory();
-        let confirmed = checkpoint(2);
-        let stale_pending = checkpoint(1);
-        let fresh_pending = checkpoint(3);
-        storage.persist(&confirmed).await.unwrap();
-        storage.persist_pending(&stale_pending).await.unwrap();
-        storage.persist_pending(&fresh_pending).await.unwrap();
+    async fn reset_pending_count_zeroes_counter_and_metric() {
+        let chain = Chain::Tron;
+        let checkpoints = Checkpoints::new(CheckpointStorage::in_memory());
+        checkpoints
+            .persist_pending(&Checkpoint::reset(chain, 1))
+            .await
+            .unwrap();
+        checkpoints
+            .persist_pending(&Checkpoint::reset(chain, 2))
+            .await
+            .unwrap();
+        assert_eq!(checkpoints.count(chain), 2);
 
-        let checkpoints = Checkpoints::new(storage);
-        assert_eq!(checkpoints.hydrate(confirmed.chain).await.unwrap(), 2);
-        assert_eq!(checkpoints.count(confirmed.chain), 2);
+        checkpoints.reset_pending_count(chain);
+
+        assert_eq!(checkpoints.count(chain), 0);
+        assert_eq!(pending_checkpoint_metric(chain), 0);
+    }
+
+    #[tokio::test]
+    async fn reset_pending_count_leaves_durable_pending_findable() {
+        let chain = Chain::Tron;
+        let storage = CheckpointStorage::in_memory();
+        let confirmed = Checkpoint::reset(chain, 2);
+        let stale_pending = Checkpoint::reset(chain, 1);
+        let checkpoints = Checkpoints::new(storage.clone());
+        storage.persist(&confirmed).await.unwrap();
+        checkpoints.persist_pending(&stale_pending).await.unwrap();
+        assert_eq!(checkpoints.count(chain), 1);
+
+        checkpoints.reset_pending_count(chain);
+
+        assert_eq!(checkpoints.count(chain), 0);
+        assert_eq!(pending_checkpoint_metric(chain), 0);
+        // The reset is purely local: durable bodies remain servable by digest.
         assert_eq!(
-            checkpoints
-                .find(stale_pending.chain, stale_pending.digest())
-                .await,
+            checkpoints.find(chain, confirmed.digest()).await,
+            Some(confirmed)
+        );
+        assert_eq!(
+            checkpoints.find(chain, stale_pending.digest()).await,
             Some(stale_pending)
         );
     }
@@ -721,9 +731,8 @@ mod tests {
         let checkpoint = checkpoint(1);
         storage.persist_pending(&checkpoint).await.unwrap();
 
-        // A fresh `Checkpoints` has an empty counter until `hydrate`
-        // initializes it, as happens right after a restart before the mesh is active.
-        // The durable pending body must still be findable.
+        // A fresh `Checkpoints` has an empty local counter; the durable pending
+        // body must still be findable.
         let checkpoints = Checkpoints::new(storage);
 
         assert_eq!(

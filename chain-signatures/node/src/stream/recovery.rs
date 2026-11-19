@@ -27,8 +27,9 @@ pub(crate) async fn recover_backlog(
 
     // Demote every durable pending checkpoint to an orphan at the very start of
     // every recovery pass. Orphans stay durable, servable by digest, and
-    // promotable, but are never used as a recovery seed (nor re-voted). Doing
-    // this before hydration also resets the pending count to zero.
+    // promotable, but are never used as a recovery seed (nor re-voted). Demotion
+    // clears durable pending and resets the local counter as part of the same
+    // operation.
     let demoted = backlog
         .checkpoints()
         .demote_pending_to_orphan(chain)
@@ -36,10 +37,6 @@ pub(crate) async fn recover_backlog(
     if demoted > 0 {
         tracing::info!(%chain, count = demoted, "demoted pending checkpoints to orphans during recovery");
     }
-
-    // Hydrate the in-memory pending checkpoint counter from storage on every
-    // recovery pass so any counter drift self-heals across restarts.
-    backlog.checkpoints().hydrate(chain).await?;
 
     // Hydrate local backlog state from durable storage on initial startup.
     if load_local {
