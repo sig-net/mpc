@@ -2281,6 +2281,10 @@ mod tests {
             [11, 11, 11],
             "the third consecutive throttled scan exits, re-reading the same block"
         );
+        assert!(
+            client.wallet.released.lock().unwrap().is_empty(),
+            "the escape holds the reservation like the deadline exit"
+        );
         let published = SubmitError::into_publish_error(error);
         assert!(is_retryable(&published), "{published:#}");
         let carrier = published
