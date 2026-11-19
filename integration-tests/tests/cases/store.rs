@@ -632,6 +632,104 @@ async fn test_redis_demote_overwrite_drops_stale_digest_body() -> anyhow::Result
     Ok(())
 }
 
+/// Re-demoting a different body at the same heights must overwrite the orphan
+/// bodies rather than accumulate them: against real Redis the orphan hash stays
+/// bounded by the number of boundary heights above the base, not by how often a
+/// node restarts or re-indexes.
+#[test(tokio::test)]
+async fn test_redis_demote_twice_does_not_grow_orphans() -> anyhow::Result<()> {
+    use deadpool_redis::redis;
+    use near_account_id::AccountId;
+
+    let spawner = ClusterSpawner::default()
+        .network("test-redis-demote-no-grow")
+        .init_network()
+        .await?;
+    let redis_container = containers::Redis::run(&spawner).await;
+    let account_id: AccountId = "party0.near".parse()?;
+    let storage = CheckpointStorage::Redis(redis_container.pool(), account_id);
+    let chain = Chain::Solana;
+    let at = |height, id| Checkpoint {
+        chain,
+        block_height: height,
+        pending_requests: vec![dummy_backlog_entry(id, chain)],
+        legacy_digest: None,
+    };
+
+    // Count the orphan bodies directly in Redis - no public API exposes this.
+    let orphan_bodies = || async {
+        let CheckpointStorage::Redis(pool, _) = &storage else {
+            unreachable!("redis storage expected");
+        };
+        let mut conn = pool.get().await?;
+        let (_, keys): (u64, Vec<String>) = redis::cmd("SCAN")
+            .arg(0)
+            .arg("MATCH")
+            .arg("*:checkpoint:orphan:*")
+            .arg("COUNT")
+            .arg(1000)
+            .query_async(&mut conn)
+            .await?;
+        let mut total = 0usize;
+        for key in keys {
+            let len: usize = redis::cmd("HLEN").arg(&key).query_async(&mut conn).await?;
+            total += len;
+        }
+        Ok::<_, anyhow::Error>(total)
+    };
+
+    // First pass: three boundary heights, one body each.
+    let old = [at(10, 1), at(20, 2), at(30, 3)];
+    for cp in &old {
+        storage.persist_pending(cp).await?;
+    }
+    assert_eq!(storage.demote_pending_to_orphan(chain).await?, 3);
+    assert_eq!(orphan_bodies().await?, 3);
+
+    // A restart re-indexes fresh bodies at the SAME heights with different
+    // digests. Each demotion must overwrite the orphan at that height.
+    let new = [at(10, 4), at(20, 5), at(30, 6)];
+    for (old_cp, new_cp) in old.iter().zip(&new) {
+        assert_ne!(old_cp.digest(), new_cp.digest());
+    }
+    for cp in &new {
+        storage.persist_pending(cp).await?;
+    }
+    assert_eq!(storage.demote_pending_to_orphan(chain).await?, 3);
+    // Still exactly one orphan per height - overwritten, not accumulated.
+    assert_eq!(orphan_bodies().await?, 3);
+
+    // The stale digests are gone from the index: they must not resolve to a
+    // different body (the stale-index regression), while the new ones do.
+    for old_cp in &old {
+        let found = storage.find(chain, old_cp.digest()).await?;
+        assert!(
+            found
+                .as_ref()
+                .is_none_or(|cp| cp.digest() == old_cp.digest()),
+            "find returned a body that does not match the requested stale digest"
+        );
+    }
+    for new_cp in &new {
+        assert_eq!(
+            storage.find(chain, new_cp.digest()).await?,
+            Some(new_cp.clone())
+        );
+    }
+
+    // Promoting the middle height retires every orphan at or below it.
+    let promoted = &new[1];
+    assert_eq!(storage.promote(chain, promoted.digest()).await?, Some(0));
+    assert_eq!(storage.load_latest(chain).await?, Some(promoted.clone()));
+    assert_eq!(orphan_bodies().await?, 1);
+    assert!(storage.find(chain, new[0].digest()).await?.is_none());
+    assert_eq!(
+        storage.find(chain, new[2].digest()).await?,
+        Some(new[2].clone())
+    );
+    Ok(())
+}
+
 /// The confirmed base is a first-class `latest()` candidate in Redis too: it
 /// wins strictly higher heights, loses to strictly higher pending/orphan bodies,
 /// and wins height ties.
