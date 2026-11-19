@@ -665,13 +665,12 @@ impl CheckpointStorage {
     pub async fn latest(&self, chain: Chain) -> anyhow::Result<Option<Checkpoint>> {
         match self {
             CheckpointStorage::Redis(pool, _) => {
-                // The confirmed base is a first-class candidate. Read it once in Rust to
-                // seed the height comparison, then let one atomic Lua pass pick the body.
-                let base = self.load_latest(chain).await?;
-                let base_height = base
-                    .as_ref()
-                    .map_or_else(|| "-1".to_string(), |cp| cp.block_height.to_string());
                 let mut conn = pool.get().await.context("failed to get redis connection")?;
+                // One atomic pass returns the best pending/orphan candidate together with
+                // the raw canonical base body (`KEYS[2]`), so no separate GET is needed.
+                // Lua cannot decode the base's CBOR to read its height, so the final
+                // comparison (base wins height ties) happens in Rust once both bodies
+                // are decoded.
                 // Redis Hashes (`HSET`) store unordered key-value pairs (block_height -> checkpoint body).
                 // Redis does not support ordering or range queries on hash keys.
                 // Because the checkpoint sets are strictly bounded, walking the pending and
@@ -695,25 +694,37 @@ impl CheckpointStorage {
                     local oh, ob = scan(KEYS[3])   -- orphan
                     local best_h, best_b = ph, pb
                     if oh > best_h then best_h, best_b = oh, ob end
-                    -- base wins ties: ARGV[1] is the confirmed base height; when pending/orphan
-                    -- do not strictly exceed it, return false so Rust falls back to the base body.
-                    if best_h <= tonumber(ARGV[1]) then return false end
-                    return best_b
+                    local base_b = redis.call('GET', KEYS[2])   -- confirmed base
+                    return { best_h, best_b, base_b }
                 "#;
-                let body: Option<Vec<u8>> = redis::Script::new(LATEST)
-                    .key(self.pending_checkpoint_key(chain))
-                    .key(self.checkpoint_key(chain))
-                    .key(self.orphan_checkpoint_key(chain))
-                    .arg(base_height)
-                    .invoke_async(&mut conn)
-                    .await
-                    .context("failed to load latest checkpoint from redis")?;
-                let Some(body) = body else {
-                    return Ok(base);
-                };
-                let checkpoint =
-                    decode_checkpoint(&body).context("failed to deserialize checkpoint")?;
-                Ok(Some(checkpoint))
+                let (_, candidate_body, base_body): (i64, Option<Vec<u8>>, Option<Vec<u8>>) =
+                    redis::Script::new(LATEST)
+                        .key(self.pending_checkpoint_key(chain))
+                        .key(self.checkpoint_key(chain))
+                        .key(self.orphan_checkpoint_key(chain))
+                        .invoke_async(&mut conn)
+                        .await
+                        .context("failed to load latest checkpoint from redis")?;
+
+                // Decode both bodies in Rust: Lua cannot read the base's CBOR height.
+                let base = base_body
+                    .map(|bytes| decode_checkpoint(&bytes))
+                    .transpose()
+                    .context("failed to deserialize confirmed checkpoint")?;
+                let candidate = candidate_body
+                    .map(|bytes| decode_checkpoint(&bytes))
+                    .transpose()
+                    .context("failed to deserialize checkpoint")?;
+
+                // The confirmed base wins height ties; a pending/orphan candidate is
+                // chosen only when strictly newer.
+                Ok(match (base, candidate) {
+                    (Some(base), Some(candidate)) if candidate.block_height > base.block_height => {
+                        Some(candidate)
+                    }
+                    (Some(base), _) => Some(base),
+                    (None, candidate) => candidate,
+                })
             }
             CheckpointStorage::InMemory {
                 latest,
