@@ -416,9 +416,7 @@ async fn test_legacy_checkpoint_keeps_its_digest() -> anyhow::Result<()> {
     );
 
     assert_eq!(
-        storage
-            .promote_pending(Chain::Solana, legacy.digest())
-            .await?,
+        storage.promote(Chain::Solana, legacy.digest()).await?,
         Some(0)
     );
     let latest = storage.load_latest(Chain::Solana).await?.unwrap();
@@ -465,9 +463,7 @@ async fn test_pending_checkpoint_persistence() -> anyhow::Result<()> {
     );
 
     assert_eq!(
-        restarted
-            .promote_pending(Chain::Solana, first.digest())
-            .await?,
+        restarted.promote(Chain::Solana, first.digest()).await?,
         Some(1)
     );
     assert_eq!(
@@ -490,19 +486,14 @@ async fn test_pending_checkpoint_persistence() -> anyhow::Result<()> {
         ));
     assert_eq!(restarted.persist_pending(&conflicting).await?, None);
     assert_eq!(restarted.persist_pending(&second).await?, Some(1));
-    assert!(restarted
-        .promote_pending(Chain::Solana, [99; 32])
-        .await?
-        .is_none());
+    assert!(restarted.promote(Chain::Solana, [99; 32]).await?.is_none());
     assert_eq!(restarted.load_latest(Chain::Solana).await?, Some(first));
     assert_eq!(
         restarted.load_pending(Chain::Solana).await?,
         vec![second.clone()]
     );
     assert_eq!(
-        restarted
-            .promote_pending(Chain::Solana, second.digest())
-            .await?,
+        restarted.promote(Chain::Solana, second.digest()).await?,
         Some(0)
     );
     assert_eq!(restarted.load_latest(Chain::Solana).await?, Some(second));
@@ -582,10 +573,7 @@ async fn test_redis_demote_pending_to_orphan_is_servable_by_digest() -> anyhow::
     );
 
     // The settled digest still promotes the orphan to canonical latest.
-    assert_eq!(
-        storage.promote_pending(chain, checkpoint.digest()).await?,
-        Some(0)
-    );
+    assert_eq!(storage.promote(chain, checkpoint.digest()).await?, Some(0));
     assert_eq!(storage.load_latest(chain).await?, Some(checkpoint));
     Ok(())
 }
@@ -628,10 +616,7 @@ async fn test_redis_demote_overwrite_drops_stale_digest_body() -> anyhow::Result
         found.as_ref().is_none_or(|cp| cp.digest() == old.digest()),
         "find returned a body that does not match the requested digest"
     );
-    assert!(storage
-        .promote_pending(chain, old.digest())
-        .await?
-        .is_none());
+    assert!(storage.promote(chain, old.digest()).await?.is_none());
     assert!(
         storage
             .load_latest(chain)
@@ -642,7 +627,7 @@ async fn test_redis_demote_overwrite_drops_stale_digest_body() -> anyhow::Result
 
     // The current body is still servable and promotable.
     assert_eq!(storage.find(chain, new.digest()).await?, Some(new.clone()));
-    assert_eq!(storage.promote_pending(chain, new.digest()).await?, Some(0));
+    assert_eq!(storage.promote(chain, new.digest()).await?, Some(0));
     assert_eq!(storage.load_latest(chain).await?, Some(new));
     Ok(())
 }
