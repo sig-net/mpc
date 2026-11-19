@@ -448,9 +448,9 @@ impl<W: FeePayer, C: SubmitChain + 'static> NativeIntentClient<W, C> {
 
     /// Scans each finalized block after `after` for `tx_hash` until it lands, until a
     /// finalized block is past `ttl` without it (`Landing::Expired`), or until
-    /// `deadline` — unknown, also for a verdict-carrying read the deadline outruns.
-    /// A terminal read verdict exits at once; `THROTTLED_SCANS_TO_EXIT`
-    /// consecutive throttled ones escape to the publisher's gate.
+    /// `deadline`, when the outcome is unknown. A terminal read verdict exits at
+    /// once; `THROTTLED_SCANS_TO_EXIT` consecutive throttled ones escape to the
+    /// publisher's gate.
     async fn await_landing(
         &self,
         tx_hash: LedgerTxHash,
@@ -843,6 +843,8 @@ mod tests {
         missing_hash_at: Mutex<Option<u64>>,
         /// The status every landing read is rejected with, when set.
         throttled_reads: Mutex<Option<u16>>,
+        /// How long every landing read takes, when set.
+        slow_landing: Mutex<Option<Duration>>,
     }
 
     impl ScriptedChain {
@@ -863,6 +865,7 @@ mod tests {
                 failing_time: Mutex::new(None),
                 missing_hash_at: Mutex::new(None),
                 throttled_reads: Mutex::new(None),
+                slow_landing: Mutex::new(None),
             }
         }
 
@@ -891,6 +894,11 @@ mod tests {
 
         fn throttling_landing_reads(self, status: u16) -> Self {
             *self.throttled_reads.lock().unwrap() = Some(status);
+            self
+        }
+
+        fn slowing_landing_reads(self, delay: Duration) -> Self {
+            *self.slow_landing.lock().unwrap() = Some(delay);
             self
         }
 
@@ -997,6 +1005,10 @@ mod tests {
             assert_eq!(tx_hash, LedgerTxHash::from_bytes(TX_HASH));
             let number = block_number_of(at);
             self.landing_reads.lock().unwrap().push_back(number);
+            let slow = *self.slow_landing.lock().unwrap();
+            if let Some(delay) = slow {
+                tokio::time::sleep(delay).await;
+            }
             if let Some(status) = *self.throttled_reads.lock().unwrap() {
                 return Err(scan_read_rejected(status));
             }
@@ -2275,6 +2287,32 @@ mod tests {
             client.chain.submits().len(),
             1,
             "the resend task died with the watch, not with the budget"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_verdict_finishing_after_the_deadline_ends_ambiguous() {
+        // The dropped scan takes its verdict with it.
+        let client = client_over(
+            managed_dir(|_, bytes| bytes),
+            ScriptedChain::new(10, 20, None)
+                .failing_once_with(11, scan_read_rejected(403))
+                .slowing_landing_reads(Duration::from_secs(40)),
+        );
+        let error = client
+            .post(
+                b"tx",
+                LedgerTxHash::from_bytes(TX_HASH),
+                &spent(),
+                10,
+                Timestamp::from_secs(5000),
+                Instant::now() + Duration::from_secs(30),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, SubmitError::Ambiguous(_)),
+            "the deadline outran the terminal read: {error:#}"
         );
     }
 
