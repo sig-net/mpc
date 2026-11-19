@@ -687,9 +687,14 @@ impl CheckpointStorage {
                 // are decoded.
                 // Redis Hashes (`HSET`) store unordered key-value pairs (block_height -> checkpoint body).
                 // Redis does not support ordering or range queries on hash keys.
-                // Because the checkpoint sets are strictly bounded, walking the pending and
-                // orphan entries in Lua via `HGETALL` is effectively O(1). This linear scan
-                // avoids the operational complexity and dual-write maintenance of a ZSET.
+                // Pending is capped at MAX_PENDING_CHECKPOINTS. Orphans hold at most one body
+                // per boundary height in the window above the confirmed base: a demotion
+                // overwrites the body at a height (purging stale index entries) rather than
+                // adding a second one, `promote` deletes every orphan at or below the promoted
+                // height, and `reset` wipes them. So the scan stays small and does not grow with
+                // restart frequency, only with new heights above the base, which the cap bounds.
+                // This linear scan avoids the operational complexity and dual-write maintenance
+                // of a ZSET.
                 const LATEST: &str = r#"
                     local function scan(key)
                         local entries = redis.call('HGETALL', key)
@@ -1267,6 +1272,96 @@ mod tests {
         assert_eq!(storage.find(chain, new.digest()).await?, Some(new.clone()));
         assert_eq!(storage.promote(chain, new.digest()).await?, Some(0));
         assert_eq!(storage.load_latest(chain).await?, Some(new));
+        Ok(())
+    }
+
+    /// Orphans are bounded by height, not by how often a node restarts:
+    /// re-demoting a different body at the same heights must overwrite, not
+    /// accumulate, so a restart cycle cannot grow the orphan set.
+    #[tokio::test]
+    async fn demote_twice_with_different_digests_does_not_grow_orphans() -> anyhow::Result<()> {
+        let chain = Chain::Solana;
+        let storage = CheckpointStorage::in_memory();
+
+        // First pass: three boundary heights, one body each.
+        let old = [
+            checkpoint_with_id(chain, 10, 1),
+            checkpoint_with_id(chain, 20, 2),
+            checkpoint_with_id(chain, 30, 3),
+        ];
+        for cp in &old {
+            storage.persist_pending(cp).await?;
+        }
+        assert_eq!(storage.demote_pending_to_orphan(chain).await?, 3);
+        assert_eq!(
+            match &storage {
+                CheckpointStorage::InMemory { orphan, .. } =>
+                    orphan.read().await.get(&chain).map_or(0, |m| m.len()),
+                _ => unreachable!("in-memory storage"),
+            },
+            3
+        );
+
+        // A restart re-indexes fresh bodies at the SAME heights with different
+        // digests. Each demotion must overwrite the orphan at that height.
+        let new = [
+            checkpoint_with_id(chain, 10, 4),
+            checkpoint_with_id(chain, 20, 5),
+            checkpoint_with_id(chain, 30, 6),
+        ];
+        for (old_cp, new_cp) in old.iter().zip(&new) {
+            assert_ne!(old_cp.digest(), new_cp.digest());
+        }
+        for cp in &new {
+            storage.persist_pending(cp).await?;
+        }
+        assert_eq!(storage.demote_pending_to_orphan(chain).await?, 3);
+        // Still exactly one orphan per height - overwritten, not accumulated.
+        assert_eq!(
+            match &storage {
+                CheckpointStorage::InMemory { orphan, .. } =>
+                    orphan.read().await.get(&chain).map_or(0, |m| m.len()),
+                _ => unreachable!("in-memory storage"),
+            },
+            3
+        );
+
+        // The stale digests are gone from the index: they must not resolve to a
+        // different body (the stale-index regression), while the new ones do.
+        for old_cp in &old {
+            let found = storage.find(chain, old_cp.digest()).await?;
+            assert!(
+                found
+                    .as_ref()
+                    .is_none_or(|cp| cp.digest() == old_cp.digest()),
+                "find returned a body that does not match the requested stale digest"
+            );
+        }
+        for new_cp in &new {
+            assert_eq!(
+                storage.find(chain, new_cp.digest()).await?,
+                Some(new_cp.clone())
+            );
+        }
+
+        // Promoting the middle height retires every orphan at or below it.
+        let promoted = &new[1];
+        assert_eq!(storage.promote(chain, promoted.digest()).await?, Some(0));
+        assert_eq!(storage.load_latest(chain).await?, Some(promoted.clone()));
+        assert_eq!(
+            match &storage {
+                CheckpointStorage::InMemory { orphan, .. } =>
+                    orphan.read().await.get(&chain).map_or(0, |m| m.len()),
+                _ => unreachable!("in-memory storage"),
+            },
+            1
+        );
+        assert!(storage.find(chain, new[0].digest()).await?.is_none());
+        assert!(storage.find(chain, old[0].digest()).await?.is_none());
+        assert_eq!(
+            storage.find(chain, new[2].digest()).await?,
+            Some(new[2].clone())
+        );
         Ok(())
     }
 
