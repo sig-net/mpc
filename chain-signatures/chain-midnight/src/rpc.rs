@@ -2680,6 +2680,12 @@ mod tests {
                     "{code}: {error:#}"
                 );
             }
+            // The landing watch's exit predicate, on the form its reads produce.
+            assert_eq!(
+                crate::native::exits_the_watch(&read),
+                matches!(code, 400 | 401 | 402 | 403 | 404 | 405 | 429),
+                "{code}"
+            );
             // The indexer loop's bool form, on the raw error `retry_read` sees.
             assert_eq!(
                 is_read_retryable(&rejected_read(code)),

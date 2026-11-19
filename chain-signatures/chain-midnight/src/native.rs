@@ -33,7 +33,7 @@ use tokio::time::Instant;
 use crate::funding::{dust_deficit, FeePayer, SealedTx, UnprovenTx};
 use crate::intent::{IntentRequest, RespondCircuit, Submitted};
 use crate::publisher::IntentClient;
-use crate::rpc::{Landing, PinnedReads, SubmitRefusal};
+use crate::rpc::{read_verdict, Landing, PinnedReads, SubmitRefusal};
 use crate::submit_error::SubmitError;
 use crate::types::{BlockHash, LedgerTxHash, NetworkId};
 
@@ -443,7 +443,7 @@ impl<W: FeePayer, C: SubmitChain + 'static> NativeIntentClient<W, C> {
 
     /// Scans each finalized block after `after` for `tx_hash` until it lands, until a
     /// finalized block is past `ttl` without it (`Landing::Expired`), or until
-    /// `deadline`, when the outcome is unknown.
+    /// `deadline` — unknown, also for a verdict-carrying read the deadline outruns.
     async fn await_landing(
         &self,
         tx_hash: LedgerTxHash,
@@ -487,6 +487,9 @@ impl<W: FeePayer, C: SubmitChain + 'static> NativeIntentClient<W, C> {
                 Ok(Ok(Some(landing))) => return Ok(landing),
                 Ok(Ok(None)) => {}
                 Ok(Err(error)) => {
+                    if exits_the_watch(&error) {
+                        return Err(node(error));
+                    }
                     tracing::warn!(
                         ?error,
                         "midnight: watching for the respond transaction failed; retrying"
@@ -675,6 +678,18 @@ fn node(error: anyhow::Error) -> SubmitError {
     SubmitError::Node { source: error }
 }
 
+/// Whether a failed scan read ends the watch: terminal verdicts exit to
+/// failover, throttled ones (core's typed 402/429) escape so the publisher's
+/// gate engages — decided on `read_verdict` only; watch renders carry numbers.
+pub(crate) fn exits_the_watch(error: &anyhow::Error) -> bool {
+    let failure = read_verdict(error);
+    failure.is_terminal()
+        || matches!(
+            failure.status().map(|status| status.as_u16()),
+            Some(402 | 429)
+        )
+}
+
 #[cfg(test)]
 mod tests {
     use crate::MidnightAddress;
@@ -682,11 +697,16 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Mutex;
 
+    use http::StatusCode;
+    use jsonrpsee::core::client::Error as JsonrpseeClientError;
     use midnight_ledger_v9::structure::{
         ContractAction, ContractCall, Intent, ProofPreimageMarker, Signature, INITIAL_PARAMETERS,
     };
     use midnight_transient_crypto::commitment::PedersenRandomness;
-    use mpc_chain_integration_core::utils::retry::is_retryable;
+    use mpc_chain_integration_core::utils::retry::{
+        is_retryable, run_gated, RpcFailure, SharedBackoff,
+    };
+    use subxt::ext::subxt_rpcs::Error as RawRpcError;
 
     use super::*;
     use crate::emissions::{emissions_of_call, Emission, EmissionKind, MISC_PAYLOAD_LEN};
@@ -791,8 +811,12 @@ mod tests {
         landing_reads: Mutex<VecDeque<u64>>,
         /// A block whose first landing read fails.
         failing_read: Mutex<Option<u64>>,
+        /// What `failing_read` fails with, if not the stock text.
+        failing_read_with: Mutex<Option<anyhow::Error>>,
         /// A block whose first time read fails.
         failing_time: Mutex<Option<u64>>,
+        /// A block `block_hash_at` answers nothing for.
+        missing_hash_at: Mutex<Option<u64>>,
     }
 
     impl ScriptedChain {
@@ -809,7 +833,9 @@ mod tests {
                 landing,
                 landing_reads: Mutex::new(VecDeque::new()),
                 failing_read: Mutex::new(None),
+                failing_read_with: Mutex::new(None),
                 failing_time: Mutex::new(None),
+                missing_hash_at: Mutex::new(None),
             }
         }
 
@@ -820,6 +846,17 @@ mod tests {
 
         fn failing_once_at(self, number: u64) -> Self {
             *self.failing_read.lock().unwrap() = Some(number);
+            self
+        }
+
+        fn failing_once_with(self, number: u64, error: anyhow::Error) -> Self {
+            *self.failing_read.lock().unwrap() = Some(number);
+            *self.failing_read_with.lock().unwrap() = Some(error);
+            self
+        }
+
+        fn missing_hash_at(self, number: u64) -> Self {
+            *self.missing_hash_at.lock().unwrap() = Some(number);
             self
         }
 
@@ -842,6 +879,19 @@ mod tests {
         let mut bytes = [0u8; 32];
         bytes[24..].copy_from_slice(&number.to_be_bytes());
         BlockHash::from_bytes(bytes)
+    }
+
+    /// jsonrpsee's `Rejected` shape (jsonrpsee-http-client 0.24.10 transport.rs:376),
+    /// attached like the `SubmitChain` boundary attaches its reads.
+    fn scan_read_rejected(status: u16) -> anyhow::Error {
+        let transport = jsonrpsee::http_client::transport::Error::Rejected {
+            status_code: status,
+        };
+        let client = JsonrpseeClientError::Transport(Box::new(transport));
+        crate::rpc::attach_read_carrier(
+            anyhow::Error::new(RawRpcError::Client(Box::new(client)))
+                .context("failed to fetch midnight block events"),
+        )
     }
 
     fn block_number_of(hash: &BlockHash) -> u64 {
@@ -879,6 +929,9 @@ mod tests {
 
         async fn block_hash_at(&self, number: u64) -> anyhow::Result<Option<BlockHash>> {
             self.hash_lookups.lock().unwrap().push(number);
+            if *self.missing_hash_at.lock().unwrap() == Some(number) {
+                return Ok(None);
+            }
             Ok(Some(block_hash(number)))
         }
 
@@ -913,6 +966,9 @@ mod tests {
             let mut failing = self.failing_read.lock().unwrap();
             if *failing == Some(number) {
                 *failing = None;
+                if let Some(error) = self.failing_read_with.lock().unwrap().take() {
+                    return Err(error);
+                }
                 anyhow::bail!("the node dropped the read of block {number}");
             }
             Ok(self
@@ -2090,6 +2146,177 @@ mod tests {
             *client.chain.landing_reads.lock().unwrap(),
             [11, 12, 13, 13]
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_terminal_scan_read_ends_the_watch_at_once() {
+        // Block 13's landing read answers 403: the watch returns it, reservation kept.
+        let client = client_over(
+            managed_dir(|_, bytes| bytes),
+            ScriptedChain::new(10, 20, Some((13, Landing::Applied)))
+                .failing_once_with(13, scan_read_rejected(403)),
+        );
+        let started = Instant::now();
+        let error = client
+            .post(
+                b"tx",
+                LedgerTxHash::from_bytes(TX_HASH),
+                &spent(),
+                10,
+                Timestamp::from_secs(5000),
+                deadline(),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(error, SubmitError::Node { .. }), "{error:#}");
+        assert!(
+            started.elapsed() < LANDING_POLL * 3,
+            "the watch ends on the failing scan, not the budget: {:?}",
+            started.elapsed()
+        );
+        assert_eq!(
+            client
+                .chain
+                .landing_reads
+                .lock()
+                .unwrap()
+                .iter()
+                .copied()
+                .collect::<Vec<_>>(),
+            [11, 12, 13],
+            "no scan follows the terminal read"
+        );
+        assert!(client.wallet.released.lock().unwrap().is_empty());
+        let published = SubmitError::into_publish_error(error);
+        assert!(!is_retryable(&published), "{published:#}");
+        let carrier = published
+            .chain()
+            .find_map(|cause| cause.downcast_ref::<RpcFailure>())
+            .unwrap_or_else(|| panic!("the exit carries its carrier: {published:#}"));
+        assert_eq!(
+            carrier.status(),
+            StatusCode::from_u16(403).ok(),
+            "{published:#}"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_throttled_scan_read_exits_and_engages_the_gate() {
+        // A 429 escapes the watch too: only a returned error reaches the gate wrapper.
+        let client = client_over(
+            managed_dir(|_, bytes| bytes),
+            ScriptedChain::new(10, 20, Some((13, Landing::Applied)))
+                .failing_once_with(13, scan_read_rejected(429)),
+        );
+        let error = client
+            .post(
+                b"tx",
+                LedgerTxHash::from_bytes(TX_HASH),
+                &spent(),
+                10,
+                Timestamp::from_secs(5000),
+                deadline(),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(error, SubmitError::Node { .. }), "{error:#}");
+        let published = SubmitError::into_publish_error(error);
+        assert!(is_retryable(&published), "{published:#}");
+        let carrier = published
+            .chain()
+            .find_map(|cause| cause.downcast_ref::<RpcFailure>())
+            .unwrap_or_else(|| panic!("the exit carries its carrier: {published:#}"));
+        assert_eq!(
+            carrier.status(),
+            StatusCode::from_u16(429).ok(),
+            "{published:#}"
+        );
+
+        let gate =
+            SharedBackoff::with_cooldowns(Duration::from_millis(300), Duration::from_millis(600));
+        let failed = run_gated(&gate, "midnight publish", async { Err::<(), _>(published) })
+            .await
+            .unwrap_err();
+        assert_eq!(
+            failed
+                .chain()
+                .find_map(|cause| cause.downcast_ref::<RpcFailure>())
+                .unwrap()
+                .status(),
+            StatusCode::from_u16(429).ok(),
+            "the error returns unchanged: {failed:#}"
+        );
+        assert!(
+            gate.remaining() > Duration::ZERO,
+            "the typed 429 engaged the shared cooldown"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_retryable_status_scan_read_keeps_the_watch_scanning() {
+        // A retryable-with-status 500: the watch must re-read, not exit.
+        let client = client_over(
+            managed_dir(|_, bytes| bytes),
+            ScriptedChain::new(10, 13, Some((13, Landing::Applied)))
+                .failing_once_with(13, scan_read_rejected(500)),
+        );
+        let landed = client
+            .post(
+                b"tx",
+                LedgerTxHash::from_bytes(TX_HASH),
+                &spent(),
+                10,
+                Timestamp::from_secs(5000),
+                deadline(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(landed, LedgerTxHash::from_bytes(TX_HASH));
+        assert_eq!(
+            client
+                .chain
+                .landing_reads
+                .lock()
+                .unwrap()
+                .iter()
+                .copied()
+                .collect::<Vec<_>>(),
+            [11, 12, 13, 13],
+            "the failed block is re-read, not exited on"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_absent_block_number_never_ends_the_watch() {
+        // The watch's own None-wrap renders "…block 403": carrier-less, must not exit.
+        for number in [403u64, 429] {
+            let client = client_over(
+                managed_dir(|_, bytes| bytes),
+                ScriptedChain::new(number - 1, number + 2, None)
+                    .stepping(2)
+                    .missing_hash_at(number),
+            );
+            let error = client
+                .post(
+                    b"tx",
+                    LedgerTxHash::from_bytes(TX_HASH),
+                    &spent(),
+                    number - 1,
+                    Timestamp::from_secs(5000),
+                    Instant::now() + Duration::from_secs(30),
+                )
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(error, SubmitError::Ambiguous(_)),
+                "number {number}: {error:#}"
+            );
+            let lookups = client.chain.hash_lookups.lock().unwrap().clone();
+            assert!(
+                lookups.len() > 1 && lookups.iter().all(|looked| *looked == number),
+                "number {number}: the watch kept polling {lookups:?}"
+            );
+        }
     }
 
     #[tokio::test(start_paused = true)]
