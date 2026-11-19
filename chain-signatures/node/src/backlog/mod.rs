@@ -738,14 +738,23 @@ impl Backlog {
         }
     }
 
-    /// Recovers local backlog state from the latest durable checkpoint if one exists.
+    /// Recovers local backlog state from the canonical, contract-settled base if one exists.
+    /// Only the durable confirmed base is used as a seed. Pending bodies (and any older
+    /// unconfirmed bodies) remain durable, servable, and promotable, but are deliberately
+    /// excluded here: after a restart they must never seed the backlog we index or vote from.
     /// A body from an earlier version may be one adopted as sent, so its progress is rebuilt.
     pub async fn recover_local(
         &self,
         chain: Chain,
         root_pk: PublicKey,
     ) -> Result<Option<Checkpoint>, CheckpointError> {
-        let Some(checkpoint) = self.checkpoints.latest(chain).await? else {
+        let Some(checkpoint) = self
+            .checkpoints
+            .storage()
+            .load_latest(chain)
+            .await
+            .map_err(|source| CheckpointError::Storage { chain, source })?
+        else {
             return Ok(None);
         };
         if checkpoint.legacy_digest.is_some() {

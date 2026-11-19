@@ -320,6 +320,19 @@ impl Checkpoints {
         Ok(count)
     }
 
+    /// Moves durable pending checkpoints into the orphan set at the start of a
+    /// recovery pass. Orphans remain servable and promotable but never seed the
+    /// backlog, so recovery deliberately demotes before hydrating or seeding.
+    pub(crate) async fn demote_pending_to_orphan(
+        &self,
+        chain: Chain,
+    ) -> Result<usize, CheckpointError> {
+        self.storage
+            .demote_pending_to_orphan(chain)
+            .await
+            .map_err(|source| CheckpointError::Storage { chain, source })
+    }
+
     /// Replaces durable checkpoint state with a consensus checkpoint after regression.
     pub(crate) async fn regress(&self, checkpoint: &Checkpoint) -> Result<(), CheckpointError> {
         let chain = checkpoint.chain;
@@ -332,7 +345,7 @@ impl Checkpoints {
         Ok(())
     }
 
-    /// Returns the newest pending checkpoint or the latest confirmed checkpoint.
+    /// Returns the newest pending, orphan, or confirmed checkpoint by block height.
     pub async fn latest(&self, chain: Chain) -> Result<Option<Checkpoint>, CheckpointError> {
         self.storage
             .latest(chain)
@@ -348,17 +361,6 @@ impl Checkpoints {
             .map_err(|source| CheckpointError::Storage { chain, source })
     }
 
-    /// Loads the durable unconfirmed checkpoints for `chain`, ordered by height.
-    pub(crate) async fn load_pending(
-        &self,
-        chain: Chain,
-    ) -> Result<Vec<Checkpoint>, CheckpointError> {
-        self.storage
-            .load_pending(chain)
-            .await
-            .map_err(|source| CheckpointError::Storage { chain, source })
-    }
-
     /// Reports whether `chain` can create another pending checkpoint.
     pub(crate) fn has_slot(&self, chain: Chain) -> bool {
         self.count(chain) < MAX_PENDING_CHECKPOINTS
@@ -369,7 +371,7 @@ impl Checkpoints {
         self.pending_counts[chain].load(Ordering::Acquire)
     }
 
-    /// Finds a checkpoint by digest, searching durable latest and pending storage.
+    /// Finds a checkpoint by digest, searching confirmed, pending and orphan storage.
     pub(crate) async fn find(&self, chain: Chain, digest: [u8; 32]) -> Option<Checkpoint> {
         self.storage.find(chain, digest).await.ok().flatten()
     }
