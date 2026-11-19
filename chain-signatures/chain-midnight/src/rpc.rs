@@ -58,10 +58,26 @@ const _: () = assert!(MIN_PROVING_RESPONSE_CAP <= MAX_RESPONSE_SIZE as usize);
 
 const STATE_TOO_LARGE: &str = "midnight contract state exceeds the protocol limit";
 
+/// What produced an [`OversizedContractState`] marker. The publish path treats
+/// only a client-cap refusal as terminal, because [`MAX_RESPONSE_SIZE`] is a
+/// compile-time constant.
+#[derive(Debug)]
+enum OversizedContractStateSource {
+    /// The jsonrpsee HTTP client refused the response before reading it.
+    ClientCap,
+    /// An RPC node returned [`OVERSIZED_RESPONSE_CODE`] with a cap at least as
+    /// large as [`MIN_PROVING_RESPONSE_CAP`].
+    NodeCap,
+    /// The decoded state exceeded [`MAX_CALLER_STATE_BYTES`]. Used by the
+    /// indexer admission path.
+    DecodedLimit,
+}
+
 #[derive(Debug)]
 struct OversizedContractState {
     detail: String,
     source: Option<RawRpcError>,
+    provenance: OversizedContractStateSource,
 }
 
 impl std::fmt::Display for OversizedContractState {
@@ -82,6 +98,7 @@ pub(crate) fn oversized_contract_state(detail: impl Into<String>) -> anyhow::Err
     anyhow::Error::new(OversizedContractState {
         detail: detail.into(),
         source: None,
+        provenance: OversizedContractStateSource::DecodedLimit,
     })
 }
 
@@ -1155,12 +1172,26 @@ async fn publisher_contract_state(
 
     match classify_contract_state_reply(response)? {
         ContractStateReply::State(state) => Ok(state),
-        // The marker stays in the chain, as `Reads::contract_state` keeps it: it
-        // carries the publish verdict besides the indexer's admission one.
-        ContractStateReply::TooLarge(marker) => Err(anyhow::Error::new(marker).context(
-            "the responder's state was refused for its size; it is exempt from \
-             the admission limit, so the refusing cap is too small for it",
-        )),
+        // Only the client-cap refusal is terminal on the publish path: the cap
+        // is a compile-time constant, so retry cannot help. A node-cap refusal
+        // is retryable because the operator can raise the node's response cap.
+        ContractStateReply::TooLarge(marker)
+            if matches!(marker.provenance, OversizedContractStateSource::ClientCap) =>
+        {
+            Err(anyhow::Error::new(marker).context(
+                "the responder's state was refused by the client's own cap",
+            ))
+        }
+        ContractStateReply::TooLarge(marker) => {
+            let err = marker.source.unwrap_or_else(|| {
+                RawRpcError::User(UserError {
+                    code: OVERSIZED_RESPONSE_CODE,
+                    message: "response too large".into(),
+                    data: None,
+                })
+            });
+            Err(anyhow::Error::new(err).context("midnight_contractState failed"))
+        }
         ContractStateReply::Other(err) => {
             Err(anyhow::Error::new(err).context("midnight_contractState failed"))
         }
@@ -1200,6 +1231,7 @@ fn classify_contract_state_reply(
             ContractStateReply::TooLarge(OversizedContractState {
                 detail: format!("response over the client cap of {MAX_RESPONSE_SIZE} bytes"),
                 source: Some(err),
+                provenance: OversizedContractStateSource::ClientCap,
             })
         }
         // The RPC node refused the response for its size. Under a cap that fits every
@@ -1212,6 +1244,7 @@ fn classify_contract_state_reply(
                     ContractStateReply::TooLarge(OversizedContractState {
                         detail: format!("response over the rpc node's cap of {cap} bytes"),
                         source: Some(RawRpcError::User(reply)),
+                        provenance: OversizedContractStateSource::NodeCap,
                     })
                 }
                 cap => {
@@ -2618,17 +2651,37 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cap_proven_size_refusals_terminate_the_publish_read() {
-        // Both TooLarge producers, driven through the boundary that wraps them.
-        for reply in [
-            Canned::UserWithData(
+    async fn client_cap_size_refusal_terminates_the_publish_read() {
+        let (transport, _calls) = stub_rpc(Canned::ClientTooLarge);
+        let rpc = publisher_rpc(transport);
+
+        let error = PinnedReads::contract_state(&rpc, &test_address(), &test_at_hash())
+            .await
+            .expect_err("the refusal must fail the read");
+        assert!(
+            error
+                .chain()
+                .find_map(|cause| cause.downcast_ref::<RpcFailure>())
+                .is_some(),
+            "the read attaches its carrier: {error:#}"
+        );
+        assert!(!is_retryable(&error), "{error:#}");
+        assert!(!is_provider_throttled(&error), "{error:#}");
+    }
+
+    #[tokio::test]
+    async fn node_cap_size_refusal_is_retryable_on_the_publish_read() {
+        // A proving cap and a small cap both stay retryable on the publish path;
+        // the operator can raise the node's response cap.
+        for (data, cap) in [
+            ("\"Exceeded max limit of 15728640\"", "proving"),
+            ("\"Exceeded max limit of 65536\"", "small"),
+        ] {
+            let (transport, calls) = stub_rpc(Canned::UserWithData(
                 OVERSIZED_RESPONSE_CODE,
                 "Response is too big",
-                "\"Exceeded max limit of 15728640\"",
-            ),
-            Canned::ClientTooLarge,
-        ] {
-            let (transport, _calls) = stub_rpc(reply);
+                data,
+            ));
             let rpc = publisher_rpc(transport);
 
             let error = PinnedReads::contract_state(&rpc, &test_address(), &test_at_hash())
@@ -2639,10 +2692,11 @@ mod tests {
                     .chain()
                     .find_map(|cause| cause.downcast_ref::<RpcFailure>())
                     .is_some(),
-                "the read attaches its carrier: {error:#}"
+                "{cap}: the read attaches its carrier: {error:#}"
             );
-            assert!(!is_retryable(&error), "{error:#}");
-            assert!(!is_provider_throttled(&error), "{error:#}");
+            assert!(is_retryable(&error), "{cap}: {error:#}");
+            assert!(!is_provider_throttled(&error), "{cap}: {error:#}");
+            assert_eq!(calls.load(Ordering::SeqCst), 1, "{cap}: no retries in the test");
         }
     }
 
@@ -3036,10 +3090,10 @@ mod tests {
         assert_eq!(calls.load(Ordering::SeqCst), 1, "a drop is not retried");
     }
 
-    /// The publisher reads the responder through the same classifier: a
-    /// cap-proven size refusal is terminal, never an admission drop or a spin.
+    /// The publisher reads the responder through the same classifier, but only
+    /// a client-cap size refusal is terminal; a node-cap refusal is retryable.
     #[tokio::test]
-    async fn a_size_refusal_on_the_publisher_read_is_terminal() {
+    async fn a_node_cap_refusal_on_the_publisher_read_is_retryable() {
         let server = ServerBuilder::default()
             .max_response_body_size(15 * 1024 * 1024)
             .build("127.0.0.1:0")
@@ -3058,15 +3112,9 @@ mod tests {
         let err = publisher_contract_state(&rpc, &test_address(), &test_at_hash())
             .await
             .expect_err("the server refuses the response");
-        assert!(is_oversized_contract_state(&err), "{err:#}");
-        let rendered = format!("{err:#}");
         assert!(
-            rendered.contains("exempt from the admission limit"),
-            "{rendered}"
-        );
-        assert!(
-            rendered.contains("rpc node's cap of 15728640 bytes"),
-            "{rendered}"
+            !is_oversized_contract_state(&err),
+            "a node-cap refusal must not carry the oversized marker: {err:#}"
         );
     }
 
