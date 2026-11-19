@@ -365,9 +365,10 @@ impl<W: FeePayer, C: SubmitChain + 'static> NativeIntentClient<W, C> {
 
     /// Posts a paid transaction and waits for it: the UTXOs it spends stay reserved
     /// until it lands, the node refuses the first submit or it could not be sent, a
-    /// finalized block past its TTL does not hold it, or a minute past its TTL. An ambiguous outcome comes
-    /// no earlier than that minute, so the retry may plan the same UTXOs; if this
-    /// transaction landed after all, the node refuses that spend.
+    /// finalized block past its TTL does not hold it, or a minute past its TTL. An
+    /// ambiguous outcome — the deadline's, or a read verdict ending the watch
+    /// early — keeps the reservation: the retry may plan the same UTXOs, and if
+    /// this transaction landed after all, the node refuses that spend.
     async fn post(
         &self,
         bytes: &[u8],
