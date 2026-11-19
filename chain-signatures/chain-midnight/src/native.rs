@@ -705,7 +705,8 @@ fn node(error: anyhow::Error) -> SubmitError {
 
 /// Whether a failed scan read is the provider throttling — core's typed 402/429
 /// set (`is_provider_throttled`'s carrier arm), never its text-scanning call:
-/// the watch's renders carry block numbers.
+/// the watch's renders carry block numbers. Delegate to a typed core predicate
+/// once the fallback is deleted (classify.rs TODO).
 pub(crate) fn throttled_scan(failure: &RpcFailure) -> bool {
     matches!(
         failure.status().map(|status| status.as_u16()),

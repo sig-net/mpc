@@ -2687,6 +2687,13 @@ mod tests {
                 matches!(code, 402 | 429),
                 "{code}"
             );
+            // Coupled to core: on the carrier-carrying form the typed arm
+            // decides, so the two throttle sets cannot drift apart silently.
+            assert_eq!(
+                crate::native::throttled_scan(&read_verdict(&read)),
+                is_provider_throttled(&read),
+                "{code}"
+            );
             // The indexer loop's bool form, on the raw error `retry_read` sees.
             assert_eq!(
                 is_read_retryable(&rejected_read(code)),
