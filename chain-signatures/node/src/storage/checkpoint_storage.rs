@@ -452,14 +452,10 @@ impl CheckpointStorage {
         }
     }
 
-    /// Promote the durable pending checkpoint identified by its digest, or confirm
-    /// it if already the latest checkpoint.
+    /// Promote the durable checkpoint identified by its digest from either the
+    /// pending or the orphan store, or confirm it if already the canonical base.
     /// Returns `Some(remaining_pending_count)` if confirmed, or `None` if not found.
-    pub async fn promote_pending(
-        &self,
-        chain: Chain,
-        digest: [u8; 32],
-    ) -> anyhow::Result<Option<usize>> {
+    pub async fn promote(&self, chain: Chain, digest: [u8; 32]) -> anyhow::Result<Option<usize>> {
         match self {
             CheckpointStorage::Redis(pool, _) => {
                 let mut conn = pool.get().await.context("failed to get redis connection")?;
@@ -518,7 +514,7 @@ impl CheckpointStorage {
                         .arg(hex::encode(digest))
                         .invoke_async(&mut conn)
                         .await
-                        .context("failed to promote pending checkpoint")?;
+                        .context("failed to promote checkpoint")?;
 
                 if promoted {
                     return Ok(Some(remaining));
@@ -1056,10 +1052,7 @@ mod tests {
             vec![first.clone(), second.clone()]
         );
 
-        assert_eq!(
-            storage.promote_pending(chain, first.digest()).await?,
-            Some(1)
-        );
+        assert_eq!(storage.promote(chain, first.digest()).await?, Some(1));
         assert_eq!(storage.load_latest(chain).await?, Some(first.clone()));
         assert_eq!(storage.load_pending(chain).await?, vec![second.clone()]);
         assert_eq!(storage.latest(chain).await?, Some(second));
@@ -1100,10 +1093,7 @@ mod tests {
         assert_eq!(storage.persist_pending(&checkpoint).await?, Some(1));
         assert_eq!(storage.persist_pending(&checkpoint).await?, Some(1));
         assert_eq!(storage.persist_pending(&conflicting).await?, None);
-        assert!(storage
-            .promote_pending(Chain::Solana, [99; 32])
-            .await?
-            .is_none());
+        assert!(storage.promote(Chain::Solana, [99; 32]).await?.is_none());
         assert_eq!(storage.load_pending(Chain::Solana).await?, vec![checkpoint]);
         Ok(())
     }
@@ -1121,14 +1111,14 @@ mod tests {
         assert_eq!(checkpoint, decoded);
     }
 
-    /// `promote_pending` leaves an empty map behind for a chain that has no
+    /// `promote` leaves an empty map behind for a chain that has no
     /// checkpoints, so "pending is present" must not be read as "non-empty".
     /// The Redis arm is covered in integration-tests/tests/cases/store.rs.
     #[tokio::test]
     async fn has_checkpoint_ignores_an_empty_pending_map() -> anyhow::Result<()> {
         let chain = Chain::Solana;
         let storage = CheckpointStorage::in_memory();
-        storage.promote_pending(chain, [0u8; 32]).await?;
+        storage.promote(chain, [0u8; 32]).await?;
 
         assert!(!storage.has_checkpoint(chain).await?);
         assert!(storage.latest(chain).await?.is_none());
@@ -1193,10 +1183,7 @@ mod tests {
         assert_eq!(storage.demote_pending_to_orphan(chain).await?, 2);
         assert!(storage.load_pending(chain).await?.is_empty());
 
-        assert_eq!(
-            storage.promote_pending(chain, second.digest()).await?,
-            Some(0)
-        );
+        assert_eq!(storage.promote(chain, second.digest()).await?, Some(0));
         assert_eq!(storage.load_latest(chain).await?, Some(second.clone()));
         // Both orphans were at or below the promoted height and were retired.
         assert!(storage.find(chain, first.digest()).await?.is_none());
@@ -1267,10 +1254,7 @@ mod tests {
             found.as_ref().is_none_or(|cp| cp.digest() == old.digest()),
             "find returned a body that does not match the requested digest"
         );
-        assert!(storage
-            .promote_pending(chain, old.digest())
-            .await?
-            .is_none());
+        assert!(storage.promote(chain, old.digest()).await?.is_none());
         assert!(
             storage
                 .load_latest(chain)
@@ -1281,7 +1265,7 @@ mod tests {
 
         // The current body is still servable and promotable.
         assert_eq!(storage.find(chain, new.digest()).await?, Some(new.clone()));
-        assert_eq!(storage.promote_pending(chain, new.digest()).await?, Some(0));
+        assert_eq!(storage.promote(chain, new.digest()).await?, Some(0));
         assert_eq!(storage.load_latest(chain).await?, Some(new));
         Ok(())
     }
@@ -1318,10 +1302,7 @@ mod tests {
                 .map_or(true, |cp| cp.digest() == stale.digest()),
             "find returned the wrong body for a stale orphan digest"
         );
-        assert!(storage
-            .promote_pending(chain, stale.digest())
-            .await?
-            .is_none());
+        assert!(storage.promote(chain, stale.digest()).await?.is_none());
         assert!(
             storage
                 .load_latest(chain)

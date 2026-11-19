@@ -278,12 +278,12 @@ impl Checkpoints {
         }
     }
 
-    /// Promotes a pending checkpoint when its digest reaches consensus, or
-    /// confirms it if already promoted.
+    /// Promotes a pending or orphan checkpoint when its digest reaches consensus,
+    /// or confirms it if already promoted.
     pub async fn confirm(&self, chain: Chain, digest: [u8; 32]) -> Result<bool, CheckpointError> {
         let outcome = self
             .storage
-            .promote_pending(chain, digest)
+            .promote(chain, digest)
             .await
             .map_err(|source| CheckpointError::Storage { chain, source })?;
 
@@ -292,7 +292,7 @@ impl Checkpoints {
             tracing::debug!(
                 ?chain,
                 ?digest,
-                "pending checkpoint not found for promotion"
+                "checkpoint not found for promotion"
             );
             return Ok(false);
         };
@@ -670,7 +670,7 @@ mod tests {
 
         checkpoints.persist_pending(&checkpoint).await.unwrap();
         storage
-            .promote_pending(checkpoint.chain, checkpoint.digest())
+            .promote(checkpoint.chain, checkpoint.digest())
             .await
             .unwrap();
 
