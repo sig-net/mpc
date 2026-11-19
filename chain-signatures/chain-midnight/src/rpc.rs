@@ -2585,6 +2585,7 @@ mod tests {
         for (status, reason, retryable, throttled) in [
             (403u16, "Forbidden", false, false),
             (409, "Conflict", true, false),
+            (402, "Payment Required", true, true),
             (429, "Too Many Requests", true, true),
             (500, "Internal Server Error", true, false),
         ] {
