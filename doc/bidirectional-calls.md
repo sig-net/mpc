@@ -424,9 +424,6 @@ processable(req): bool
       source chain, a key version the MPC supports
     at key version 1, which has no purposes (M1):
       req.key's path is not the attestation key's
-      if another signing API on the source chain maps the same sender,
-        path and key version to the same key as sign_bidirectional:
-          req.key's path lies in the bidirectional namespace
     req.tx is non-empty, parses as an unsigned transaction in target's
       format, commits to the network this MPC watches for target (EVM:
       carries that network's chain id; not required on Tron, which has
@@ -544,10 +541,10 @@ Properties:
   from the signing API a request comes on, never from its fields (Distinct
   keys, Section 5). Key version 1 has no purposes: there the attestation
   key lies under a reserved path that no request on any signing API may
-  name (`processable` covers this one), and where another signing API on
-  the source chain maps the same contract, path and key version to the
-  same key, a bidirectional request's path lies in a namespace that no
-  request on that API may name.
+  name (`processable`). Nothing keeps a bidirectional request's key from
+  another signing API at key version 1: where one maps the same contract,
+  path and key version to the same key, as plain sign does on Solana and
+  Hydration, M1 holds only from key version 2.
 * M2 The MPC drops a request that is not authentic, that it cannot
   process, or whose rid is already in the backlog, and keeps nothing for
   it. A rid already in the backlog is the same transaction, already being
@@ -740,10 +737,9 @@ a path from B48 through A15; the first at A12 has none.
   request, it could use up that request's replay protection and leave it
   unanswered. From key version 2, separate purposes (M1) keep the keys
   apart, and no key under the bidirectional purpose signed anything
-  earlier. At key version 1 the reserved path namespace (M1) keeps them
-  apart. It has to be one that no path accepted before the rule took
-  effect lies in: a transaction signed then stays valid until its replay
-  protection is used.
+  earlier. At key version 1 nothing keeps them apart, and this risk is
+  accepted: a contract that needs the separation makes its requests at
+  key version 2.
 * Agreement has no enforcement point. A change to `authentic`,
   `processable` or the attestation function must apply only to requests
   made at or after a source height the upgrade names; applied to requests
@@ -1152,8 +1148,7 @@ Still to change:
 
 * `local` keeps the latest signature and the latest attestation per request.
 * Unviable from another request's response, on Solana, Hydration and Canton.
-* Refusing non-canonical request fields, and the reserved paths on every
-  source.
+* Refusing non-canonical request fields.
 * Key version 2, with purposes (account-derivation.md).
 * A root key of its own for each key version after 2.
 * Catch-up for Hydration.
