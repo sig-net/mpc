@@ -40,7 +40,7 @@ pub(crate) async fn recover_backlog(
 
     // Hydrate local backlog state from durable storage on initial startup.
     if load_local {
-        match backlog.recover_local(chain, root_pk).await? {
+        match backlog.hydrate(chain, root_pk).await? {
             Some(checkpoint) => {
                 tracing::info!(
                     ?chain,

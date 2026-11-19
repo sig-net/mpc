@@ -727,12 +727,12 @@ impl Backlog {
         }
     }
 
-    /// Recovers local backlog state from the canonical, contract-settled base if one exists.
-    /// Only the durable confirmed base is used as a seed. Pending bodies (and any older
-    /// unconfirmed bodies) remain durable, servable, and promotable, but are deliberately
-    /// excluded here: after a restart they must never seed the backlog we index or vote from.
+    /// Seeds the in-memory backlog from the confirmed base only.
+    /// The seed is whatever `load_latest` returns — the durable confirmed base — and nothing
+    /// else. Pending and orphan checkpoints are never used here: they remain durable, servable,
+    /// and promotable, but after a restart they must not seed the backlog we index or vote from.
     /// A body from an earlier version may be one adopted as sent, so its progress is rebuilt.
-    pub async fn recover_local(
+    pub async fn hydrate(
         &self,
         chain: Chain,
         root_pk: PublicKey,
@@ -782,7 +782,7 @@ impl Backlog {
     }
 
     /// Recover backlog state from a checkpoint into memory.
-    /// This is called when a node restarts (via `recover_local`) or regresses to consensus (via `regress`).
+    /// This is called when a node restarts (via `hydrate`) or regresses to consensus (via `regress`).
     pub async fn recover_by_checkpoint(&self, checkpoint: &Checkpoint) {
         let restored = PendingRequests::from_checkpoint(checkpoint);
         let chain = checkpoint.chain;
