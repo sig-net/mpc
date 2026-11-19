@@ -1,12 +1,20 @@
 # Glossary
 
-Terms used across the docs.  
-Each entry names the code that implements the term, if any: the symbol and
-its file. Paths are relative to `chain-signatures/node/src/`,
-except those starting with `chain-signatures/` or `signet-`, which are
-relative to the repository root.  
-Some entries note under *Code today* where the code does not match yet, with
-the tracking issue where there is one.
+Terms used across the docs, in alphabetical order. An entry:
+
+- Says what the term is, in a few sentences: what kind of thing it is and
+  what sets it apart, or the cases it covers. How it works, why it is
+  designed so and how it changed belong in the doc that defines the term,
+  or in the code.
+- Gives the term's abbreviation or other names, and the term it is easily
+  confused with, if any.
+- Names the code that implements the term, if any: the symbol and its file.
+  Paths are relative to `chain-signatures/node/src/`, except those starting
+  with `chain-signatures/` or `signet-`, which are relative to the repository
+  root.
+- Links the doc that defines the term, if any.
+- Notes under *Code today* where the code does not match the definition yet,
+  with the tracking issue where there is one.
 
 ## Active set
 
@@ -18,8 +26,7 @@ sync](#state-sync) with the node. No two nodes need the same guess
 ## Admitted request
 
 A [request](#request) the network has found authentic and processable and
-added to its [backlog](#backlog). Only an admitted request is ever signed or
-attested. See [bidirectional-calls.md
+added to its [backlog](#backlog). See [bidirectional-calls.md
 §2](bidirectional-calls.md#2-vocabulary).
 
 ## Artifact
@@ -28,22 +35,10 @@ A one-shot input generated ahead of time and consumed by at most one
 [instance](#instance): a [triple pair](#triple-pair) or a
 [presignature](#presignature) (`ProtocolArtifact`,
 `storage/protocol_storage.rs`). Each artifact has a single [owner](#owner) and
-a set of [holders](#holder).
-
-Its states are `Generating` (the [generation](#generation) protocol that
-produces it is still running), `Available` (stored and ready to use) and
-`Using` (taken by a running generation), with implicit `init` and `done`. The
-explicit states are stored and ideally persisted, and the change to `Using`
-must be persisted as soon as the artifact leaves storage. See
-[node-specification.md](node-specification.md) and
+a set of [holders](#holder). See [node-specification.md, Triple and
+Pre-Signature State
+Machine](node-specification.md#triple-and-pre-signature-state-machine) and
 [state-sync.md](state-sync.md).
-
-*Code today:* artifacts are stored in Redis, and their marks `Generating`,
-`Pending` (a [reservation](#reservation)) and `Using` live only in memory
-(`ReservedKind`, `storage/protocol_storage.rs`). There is no `Available`
-mark: an artifact in Redis with no mark plays that role. A crash loses an
-artifact in `Using`, and `Using` clears whenever the consuming generation
-ends, even when it fails.
 
 ## Attestation
 
@@ -62,9 +57,8 @@ Each node keeps one backlog per [source chain](#source-chain), with one entry
 per [admitted](#admitted-request) [request](#request) that is not finished. An
 entry holds the [request id](#request-id), the request and, for a
 [bidirectional request](#bidirectional-request), the signatures
-for it [published](#publish) in final source chain blocks. Only final source
-chain events change it; anything else a node keeps about a request stays out of
-it (`Backlog`, `backlog/`). See [checkpoints.md
+for it [published](#publish) in final source chain blocks (`Backlog`,
+`backlog/`). See [checkpoints.md
 §1](checkpoints.md#1-background).
 
 *Code today:* `BacklogEntry` holds the request and the node's progress,
@@ -83,13 +77,9 @@ chain](#source-chain) (`SignKind::SignBidirectional`,
 ## Caught up
 
 A node is caught up on a chain once it has processed every block up to the
-finalized head its [indexer](#indexer) read at startup: one bounded pass,
-without chasing blocks finalized meanwhile. Until then it starts no new
-signing, attesting or publishing for that chain. The per-chain flag is set when
-the indexer reports `ChainEvent::CatchupCompleted`
-(`chain-signatures/primitives/src/events.rs`) and cleared by every restart of
-the indexer or the node; a node that falls behind without a restart keeps
-signing. See [checkpoints.md
+finalized head its [indexer](#indexer) read at startup. Falling behind later
+does not undo it (`ChainEvent::CatchupCompleted`,
+`chain-signatures/primitives/src/events.rs`). See [checkpoints.md
 §1](checkpoints.md#1-background).
 
 ## Checkpoint
@@ -136,11 +126,8 @@ A short hash that stands for a larger structure. The docs use two:
 ## Entropy
 
 A value from the block that holds a [request](#request). The requester cannot
-know or influence it before that block is validated. Nodes read it from a final
-block, so every node derives the same delta (`SignArgs::entropy`,
-`chain-signatures/primitives/src/crypto.rs`). A response has no such block: its
-entropy hashes the first leg's with the message it signs and its key. It also seeds the
-[proposer](#proposer) election. See
+know or influence it before that block is validated (`SignArgs::entropy`,
+`chain-signatures/primitives/src/crypto.rs`). See
 [delta-derivation.md](delta-derivation.md).
 
 ## Epoch
@@ -165,9 +152,8 @@ faulty. Compare [correct node](#correct-node). See
 ## Final block
 
 A block the network treats as final, so it will stay in the chain unchanged
-(called solidified on Tron). Nodes read [requests](#request) and attest
-[outcomes](#outcome) only from final blocks; what counts as finalized differs
-per chain. See [bidirectional-calls.md
+(called solidified on Tron); what counts as finalized differs per chain. See
+[bidirectional-calls.md
 §3.3](bidirectional-calls.md#33-assumptions) and
 [system-model.md](system-model.md).
 
@@ -207,8 +193,7 @@ id](#request-id), the same 32 bytes.
 
 A node's connections to its peers, each `Offline` (no answer), `Inactive`
 (answers but does not take part), `Syncing` (takes part, [state
-sync](#state-sync) not done) or `Active` (`mesh/connection.rs`). Only `Active`
-peers are eligible for a [participant](#participant) list. See
+sync](#state-sync) not done) or `Active` (`mesh/connection.rs`). See
 [mesh.md](mesh.md).
 
 ## n
@@ -238,8 +223,7 @@ See [bidirectional-calls.md §2](bidirectional-calls.md#2-vocabulary).
 
 The node that coordinated an [artifact](#artifact)'s
 [generation](#generation). It decides about the artifact, and only an
-[instance](#instance) it proposes can consume the artifact. Having one owner
-per artifact keeps coordination and [state sync](#state-sync) simple.
+[instance](#instance) it proposes can consume the artifact.
 
 ## Participant
 
@@ -257,38 +241,23 @@ A [request](#request) for a signature with nothing to report back
 
 ## Posit
 
-The agreement phase before an [instance](#instance), in four messages
-(`PositAction`):
-
-- **PROPOSE.** For a signature or a [presignature](#presignature), the
-  [proposer](#proposer) [reserves](#reservation) the [artifact](#artifact) to
-  consume and offers it to the artifact's active [holders](#holder). For a
-  [triple pair](#triple-pair), which consumes no artifact, it proposes to
-  every node in its [active set](#active-set).
-- **ACCEPT** or **REJECT.** Each [deliberator](#deliberator) agrees, or
-  refuses with a reason (`PositRejectReason`).
-- **START.** The proposer commits the reserved artifact, removing it from the
-  pool, and sends the final [participant](#participant) list. Aborting before
-  the commit releases the reservation; aborting after it does not
-  (`ArtifactReservation::commit`, `storage/protocol_storage.rs`).
-
-Code: `protocol/posit.rs`, `protocol/request/`. See
-[posit-state-machine.md](posit-state-machine.md).
+The agreement phase before an [instance](#instance): the
+[proposer](#proposer) sends PROPOSE, each [deliberator](#deliberator) answers
+ACCEPT or REJECT, and the proposer sends START with the final
+[participant](#participant) list (`PositAction`, `protocol/posit.rs`,
+`protocol/request/`). See [posit-state-machine.md](posit-state-machine.md).
 
 ## Presignature
 
-A pre-computed, secret-shared ECDSA nonce (`big_r` and the shares k and
-sigma), built from one [triple pair](#triple-pair) and consumed by one
-signature (`Presignature`, `protocol/presignature.rs`). Its id is derived from
-the pair's id, not chosen (`hash_as_id`). Abbreviated P.
+A pre-computed, secret-shared ECDSA nonce, built from one [triple
+pair](#triple-pair) and consumed by one signature (`Presignature`,
+`protocol/presignature.rs`). Abbreviated P.
 
 ## Proposer
 
-The node that drives a [posit](#posit). For a signature it is elected per
-[round](#round) from the request's [entropy](#entropy) and the round number
-(`protocol/request/organize.rs`), so every node agrees on it without
-messaging; for a [triple pair](#triple-pair) or
-[presignature](#presignature) it is the [owner](#owner). See
+The node that drives a [posit](#posit): for a signature, the node elected
+for the [round](#round) (`protocol/request/organize.rs`); for a [triple
+pair](#triple-pair) or [presignature](#presignature), its [owner](#owner). See
 [posit-state-machine.md §5](posit-state-machine.md#5-bumping-rounds).
 
 ## Publish
@@ -303,9 +272,7 @@ chain](#source-chain). See
 
 What a contract asks the network to sign. A [bidirectional
 request](#bidirectional-request) is the tuple (sender, transaction, target,
-key, schema), where the sender is the requesting contract. It is made when
-the contract calls `sign_bidirectional` with the other four fields, which
-sets the sender to the calling contract and accepts the call
+key, schema), where the sender is the requesting contract
 (`IndexedSignRequest`, `SignKind`,
 `chain-signatures/primitives/src/requests.rs`; `SignBidirectionalEvent`,
 `chain-signatures/primitives/src/bidirectional.rs`). See
@@ -321,10 +288,7 @@ same one (`SignId`, `signet-primitives/src/crypto.rs`). See
 
 A [proposer](#proposer)'s claim on one of its own stored
 [artifacts](#artifact) for a [posit](#posit), so that its other posits
-running at the same time do not pick the same artifact. The artifact stays
-stored and, in the spec's terms, `Available`. The START commit removes it and
-makes it `Using`; a posit that ends before START releases it. A reservation
-is local to the proposer and kept only in memory, so a restart drops it
+running at the same time do not pick the same artifact
 (`ArtifactReservation`, `ReservedKind::Pending`,
 `storage/protocol_storage.rs`). See
 [posit-state-machine.md](posit-state-machine.md).
@@ -360,19 +324,15 @@ The chain a [request](#request) is made on and answered on.
 ## State sync
 
 The exchange in which an [artifact](#artifact)'s [owner](#owner) and its
-[holders](#holder) repair the holder directory after one of them lost data.
-It runs whenever a node connects or reconnects to a peer, and when a sign
-[posit](#posit) fails on REJECTs: the peers that rejected its
-[presignature](#presignature) as missing (`MissingArtifact`) are synced again
-(`protocol/sync/`, `protocol/request/posit.rs`). See
+[holders](#holder) repair the holder directory after one of them lost data
+(`protocol/sync/`). See
 [state-sync.md](state-sync.md).
 
 ## Take
 
 A [holder](#holder) removing its own share of an [artifact](#artifact) from
 storage when the [generation](#generation) that consumes it starts. Taking is
-what burns the artifact, and the removal must reach durable storage before
-anything derived from it is sent (`take`, `ArtifactTaken`,
+what burns the artifact (`take`, `ArtifactTaken`,
 `storage/protocol_storage.rs`). See
 [protocol-properties.md,
 S1](protocol-properties.md#s1-one-shot-artifacts-are-consumed-at-most-once).
@@ -394,6 +354,5 @@ contract](#governance-contract) (`vote_threshold`,
 Two secret-shared random triples, produced in the background and stored, owned
 and consumed as one [artifact](#artifact) under one id, spent to build one
 [presignature](#presignature) (`TriplePair` in `storage/triple_storage.rs`,
-`TripleId` in `protocol/triple.rs`). Its id is drawn at random by its
-[proposer](#proposer). Abbreviated T, which is not the
+`TripleId` in `protocol/triple.rs`). Abbreviated T, which is not the
 [threshold](#threshold) t.

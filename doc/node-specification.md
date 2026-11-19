@@ -87,6 +87,13 @@ successfully, or we hit the global protocol timeout. Once that transition
 happens, the node can delete all info about the P or T and its ID from
 persistent storage.
 
+*Code today:* P and T are stored in Redis, and their marks `Generating`,
+`Pending` (a [reservation](glossary.md#reservation)) and `Using` live only in
+memory (`ReservedKind`, `chain-signatures/node/src/storage/protocol_storage.rs`).
+There is no `Available` mark: a P or T in Redis with no mark plays that role.
+A crash loses a P or T in `Using`, and `Using` clears whenever the consuming
+generation ends, even when it fails.
+
 
 ## Participant Selection
 
