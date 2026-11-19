@@ -508,7 +508,19 @@ async fn test_stream_sends_pre_catchup_ethereum_completion() {
         .set_processed_block(Chain::Ethereum, 100)
         .await
         .unwrap();
-    seeded_backlog.checkpoint(Chain::Ethereum).await.unwrap();
+    let checkpoint = seeded_backlog.checkpoint(Chain::Ethereum).await.unwrap();
+    // A restart seeds only from the canonical, contract-settled base. Promote the
+    // pending checkpoint so the entry survives the simulated restart; a pending
+    // body is still durable, servable, and promotable, but is never the seed.
+    seeded_backlog
+        .checkpoints()
+        .confirm(Chain::Ethereum, checkpoint.digest())
+        .await
+        .unwrap();
+    assert_eq!(
+        storage.load_latest(Chain::Ethereum).await.unwrap(),
+        Some(checkpoint)
+    );
 
     let root_sk = k256::SecretKey::random(&mut rand::thread_rng());
     let root_pk = root_sk.public_key().to_projective().to_affine();
@@ -555,7 +567,19 @@ async fn test_stream_keeps_the_recovered_ethereum_entry_over_a_replay() {
         .set_processed_block(Chain::Ethereum, 100)
         .await
         .unwrap();
-    seeded_backlog.checkpoint(Chain::Ethereum).await.unwrap();
+    let checkpoint = seeded_backlog.checkpoint(Chain::Ethereum).await.unwrap();
+    // Seed the restart from the canonical settled base. An unconfirmed pending
+    // body stays durable, servable, and promotable but never seeds the backlog,
+    // so the in-flight entry must come from this base.
+    seeded_backlog
+        .checkpoints()
+        .confirm(Chain::Ethereum, checkpoint.digest())
+        .await
+        .unwrap();
+    assert_eq!(
+        storage.load_latest(Chain::Ethereum).await.unwrap(),
+        Some(checkpoint)
+    );
 
     let replacement =
         IndexedSignRequest::sign(sign_id, args.clone(), Chain::Ethereum, replayed_timestamp);

@@ -540,6 +540,157 @@ async fn test_pending_checkpoint_persistence() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Demotion is a single atomic Redis round trip that makes pending bodies
+/// durable, servable orphans: they leave `pending`, stay findable by digest,
+/// are idempotently re-demotable, and can still be promoted by that digest.
+#[test(tokio::test)]
+async fn test_redis_demote_pending_to_orphan_is_servable_by_digest() -> anyhow::Result<()> {
+    use near_account_id::AccountId;
+
+    let spawner = ClusterSpawner::default()
+        .network("test-demote-orphan")
+        .init_network()
+        .await?;
+    let redis_container = containers::Redis::run(&spawner).await;
+    let account_id: AccountId = "party0.near".parse()?;
+    let storage = CheckpointStorage::Redis(redis_container.pool(), account_id);
+    let chain = Chain::Solana;
+    let checkpoint = Checkpoint {
+        chain,
+        block_height: 10,
+        pending_requests: vec![dummy_backlog_entry(1, chain)],
+        legacy_digest: None,
+    };
+
+    assert!(!storage.has_checkpoint(chain).await?);
+    storage.persist_pending(&checkpoint).await?;
+    assert_eq!(storage.load_pending(chain).await?, vec![checkpoint.clone()]);
+
+    assert_eq!(storage.demote_pending_to_orphan(chain).await?, 1);
+    assert!(storage.load_pending(chain).await?.is_empty());
+    assert!(storage.has_checkpoint(chain).await?);
+    assert_eq!(
+        storage.find(chain, checkpoint.digest()).await?,
+        Some(checkpoint.clone())
+    );
+
+    // Drained pending makes a second pass a no-op that leaves the orphan intact.
+    assert_eq!(storage.demote_pending_to_orphan(chain).await?, 0);
+    assert_eq!(
+        storage.find(chain, checkpoint.digest()).await?,
+        Some(checkpoint.clone())
+    );
+
+    // The settled digest still promotes the orphan to canonical latest.
+    assert_eq!(
+        storage.promote_pending(chain, checkpoint.digest()).await?,
+        Some(0)
+    );
+    assert_eq!(storage.load_latest(chain).await?, Some(checkpoint));
+    Ok(())
+}
+
+/// A stale orphan digest left by the first demotion must not resolve to a
+/// different body persisted and demoted at the same height after a restart.
+#[test(tokio::test)]
+async fn test_redis_demote_overwrite_drops_stale_digest_body() -> anyhow::Result<()> {
+    use near_account_id::AccountId;
+
+    let spawner = ClusterSpawner::default()
+        .network("test-redis-demote-stale-digest")
+        .init_network()
+        .await?;
+    let redis_container = containers::Redis::run(&spawner).await;
+    let account_id: AccountId = "party0.near".parse()?;
+    let storage = CheckpointStorage::Redis(redis_container.pool(), account_id);
+    let chain = Chain::Solana;
+    let body = |id| Checkpoint {
+        chain,
+        block_height: 10,
+        pending_requests: vec![dummy_backlog_entry(id, chain)],
+        legacy_digest: None,
+    };
+    let old = body(1);
+    let new = body(2);
+    assert_ne!(old.digest(), new.digest());
+
+    // First pass: demote the body with digest `old` at height 10.
+    storage.persist_pending(&old).await?;
+    assert_eq!(storage.demote_pending_to_orphan(chain).await?, 1);
+
+    // Restart: persist a different body at the same height and demote again.
+    storage.persist_pending(&new).await?;
+    assert_eq!(storage.demote_pending_to_orphan(chain).await?, 1);
+
+    // The settled but stale digest must not return the new body or promote it.
+    let found = storage.find(chain, old.digest()).await?;
+    assert!(
+        found.as_ref().is_none_or(|cp| cp.digest() == old.digest()),
+        "find returned a body that does not match the requested digest"
+    );
+    assert!(storage
+        .promote_pending(chain, old.digest())
+        .await?
+        .is_none());
+    assert!(
+        storage
+            .load_latest(chain)
+            .await?
+            .map_or(true, |cp| cp.digest() != new.digest()),
+        "the stale digest promoted the new body as base"
+    );
+
+    // The current body is still servable and promotable.
+    assert_eq!(storage.find(chain, new.digest()).await?, Some(new.clone()));
+    assert_eq!(storage.promote_pending(chain, new.digest()).await?, Some(0));
+    assert_eq!(storage.load_latest(chain).await?, Some(new));
+    Ok(())
+}
+
+/// The confirmed base is a first-class `latest()` candidate in Redis too: it
+/// wins strictly higher heights, loses to strictly higher pending/orphan bodies,
+/// and wins height ties.
+#[test(tokio::test)]
+async fn test_redis_latest_compares_base_with_orphan() -> anyhow::Result<()> {
+    use near_account_id::AccountId;
+
+    let spawner = ClusterSpawner::default()
+        .network("test-redis-latest-base")
+        .init_network()
+        .await?;
+    let redis_container = containers::Redis::run(&spawner).await;
+    let account_id: AccountId = "party0.near".parse()?;
+    let storage = CheckpointStorage::Redis(redis_container.pool(), account_id);
+    let chain = Chain::Solana;
+    let at = |height, id| Checkpoint {
+        chain,
+        block_height: height,
+        pending_requests: vec![dummy_backlog_entry(id, chain)],
+        legacy_digest: None,
+    };
+
+    // Base strictly higher than the orphan.
+    let base = at(30, 1);
+    storage.persist(&base).await?;
+    storage.persist_pending(&at(10, 2)).await?;
+    assert_eq!(storage.demote_pending_to_orphan(chain).await?, 1);
+    assert_eq!(storage.latest(chain).await?, Some(base.clone()));
+
+    // Orphan strictly higher than the base.
+    storage.reset_to_latest(&base).await?;
+    let newer = at(40, 3);
+    storage.persist_pending(&newer).await?;
+    assert_eq!(storage.demote_pending_to_orphan(chain).await?, 1);
+    assert_eq!(storage.latest(chain).await?, Some(newer));
+
+    // Height tie: the confirmed base wins.
+    storage.reset_to_latest(&base).await?;
+    storage.persist_pending(&at(30, 4)).await?;
+    assert_eq!(storage.demote_pending_to_orphan(chain).await?, 1);
+    assert_eq!(storage.latest(chain).await?, Some(base));
+    Ok(())
+}
+
 #[test(tokio::test)]
 async fn test_clear_clears_pending_reservations() -> anyhow::Result<()> {
     let spawner = ClusterSpawner::default()

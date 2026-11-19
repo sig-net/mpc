@@ -747,4 +747,93 @@ mod tests {
         let result = handle.await.unwrap();
         assert!(result.is_none(), "aborted align should return None");
     }
+
+    /// Builds an active peer whose `/checkpoint` serves `body` as facts at the current
+    /// version — the format an honest node uses to answer a by-digest query.
+    async fn mock_peer_serving(
+        chain: Chain,
+        body: &Checkpoint,
+        participant: u32,
+    ) -> (
+        mockito::ServerGuard,
+        mockito::Mock,
+        (Participant, ParticipantInfo),
+    ) {
+        let mut server = mockito::Server::new_async().await;
+        let mut response_body = Vec::new();
+        ciborium::into_writer(
+            &crate::web::CheckpointResponse {
+                version: crate::CHECKPOINT_VERSION,
+                facts: [(chain, body.facts())].into_iter().collect(),
+                ..Default::default()
+            },
+            &mut response_body,
+        )
+        .unwrap();
+        let mock = server
+            .mock("GET", "/checkpoint")
+            .match_query(mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/cbor")
+            .with_body(response_body)
+            .create_async()
+            .await;
+        let mut info = ParticipantInfo::new(participant);
+        info.url = server.url();
+        (server, mock, (Participant::from(participant), info))
+    }
+
+    /// A peer serving a well-formed body whose recomputed digest differs from the
+    /// requested one must be skipped, so a later honest peer can supply the body.
+    #[tokio::test]
+    async fn test_rejects_peer_body_with_mismatched_digest_and_tries_next() {
+        let chain = Chain::Ethereum;
+        let requested = Checkpoint::reset(chain, 100);
+        let requested_digest = requested.digest();
+
+        // A byzantine peer serves a valid body at a different height, so the body
+        // hashes to a digest other than the one the contract settled.
+        let malicious = Checkpoint::reset(chain, 777);
+        assert_ne!(malicious.digest(), requested_digest);
+
+        let (bad_server, bad_mock, peer0) = mock_peer_serving(chain, &malicious, 0).await;
+        let (good_server, good_mock, peer1) = mock_peer_serving(chain, &requested, 1).await;
+
+        let peers = [peer0, peer1];
+        let result =
+            query_peers_checkpoint(&peers, &NodeClient::new(), chain, requested_digest).await;
+
+        assert_eq!(result, Some(requested));
+        // Both peers were queried: the first was rejected, the second accepted.
+        bad_mock.assert_async().await;
+        good_mock.assert_async().await;
+        drop(bad_server);
+        drop(good_server);
+    }
+
+    /// If every peer serves a body whose digest does not match the settled digest,
+    /// no checkpoint is adopted — alignment must halt rather than trust a body.
+    #[tokio::test]
+    async fn test_mismatched_digest_from_every_peer_returns_none() {
+        let chain = Chain::Ethereum;
+        let requested_digest = Checkpoint::reset(chain, 100).digest();
+        let malicious = Checkpoint::reset(chain, 777);
+        assert_ne!(malicious.digest(), requested_digest);
+
+        let (server0, mock0, peer0) = mock_peer_serving(chain, &malicious, 0).await;
+        let (server1, mock1, peer1) = mock_peer_serving(chain, &malicious, 1).await;
+
+        let peers = [peer0, peer1];
+        let result =
+            query_peers_checkpoint(&peers, &NodeClient::new(), chain, requested_digest).await;
+
+        assert!(
+            result.is_none(),
+            "no peer served a body matching the settled digest, so nothing must be adopted"
+        );
+        mock0.assert_async().await;
+        mock1.assert_async().await;
+        drop(server0);
+        drop(server1);
+    }
 }
