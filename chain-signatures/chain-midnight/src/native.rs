@@ -525,7 +525,8 @@ where
 
     /// Tells the wallet how the submit ended, as the intent builder's parent did: a
     /// landing clears the strikes, and any failure but an unsynced wallet starts the
-    /// replay over from the latest checkpoint.
+    /// replay over from the latest checkpoint; only a state conflict implicates the
+    /// restored state.
     async fn submit(&self, intent: &[u8]) -> anyhow::Result<Submitted> {
         let mut wallet_used = false;
         let submitted = self.submit_intent(intent, &mut wallet_used).await;
@@ -552,8 +553,16 @@ fn report_submit<W: FeePayer>(
     match submitted {
         Ok(_) => wallet.landed(),
         Err(SubmitError::WalletUnsynced(_)) => {}
-        Err(_) => wallet.failed(wallet_used),
+        Err(error) => wallet.failed(wallet_used && implicates_restored_state(error)),
     }
+}
+
+/// Whether the failure can implicate a restored wallet's snapshot: only the node
+/// refusing the planned spend is the stale-replay signature; striking on any other
+/// class — throttles, transport, an empty wallet — discards the checkpoint for an
+/// unrelated condition.
+fn implicates_restored_state(error: &SubmitError) -> bool {
+    matches!(error, SubmitError::StateConflict(_))
 }
 
 /// The fee's `ctime`. The spend proves against the replayed state's DUST roots,
@@ -785,8 +794,8 @@ mod tests {
             self.released.lock().unwrap().push(spent.to_vec());
         }
 
-        fn failed(&self, wallet_used: bool) {
-            self.failures.lock().unwrap().push(wallet_used);
+        fn failed(&self, strike: bool) {
+            self.failures.lock().unwrap().push(strike);
         }
 
         fn landed(&self) {
@@ -1270,17 +1279,26 @@ mod tests {
         );
         report_submit(&wallet, &Err(SubmitError::WalletBusy("held".into())), false);
         // An empty wallet is a failure like any other, as the intent builder's
-        // `wallet_unfunded` was.
+        // `wallet_unfunded` was — but none of these implicate the restored state.
         report_submit(
             &wallet,
             &Err(SubmitError::WalletUnfunded("empty".into())),
             true,
         );
+        // A throttled scan read (`a_throttled_scan_read_exits_and_engages_the_gate`
+        // produces this shape): reported for the reload, never a strike.
+        report_submit(
+            &wallet,
+            &Err(SubmitError::Node {
+                source: scan_read_rejected(429),
+            }),
+            true,
+        );
         assert_eq!(wallet.landings.load(Ordering::SeqCst), 1, "one landing");
         assert_eq!(
             *wallet.failures.lock().unwrap(),
-            vec![true, false, true],
-            "every failure but an unsynced wallet, with whether it used the wallet"
+            vec![true, false, false, false],
+            "every failure but an unsynced wallet, with whether it can strike"
         );
     }
 
