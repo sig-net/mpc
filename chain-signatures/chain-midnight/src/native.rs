@@ -557,10 +557,8 @@ fn report_submit<W: FeePayer>(
     }
 }
 
-/// Whether the failure can implicate a restored wallet's snapshot: only the node
-/// refusing the planned spend is the stale-replay signature; striking on any other
-/// class — throttles, transport, an empty wallet — discards the checkpoint for an
-/// unrelated condition.
+/// Only the node refusing the planned spend implicates a restored wallet's
+/// snapshot; striking on any other class would discard it for unrelated conditions.
 fn implicates_restored_state(error: &SubmitError) -> bool {
     matches!(error, SubmitError::StateConflict(_))
 }
@@ -1278,15 +1276,14 @@ mod tests {
             true,
         );
         report_submit(&wallet, &Err(SubmitError::WalletBusy("held".into())), false);
-        // An empty wallet is a failure like any other, as the intent builder's
-        // `wallet_unfunded` was — but none of these implicate the restored state.
+        // An empty wallet fails like any other, but implicates nothing.
         report_submit(
             &wallet,
             &Err(SubmitError::WalletUnfunded("empty".into())),
             true,
         );
-        // A throttled scan read (`a_throttled_scan_read_exits_and_engages_the_gate`
-        // produces this shape): reported for the reload, never a strike.
+        // The throttled watch-exit shape (a_throttled_scan_read_exits_and_engages_the_gate):
+        // reported for the reload, never a strike.
         report_submit(
             &wallet,
             &Err(SubmitError::Node {

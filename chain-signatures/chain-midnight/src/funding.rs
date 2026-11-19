@@ -158,9 +158,9 @@ pub(crate) trait FeePayer: Send + Sync {
     fn reserve(&self, spent: &[DustNullifier], until: Timestamp);
     /// Ends the reservation of `spent`: the transaction spending them cannot land.
     fn release(&self, spent: &[DustNullifier]);
-    /// A submit failed for any reason but an unsynced wallet: the replay starts
-    /// over from the latest checkpoint. `strike` says the failure can implicate a
-    /// restored wallet's state, so it counts toward dropping its checkpoint.
+    /// A submit failed for any reason but an unsynced wallet: the replay restarts
+    /// from the latest checkpoint; `strike` counts toward dropping a restored
+    /// wallet's checkpoint.
     fn failed(&self, strike: bool);
     /// A submit landed: the wallet in use can pay whatever it was restored from.
     fn landed(&self);
@@ -2198,8 +2198,7 @@ pub(crate) mod tests {
     #[tokio::test(start_paused = true)]
     async fn restored_wallets_failing_three_times_once_used_forget_the_checkpoint() {
         let (wallet, store, source, resumed_at) = restored_wallet().await;
-        // A landing between failures clears the strikes, and a failure that
-        // implicates nothing is no strike.
+        // A landing clears the strikes; a non-implicating failure is none.
         for (strike, landed) in [(true, false), (true, true), (false, false), (true, false)] {
             wallet.failed(strike);
             settle(&wallet).await;
