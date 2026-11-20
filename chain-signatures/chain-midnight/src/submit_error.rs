@@ -132,8 +132,8 @@ pub(crate) fn refusal_code(error: &anyhow::Error) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mpc_chain_integration_core::utils::retry::{is_provider_throttled, is_retryable};
     use crate::test_utils::rejected_http;
+    use mpc_chain_integration_core::utils::retry::{is_provider_throttled, is_retryable};
 
     #[test]
     fn every_class_is_counted_with_its_code_verdict_and_strike() {
