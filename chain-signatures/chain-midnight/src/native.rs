@@ -2378,13 +2378,12 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn a_verdict_finishing_after_the_deadline_ends_ambiguous() {
-        // The dropped scan takes its verdict with it.
+    async fn a_scan_read_outlasting_the_deadline_ends_ambiguous() {
+        // The 30 s deadline drops the 40 s read mid-flight; the dropped scan
+        // takes its verdict with it.
         let client = client_over(
             managed_dir(|_, bytes| bytes),
-            ScriptedChain::new(10, 20, None)
-                .failing_once_with(11, scan_read_rejected(403))
-                .slowing_landing_reads(Duration::from_secs(40)),
+            ScriptedChain::new(10, 20, None).slowing_landing_reads(Duration::from_secs(40)),
         );
         let error = client
             .post(
@@ -2399,7 +2398,7 @@ mod tests {
             .unwrap_err();
         assert!(
             matches!(error, SubmitError::Ambiguous(_)),
-            "the deadline outran the terminal read: {error:#}"
+            "the deadline dropped the read still in flight: {error:#}"
         );
     }
 
@@ -2585,11 +2584,13 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn a_non_throttled_scan_resets_the_escape_count() {
-        // 429, then a statusless failure, then 429: only consecutive throttles
-        // count — the watch lands instead of exiting.
+        // 429, 429, a statusless failure, then 429: only consecutive throttles
+        // count — without the reset the last 429 is the third standing one, and
+        // the watch escapes before the landing.
         let client = client_over(
             managed_dir(|_, bytes| bytes),
             ScriptedChain::new(10, 11, Some((11, Landing::Applied)))
+                .failing_once_with(11, scan_read_rejected(429))
                 .failing_once_with(11, scan_read_rejected(429))
                 .failing_once_with(11, anyhow::anyhow!("the node dropped the read"))
                 .failing_once_with(11, scan_read_rejected(429)),
@@ -2615,8 +2616,8 @@ mod tests {
                 .iter()
                 .copied()
                 .collect::<Vec<_>>(),
-            [11, 11, 11, 11],
-            "the reset leaves the count at one, so the fourth scan lands"
+            [11, 11, 11, 11, 11],
+            "the reset leaves the count at one, so the fifth scan lands"
         );
     }
 
