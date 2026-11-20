@@ -603,12 +603,20 @@ async fn test_clear_removes_more_artifacts_than_one_unpack_allows() -> anyhow::R
     let redis_container = containers::Redis::run(&spawner).await;
     let triple_storage = redis_container.triple_storage(&node0_id, node0);
 
-    // Lua's unpack in Redis 7.4 fails somewhere above 8000 entries.
+    // Lua's unpack in Redis 7.4 fails somewhere above 8000 entries. Populate the
+    // full key layout (artifact hash, holder sets, owners registry and owner
+    // sets) so clear() has to remove every kind of key it knows about.
+    const COUNT: u64 = 10_000;
     let artifact_key = triple_storage.artifact_key();
+    let owners_key = triple_storage.owner_keys();
+    let owner_key = format!("{owners_key}:p0");
+
     let mut pipe = redis::pipe();
-    for id in 1..=10_000u64 {
+    pipe.sadd(owners_key, owner_key.as_str()).ignore();
+    for id in 1..=COUNT {
         pipe.hset(artifact_key, id, "x")
             .sadd(format!("{artifact_key}:holders:{id}"), 1)
+            .sadd(owner_key.as_str(), id)
             .ignore();
     }
     let mut conn = redis_container.pool().get().await?;
