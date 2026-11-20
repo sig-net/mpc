@@ -3,7 +3,7 @@
   "pullRequest": "https://github.com/sig-net/midnight-examples/pull/134",
   "commit": "62304be1148a24cec9a558b320c3c6565e7bdaf3",
   "compiler": "0.36.0",
-  "signetLibrary": "@sig-net/midnight from https://github.com/sig-net/midnight-integration/pull/193 at 4d7d578532adc6d296335c16807b86fbaf06ae77 (0.27.0-rc.4 plus the Tron admission checks)",
+  "signetLibrary": "@sig-net/midnight@0.27.0-rc.5",
   "license": "erc20-vault.LICENSE",
   "files": [
     {
