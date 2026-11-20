@@ -578,7 +578,7 @@ fn report_submit<W: FeePayer>(
 /// unlanded strikes with it — kept from the wallet this replaced, which struck
 /// on any failure once the wallet paid. Striking on any other class would
 /// discard the checkpoint for conditions the replay cannot fix.
-fn implicates_restored_state(error: &SubmitError) -> bool {
+pub(crate) fn implicates_restored_state(error: &SubmitError) -> bool {
     matches!(
         error,
         SubmitError::StateConflict(_) | SubmitError::ExpiredUnlanded(_)

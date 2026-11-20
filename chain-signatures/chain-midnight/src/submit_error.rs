@@ -134,42 +134,82 @@ mod tests {
     use subxt::ext::subxt_rpcs::Error as RawRpcError;
 
     #[test]
-    fn every_class_is_counted_and_classified_under_its_code() {
-        let classes: [(fn() -> SubmitError, bool); 13] = [
-            (|| SubmitError::BadRequest("reason".to_string()), false),
+    fn every_class_is_counted_with_its_code_verdict_and_strike() {
+        let classes: [(fn() -> SubmitError, bool, bool); 13] = [
+            (
+                || SubmitError::BadRequest("reason".to_string()),
+                false,
+                false,
+            ),
             (
                 || SubmitError::ContractMismatch("reason".to_string()),
                 false,
+                false,
             ),
-            (|| SubmitError::DeployMismatch("reason".to_string()), true),
+            (
+                || SubmitError::DeployMismatch("reason".to_string()),
+                true,
+                false,
+            ),
             (
                 || SubmitError::GateRefusal {
                     source: anyhow::anyhow!("reason"),
                 },
                 false,
+                false,
             ),
-            (|| SubmitError::WalletUnsynced("reason".to_string()), true),
-            (|| SubmitError::WalletBusy("reason".to_string()), true),
-            (|| SubmitError::WalletUnfunded("reason".to_string()), true),
-            (|| SubmitError::ProvingTimeout("reason".to_string()), true),
-            (|| SubmitError::StateConflict("reason".to_string()), true),
-            (|| SubmitError::ExpiredUnlanded("reason".to_string()), true),
-            (|| SubmitError::Ambiguous("reason".to_string()), true),
-            (|| SubmitError::Internal("reason".to_string()), true),
+            (
+                || SubmitError::WalletUnsynced("reason".to_string()),
+                true,
+                false,
+            ),
+            (
+                || SubmitError::WalletBusy("reason".to_string()),
+                true,
+                false,
+            ),
+            (
+                || SubmitError::WalletUnfunded("reason".to_string()),
+                true,
+                false,
+            ),
+            (
+                || SubmitError::ProvingTimeout("reason".to_string()),
+                true,
+                false,
+            ),
+            (
+                || SubmitError::StateConflict("reason".to_string()),
+                true,
+                true,
+            ),
+            (
+                || SubmitError::ExpiredUnlanded("reason".to_string()),
+                true,
+                true,
+            ),
+            (|| SubmitError::Ambiguous("reason".to_string()), true, false),
+            (|| SubmitError::Internal("reason".to_string()), true, false),
             (
                 || SubmitError::Node {
                     source: anyhow::anyhow!("reason"),
                 },
                 true,
+                false,
             ),
         ];
-        for (class, retryable) in classes {
+        for (class, retryable, strike) in classes {
             let error = class();
             let code = error.code();
             assert!(
                 error.to_string().starts_with(&format!("[{code}]")),
                 "{} does not carry its code",
                 error
+            );
+            assert_eq!(
+                crate::native::implicates_restored_state(&error),
+                strike,
+                "{code}'s strike verdict"
             );
             let error = error.into_publish_error().context("publishing");
             assert_eq!(refusal_code(&error), Some(code));
