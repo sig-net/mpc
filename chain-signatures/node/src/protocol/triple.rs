@@ -557,10 +557,16 @@ impl TripleSpawner {
         owner: Participant,
         timeout: Duration,
     ) -> Result<(), InitializationError> {
+        if self.contains(id).await {
+            return Err(InitializationError::BadParameters(format!(
+                "triple {id} is already stored"
+            )));
+        }
+
         // Check if the `id` is already in the system. Error out and have the next cycle try again.
         let Some(slot) = self.triple_storage.create_slot(id, owner).await else {
             return Err(InitializationError::BadParameters(format!(
-                "triple {id} is already generating, in use, or stored"
+                "triple {id} is already generating or in use"
             )));
         };
 
