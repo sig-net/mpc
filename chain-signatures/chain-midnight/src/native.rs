@@ -2622,6 +2622,44 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn a_healthy_scan_resets_the_throttle_count() {
+        // The healthy scan resets the standing count, so all three 429s at 13
+        // must run before the escape.
+        let client = client_over(
+            managed_dir(|_, bytes| bytes),
+            ScriptedChain::new(10, 20, None)
+                .failing_once_with(11, scan_read_rejected(429))
+                .failing_once_with(13, scan_read_rejected(429))
+                .failing_once_with(13, scan_read_rejected(429))
+                .failing_once_with(13, scan_read_rejected(429)),
+        );
+        let error = client
+            .post(
+                b"tx",
+                LedgerTxHash::from_bytes(TX_HASH),
+                &spent(),
+                10,
+                Timestamp::from_secs(5000),
+                deadline(),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(error, SubmitError::Node { .. }), "{error:#}");
+        assert_eq!(
+            client
+                .chain
+                .landing_reads
+                .lock()
+                .unwrap()
+                .iter()
+                .copied()
+                .collect::<Vec<_>>(),
+            [11, 11, 12, 13, 13, 13],
+            "a standing count would have exited one scan early, at [11, 11, 12, 13, 13]"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn an_absent_block_number_never_ends_the_watch() {
         // The watch's own None-wrap renders "…block 403": carrier-less, must not exit.
         for number in [403u64, 429] {
