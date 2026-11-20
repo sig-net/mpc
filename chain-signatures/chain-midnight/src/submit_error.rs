@@ -44,15 +44,9 @@ pub(crate) enum SubmitError {
     /// Proving outlasted the submit budget. Nothing was posted.
     #[error("[proving_timeout] {0}")]
     ProvingTimeout(String),
-    /// The node refused the transaction. Nothing was posted. The retry
-    /// rebuilds against fresh state.
+    /// The node refused the transaction, or the posted one expired unlanded.
     #[error("[state_conflict] {0}")]
     StateConflict(String),
-    /// The posted transaction expired unlanded: the node took it, but no
-    /// finalized block held it before its TTL. Retried like `StateConflict`,
-    /// and struck with it (`SubmitError::strikes_restored_state`).
-    #[error("[state_conflict] {0}")]
-    ExpiredUnlanded(String),
     /// The transaction may still land.
     #[error("[ambiguous_submit] {0}")]
     Ambiguous(String),
@@ -79,7 +73,7 @@ impl SubmitError {
             Self::WalletBusy(_) => "wallet_busy",
             Self::WalletUnfunded(_) => "wallet_unfunded",
             Self::ProvingTimeout(_) => "proving_timeout",
-            Self::StateConflict(_) | Self::ExpiredUnlanded(_) => "state_conflict",
+            Self::StateConflict(_) => "state_conflict",
             Self::Ambiguous(_) => "ambiguous_submit",
             Self::Internal(_) | Self::Node { .. } => "internal",
         }
@@ -102,7 +96,7 @@ impl SubmitError {
     // it. Every other class would discard the checkpoint for conditions the
     // replay cannot fix.
     pub(crate) fn strikes_restored_state(&self) -> bool {
-        matches!(self, Self::StateConflict(_) | Self::ExpiredUnlanded(_))
+        matches!(self, Self::StateConflict(_))
     }
 
     /// As the publisher's error, the class's verdict riding as a carrier so the
@@ -145,7 +139,7 @@ mod tests {
     #[test]
     fn every_class_is_counted_with_its_code_verdict_and_strike() {
         type Class = (fn() -> SubmitError, bool, bool);
-        let classes: [Class; 13] = [
+        let classes: [Class; 12] = [
             (
                 || SubmitError::BadRequest("reason".to_string()),
                 false,
@@ -190,11 +184,6 @@ mod tests {
             ),
             (
                 || SubmitError::StateConflict("reason".to_string()),
-                true,
-                true,
-            ),
-            (
-                || SubmitError::ExpiredUnlanded("reason".to_string()),
                 true,
                 true,
             ),

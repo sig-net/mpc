@@ -425,7 +425,7 @@ impl<W: FeePayer, C: SubmitChain + 'static> NativeIntentClient<W, C> {
             WatchEnd::Landed => Ok(tx_hash),
             WatchEnd::Expired => {
                 self.wallet.release(spent);
-                Err(SubmitError::ExpiredUnlanded(format!(
+                Err(SubmitError::StateConflict(format!(
                     "transaction {tx_hash} expired without landing"
                 )))
             }
@@ -1201,10 +1201,6 @@ mod tests {
         report_submit(&wallet, &landed);
         report_submit(&wallet, &Err(SubmitError::WalletUnsynced("syncing".into())));
         report_submit(&wallet, &Err(SubmitError::StateConflict("refused".into())));
-        report_submit(
-            &wallet,
-            &Err(SubmitError::ExpiredUnlanded("expired unlanded".into())),
-        );
         report_submit(&wallet, &Err(SubmitError::WalletBusy("held".into())));
         // An empty wallet fails like any other, but implicates nothing.
         report_submit(&wallet, &Err(SubmitError::WalletUnfunded("empty".into())));
@@ -1219,7 +1215,7 @@ mod tests {
         assert_eq!(wallet.landings.load(Ordering::SeqCst), 1, "one landing");
         assert_eq!(
             *wallet.failures.lock().unwrap(),
-            vec![true, true, false, false, false],
+            vec![true, false, false, false],
             "every failure but an unsynced wallet, with whether it can strike"
         );
     }
@@ -1264,7 +1260,7 @@ mod tests {
             ScriptedChain::new(10, 20),
         );
         let error = client.post(1080).await.unwrap_err();
-        assert!(matches!(error, SubmitError::ExpiredUnlanded(_)), "{error}");
+        assert!(matches!(error, SubmitError::StateConflict(_)), "{error}");
         report_submit(&client.wallet, &Err(error));
         assert_eq!(
             *client.wallet.failures.lock().unwrap(),
@@ -1564,7 +1560,7 @@ mod tests {
         }
         let client = client_over(managed_dir(|_, bytes| bytes), chain);
         let error = client.post(1150).await.unwrap_err();
-        assert!(matches!(error, SubmitError::ExpiredUnlanded(_)), "{error}");
+        assert!(matches!(error, SubmitError::StateConflict(_)), "{error}");
         assert_eq!(*client.wallet.released.lock().unwrap(), vec![spent()]);
         let submits = client.chain.submits();
         assert_eq!(
@@ -1828,7 +1824,7 @@ mod tests {
         for (ttl, last_read) in [(1080, 14), (1084, 15)] {
             let client = client_over(managed_dir(|_, bytes| bytes), ScriptedChain::new(10, 20));
             let error = client.post(ttl).await.unwrap_err();
-            assert!(matches!(error, SubmitError::ExpiredUnlanded(_)), "{error}");
+            assert!(matches!(error, SubmitError::StateConflict(_)), "{error}");
             assert_eq!(*client.wallet.released.lock().unwrap(), vec![spent()]);
             let reads: Vec<u64> = client
                 .chain
@@ -1880,7 +1876,7 @@ mod tests {
             ScriptedChain::new(11, 12).failing_time_once_at(12),
         );
         let error = client.post(1070).await.unwrap_err();
-        assert!(matches!(error, SubmitError::ExpiredUnlanded(_)), "{error}");
+        assert!(matches!(error, SubmitError::StateConflict(_)), "{error}");
         assert_eq!(*client.wallet.released.lock().unwrap(), vec![spent()]);
         assert_eq!(*client.chain.time_reads.lock().unwrap(), [12, 12]);
     }
