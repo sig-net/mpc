@@ -50,7 +50,7 @@ const WORK_RESERVE: Duration = Duration::from_secs(120);
 const FINALITY_SLACK: Duration = Duration::from_secs(60);
 const LANDING_POLL: Duration = Duration::from_secs(2);
 /// Consecutive throttled scans before the watch escapes to the gate: a transient
-/// 429 keeps polling the posted submit; a standing one parks the chain.
+/// 429 keeps polling the sent transaction; a standing one parks the chain.
 const THROTTLED_SCANS_TO_EXIT: u32 = 3;
 /// How long after a submit went unanswered the transaction is first sent again. Each
 /// further unanswered attempt doubles the wait, up to `MAX_RESEND_DELAY`, so a node
