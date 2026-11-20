@@ -2197,7 +2197,7 @@ pub(crate) mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn restored_wallets_failing_three_times_once_used_forget_the_checkpoint() {
+    async fn restored_wallets_struck_three_times_forget_the_checkpoint() {
         let (wallet, store, source, resumed_at) = restored_wallet().await;
         // A landing clears the strikes; a non-implicating failure is none.
         for (strike, landed) in [(true, false), (true, true), (false, false), (true, false)] {
@@ -2210,7 +2210,7 @@ pub(crate) mod tests {
         assert_eq!(
             wallet.shared.snapshots().strikes,
             1,
-            "a landing and a failure before paying count no strike"
+            "a landing and a non-implicating failure count no strike"
         );
         // The first reload resumes the restored checkpoint; its caught-up replay keeps
         // the newest event's, which the later reloads resume.
