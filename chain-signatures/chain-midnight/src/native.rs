@@ -715,7 +715,10 @@ mod tests {
     enum LandingRead {
         Found(Landing),
         Fail(anyhow::Error),
-        Delayed(Duration),
+        Delayed {
+            delay: Duration,
+            then: Box<LandingRead>,
+        },
     }
 
     impl ScriptedChain {
@@ -767,11 +770,14 @@ mod tests {
             self
         }
 
-        fn delaying_read_at(self, number: u64, delay: Duration) -> Self {
-            self.reads
-                .lock()
-                .unwrap()
-                .push_back((number, LandingRead::Delayed(delay)));
+        fn delaying_read_at(self, number: u64, delay: Duration, then: LandingRead) -> Self {
+            self.reads.lock().unwrap().push_back((
+                number,
+                LandingRead::Delayed {
+                    delay,
+                    then: Box::new(then),
+                },
+            ));
             self
         }
 
@@ -883,21 +889,23 @@ mod tests {
             assert_eq!(tx_hash, LedgerTxHash::from_bytes(TX_HASH));
             let number = block_number_of(at);
             self.landing_reads.lock().unwrap().push_back(number);
-            let reply = {
+            let mut reply = {
                 let mut scripted = self.reads.lock().unwrap();
                 scripted
                     .front()
                     .is_some_and(|&(at, _)| at == number)
                     .then(|| scripted.pop_front().expect("checked").1)
             };
-            match reply {
-                Some(LandingRead::Fail(error)) => Err(error),
-                Some(LandingRead::Delayed(delay)) => {
-                    tokio::time::sleep(delay).await;
-                    Ok(None)
+            loop {
+                match reply {
+                    Some(LandingRead::Fail(error)) => return Err(error),
+                    Some(LandingRead::Delayed { delay, then }) => {
+                        tokio::time::sleep(delay).await;
+                        reply = Some(*then);
+                    }
+                    Some(LandingRead::Found(landing)) => return Ok(Some(landing)),
+                    None => return Ok(None),
                 }
-                Some(LandingRead::Found(landing)) => Ok(Some(landing)),
-                None => Ok(None),
             }
         }
     }
@@ -1963,20 +1971,25 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn a_scan_read_outlasting_the_deadline_ends_ambiguous() {
-        // The 30 s deadline drops the 40 s read mid-flight; the dropped scan
-        // takes its verdict with it.
-        let client = client_over(
-            managed_dir(|_, bytes| bytes),
-            ScriptedChain::new(10, 20).delaying_read_at(11, Duration::from_secs(40)),
-        );
-        let error = client
-            .post_within(5000, Instant::now() + Duration::from_secs(30))
-            .await
-            .unwrap_err();
-        assert!(
-            matches!(error, SubmitError::Ambiguous(_)),
-            "the deadline dropped the read still in flight: {error:#}"
-        );
+        // The 30 s deadline drops the 40 s read mid-flight: the outcome stays
+        // Ambiguous whichever verdict the dropped read was carrying.
+        for verdict in [
+            LandingRead::Fail(scan_read_rejected(403)),
+            LandingRead::Found(Landing::Applied),
+        ] {
+            let client = client_over(
+                managed_dir(|_, bytes| bytes),
+                ScriptedChain::new(10, 20).delaying_read_at(11, Duration::from_secs(40), verdict),
+            );
+            let error = client
+                .post_within(5000, Instant::now() + Duration::from_secs(30))
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(error, SubmitError::Ambiguous(_)),
+                "the deadline dropped the read still in flight: {error:#}"
+            );
+        }
     }
 
     #[tokio::test(start_paused = true)]
