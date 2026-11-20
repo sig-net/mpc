@@ -24,7 +24,7 @@ const THROTTLED_SCANS_TO_EXIT: u32 = 3;
 #[derive(Debug)]
 pub(crate) enum WatchEnd {
     /// A finalized block holds the transaction, applied or partially.
-    Landed,
+    Landed(Landing),
     /// No finalized block held it by one past the intent's TTL.
     Expired,
     /// The submit budget ended first; the transaction may still land.
@@ -91,7 +91,7 @@ pub(crate) async fn watch_landing<C: SubmitChain>(
         };
         match tokio::time::timeout_at(deadline, scan).await {
             Ok(Ok(Some(Landing::Expired))) => return WatchEnd::Expired,
-            Ok(Ok(Some(_))) => return WatchEnd::Landed,
+            Ok(Ok(Some(landed))) => return WatchEnd::Landed(landed),
             Ok(Ok(None)) => throttled_scans = 0,
             Ok(Err(error)) => {
                 let failure = read_verdict(&error);

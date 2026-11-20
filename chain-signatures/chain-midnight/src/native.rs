@@ -413,10 +413,15 @@ impl<W: FeePayer, C: SubmitChain + 'static> NativeIntentClient<W, C> {
             )))
         });
         let end = watch_landing(self.chain.as_ref(), tx_hash, after, ttl, deadline).await;
+        let landed = match &end {
+            WatchEnd::Landed(landing) => Some(landing),
+            _ => None,
+        };
         tracing::info!(
             tx_hash = %tx_hash,
             ?submitted,
             settled = ?started.elapsed(),
+            ?landed,
             outcome = ?end,
             "midnight: respond settled"
         );
@@ -424,7 +429,7 @@ impl<W: FeePayer, C: SubmitChain + 'static> NativeIntentClient<W, C> {
             // The respond's only transcript and the DUST spends are guaranteed, which
             // a partial success commits and readers read; the reservation ends when
             // the replay sees the spends.
-            WatchEnd::Landed => Ok(tx_hash),
+            WatchEnd::Landed(_) => Ok(tx_hash),
             WatchEnd::Expired => {
                 self.wallet.release(spent);
                 Err(SubmitError::StateConflict(format!(
@@ -616,7 +621,9 @@ mod tests {
     use crate::funding::tests::{base, funded_key, replayed};
     use crate::funding::{plan_fee, FeePlan};
     use crate::landing_watch::LANDING_POLL;
+    use crate::test_utils::{EventRecorder, RecordedFields};
     use minocrab_publisher::{Attestation, EcdsaSignature};
+    use tracing_subscriber::layer::SubscriberExt;
 
     /// The responder's initial state with the package's verifier keys
     /// (`midnight-devtools`' `gen:initial-state`).
@@ -1700,6 +1707,49 @@ mod tests {
             client.wallet.released.lock().unwrap().is_empty(),
             "the guaranteed segment spent the DUST; the replay ends the reservation"
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_settle_log_names_which_landing_the_watch_ended_in() {
+        let recorder = EventRecorder::default();
+        let _registration_guard = tracing::subscriber::set_default(tracing_subscriber::registry());
+        let subscriber = tracing_subscriber::registry().with(recorder.clone());
+        let _subscriber_guard = tracing::subscriber::set_default(subscriber);
+        for landing in [Landing::Applied, Landing::PartialSuccess] {
+            let client = client_over(
+                managed_dir(|_, bytes| bytes),
+                ScriptedChain::new(10, 20).landing_at(12, landing),
+            );
+            assert_eq!(
+                client.post(5000).await.unwrap(),
+                LedgerTxHash::from_bytes(TX_HASH)
+            );
+        }
+        let settles: Vec<RecordedFields> = recorder
+            .snapshot()
+            .into_iter()
+            .filter(|fields| fields.contains_key("settled"))
+            .collect();
+        assert_eq!(settles.len(), 2, "{settles:?}");
+        for (fields, landed, outcome) in [
+            (&settles[0], "Some(Applied)", "Landed(Applied)"),
+            (
+                &settles[1],
+                "Some(PartialSuccess)",
+                "Landed(PartialSuccess)",
+            ),
+        ] {
+            assert_eq!(
+                fields.get("landed").map(String::as_str),
+                Some(landed),
+                "{fields:?}"
+            );
+            assert_eq!(
+                fields.get("outcome").map(String::as_str),
+                Some(outcome),
+                "{fields:?}"
+            );
+        }
     }
 
     #[test]
