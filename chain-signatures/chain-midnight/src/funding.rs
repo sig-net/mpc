@@ -67,9 +67,10 @@ const CHECKPOINT_MAGIC: &[u8; 16] = b"mpc-dust-ckpt-v1";
 /// How long a resumed subscription may stay silent before the checkpoint is dropped:
 /// the indexer serves the checkpoint's own event first, from what it has stored.
 const RESUME_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
-/// Failed submits of a restored wallet, after it was used and with none landing in
-/// between, before its checkpoint is dropped: the intent builder's snapshot strikes.
-/// Above one, because a healthy wallet is also refused at times.
+/// Strikes — submits a restored wallet's state was implicated in, with none landing
+/// in between — before its checkpoint is dropped: the intent builder's snapshot
+/// strikes. Above one, because a healthy wallet is also refused at times, and its
+/// spends also expire unlanded.
 const RESTORE_STRIKES: u32 = 3;
 /// How long a live subscription that holds itself caught up may apply nothing while
 /// the indexer names a newer event before it is replaced: a connection can stall
@@ -158,10 +159,10 @@ pub(crate) trait FeePayer: Send + Sync {
     fn reserve(&self, spent: &[DustNullifier], until: Timestamp);
     /// Ends the reservation of `spent`: the transaction spending them cannot land.
     fn release(&self, spent: &[DustNullifier]);
-    /// A submit failed for any reason but an unsynced wallet. The replay starts over
-    /// from the latest checkpoint, and `wallet_used` says whether the failure came
-    /// once the wallet was paying, so it can implicate the restored state.
-    fn failed(&self, wallet_used: bool);
+    /// A submit failed for any reason but an unsynced wallet: the replay restarts
+    /// from the latest checkpoint; `strike` counts toward dropping a restored
+    /// wallet's checkpoint.
+    fn failed(&self, strike: bool);
     /// A submit landed: the wallet in use can pay whatever it was restored from.
     fn landed(&self);
 }
@@ -968,11 +969,11 @@ impl FeePayer for FundingWallet {
         self.shared.progress.send_replace(());
     }
 
-    fn failed(&self, wallet_used: bool) {
+    fn failed(&self, strike: bool) {
         let restored = self.shared.state().restored;
         // The strikes before the reload, so a wake acting on it sees any forget.
         let mut forget = false;
-        if restored && wallet_used {
+        if restored && strike {
             let mut snapshots = self.shared.snapshots();
             snapshots.strikes += 1;
             if snapshots.strikes >= RESTORE_STRIKES {
@@ -2196,12 +2197,11 @@ pub(crate) mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn restored_wallets_failing_three_times_once_used_forget_the_checkpoint() {
+    async fn restored_wallets_struck_three_times_forget_the_checkpoint() {
         let (wallet, store, source, resumed_at) = restored_wallet().await;
-        // A landing between failures clears the strikes, and a failure before the
-        // wallet was used is no strike.
-        for (used, landed) in [(true, false), (true, true), (false, false), (true, false)] {
-            wallet.failed(used);
+        // A landing clears the strikes; a non-implicating failure is none.
+        for (strike, landed) in [(true, false), (true, true), (false, false), (true, false)] {
+            wallet.failed(strike);
             settle(&wallet).await;
             if landed {
                 wallet.landed();
@@ -2210,7 +2210,7 @@ pub(crate) mod tests {
         assert_eq!(
             wallet.shared.snapshots().strikes,
             1,
-            "a landing and a failure before paying count no strike"
+            "a landing and a non-implicating failure count no strike"
         );
         // The first reload resumes the restored checkpoint; its caught-up replay keeps
         // the newest event's, which the later reloads resume.
@@ -2220,13 +2220,17 @@ pub(crate) mod tests {
             vec![Some(resumed_at), Some(resumed_at), newest, newest, newest]
         );
 
+        // A failure between strikes does not clear them; only a landing does.
+        wallet.failed(false);
+        settle(&wallet).await;
+
         // The last of those was the first strike since the landing; this is the second.
         wallet.failed(true);
         settle(&wallet).await;
         assert_eq!(
             wallet.shared.snapshots().strikes,
             2,
-            "two strikes in a row keep the checkpoint"
+            "two strikes, with none landing between them, keep the checkpoint"
         );
 
         wallet.failed(true);

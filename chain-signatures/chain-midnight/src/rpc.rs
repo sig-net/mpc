@@ -843,6 +843,81 @@ impl MidnightPublisherRpc {
         Ok(header)
     }
 
+    async fn number_at(&self, at: &BlockHash) -> anyhow::Result<u64> {
+        Ok(u64::from(self.header(H256::from(*at)).await?.number))
+    }
+
+    async fn hash_at(&self, number: u64) -> anyhow::Result<Option<BlockHash>> {
+        Ok(self
+            .legacy
+            .chain_get_block_hash(Some(NumberOrHex::Number(number)))
+            .await
+            .context("failed to fetch a midnight block hash by number")?
+            .map(BlockHash::from))
+    }
+
+    async fn time_at(
+        &self,
+        at: &BlockHash,
+    ) -> anyhow::Result<midnight_base_crypto::time::Timestamp> {
+        // Named for its type: interpolating `at` must render the full hash, and an
+        // H256 binding here once truncated that render to `0x4343…4343`.
+        let at_h256 = H256::from(*at);
+        if let Some(time) = recall(&self.blocks().times, at_h256) {
+            return Ok(time);
+        }
+        let key = self
+            .client_for_block(at_h256)
+            .await?
+            .storage()
+            .address_bytes(&subxt::dynamic::storage(
+                "Timestamp",
+                "Now",
+                Vec::<subxt::dynamic::Value>::new(),
+            ))
+            .context("the midnight runtime has no Timestamp::Now")?;
+        let raw = self
+            .legacy
+            .state_get_storage(&key, Some(at_h256))
+            .await
+            .context("failed to fetch the midnight block time")?
+            .with_context(|| format!("midnight node has no block time at {at}"))?;
+        let millis =
+            u64::decode_all(&mut &raw[..]).context("the midnight block time is not a u64")?;
+        let time = midnight_base_crypto::time::Timestamp::from_secs(millis / 1000);
+        remember(&mut self.blocks().times, at_h256, time);
+        Ok(time)
+    }
+
+    async fn landing_at(
+        &self,
+        at: &BlockHash,
+        tx_hash: LedgerTxHash,
+    ) -> anyhow::Result<Option<Landing>> {
+        let at_h256 = H256::from(*at);
+        let events = self
+            .client_for_block(at_h256)
+            .await?
+            .events()
+            .at(at_h256)
+            .await
+            .context("failed to fetch midnight block events")?;
+        for event in events.iter() {
+            let event = event.context("Midnight block events did not match metadata")?;
+            if let Some(TxApplied(details)) = event.as_event::<TxApplied>()? {
+                if details.tx_hash == *tx_hash.as_bytes() {
+                    return Ok(Some(Landing::Applied));
+                }
+            }
+            if let Some(TxPartialSuccess(details)) = event.as_event::<TxPartialSuccess>()? {
+                if details.tx_hash == *tx_hash.as_bytes() {
+                    return Ok(Some(Landing::PartialSuccess));
+                }
+            }
+        }
+        Ok(None)
+    }
+
     fn blocks(&self) -> std::sync::MutexGuard<'_, BlockMemo> {
         self.blocks
             .lock()
@@ -879,9 +954,7 @@ async fn metadata_at(rpc: &RpcClient, at: H256) -> anyhow::Result<subxt::Metadat
         .context("failed to fetch the midnight runtime metadata")
 }
 
-/// Finalized reads used by the publisher and its in-process tests, every one
-/// addressed by the hash `finalized_head` answers with. Every error out of
-/// an impl carries a read-partition verdict carrier (`attach_read_carrier`).
+/// Finalized reads used by the publisher and its in-process tests.
 #[async_trait::async_trait]
 pub(crate) trait PinnedReads: Send + Sync {
     async fn finalized_head(&self) -> anyhow::Result<BlockHash>;
@@ -891,6 +964,25 @@ pub(crate) trait PinnedReads: Send + Sync {
         at_hash: &BlockHash,
     ) -> anyhow::Result<Option<Vec<u8>>>;
     async fn ledger_parameters(&self, at_hash: &BlockHash) -> anyhow::Result<Vec<u8>>;
+}
+
+/// What the submit path needs from the node, beyond the pinned reads.
+#[async_trait::async_trait]
+pub(crate) trait SubmitChain: PinnedReads {
+    async fn block_number(&self, at: &BlockHash) -> anyhow::Result<u64>;
+    async fn block_hash_at(&self, number: u64) -> anyhow::Result<Option<BlockHash>>;
+    /// The block's `Timestamp::Now`, in whole seconds.
+    async fn block_time(
+        &self,
+        at: &BlockHash,
+    ) -> anyhow::Result<midnight_base_crypto::time::Timestamp>;
+    async fn submit(&self, transaction: &[u8]) -> Result<(), SubmitRefusal>;
+    /// The status the block reports for the ledger transaction `tx_hash`, if it holds it.
+    async fn landing(
+        &self,
+        at: &BlockHash,
+        tx_hash: LedgerTxHash,
+    ) -> anyhow::Result<Option<Landing>>;
 }
 
 /// The read-path verdict for a node error: oversized state terminal, an
@@ -915,7 +1007,7 @@ pub(crate) fn read_verdict(error: &anyhow::Error) -> RpcFailure {
 #[error("a publisher read failed")]
 struct ReadFailed(#[source] anyhow::Error);
 
-fn attach_read_carrier(error: anyhow::Error) -> anyhow::Error {
+pub(crate) fn attach_read_carrier(error: anyhow::Error) -> anyhow::Error {
     anyhow::Error::new(read_verdict(&error)).context(ReadFailed(error))
 }
 
@@ -962,8 +1054,6 @@ pub(crate) enum Landing {
     Applied,
     /// Applied but for a fallible segment; readers still read its guaranteed events.
     PartialSuccess,
-    /// A finalized block is past the transaction's TTL, so it can no longer land.
-    Expired,
 }
 
 /// Why `author_submitExtrinsic` did not take a transaction.
@@ -1007,52 +1097,20 @@ fn classify_submit_reply(
 }
 
 #[async_trait::async_trait]
-impl crate::native::SubmitChain for MidnightPublisherRpc {
+impl SubmitChain for MidnightPublisherRpc {
     async fn block_number(&self, at: &BlockHash) -> anyhow::Result<u64> {
-        let header = self.header(H256::from(*at)).await?;
-        Ok(u64::from(header.number))
+        self.number_at(at).await.map_err(attach_read_carrier)
     }
 
     async fn block_hash_at(&self, number: u64) -> anyhow::Result<Option<BlockHash>> {
-        Ok(self
-            .legacy
-            .chain_get_block_hash(Some(NumberOrHex::Number(number)))
-            .await
-            .context("failed to fetch a midnight block hash by number")?
-            .map(BlockHash::from))
+        self.hash_at(number).await.map_err(attach_read_carrier)
     }
 
     async fn block_time(
         &self,
         at: &BlockHash,
     ) -> anyhow::Result<midnight_base_crypto::time::Timestamp> {
-        // Named for its type: interpolating `at` must render the full hash, and an
-        // H256 binding here once truncated that render to `0x4343…4343`.
-        let at_h256 = H256::from(*at);
-        if let Some(time) = recall(&self.blocks().times, at_h256) {
-            return Ok(time);
-        }
-        let key = self
-            .client_for_block(at_h256)
-            .await?
-            .storage()
-            .address_bytes(&subxt::dynamic::storage(
-                "Timestamp",
-                "Now",
-                Vec::<subxt::dynamic::Value>::new(),
-            ))
-            .context("the midnight runtime has no Timestamp::Now")?;
-        let raw = self
-            .legacy
-            .state_get_storage(&key, Some(at_h256))
-            .await
-            .context("failed to fetch the midnight block time")?
-            .with_context(|| format!("midnight node has no block time at {at}"))?;
-        let millis =
-            u64::decode_all(&mut &raw[..]).context("the midnight block time is not a u64")?;
-        let time = midnight_base_crypto::time::Timestamp::from_secs(millis / 1000);
-        remember(&mut self.blocks().times, at_h256, time);
-        Ok(time)
+        self.time_at(at).await.map_err(attach_read_carrier)
     }
 
     async fn submit(&self, transaction: &[u8]) -> Result<(), SubmitRefusal> {
@@ -1086,28 +1144,9 @@ impl crate::native::SubmitChain for MidnightPublisherRpc {
         at: &BlockHash,
         tx_hash: LedgerTxHash,
     ) -> anyhow::Result<Option<Landing>> {
-        let at_h256 = H256::from(*at);
-        let events = self
-            .client_for_block(at_h256)
-            .await?
-            .events()
-            .at(at_h256)
+        self.landing_at(at, tx_hash)
             .await
-            .context("failed to fetch midnight block events")?;
-        for event in events.iter() {
-            let event = event.context("Midnight block events did not match metadata")?;
-            if let Some(TxApplied(details)) = event.as_event::<TxApplied>()? {
-                if details.tx_hash == *tx_hash.as_bytes() {
-                    return Ok(Some(Landing::Applied));
-                }
-            }
-            if let Some(TxPartialSuccess(details)) = event.as_event::<TxPartialSuccess>()? {
-                if details.tx_hash == *tx_hash.as_bytes() {
-                    return Ok(Some(Landing::PartialSuccess));
-                }
-            }
-        }
-        Ok(None)
+            .map_err(attach_read_carrier)
     }
 }
 
@@ -1523,11 +1562,19 @@ impl Reads {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::native::SubmitChain as _;
     use crate::submit_error::SubmitError;
     use jsonrpsee::server::ServerBuilder;
     use jsonrpsee::types::ErrorObjectOwned;
     use jsonrpsee::RpcModule;
+    use midnight_ledger_v9::structure::ContractAction;
+    use midnight_onchain_runtime::{
+        context::QueryContext,
+        cost_model::INITIAL_COST_MODEL,
+        ops::Op,
+        result_mode::ResultModeVerify,
+        state::{ChargedState, StateValue},
+    };
+    use midnight_storage::{arena::Sp, storage::Array};
     use mpc_chain_integration_core::utils::retry::{is_provider_throttled, is_retryable};
     use serde_json::json;
     use std::io::Write as _;
@@ -1950,16 +1997,6 @@ mod tests {
 
     #[tokio::test]
     async fn block_reader_extracts_fallible_notification_with_zero_noop() {
-        use midnight_ledger_v9::structure::ContractAction;
-        use midnight_onchain_runtime::{
-            context::QueryContext,
-            cost_model::INITIAL_COST_MODEL,
-            ops::Op,
-            result_mode::ResultModeVerify,
-            state::{ChargedState, StateValue},
-        };
-        use midnight_storage::{arena::Sp, storage::Array};
-
         let bytes = include_bytes!("../fixtures/fallible-deposit-tx-432.mn");
         let tx: DecodedTransaction =
             midnight_serialize::tagged_deserialize(&mut &bytes[..]).unwrap();
@@ -2048,10 +2085,6 @@ mod tests {
 
     #[tokio::test]
     async fn block_reader_extracts_fallible_notification_with_checkpoints() {
-        use midnight_ledger_v9::structure::ContractAction;
-        use midnight_onchain_runtime::ops::Op;
-        use midnight_storage::arena::Sp;
-
         let bytes = include_bytes!("../fixtures/fallible-deposit-tx-432.mn");
         let tx: DecodedTransaction =
             midnight_serialize::tagged_deserialize(&mut &bytes[..]).unwrap();
@@ -2119,9 +2152,6 @@ mod tests {
             &mut midnight_onchain_runtime::transcript::Transcript<midnight_storage::DefaultDB>,
         ),
     ) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
-        use midnight_ledger_v9::structure::ContractAction;
-        use midnight_storage::arena::Sp;
-
         let bytes = include_bytes!("../fixtures/fallible-deposit-tx-432.mn");
         let tx: DecodedTransaction =
             midnight_serialize::tagged_deserialize(&mut &bytes[..]).unwrap();
@@ -2561,6 +2591,7 @@ mod tests {
         for (status, reason, retryable, throttled) in [
             (403u16, "Forbidden", false, false),
             (409, "Conflict", true, false),
+            (402, "Payment Required", true, true),
             (429, "Too Many Requests", true, true),
             (500, "Internal Server Error", true, false),
         ] {
@@ -2578,6 +2609,22 @@ mod tests {
                     .await
                     .expect_err("an HTTP rejection must fail the read"),
                 PinnedReads::ledger_parameters(&rpc, &at_hash)
+                    .await
+                    .expect_err("an HTTP rejection must fail the read"),
+                // The watch's reads: against an all-rejecting transport each
+                // fails at its first legacy call; subxt's wrappers forward
+                // `source()` to `RawRpcError` regardless (subxt 0.44.0
+                // error/mod.rs).
+                SubmitChain::block_number(&rpc, &at_hash)
+                    .await
+                    .expect_err("an HTTP rejection must fail the read"),
+                SubmitChain::block_hash_at(&rpc, 1)
+                    .await
+                    .expect_err("an HTTP rejection must fail the read"),
+                SubmitChain::block_time(&rpc, &at_hash)
+                    .await
+                    .expect_err("an HTTP rejection must fail the read"),
+                SubmitChain::landing(&rpc, &at_hash, LedgerTxHash::from_bytes([0x42; 32]))
                     .await
                     .expect_err("an HTTP rejection must fail the read"),
             ] {
@@ -2606,29 +2653,28 @@ mod tests {
         }
     }
 
-    /// jsonrpsee's `Rejected` wire shape (jsonrpsee-http-client 0.24.10
-    /// transport.rs:376), as a raw HTTP status fails these reads.
     fn rejected_read(status: u16) -> anyhow::Error {
-        let transport = jsonrpsee::http_client::transport::Error::Rejected {
-            status_code: status,
-        };
-        let client = JsonrpseeClientError::Transport(Box::new(transport));
-        anyhow::Error::new(RawRpcError::Client(Box::new(client)))
+        crate::test_utils::rejected_http(status)
             .context("failed to fetch the midnight finalized head")
     }
 
     #[test]
     fn every_http_status_classifies_under_the_read_partition() {
         // Every status jsonrpsee can report — parsed StatusCode, so 100..=599
-        // (jsonrpsee-http-client 0.24.10 transport.rs:337) — at both call
-        // sites of the shared derivation.
+        // (jsonrpsee-http-client 0.24.10 transport.rs:337) — at each call
+        // site of the shared derivation.
         for code in 100..=599u16 {
             let read = attach_read_carrier(rejected_read(code));
-            let node = SubmitError::Node {
+            let bare = SubmitError::Node {
                 source: rejected_read(code),
             }
             .into_publish_error();
-            for error in [&read, &node] {
+            // The watch's exits carry the carrier inside the Node source.
+            let carried = SubmitError::Node {
+                source: attach_read_carrier(rejected_read(code)),
+            }
+            .into_publish_error();
+            for error in [&read, &bare, &carried] {
                 assert_eq!(
                     is_retryable(error),
                     !matches!(code, 400 | 401 | 403 | 404 | 405),
@@ -2640,6 +2686,13 @@ mod tests {
                     "{code}: {error:#}"
                 );
             }
+            // The watch's throttle counter keys on this predicate; terminal
+            // verdicts (the classic set above) exit a scan without one.
+            assert_eq!(
+                crate::landing_watch::throttled_scan(&read_verdict(&read)),
+                matches!(code, 402 | 429),
+                "{code}"
+            );
             // The indexer loop's bool form, on the raw error `retry_read` sees.
             assert_eq!(
                 is_read_retryable(&rejected_read(code)),
@@ -3763,8 +3816,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_submit_whose_runtime_cannot_be_read_is_never_sent() {
-        use crate::native::SubmitChain as _;
-
         let server = ServerBuilder::default().build("127.0.0.1:0").await.unwrap();
         let transport = connect_http(&http_config(server.local_addr().unwrap())).unwrap();
         let submits = Arc::new(AtomicUsize::new(0));
@@ -4030,8 +4081,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_missing_block_time_names_the_block_hash_in_full() {
-        use crate::native::SubmitChain as _;
-
         let block = BlockHash::from_0x_hex(&hash_of_byte(0x43)).unwrap();
         let (rpc, _handle, _log) = captured_landing_node(Vec::new(), None).await;
         let err = rpc
@@ -4045,8 +4094,6 @@ mod tests {
 
     #[tokio::test]
     async fn the_publisher_reads_a_landing_and_the_block_time_from_a_captured_block() {
-        use crate::native::SubmitChain as _;
-
         let applied = LedgerTxHash::from_bytes(crate::test_utils::hex_32(
             "ba41ac43f2cfa97e32357877b85210a7f2105f4930b60515e19aa9ec00bb0f5d",
         ));
@@ -4091,8 +4138,6 @@ mod tests {
     /// are each read once.
     #[tokio::test]
     async fn the_publisher_reads_a_block_header_and_runtime_once() {
-        use crate::native::SubmitChain as _;
-
         let applied = LedgerTxHash::from_bytes(crate::test_utils::hex_32(
             "ba41ac43f2cfa97e32357877b85210a7f2105f4930b60515e19aa9ec00bb0f5d",
         ));
@@ -4172,8 +4217,6 @@ mod tests {
     /// 17th evicts the oldest, which is then read again.
     #[tokio::test]
     async fn the_publisher_keeps_the_last_sixteen_headers() {
-        use crate::native::SubmitChain as _;
-
         let (rpc, _handle, reads) = numbered_header_node().await;
         for byte in 1u8..=17 {
             assert_eq!(

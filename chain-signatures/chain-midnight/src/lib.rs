@@ -7,6 +7,8 @@
 #![cfg_attr(test, allow(clippy::disallowed_methods))]
 
 mod attestation;
+#[cfg(test)]
+mod chain_mock;
 mod config;
 mod convert;
 mod dust_feed;
@@ -15,6 +17,7 @@ mod funding;
 mod hashing;
 mod indexer;
 mod intent;
+mod landing_watch;
 mod native;
 mod output_storage;
 mod publisher;
