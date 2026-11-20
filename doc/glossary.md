@@ -299,18 +299,13 @@ counts as published once the event carrying it is final on the [source
 chain](#source-chain). See
 [bidirectional-calls.md §2](bidirectional-calls.md#2-vocabulary).
 
-## Purpose
+## Purpose of the key
 
 What a key signs: [plain sign requests](#plain-sign-request),
 [bidirectional requests](#bidirectional-request),
 [attestations](#attestation) or a [system account](#system-account)'s
-transactions. From key
-version 2 the derivation path names it, so two purposes never derive the
-same key. Key versions 0 and 1 have no purpose. See
+transactions. It applies from key version 2. See
 [account-derivation.md](account-derivation.md#derivation-path-structure).
-Not the `Purpose` of a system key (`DerivationParams::SystemKey`,
-`signet-crypto/src/kdf.rs`), which names what one of the MPC's own keys
-is for.
 
 *Code today:* the latest key version is 1 (`LATEST_MPC_KEY_VERSION`,
 `signet-primitives/src/lib.rs`), so no key has a purpose.
@@ -371,9 +366,7 @@ on Solana. See [bidirectional-calls.md
 
 The signature algorithm and curve a key signs with: ECDSA over secp256k1
 today, with EdDSA planned. A request names its signing scheme among its key
-parameters. The contracts call it `algo`: a string on most source chains, the
-enum `MPCSignatureAlgorithm` on Midnight (`SignBidirectionalEvent::algo`,
-`chain-signatures/primitives/src/bidirectional.rs`). See
+parameters, in a field the contracts call `algo`. See
 [bidirectional-calls.md
 §7.1](bidirectional-calls.md#71-request-signbidirectionaleventv1).
 
@@ -395,11 +388,7 @@ It runs whenever a node connects or reconnects to a peer, and when a sign
 
 An account the MPC network itself controls on a chain, rather than one a
 [request](#request)'s sender controls: the admin of the Ethereum contract
-(`ChainSignatures.sol`), for instance, derived at key version 0 with the
-path `signing_contract_control`. From key version 2 it derives under the
-`system` [purpose](#purpose), with no sender; earlier versions derive it as
-a plain key with the sender `%admin#` (`DerivationParams::SystemAccount`,
-`signet-crypto/src/kdf.rs`). See
+(`ChainSignatures.sol`), for instance. See
 [account-derivation.md](account-derivation.md#derivation-path-structure).
 
 ## Take

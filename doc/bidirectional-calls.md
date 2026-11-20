@@ -124,7 +124,7 @@ Happy path:
   block at or past the expiry.
 * *Attestation key*: the key the MPC derives for a contract at a key
   version, used for nothing but attestations to that contract: under the
-  attestation [purpose](glossary.md#purpose) from key version 2, under a
+  attestation [purpose](glossary.md#purpose-of-the-key) from key version 2, under a
   reserved path before it (account-derivation.md).
 * *Response*: an attestation delivered to the contract that made rid's
   request.
@@ -532,7 +532,7 @@ Properties:
 
 * M1 The MPC signs a request only if it provably comes from the contract it
   names, with a key derived from that contract under the bidirectional
-  [purpose](glossary.md#purpose). No request is signed with an attestation
+  [purpose](glossary.md#purpose-of-the-key). No request is signed with an attestation
   key; otherwise a contract could have its own attestation key sign an
   arbitrary hash and forge a response to itself. No request on another
   signing API is signed with a bidirectional request's key; otherwise it
