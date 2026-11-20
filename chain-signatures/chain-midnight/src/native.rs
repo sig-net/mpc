@@ -439,8 +439,8 @@ impl<W: FeePayer, C: SubmitChain + 'static> NativeIntentClient<W, C> {
             Landing::Applied | Landing::PartialSuccess => Ok(tx_hash),
             Landing::Expired => {
                 self.wallet.release(spent);
-                Err(SubmitError::StateConflict(format!(
-                    "transaction {tx_hash} expired without landing; nothing was posted"
+                Err(SubmitError::ExpiredUnlanded(format!(
+                    "transaction {tx_hash} expired without landing"
                 )))
             }
         }
@@ -574,10 +574,15 @@ fn report_submit<W: FeePayer>(
     }
 }
 
-/// Only the node refusing the planned spend implicates a restored wallet's
-/// snapshot; striking on any other class would discard it for unrelated conditions.
+/// A refusal is the stale-snapshot signature, and a spend the chain let expire
+/// unlanded strikes with it — kept from the wallet this replaced, which struck
+/// on any failure once the wallet paid. Striking on any other class would
+/// discard the checkpoint for conditions the replay cannot fix.
 fn implicates_restored_state(error: &SubmitError) -> bool {
-    matches!(error, SubmitError::StateConflict(_))
+    matches!(
+        error,
+        SubmitError::StateConflict(_) | SubmitError::ExpiredUnlanded(_)
+    )
 }
 
 /// The fee's `ctime`. The spend proves against the replayed state's DUST roots,
@@ -1320,6 +1325,11 @@ mod tests {
             &Err(SubmitError::StateConflict("refused".into())),
             true,
         );
+        report_submit(
+            &wallet,
+            &Err(SubmitError::ExpiredUnlanded("expired unlanded".into())),
+            true,
+        );
         report_submit(&wallet, &Err(SubmitError::WalletBusy("held".into())), false);
         // An empty wallet fails like any other, but implicates nothing.
         report_submit(
@@ -1339,8 +1349,85 @@ mod tests {
         assert_eq!(wallet.landings.load(Ordering::SeqCst), 1, "one landing");
         assert_eq!(
             *wallet.failures.lock().unwrap(),
-            vec![true, false, false, false],
+            vec![true, true, false, false, false],
             "every failure but an unsynced wallet, with whether it can strike"
+        );
+    }
+
+    /// Each arm's error from the construction site in `post` that produces it,
+    /// through `report_submit` as `submit` reports it, with `wallet_used` true
+    /// — where a successful plan leaves it on all three paths.
+    #[tokio::test(start_paused = true)]
+    async fn post_failures_strike_the_restored_wallet_by_their_class() {
+        let client = client_over(
+            managed_dir(|_, bytes| bytes),
+            ScriptedChain::new(10, 20, None)
+                .refusing(SubmitRefusal::Refused("1010: Invalid Transaction".into())),
+        );
+        let error = client
+            .post(
+                b"tx",
+                LedgerTxHash::from_bytes(TX_HASH),
+                &spent(),
+                10,
+                Timestamp::from_secs(5000),
+                deadline(),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(error, SubmitError::StateConflict(_)), "{error}");
+        report_submit(&client.wallet, &Err(error), true);
+        assert_eq!(
+            *client.wallet.failures.lock().unwrap(),
+            [true],
+            "the refusal strikes"
+        );
+
+        let client = client_over(
+            managed_dir(|_, bytes| bytes),
+            ScriptedChain::new(10, 20, None).throttling_landing_reads(429),
+        );
+        let error = client
+            .post(
+                b"tx",
+                LedgerTxHash::from_bytes(TX_HASH),
+                &spent(),
+                10,
+                Timestamp::from_secs(5000),
+                deadline(),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(error, SubmitError::Node { .. }), "{error:#}");
+        report_submit(&client.wallet, &Err(error), true);
+        assert_eq!(
+            *client.wallet.failures.lock().unwrap(),
+            [false],
+            "the throttle escape never strikes"
+        );
+
+        let client = client_over(
+            managed_dir(|_, bytes| bytes),
+            // Block 14, at 1084, is the first past a 1080 TTL.
+            ScriptedChain::new(10, 20, None),
+        );
+        let error = client
+            .post(
+                b"tx",
+                LedgerTxHash::from_bytes(TX_HASH),
+                &spent(),
+                10,
+                Timestamp::from_secs(1080),
+                deadline(),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(error, SubmitError::ExpiredUnlanded(_)), "{error}");
+        report_submit(&client.wallet, &Err(error), true);
+        assert_eq!(
+            *client.wallet.failures.lock().unwrap(),
+            [true],
+            "the expiry unlanded strikes"
         );
     }
 
@@ -1811,7 +1898,7 @@ mod tests {
             )
             .await
             .unwrap_err();
-        assert!(matches!(error, SubmitError::StateConflict(_)), "{error}");
+        assert!(matches!(error, SubmitError::ExpiredUnlanded(_)), "{error}");
         assert_eq!(*client.wallet.released.lock().unwrap(), vec![spent()]);
         let submits = client.chain.submits();
         assert_eq!(
@@ -2106,7 +2193,7 @@ mod tests {
                 )
                 .await
                 .unwrap_err();
-            assert!(matches!(error, SubmitError::StateConflict(_)), "{error}");
+            assert!(matches!(error, SubmitError::ExpiredUnlanded(_)), "{error}");
             assert_eq!(*client.wallet.released.lock().unwrap(), vec![spent()]);
             let reads: Vec<u64> = client
                 .chain
@@ -2178,7 +2265,7 @@ mod tests {
             )
             .await
             .unwrap_err();
-        assert!(matches!(error, SubmitError::StateConflict(_)), "{error}");
+        assert!(matches!(error, SubmitError::ExpiredUnlanded(_)), "{error}");
         assert_eq!(*client.wallet.released.lock().unwrap(), vec![spent()]);
         assert_eq!(*client.chain.time_reads.lock().unwrap(), [12, 12]);
     }

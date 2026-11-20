@@ -44,10 +44,15 @@ pub(crate) enum SubmitError {
     /// Proving outlasted the submit budget. Nothing was posted.
     #[error("[proving_timeout] {0}")]
     ProvingTimeout(String),
-    /// The node refused the transaction or it expired unlanded. The retry
+    /// The node refused the transaction. Nothing was posted. The retry
     /// rebuilds against fresh state.
     #[error("[state_conflict] {0}")]
     StateConflict(String),
+    /// The posted transaction expired unlanded: the node took it, but no
+    /// finalized block held it before its TTL. Retried like `StateConflict`,
+    /// and struck with it (`native::implicates_restored_state`).
+    #[error("[state_conflict] {0}")]
+    ExpiredUnlanded(String),
     /// The transaction may still land.
     #[error("[ambiguous_submit] {0}")]
     Ambiguous(String),
@@ -74,7 +79,7 @@ impl SubmitError {
             Self::WalletBusy(_) => "wallet_busy",
             Self::WalletUnfunded(_) => "wallet_unfunded",
             Self::ProvingTimeout(_) => "proving_timeout",
-            Self::StateConflict(_) => "state_conflict",
+            Self::StateConflict(_) | Self::ExpiredUnlanded(_) => "state_conflict",
             Self::Ambiguous(_) => "ambiguous_submit",
             Self::Internal(_) | Self::Node { .. } => "internal",
         }
@@ -130,7 +135,7 @@ mod tests {
 
     #[test]
     fn every_class_is_counted_and_classified_under_its_code() {
-        let classes: [(fn() -> SubmitError, bool); 12] = [
+        let classes: [(fn() -> SubmitError, bool); 13] = [
             (|| SubmitError::BadRequest("reason".to_string()), false),
             (
                 || SubmitError::ContractMismatch("reason".to_string()),
@@ -148,6 +153,7 @@ mod tests {
             (|| SubmitError::WalletUnfunded("reason".to_string()), true),
             (|| SubmitError::ProvingTimeout("reason".to_string()), true),
             (|| SubmitError::StateConflict("reason".to_string()), true),
+            (|| SubmitError::ExpiredUnlanded("reason".to_string()), true),
             (|| SubmitError::Ambiguous("reason".to_string()), true),
             (|| SubmitError::Internal("reason".to_string()), true),
             (
