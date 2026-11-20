@@ -55,10 +55,7 @@
     "@midnight-ntwrk/midnight-js-protocol": "5.0.0",
     "@midnight-ntwrk/midnight-js-types": "5.0.0",
     "@sig-net/midnight-contract-deploy": {
-      "@sig-net/midnight": {
-        ".": "0.26.0-rc.7",
-        "@sig-net/midnight-serde": "0.26.0-rc.7"
-      }
+      "@sig-net/midnight": "0.26.0-rc.7"
     }
   }
 }
