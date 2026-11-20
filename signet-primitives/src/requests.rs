@@ -6,8 +6,8 @@ use serde::{Deserialize, Serialize};
 /// This is the exact type the NEAR contract deserializes, so a client
 /// compiling against this crate is wire-correct by construction. `payload`
 /// is the 32-byte hash to sign; `path` is the derivation path; `key_version`
-/// must be `<=` the contract's latest key version (see
-/// [`crate::LATEST_MPC_KEY_VERSION`]).
+/// must be at most the highest supported key version (see
+/// [`crate::MAX_SUPPORTED_MPC_KEY_VERSION`]).
 #[derive(Serialize, Deserialize, BorshDeserialize, BorshSerialize, Debug, Clone, PartialEq, Eq)]
 pub struct SignRequest {
     pub payload: [u8; 32],

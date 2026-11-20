@@ -78,7 +78,12 @@ pub fn generate_sign_request(
 
     // The one render of the requester.
     let requester = read_address.to_hex();
-    let epsilon = signet_crypto::derive_epsilon_midnight(key_version, &requester, &path)?;
+    let epsilon = signet_crypto::derive_epsilon_midnight(
+        key_version,
+        signet_crypto::RequestPurpose::Bidirectional,
+        &requester,
+        &path,
+    )?;
 
     let serialized = serialized_transaction(record, root_pk, epsilon)?;
     // The wire choice above and the hash choice here read the same discriminant,
@@ -230,8 +235,13 @@ mod tests {
         let raw = mpc_tron_wire::pb::RawTransaction::parse(&event.serialized_transaction).unwrap();
         // `owned_by_requester` recomputes the owner from the same public
         // inputs; pinning it here keeps the two crates on one formula.
-        let epsilon =
-            signet_crypto::derive_epsilon_midnight(1, &READ_ADDRESS.to_hex(), &event.path).unwrap();
+        let epsilon = signet_crypto::derive_epsilon_midnight(
+            1,
+            signet_crypto::RequestPurpose::Bidirectional,
+            &READ_ADDRESS.to_hex(),
+            &event.path,
+        )
+        .unwrap();
         let owner = TronAddress::from_evm(derive_user_address(test_root_pk(), epsilon));
         assert_eq!(raw.owner_address().unwrap(), owner.as_bytes().to_vec());
 
@@ -331,10 +341,10 @@ mod tests {
         assert_ne!(request.args.path, reserved);
         assert_ne!(
             request.args.epsilon,
-            signet_crypto::derive_epsilon_midnight(
+            signet_crypto::derive_attestation_epsilon(
                 request.args.key_version,
+                Chain::Midnight,
                 &READ_ADDRESS.to_hex(),
-                reserved,
             )
             .unwrap(),
         );
@@ -463,7 +473,8 @@ mod tests {
         assert!(err.contains("key_version"), "err: {err}");
 
         let mut record = caller_record();
-        record.key_version = 2;
+        record.key_version =
+            u8::try_from(mpc_primitives::MAX_SUPPORTED_MPC_KEY_VERSION + 1).unwrap();
         let err = generate_sign_request(
             &record,
             &READ_ADDRESS,
@@ -472,7 +483,7 @@ mod tests {
             INDEXED_TS,
             test_root_pk(),
         )
-        .expect_err("a key_version above LATEST must be rejected")
+        .expect_err("a key_version above MAX_SUPPORTED must be rejected")
         .to_string();
         assert!(err.contains("key_version"), "err: {err}");
     }

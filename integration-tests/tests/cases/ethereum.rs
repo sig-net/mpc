@@ -11,7 +11,7 @@ use k256::{AffinePoint, EncodedPoint, FieldBytes, PublicKey as K256PublicKey};
 use mpc_chain_ethereum::abi::ChainSignatures::{self, SignRequest, SignatureResponded};
 use mpc_chain_ethereum::utils::test::submit_sign_request;
 use mpc_crypto::derive_key;
-use mpc_crypto::kdf::derive_epsilon_eth;
+use mpc_crypto::kdf::{derive_epsilon_eth, RequestPurpose};
 use mpc_node::backlog::Checkpoint;
 use mpc_node::sign_bidirectional::public_key_to_address;
 use mpc_primitives::{Chain, LATEST_MPC_KEY_VERSION};
@@ -143,7 +143,12 @@ async fn test_signature_ethereum() -> Result<()> {
         .ok_or_else(|| anyhow!("invalid network public key"))?;
 
     let sender_hex = format!("0x{}", hex::encode(requester));
-    let epsilon = derive_epsilon_eth(LATEST_MPC_KEY_VERSION, &sender_hex, path)?;
+    let epsilon = derive_epsilon_eth(
+        LATEST_MPC_KEY_VERSION,
+        RequestPurpose::Plain,
+        &sender_hex,
+        path,
+    )?;
     let user_affine = derive_key(network_affine, epsilon);
     let user_public_key = K256PublicKey::from_affine(user_affine)
         .map_err(|_| anyhow!("invalid derived public key"))?;

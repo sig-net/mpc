@@ -203,6 +203,19 @@ for a signature: (sign id, [presignature](#presignature) id). The sign id
 (`SignId`, `signet-primitives/src/crypto.rs`) wraps the [request
 id](#request-id), the same 32 bytes.
 
+## Key version
+
+Which derivation format a key uses. See
+[account-derivation.md](account-derivation.md#derivation-path-structure).
+A request names its key version. The network signs only up to the highest
+supported key version (`MAX_SUPPORTED_MPC_KEY_VERSION`,
+`signet-primitives/src/lib.rs`). Clients that do not pick one use the latest
+key version (`LATEST_MPC_KEY_VERSION`), which reaches a new version only after
+the highest supported does, so clients can opt in before it becomes the
+default.
+
+*Code today:* both are 1.
+
 ## Mesh
 
 A node's connections to its peers, each `Offline` (no answer), `Inactive`
@@ -307,8 +320,8 @@ What a key signs: [plain sign requests](#plain-sign-request),
 transactions. It applies from key version 2. See
 [account-derivation.md](account-derivation.md#derivation-path-structure).
 
-*Code today:* the latest key version is 1 (`LATEST_MPC_KEY_VERSION`,
-`signet-primitives/src/lib.rs`), so no key has a purpose.
+*Code today:* the highest supported [key version](#key-version) is 1, so no
+key has a purpose.
 
 ## Request
 

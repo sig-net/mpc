@@ -1485,6 +1485,7 @@ mod tests {
             request.args.epsilon,
             signet_crypto::derive_epsilon_midnight(
                 1,
+                signet_crypto::RequestPurpose::Bidirectional,
                 &hex::encode(CALLER),
                 &hex::encode(genuine.path),
             )

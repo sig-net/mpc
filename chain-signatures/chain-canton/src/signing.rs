@@ -114,6 +114,7 @@ impl CantonSignBidirectionalRequestedEvent {
 
         let epsilon = signet_crypto::derive_epsilon_canton(
             self.key_version,
+            signet_crypto::RequestPurpose::Bidirectional,
             &self.sender_string(),
             &self.path,
         )?;

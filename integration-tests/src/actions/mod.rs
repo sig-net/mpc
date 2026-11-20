@@ -13,7 +13,7 @@ use k256::{AffinePoint, EncodedPoint, Scalar, Secp256k1};
 use mpc_contract::errors::SignError;
 use mpc_contract::primitives::SignRequest;
 use mpc_crypto::ScalarExt;
-use mpc_crypto::{derive_epsilon_near, derive_key};
+use mpc_crypto::{derive_epsilon_near, derive_key, RequestPurpose};
 use mpc_node::sign_bidirectional::public_key_to_address;
 use mpc_primitives::LATEST_MPC_KEY_VERSION;
 use near_crypto::InMemorySigner;
@@ -103,7 +103,12 @@ pub async fn validate_signature(
 ) -> anyhow::Result<()> {
     let mpc_point = EncodedPoint::from_bytes(mpc_pk_bytes).unwrap();
     let mpc_pk = AffinePoint::from_encoded_point(&mpc_point).unwrap();
-    let epsilon = derive_epsilon_near(LATEST_MPC_KEY_VERSION, account_id, "test")?;
+    let epsilon = derive_epsilon_near(
+        LATEST_MPC_KEY_VERSION,
+        RequestPurpose::Plain,
+        account_id,
+        "test",
+    )?;
     let user_pk = derive_key(mpc_pk, epsilon);
     signature
         .verify(
@@ -170,7 +175,7 @@ mod tests {
     use k256::elliptic_curve::point::AffineCoordinates;
     use k256::elliptic_curve::ProjectivePoint;
     use k256::{AffinePoint, EncodedPoint, Scalar};
-    use mpc_crypto::{derive_epsilon_near, derive_key, ScalarExt as _};
+    use mpc_crypto::{derive_epsilon_near, derive_key, RequestPurpose, ScalarExt as _};
     use mpc_primitives::LEGACY_MPC_KEY_VERSION_0;
 
     use super::{public_key_to_address, recover_eth_address};
@@ -198,8 +203,13 @@ mod tests {
         let mpc_pk = AffinePoint::from_encoded_point(&mpc_pk).unwrap();
 
         let account_id = account_id.parse().unwrap();
-        let derivation_epsilon: k256::Scalar =
-            derive_epsilon_near(LEGACY_MPC_KEY_VERSION_0, &account_id, "test").unwrap();
+        let derivation_epsilon: k256::Scalar = derive_epsilon_near(
+            LEGACY_MPC_KEY_VERSION_0,
+            RequestPurpose::Plain,
+            &account_id,
+            "test",
+        )
+        .unwrap();
         let user_pk: AffinePoint = derive_key(mpc_pk, derivation_epsilon);
         let user_address_from_pk = public_key_to_address(&user_pk.to_encoded_point(false));
 

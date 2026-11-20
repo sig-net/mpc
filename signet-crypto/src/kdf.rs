@@ -1,18 +1,21 @@
-use crate::{Address, KeyVersion, Path, Purpose};
+use crate::KeyVersion;
 use k256::{
     ecdsa::{RecoveryId, VerifyingKey},
     elliptic_curve::{point::AffineCoordinates, sec1::ToEncodedPoint, CurveArithmetic},
     AffinePoint, Scalar, Secp256k1,
 };
 use sha3::{Digest, Keccak256, Sha3_256};
-use signet_primitives::{Chain, PublicKey, ScalarExt, Signature, LATEST_MPC_KEY_VERSION};
+use signet_primitives::{Chain, PublicKey, ScalarExt, Signature, MAX_SUPPORTED_MPC_KEY_VERSION};
 
 // Constant prefix that ensures epsilon derivation values are used specifically for
 // Sig.Network with key derivation protocol vX.Y.Z.
 pub const EPSILON_DERIVATION_PREFIX_V1: &str = "sig.network v1.0.0 epsilon derivation";
 pub const EPSILON_DERIVATION_PREFIX_V2: &str = "sig.network v2.0.0 epsilon derivation";
+/// Prefix of every derivation path from key version 2, which names the version itself.
+pub const SIGNET_DERIVATION_PREFIX: &str = "sig.network derivation";
 
-/// The key version is not one this derivation scheme knows how to route.
+/// The key version is not one this derivation scheme knows how to route, or
+/// has no such key on the chain.
 ///
 /// Every version maps to exactly one derivation format; an unknown one is
 /// rejected rather than silently coerced to the latest format.
@@ -21,68 +24,167 @@ pub struct UnsupportedKeyVersion(pub KeyVersion);
 
 impl std::fmt::Display for UnsupportedKeyVersion {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "unsupported key_version {}: the latest is {LATEST_MPC_KEY_VERSION}",
-            self.0
-        )
+        write!(f, "unsupported key_version {}", self.0)
     }
 }
 
 impl std::error::Error for UnsupportedKeyVersion {}
 
-pub enum DerivationParams {
-    /// Account owned by a user on a specific chain.
-    UserAccount(KeyVersion, Chain, Address, Path),
-    /// Account owned by MPC system on a specific chain.
-    SystemAccount(KeyVersion, Chain, Path),
-    /// Key used for system purposes.
-    SystemKey(Purpose),
+/// What a key signs (doc/account-derivation.md). From key version 2 the
+/// derivation path names it, so two purposes never derive the same key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum KeyPurpose {
+    Plain,
+    Bidirectional,
+    Attestation,
+    System,
 }
 
-impl DerivationParams {
-    pub fn derivation_path(&self) -> Result<String, UnsupportedKeyVersion> {
+impl KeyPurpose {
+    const fn as_str(self) -> &'static str {
         match self {
-            DerivationParams::UserAccount(key_version, chain, owner, path) => {
-                versioned_derivation_path(*key_version, *chain, owner, path)
-            }
-            DerivationParams::SystemAccount(key_version, chain, path) => {
-                versioned_derivation_path(*key_version, *chain, "%admin#", path)
-            }
-            DerivationParams::SystemKey(purpose) => {
-                // key version and other parameters are not relevant for system keys
-                Ok(format!(
-                    "{EPSILON_DERIVATION_PREFIX_V2}:system_key:{purpose}"
-                ))
-            }
+            KeyPurpose::Plain => "plain",
+            KeyPurpose::Bidirectional => "bidirectional",
+            KeyPurpose::Attestation => "attestation",
+            KeyPurpose::System => "system",
         }
     }
 }
 
-/// Each key version is pinned to one derivation format; unknown versions are rejected.
-fn versioned_derivation_path(
-    key_version: KeyVersion,
-    chain: Chain,
-    sender: &str,
-    path: &str,
-) -> Result<String, UnsupportedKeyVersion> {
-    match key_version {
-        0 => Ok(deprecated_derivation_path(chain, sender, path)),
-        1 => Ok(caip2_derivation_path(chain, sender, path)),
-        other => Err(UnsupportedKeyVersion(other)),
+impl std::fmt::Display for KeyPurpose {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
     }
 }
 
-/// Creates a derivation path string using the legacy format
-fn deprecated_derivation_path(chain: Chain, sender: &str, path: &str) -> String {
+/// The purpose of a key a request names, set by the signing API the request came on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RequestPurpose {
+    Plain,
+    Bidirectional,
+}
+
+impl From<RequestPurpose> for KeyPurpose {
+    fn from(purpose: RequestPurpose) -> Self {
+        match purpose {
+            RequestPurpose::Plain => KeyPurpose::Plain,
+            RequestPurpose::Bidirectional => KeyPurpose::Bidirectional,
+        }
+    }
+}
+
+/// The path that holds a chain's attestation key at key version 1, which no request
+/// at that version may name. `None` on chains that are not bidirectional sources.
+pub const fn reserved_attestation_path_v1(chain: Chain) -> Option<&'static str> {
+    match chain {
+        Chain::Solana => Some("solana response key"),
+        Chain::Hydration => Some("hydration response key"),
+        Chain::Canton => Some("canton response key"),
+        Chain::Midnight => Some("midnight response key"),
+        _ => None,
+    }
+}
+
+/// The key to derive an epsilon for, at any key version.
+#[derive(Debug, Clone, Copy)]
+pub enum DerivationParams<'a> {
+    /// Key a request names, owned by its sender on a specific chain.
+    Request {
+        chain: Chain,
+        purpose: RequestPurpose,
+        sender: &'a str,
+        path: &'a str,
+    },
+    /// Key the MPC attests bidirectional outcomes to a contract with.
+    Attestation { chain: Chain, sender: &'a str },
+    /// Account owned by MPC system on a specific chain.
+    SystemAccount { chain: Chain, path: &'a str },
+}
+
+impl DerivationParams<'_> {
+    /// The derivation path at `key_version`; refuses versions above
+    /// `MAX_SUPPORTED_MPC_KEY_VERSION`.
+    pub fn derivation_path(
+        &self,
+        key_version: KeyVersion,
+    ) -> Result<String, UnsupportedKeyVersion> {
+        if key_version > MAX_SUPPORTED_MPC_KEY_VERSION {
+            return Err(UnsupportedKeyVersion(key_version));
+        }
+        self.versioned_derivation_path(key_version)
+    }
+
+    fn chain(&self) -> Chain {
+        match *self {
+            DerivationParams::Request { chain, .. }
+            | DerivationParams::Attestation { chain, .. }
+            | DerivationParams::SystemAccount { chain, .. } => chain,
+        }
+    }
+
+    /// Each key version is pinned to one format; unknown versions are rejected.
+    /// Ignores `MAX_SUPPORTED_MPC_KEY_VERSION`, so formats are testable before they are served.
+    fn versioned_derivation_path(
+        &self,
+        key_version: KeyVersion,
+    ) -> Result<String, UnsupportedKeyVersion> {
+        match *self {
+            DerivationParams::Request {
+                chain,
+                purpose,
+                sender,
+                path,
+            } => match key_version {
+                0 => Ok(derivation_path_v0(chain, sender, path)),
+                1 => Ok(derivation_path_v1(chain, sender, path)),
+                2 => Ok(derivation_path_v2(chain, purpose.into(), &[sender, path])),
+                other => Err(UnsupportedKeyVersion(other)),
+            },
+            // Key version 0 predates bidirectional signing, so it has no attestation key.
+            // At key version 1 the attestation key is a plain key under a reserved path.
+            DerivationParams::Attestation { chain, sender } => match key_version {
+                1 => reserved_attestation_path_v1(chain)
+                    .map(|path| derivation_path_v1(chain, sender, path))
+                    .ok_or(UnsupportedKeyVersion(key_version)),
+                2 => Ok(derivation_path_v2(
+                    chain,
+                    KeyPurpose::Attestation,
+                    &[sender],
+                )),
+                other => Err(UnsupportedKeyVersion(other)),
+            },
+            DerivationParams::SystemAccount { chain, path } => match key_version {
+                0 => Ok(derivation_path_v0(chain, "%admin#", path)),
+                1 => Ok(derivation_path_v1(chain, "%admin#", path)),
+                2 => Ok(derivation_path_v2(chain, KeyPurpose::System, &[path])),
+                other => Err(UnsupportedKeyVersion(other)),
+            },
+        }
+    }
+}
+
+/// Key version 0: `sig.network v1.0.0 epsilon derivation,{deprecated chain id},{sender},{path}`.
+fn derivation_path_v0(chain: Chain, sender: &str, path: &str) -> String {
     let chain_id = chain.deprecated_chain_id();
     format!("{EPSILON_DERIVATION_PREFIX_V1},{chain_id},{sender},{path}")
 }
 
-/// Creates a derivation path string using the extended with prefix CAIP-2 format
-fn caip2_derivation_path(chain: Chain, sender: &str, derivation_path: &str) -> String {
+/// Key version 1: `sig.network v2.0.0 epsilon derivation:{caip2 chain id}:{sender}:{path}`.
+fn derivation_path_v1(chain: Chain, sender: &str, path: &str) -> String {
     let chain_id = chain.caip2_chain_id();
-    format!("{EPSILON_DERIVATION_PREFIX_V2}:{chain_id}:{sender}:{derivation_path}")
+    format!("{EPSILON_DERIVATION_PREFIX_V2}:{chain_id}:{sender}:{path}")
+}
+
+/// Key version 2: `sig.network derivation:2:{purpose}:{caip2 chain id}:{fields}`, where the
+/// fields depend on the purpose.
+fn derivation_path_v2(chain: Chain, purpose: KeyPurpose, fields: &[&str]) -> String {
+    let chain_id = chain.caip2_chain_id();
+    let mut path = format!("{SIGNET_DERIVATION_PREFIX}:2:{purpose}:{chain_id}");
+    for field in fields {
+        path.push(':');
+        path.push_str(field);
+    }
+    path
 }
 
 fn sha3(derivation_path: impl AsRef<[u8]>) -> Scalar {
@@ -99,91 +201,102 @@ fn keccak(derivation_path: impl AsRef<[u8]>) -> Scalar {
     Scalar::from_non_biased(hash)
 }
 
-pub fn derive_epsilon(params: &DerivationParams) -> Result<Scalar, UnsupportedKeyVersion> {
-    let derivation_path = params.derivation_path()?;
-    Ok(match params {
-        DerivationParams::UserAccount(_, Chain::NEAR, _, _)
-        | DerivationParams::SystemAccount(_, Chain::NEAR, _) => sha3(derivation_path),
+fn hash_derivation_path(chain: Chain, derivation_path: String) -> Scalar {
+    match chain {
+        Chain::NEAR => sha3(derivation_path),
         _ => keccak(derivation_path),
-    })
+    }
+}
+
+pub fn derive_epsilon(
+    key_version: KeyVersion,
+    params: DerivationParams<'_>,
+) -> Result<Scalar, UnsupportedKeyVersion> {
+    Ok(hash_derivation_path(
+        params.chain(),
+        params.derivation_path(key_version)?,
+    ))
+}
+
+/// Epsilon of `sender`'s attestation key on `chain`.
+pub fn derive_attestation_epsilon(
+    key_version: KeyVersion,
+    chain: Chain,
+    sender: &str,
+) -> Result<Scalar, UnsupportedKeyVersion> {
+    derive_epsilon(key_version, DerivationParams::Attestation { chain, sender })
+}
+
+fn derive_request_epsilon(
+    key_version: KeyVersion,
+    chain: Chain,
+    purpose: RequestPurpose,
+    sender: &str,
+    path: &str,
+) -> Result<Scalar, UnsupportedKeyVersion> {
+    derive_epsilon(
+        key_version,
+        DerivationParams::Request {
+            chain,
+            purpose,
+            sender,
+            path,
+        },
+    )
 }
 
 pub fn derive_epsilon_eth(
     key_version: KeyVersion,
+    purpose: RequestPurpose,
     address: &str,
     path: &str,
 ) -> Result<Scalar, UnsupportedKeyVersion> {
-    derive_epsilon(&DerivationParams::UserAccount(
-        key_version,
-        Chain::Ethereum,
-        address.to_string(),
-        path.to_string(),
-    ))
+    derive_request_epsilon(key_version, Chain::Ethereum, purpose, address, path)
 }
 
 pub fn derive_epsilon_sol(
     key_version: KeyVersion,
+    purpose: RequestPurpose,
     address: &str,
     path: &str,
 ) -> Result<Scalar, UnsupportedKeyVersion> {
-    derive_epsilon(&DerivationParams::UserAccount(
-        key_version,
-        Chain::Solana,
-        address.to_string(),
-        path.to_string(),
-    ))
+    derive_request_epsilon(key_version, Chain::Solana, purpose, address, path)
 }
 
 pub fn derive_epsilon_canton(
     key_version: KeyVersion,
+    purpose: RequestPurpose,
     address: &str,
     path: &str,
 ) -> Result<Scalar, UnsupportedKeyVersion> {
-    derive_epsilon(&DerivationParams::UserAccount(
-        key_version,
-        Chain::Canton,
-        address.to_string(),
-        path.to_string(),
-    ))
+    derive_request_epsilon(key_version, Chain::Canton, purpose, address, path)
 }
 
 pub fn derive_epsilon_hydration(
     key_version: KeyVersion,
+    purpose: RequestPurpose,
     address: &str,
     path: &str,
 ) -> Result<Scalar, UnsupportedKeyVersion> {
-    derive_epsilon(&DerivationParams::UserAccount(
-        key_version,
-        Chain::Hydration,
-        address.to_string(),
-        path.to_string(),
-    ))
+    derive_request_epsilon(key_version, Chain::Hydration, purpose, address, path)
 }
 
 pub fn derive_epsilon_bitcoin(
     key_version: KeyVersion,
+    purpose: RequestPurpose,
     address: &str,
     path: &str,
 ) -> Result<Scalar, UnsupportedKeyVersion> {
-    derive_epsilon(&DerivationParams::UserAccount(
-        key_version,
-        Chain::Bitcoin,
-        address.to_string(),
-        path.to_string(),
-    ))
+    derive_request_epsilon(key_version, Chain::Bitcoin, purpose, address, path)
 }
 
 pub fn derive_epsilon_midnight(
     key_version: KeyVersion,
+    purpose: RequestPurpose,
     address: &str,
     path: &str,
 ) -> Result<Scalar, UnsupportedKeyVersion> {
-    derive_epsilon(&DerivationParams::UserAccount(
-        key_version,
-        Chain::Midnight,
-        address.to_string(),
-        path.to_string(),
-    ))
+    derive_request_epsilon(key_version, Chain::Midnight, purpose, address, path)
 }
 
 pub fn derive_key(public_key: PublicKey, epsilon: Scalar) -> PublicKey {
@@ -297,97 +410,110 @@ mod tests {
     #[test]
     fn test_derivation_path_stays_the_same() {
         assert_eq!(
-            DerivationParams::UserAccount(
-                0,
-                Chain::Ethereum,
-                "sender".to_string(),
-                "path".to_string()
-            )
-            .derivation_path()
+            DerivationParams::Request {
+                chain: Chain::Ethereum,
+                purpose: RequestPurpose::Plain,
+                sender: "sender",
+                path: "path"
+            }
+            .derivation_path(0)
             .unwrap(),
             "sig.network v1.0.0 epsilon derivation,0x1,sender,path"
         );
         assert_eq!(
-            DerivationParams::UserAccount(
-                1,
-                Chain::Ethereum,
-                "sender".to_string(),
-                "path".to_string()
-            )
-            .derivation_path()
+            DerivationParams::Request {
+                chain: Chain::Ethereum,
+                purpose: RequestPurpose::Plain,
+                sender: "sender",
+                path: "path"
+            }
+            .derivation_path(1)
             .unwrap(),
             "sig.network v2.0.0 epsilon derivation:eip155:1:sender:path"
         );
 
         assert_eq!(
-            DerivationParams::UserAccount(
-                0,
-                Chain::Solana,
-                "sender".to_string(),
-                "path".to_string()
-            )
-            .derivation_path()
+            DerivationParams::Request {
+                chain: Chain::Solana,
+                purpose: RequestPurpose::Plain,
+                sender: "sender",
+                path: "path"
+            }
+            .derivation_path(0)
             .unwrap(),
             "sig.network v1.0.0 epsilon derivation,0x800001f5,sender,path"
         );
         assert_eq!(
-            DerivationParams::UserAccount(1, Chain::Solana, "sender".to_string(), "path".to_string())
-                .derivation_path().unwrap(),
+            DerivationParams::Request { chain: Chain::Solana, purpose: RequestPurpose::Plain, sender: "sender", path: "path" }
+                .derivation_path(1).unwrap(),
             "sig.network v2.0.0 epsilon derivation:solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp:sender:path"
         );
 
         assert_eq!(
-            DerivationParams::UserAccount(0, Chain::NEAR, "sender".to_string(), "path".to_string())
-                .derivation_path()
-                .unwrap(),
+            DerivationParams::Request {
+                chain: Chain::NEAR,
+                purpose: RequestPurpose::Plain,
+                sender: "sender",
+                path: "path"
+            }
+            .derivation_path(0)
+            .unwrap(),
             "sig.network v1.0.0 epsilon derivation,0x18d,sender,path"
         );
 
         assert_eq!(
-            DerivationParams::UserAccount(1, Chain::NEAR, "sender".to_string(), "path".to_string())
-                .derivation_path()
-                .unwrap(),
+            DerivationParams::Request {
+                chain: Chain::NEAR,
+                purpose: RequestPurpose::Plain,
+                sender: "sender",
+                path: "path"
+            }
+            .derivation_path(1)
+            .unwrap(),
             "sig.network v2.0.0 epsilon derivation:near:mainnet:sender:path"
         );
 
         assert_eq!(
-            DerivationParams::UserAccount(0, Chain::Bitcoin, "sender".to_string(), "path".to_string())
-                .derivation_path().unwrap(),
+            DerivationParams::Request { chain: Chain::Bitcoin, purpose: RequestPurpose::Plain, sender: "sender", path: "path" }
+                .derivation_path(0).unwrap(),
             "sig.network v1.0.0 epsilon derivation,bip122:000000000019d6689c085ae165831e93,sender,path"
         );
         assert_eq!(
-            DerivationParams::UserAccount(1, Chain::Bitcoin, "sender".to_string(), "path".to_string())
-                .derivation_path().unwrap(),
+            DerivationParams::Request { chain: Chain::Bitcoin, purpose: RequestPurpose::Plain, sender: "sender", path: "path" }
+                .derivation_path(1).unwrap(),
             "sig.network v2.0.0 epsilon derivation:bip122:000000000019d6689c085ae165831e93:sender:path"
         );
 
         assert_eq!(
-            DerivationParams::UserAccount(
-                0,
-                Chain::Canton,
-                "sender".to_string(),
-                "path".to_string()
-            )
-            .derivation_path()
+            DerivationParams::Request {
+                chain: Chain::Canton,
+                purpose: RequestPurpose::Plain,
+                sender: "sender",
+                path: "path"
+            }
+            .derivation_path(0)
             .unwrap(),
             "sig.network v1.0.0 epsilon derivation,canton:global,sender,path"
         );
         assert_eq!(
-            DerivationParams::UserAccount(
-                1,
-                Chain::Canton,
-                "sender".to_string(),
-                "path".to_string()
-            )
-            .derivation_path()
+            DerivationParams::Request {
+                chain: Chain::Canton,
+                purpose: RequestPurpose::Plain,
+                sender: "sender",
+                path: "path"
+            }
+            .derivation_path(1)
             .unwrap(),
             "sig.network v2.0.0 epsilon derivation:canton:global:sender:path"
         );
 
         assert_eq!(
-            DerivationParams::SystemAccount(1, Chain::Ethereum, "path".to_string())
-                .derivation_path()
-                .unwrap(),
+            DerivationParams::SystemAccount {
+                chain: Chain::Ethereum,
+                path: "path"
+            }
+            .derivation_path(1)
+            .unwrap(),
             "sig.network v2.0.0 epsilon derivation:eip155:1:%admin#:path"
         );
     }
@@ -410,21 +536,27 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            derive_epsilon(&DerivationParams::UserAccount(
+            derive_epsilon(
                 0,
-                Chain::Ethereum,
-                "sender".to_string(),
-                "path".to_string()
-            )),
+                DerivationParams::Request {
+                    chain: Chain::Ethereum,
+                    purpose: RequestPurpose::Plain,
+                    sender: "sender",
+                    path: "path"
+                }
+            ),
             Ok(expected_eth_v0)
         );
         assert_eq!(
-            derive_epsilon(&DerivationParams::UserAccount(
+            derive_epsilon(
                 1,
-                Chain::Ethereum,
-                "sender".to_string(),
-                "path".to_string()
-            )),
+                DerivationParams::Request {
+                    chain: Chain::Ethereum,
+                    purpose: RequestPurpose::Plain,
+                    sender: "sender",
+                    path: "path"
+                }
+            ),
             Ok(expected_eth_v1)
         );
 
@@ -444,21 +576,27 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            derive_epsilon(&DerivationParams::UserAccount(
+            derive_epsilon(
                 0,
-                Chain::Solana,
-                "sender".to_string(),
-                "path".to_string()
-            )),
+                DerivationParams::Request {
+                    chain: Chain::Solana,
+                    purpose: RequestPurpose::Plain,
+                    sender: "sender",
+                    path: "path"
+                }
+            ),
             Ok(expected_sol_v0)
         );
         assert_eq!(
-            derive_epsilon(&DerivationParams::UserAccount(
+            derive_epsilon(
                 1,
-                Chain::Solana,
-                "sender".to_string(),
-                "path".to_string()
-            )),
+                DerivationParams::Request {
+                    chain: Chain::Solana,
+                    purpose: RequestPurpose::Plain,
+                    sender: "sender",
+                    path: "path"
+                }
+            ),
             Ok(expected_sol_v1)
         );
 
@@ -479,21 +617,27 @@ mod tests {
 
         // Test NEAR epsilon derivation
         assert_eq!(
-            derive_epsilon(&DerivationParams::UserAccount(
+            derive_epsilon(
                 0,
-                Chain::NEAR,
-                "sender.near".to_string(),
-                "path".to_string()
-            )),
+                DerivationParams::Request {
+                    chain: Chain::NEAR,
+                    purpose: RequestPurpose::Plain,
+                    sender: "sender.near",
+                    path: "path"
+                }
+            ),
             Ok(expected_near_v0)
         );
         assert_eq!(
-            derive_epsilon(&DerivationParams::UserAccount(
+            derive_epsilon(
                 1,
-                Chain::NEAR,
-                "sender.near".to_string(),
-                "path".to_string()
-            )),
+                DerivationParams::Request {
+                    chain: Chain::NEAR,
+                    purpose: RequestPurpose::Plain,
+                    sender: "sender.near",
+                    path: "path"
+                }
+            ),
             Ok(expected_near_v1)
         );
     }
@@ -515,21 +659,27 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            derive_epsilon(&DerivationParams::UserAccount(
+            derive_epsilon(
                 0,
-                Chain::Canton,
-                "sender".to_string(),
-                "path".to_string()
-            )),
+                DerivationParams::Request {
+                    chain: Chain::Canton,
+                    purpose: RequestPurpose::Plain,
+                    sender: "sender",
+                    path: "path"
+                }
+            ),
             Ok(expected_canton_v0)
         );
         assert_eq!(
-            derive_epsilon(&DerivationParams::UserAccount(
+            derive_epsilon(
                 1,
-                Chain::Canton,
-                "sender".to_string(),
-                "path".to_string()
-            )),
+                DerivationParams::Request {
+                    chain: Chain::Canton,
+                    purpose: RequestPurpose::Plain,
+                    sender: "sender",
+                    path: "path"
+                }
+            ),
             Ok(expected_canton_v1)
         );
     }
@@ -560,7 +710,7 @@ mod tests {
             let mut expected = [0u8; 32];
             hex::decode_to_slice(vector["epsilon"].as_str().unwrap(), &mut expected).unwrap();
             assert_eq!(
-                derive_epsilon_midnight(1, requester, path)
+                derive_epsilon_midnight(1, RequestPurpose::Bidirectional, requester, path)
                     .unwrap()
                     .to_bytes()
                     .as_slice(),
@@ -570,38 +720,206 @@ mod tests {
         }
     }
 
-    // Version 0 selects the legacy v1 comma format, which the reference
-    // implementation cannot produce, so no golden reaches it.
-    // Versions above the latest are rejected rather than coerced to the latest format.
+    // Key version 0 has the comma format, which the reference implementation cannot
+    // produce, so no golden reaches it. Versions above the highest supported are
+    // rejected rather than coerced to another format.
     #[test]
     fn test_derive_epsilon_midnight_key_version_routing() {
         let (sender, path) = ("ab".repeat(32), "caller-path");
         assert_ne!(
-            derive_epsilon_midnight(0, &sender, path),
-            derive_epsilon_midnight(1, &sender, path),
+            derive_epsilon_midnight(0, RequestPurpose::Bidirectional, &sender, path),
+            derive_epsilon_midnight(1, RequestPurpose::Bidirectional, &sender, path),
         );
+        let unsupported = MAX_SUPPORTED_MPC_KEY_VERSION + 1;
         assert_eq!(
-            derive_epsilon_midnight(2, &sender, path),
-            Err(UnsupportedKeyVersion(2)),
+            derive_epsilon_midnight(unsupported, RequestPurpose::Bidirectional, &sender, path),
+            Err(UnsupportedKeyVersion(unsupported)),
         );
     }
 
     /// `versioned_derivation_path` pins each version to a format by hand, so a
-    /// bump of `LATEST_MPC_KEY_VERSION` without a new match arm would reject
-    /// every request at the new version.
+    /// bump of `MAX_SUPPORTED_MPC_KEY_VERSION` without a new match arm would
+    /// reject every request at the new version.
     #[test]
-    fn latest_key_version_is_supported() {
-        assert!(derive_epsilon_eth(LATEST_MPC_KEY_VERSION, "sender", "path").is_ok());
+    fn supported_key_versions_have_a_format() {
+        for purpose in [RequestPurpose::Plain, RequestPurpose::Bidirectional] {
+            assert!(
+                derive_epsilon_eth(MAX_SUPPORTED_MPC_KEY_VERSION, purpose, "sender", "path")
+                    .is_ok()
+            );
+        }
+        assert!(
+            derive_attestation_epsilon(MAX_SUPPORTED_MPC_KEY_VERSION, Chain::Solana, "sender")
+                .is_ok()
+        );
+        assert!(derive_epsilon(
+            MAX_SUPPORTED_MPC_KEY_VERSION,
+            DerivationParams::SystemAccount {
+                chain: Chain::Ethereum,
+                path: "path"
+            }
+        )
+        .is_ok());
     }
 
+    fn v2(params: DerivationParams<'_>) -> String {
+        params.versioned_derivation_path(2).unwrap()
+    }
+
+    /// The key version 2 table of doc/account-derivation.md.
     #[test]
-    fn test_derive_epsilon_checkpoint() {
-        let p = DerivationParams::SystemKey("checkpoint".to_string())
-            .derivation_path()
-            .unwrap();
+    fn key_version_2_derivation_paths() {
+        let (sender, path) = ("sender", "path");
         assert_eq!(
-            p,
-            "sig.network v2.0.0 epsilon derivation:system_key:checkpoint"
+            v2(DerivationParams::Request {
+                chain: Chain::Ethereum,
+                purpose: RequestPurpose::Plain,
+                sender,
+                path
+            }),
+            "sig.network derivation:2:plain:eip155:1:sender:path"
+        );
+        assert_eq!(
+            v2(DerivationParams::Request {
+                chain: Chain::Ethereum,
+                purpose: RequestPurpose::Bidirectional,
+                sender,
+                path
+            }),
+            "sig.network derivation:2:bidirectional:eip155:1:sender:path"
+        );
+        assert_eq!(
+            v2(DerivationParams::Attestation {
+                chain: Chain::Solana,
+                sender
+            }),
+            "sig.network derivation:2:attestation:solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp:sender"
+        );
+        assert_eq!(
+            v2(DerivationParams::SystemAccount {
+                chain: Chain::Ethereum,
+                path
+            }),
+            "sig.network derivation:2:system:eip155:1:path"
+        );
+    }
+
+    fn scalar(hex_bytes: &str) -> Scalar {
+        let mut bytes = [0u8; 32];
+        hex::decode_to_slice(hex_bytes, &mut bytes).unwrap();
+        Scalar::from_bytes(bytes).unwrap()
+    }
+
+    fn v2_epsilon(params: DerivationParams<'_>) -> Scalar {
+        let path = params.versioned_derivation_path(2).unwrap();
+        hash_derivation_path(params.chain(), path)
+    }
+
+    /// Expected values are keccak-256 (sha3-256 on NEAR) of the derivation paths
+    /// above, computed outside this crate (`cast keccak`, Python's `hashlib`).
+    #[test]
+    fn key_version_2_epsilons() {
+        let (sender, path) = ("sender", "path");
+        assert_eq!(
+            v2_epsilon(DerivationParams::Request {
+                chain: Chain::Ethereum,
+                purpose: RequestPurpose::Plain,
+                sender,
+                path
+            }),
+            scalar("5268a12d5cf592cc5f3b668ee66e8d10d29c39553c3dd2ea61da748af4b324fb")
+        );
+        assert_eq!(
+            v2_epsilon(DerivationParams::Request {
+                chain: Chain::Ethereum,
+                purpose: RequestPurpose::Bidirectional,
+                sender,
+                path
+            }),
+            scalar("99d9614ae3b4d545344e51e68885fdc92d64160275892278b282889baa6ab479")
+        );
+        assert_eq!(
+            v2_epsilon(DerivationParams::Attestation {
+                chain: Chain::Solana,
+                sender
+            }),
+            scalar("fb5f74e32c045f3beadd6a6cd8dc5bd68feeed174bd7ae80ea36f8d7c5d0dd8b")
+        );
+        assert_eq!(
+            v2_epsilon(DerivationParams::SystemAccount {
+                chain: Chain::Ethereum,
+                path
+            }),
+            scalar("e2a9df0418ef5628fecd7ff9f2d5ed4a2775ac2a63d961be23cca6ae82bee0e8")
+        );
+        assert_eq!(
+            v2_epsilon(DerivationParams::Request {
+                chain: Chain::NEAR,
+                purpose: RequestPurpose::Plain,
+                sender: "sender.near",
+                path
+            }),
+            scalar("eb990bf8724ef278657009900b06489c2d87155ffdd061921f1f9ba060015614")
+        );
+    }
+
+    /// Key versions 0 and 1 have no purposes: a bidirectional key is the plain key.
+    #[test]
+    fn earlier_key_versions_ignore_the_purpose() {
+        for key_version in [0, 1] {
+            assert_eq!(
+                derive_epsilon_sol(key_version, RequestPurpose::Bidirectional, "sender", "path"),
+                derive_epsilon_sol(key_version, RequestPurpose::Plain, "sender", "path"),
+            );
+        }
+    }
+
+    /// At key version 1 the attestation key is the plain key under the reserved path.
+    #[test]
+    fn key_version_1_attestation_key_is_the_reserved_path_key() {
+        assert_eq!(
+            derive_attestation_epsilon(1, Chain::Solana, "sender"),
+            derive_epsilon_sol(1, RequestPurpose::Plain, "sender", "solana response key"),
+        );
+        assert_eq!(
+            derive_attestation_epsilon(1, Chain::Solana, "sender"),
+            Ok(scalar(
+                "1a4bfe456b826af8269cb3adef1489e4ada6c79817faa8f7b17fad6239353282"
+            ))
+        );
+    }
+
+    /// Key version 0 predates bidirectional signing, and a chain that is not a
+    /// bidirectional source has no attestation key before key version 2.
+    #[test]
+    fn attestation_key_versions() {
+        assert_eq!(
+            derive_attestation_epsilon(0, Chain::Solana, "sender"),
+            Err(UnsupportedKeyVersion(0))
+        );
+        assert_eq!(
+            derive_attestation_epsilon(1, Chain::Ethereum, "sender"),
+            Err(UnsupportedKeyVersion(1))
+        );
+        assert!(DerivationParams::Attestation {
+            chain: Chain::Ethereum,
+            sender: "sender"
+        }
+        .versioned_derivation_path(2)
+        .is_ok());
+    }
+
+    /// A key version is not served until `MAX_SUPPORTED_MPC_KEY_VERSION` reaches it.
+    #[test]
+    fn versions_above_max_supported_are_refused() {
+        let unsupported = MAX_SUPPORTED_MPC_KEY_VERSION + 1;
+        assert_eq!(
+            derive_epsilon_eth(unsupported, RequestPurpose::Plain, "sender", "path"),
+            Err(UnsupportedKeyVersion(unsupported))
+        );
+        assert_eq!(
+            derive_attestation_epsilon(unsupported, Chain::Solana, "sender"),
+            Err(UnsupportedKeyVersion(unsupported))
         );
     }
 }

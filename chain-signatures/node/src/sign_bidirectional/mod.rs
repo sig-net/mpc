@@ -9,8 +9,9 @@ mod signing;
 use crate::protocol::Chain;
 use anyhow::Context as _;
 use k256::Scalar;
+use mpc_crypto::RequestPurpose;
 use mpc_primitives::ChainConfig as _;
-use mpc_primitives::LATEST_MPC_KEY_VERSION;
+use mpc_primitives::MAX_SUPPORTED_MPC_KEY_VERSION;
 pub use mpc_primitives::{
     BidirectionalTx, BidirectionalTxId, ChainFromError, SignBidirectionalEvent, Signature,
 };
@@ -34,31 +35,36 @@ fn source_chain_sender_string(sender: [u8; 32], chain: Chain) -> anyhow::Result<
     }
 }
 
-/// Derives the request key's epsilon on the requester's chain.
+/// Derives the epsilon of a key on the requester's chain.
 fn derive_epsilon(
     chain: Chain,
     key_version: u32,
+    purpose: RequestPurpose,
     sender_string: &str,
     path: &str,
 ) -> anyhow::Result<Scalar> {
     match chain {
         Chain::Solana => Ok(mpc_crypto::kdf::derive_epsilon_sol(
             key_version,
+            purpose,
             sender_string,
             path,
         )?),
         Chain::Hydration => Ok(mpc_crypto::kdf::derive_epsilon_hydration(
             key_version,
+            purpose,
             sender_string,
             path,
         )?),
         Chain::Canton => Ok(mpc_crypto::kdf::derive_epsilon_canton(
             key_version,
+            purpose,
             sender_string,
             path,
         )?),
         Chain::Midnight => Ok(mpc_crypto::kdf::derive_epsilon_midnight(
             key_version,
+            purpose,
             sender_string,
             path,
         )?),
@@ -78,7 +84,7 @@ pub(crate) const SDK_PARAMS: &str = "";
 /// Key version 0 predates bidirectional signing.
 const MIN_BIDIRECTIONAL_KEY_VERSION: u32 = 1;
 
-/// Key version in `MIN_BIDIRECTIONAL_KEY_VERSION..=LATEST_MPC_KEY_VERSION`, and
+/// Key version in `MIN_BIDIRECTIONAL_KEY_VERSION..=MAX_SUPPORTED_MPC_KEY_VERSION`, and
 /// [`SDK_ALGO`], [`SDK_DEST`] and [`SDK_PARAMS`].
 fn check_request_fields(event: &SignBidirectionalEvent) -> anyhow::Result<()> {
     anyhow::ensure!(
@@ -87,8 +93,8 @@ fn check_request_fields(event: &SignBidirectionalEvent) -> anyhow::Result<()> {
         event.key_version
     );
     anyhow::ensure!(
-        event.key_version <= LATEST_MPC_KEY_VERSION,
-        "key version must be at most {LATEST_MPC_KEY_VERSION}, got {}",
+        event.key_version <= MAX_SUPPORTED_MPC_KEY_VERSION,
+        "key version must be at most {MAX_SUPPORTED_MPC_KEY_VERSION}, got {}",
         event.key_version
     );
     let fields = (
@@ -149,6 +155,7 @@ impl SignBidirectionalEventExt for SignBidirectionalEvent {
         derive_epsilon(
             self.chain,
             self.key_version,
+            RequestPurpose::Bidirectional,
             &self.sender_string()?,
             &self.path,
         )
@@ -260,10 +267,12 @@ impl BidirectionalTxExt for BidirectionalTx {
         source_chain_sender_string(self.sender, self.source_chain)
     }
 
+    // At key version 1 the attestation key is a plain key under a reserved path.
     fn epsilon(&self, path: &str) -> anyhow::Result<Scalar> {
         derive_epsilon(
             self.source_chain,
             self.key_version,
+            RequestPurpose::Plain,
             &self.sender_string()?,
             path,
         )
@@ -274,12 +283,13 @@ impl BidirectionalTxExt for BidirectionalTx {
 mod tests {
     use super::eth_tx::legacy_tx;
     use super::{
-        SignBidirectionalEvent, SignBidirectionalEventExt as _, Signature, LATEST_MPC_KEY_VERSION,
-        SDK_ALGO, SDK_DEST, SDK_PARAMS,
+        SignBidirectionalEvent, SignBidirectionalEventExt as _, Signature, SDK_ALGO, SDK_DEST,
+        SDK_PARAMS,
     };
     use crate::protocol::Chain;
     use k256::elliptic_curve::sec1::FromEncodedPoint;
     use k256::{AffinePoint, EncodedPoint};
+    use mpc_primitives::{LATEST_MPC_KEY_VERSION, MAX_SUPPORTED_MPC_KEY_VERSION};
 
     /// Recorded mainnet USDT transfer (chain-tron fixture `usdt-transfer-1.json`)
     const RAW_HEX: &str = "0a02db6f220815ff9c9c504ad4a8409a80f5a491345aae01081f12a9010a31747970652e676f6f676c65617069732e636f6d2f70726f746f636f6c2e54726967676572536d617274436f6e747261637412740a154120eb85916a10d2c6542613e4c9517b5e99b2dee9121541a614f803b6fd780986a42c78ec9c7f77e6ded13c2244a9059cbb000000000000000000000000d9e02baf48ed306afc63cfa816a2b6be8442036a0000000000000000000000000000000000000000000000000000000008f428f870bad8e2a49134900180e1eb17";
@@ -320,9 +330,9 @@ mod tests {
     }
 
     #[test]
-    fn check_request_fields_accepts_only_key_version_1_and_the_sdk_fields() {
+    fn check_request_fields_accepts_only_supported_key_versions_and_the_sdk_fields() {
         type Edit = fn(&mut SignBidirectionalEvent);
-        let cases: [(&str, Edit, bool); 15] = [
+        let cases: [(&str, Edit, bool); 16] = [
             ("as the SDKs send it", |_| {}, true),
             ("from Hydration", |e| e.chain = Chain::Hydration, true),
             (
@@ -343,7 +353,16 @@ mod tests {
             ),
             ("from Canton", |e| e.chain = Chain::Canton, true),
             ("key version 0", |e| e.key_version = 0, false),
-            ("key version 2", |e| e.key_version = 2, false),
+            (
+                "highest supported key version",
+                |e| e.key_version = MAX_SUPPORTED_MPC_KEY_VERSION,
+                true,
+            ),
+            (
+                "above the highest supported key version",
+                |e| e.key_version = MAX_SUPPORTED_MPC_KEY_VERSION + 1,
+                false,
+            ),
             (
                 "algo secp256k1",
                 |e| e.algo = "secp256k1".to_string(),

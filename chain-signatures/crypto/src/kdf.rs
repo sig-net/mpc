@@ -21,23 +21,27 @@ use sha3::Sha3_256;
 // `signet-crypto` kernel; re-exported here so node paths (`mpc_crypto::kdf::…`,
 // `mpc_crypto::…`) keep resolving unchanged.
 pub use signet_crypto::{
-    derive_epsilon, derive_epsilon_bitcoin, derive_epsilon_canton, derive_epsilon_eth,
-    derive_epsilon_hydration, derive_epsilon_midnight, derive_epsilon_sol, derive_key,
-    reconstruct_signature, x_coordinate, DerivationParams, UnsupportedKeyVersion,
-    EPSILON_DERIVATION_PREFIX_V1, EPSILON_DERIVATION_PREFIX_V2,
+    derive_attestation_epsilon, derive_epsilon, derive_epsilon_bitcoin, derive_epsilon_canton,
+    derive_epsilon_eth, derive_epsilon_hydration, derive_epsilon_midnight, derive_epsilon_sol,
+    derive_key, reconstruct_signature, x_coordinate, DerivationParams, RequestPurpose,
+    UnsupportedKeyVersion, EPSILON_DERIVATION_PREFIX_V1, EPSILON_DERIVATION_PREFIX_V2,
 };
 
 pub fn derive_epsilon_near(
     key_version: KeyVersion,
+    purpose: RequestPurpose,
     account_id: &AccountId,
     path: &str,
 ) -> Result<Scalar, UnsupportedKeyVersion> {
-    derive_epsilon(&DerivationParams::UserAccount(
+    derive_epsilon(
         key_version,
-        Chain::NEAR,
-        account_id.to_string(),
-        path.to_string(),
-    ))
+        DerivationParams::Request {
+            chain: Chain::NEAR,
+            purpose,
+            sender: account_id.as_str(),
+            path,
+        },
+    )
 }
 
 pub fn derive_secret_key(secret_key: &SecretKey, epsilon: Scalar) -> SecretKey {
@@ -234,11 +238,13 @@ mod tests {
     #[test]
     fn derive_ethereum_admin_key() {
         // Define epsilon
-        let epsilon = derive_epsilon(&DerivationParams::SystemAccount(
+        let epsilon = derive_epsilon(
             0,
-            Chain::Ethereum,
-            "signing_contract_control".to_string(),
-        ))
+            DerivationParams::SystemAccount {
+                chain: Chain::Ethereum,
+                path: "signing_contract_control",
+            },
+        )
         .unwrap();
 
         // Mainnet root PK
