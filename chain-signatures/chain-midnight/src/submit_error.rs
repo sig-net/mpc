@@ -135,7 +135,8 @@ mod tests {
 
     #[test]
     fn every_class_is_counted_with_its_code_verdict_and_strike() {
-        let classes: [(fn() -> SubmitError, bool, bool); 13] = [
+        type Class = (fn() -> SubmitError, bool, bool);
+        let classes: [Class; 13] = [
             (
                 || SubmitError::BadRequest("reason".to_string()),
                 false,
