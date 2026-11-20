@@ -20,7 +20,7 @@ use mpc_node::protocol::{Governance, MessageChannel, ProtocolState};
 use mpc_node::rpc::ContractStateWatcher;
 use mpc_node::storage::{PresignatureStorage, TripleStorage};
 use mpc_node::types::SignCommand;
-use mpc_primitives::{Chain, CheckpointDigest, IndexedSignRequest};
+use mpc_primitives::{Chain, IndexedSignRequest};
 use near_sdk::AccountId;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -49,8 +49,6 @@ pub struct MpcFixtureNode {
     pub msg_channel: MessageChannel,
     pub mock_streams: HashMap<Chain, MockStream>,
 
-    /// Keeps the per-node checkpoint watch sender alive for the test's lifetime.
-    pub checkpoint_tx: watch::Sender<Option<CheckpointDigest>>,
     pub triple_storage: TripleStorage,
     pub presignature_storage: PresignatureStorage,
     pub backlog: Backlog,

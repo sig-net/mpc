@@ -100,6 +100,8 @@ async fn next_sign_command(
 
 /// Spawn a supervised Solana indexer over `backlog` (test wiring for
 /// `run_supervised`).
+/// Checkpoint votes settle as in a 1-of-1 governance contract: each vote's
+/// digest is pushed to the consensus watch, so the base advances with indexing.
 /// Returns its abort handle and sign command receiver.
 async fn spawn_supervised_stream(
     config: SolConfig,
@@ -119,9 +121,6 @@ async fn spawn_supervised_stream(
     let (sign_tx, sign_rx) = mpsc::channel::<SignCommand>(16);
     let (rpc_tx, mut rpc_rx) = mpsc::channel::<RpcAction>(16);
     let rpc = RpcChannel { tx: rpc_tx };
-    // Drain RPC actions so the bounded channel never fills and blocks the
-    // supervised stream's senders; no receiver is needed in this test harness.
-    tokio::spawn(async move { while rpc_rx.recv().await.is_some() {} });
 
     let account_id: AccountId = "test.near".parse().unwrap();
     let (contract_watcher, _contract_tx) = ContractStateWatcher::with_running(
@@ -139,12 +138,24 @@ async fn spawn_supervised_stream(
     );
     let (_mesh_tx, mesh_rx) = watch::channel(mesh_state);
     let node_client = NodeClient::new();
-    let (_cp_tx, checkpoints_rx) = watch::channel(None);
+    let (cp_tx, checkpoints_rx) = watch::channel(None);
 
-    // We need to forget the tx handles because they are not used after this point
-    // and we don't want them to be dropped and close the channels.
-    // The indexer will use the channels internally.
-    std::mem::forget((_mesh_tx, _cp_tx));
+    // This harness is a one-node network, so every checkpoint vote settles its
+    // own digest immediately, as a 1-of-1 governance contract would. The base
+    // then advances with indexing instead of stalling at the pending cap, and
+    // draining here still keeps the bounded RPC channel from blocking the
+    // supervised stream's senders.
+    tokio::spawn(async move {
+        while let Some(action) = rpc_rx.recv().await {
+            if let RpcAction::VoteCheckpoint { checkpoint, .. } = action {
+                let _ = cp_tx.send(Some(checkpoint));
+            }
+        }
+    });
+
+    // The mesh sender is not used after this point and must not be dropped,
+    // or the channel closes under the indexer.
+    std::mem::forget(_mesh_tx);
 
     let run_handle = tokio::spawn(async move {
         run_supervised(

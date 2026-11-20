@@ -177,6 +177,10 @@ async fn check_channel_contention(
         .only_generate_signatures()
         .with_mock_stream(Chain::Solana, MockStream::default())
         .await
+        // These bursts deliberately desync nodes' backlogs; settling a majority
+        // digest would regress minority nodes and drop in-flight requests, so
+        // they exercise message contention only, not checkpoint settlement.
+        .without_checkpoint_settlement()
         .build()
         .await;
 
