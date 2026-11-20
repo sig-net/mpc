@@ -72,6 +72,14 @@ pub struct NodeConfig {
     pub hydration: Option<HydrationConfig>,
     pub canton: Option<CantonConfig>,
     pub midnight: Option<MidnightConfig>,
+    pub tron: Option<TronNodeConfig>,
+}
+
+/// The Tron chain a node watches for the execution of the transactions it signed.
+#[derive(Clone, Debug)]
+pub struct TronNodeConfig {
+    /// The node's `--tron-endpoint`: a java-tron HTTP API base URL.
+    pub endpoint: url::Url,
 }
 
 impl Default for NodeConfig {
@@ -85,6 +93,7 @@ impl Default for NodeConfig {
             hydration: None,
             canton: None,
             midnight: None,
+            tron: None,
         }
     }
 }
@@ -222,6 +231,7 @@ pub struct Context {
     pub storage_options: storage::Options,
     pub log_options: logs::Options,
     pub ethereum: Option<EthereumContext>,
+    pub tron: Option<containers::TronSandbox>,
 }
 
 pub async fn setup(spawner: &mut ClusterSpawner) -> anyhow::Result<Context> {
@@ -282,6 +292,18 @@ pub async fn setup(spawner: &mut ClusterSpawner) -> anyhow::Result<Context> {
         });
     }
 
+    let mut tron = None;
+    if spawner.use_tron {
+        let sandbox = containers::TronSandbox::run(spawner).await?;
+        spawner.cfg.tron = Some(TronNodeConfig {
+            endpoint: sandbox
+                .external_http_endpoint
+                .parse()
+                .context("invalid TRE endpoint")?,
+        });
+        tron = Some(sandbox);
+    }
+
     let storage_options = mpc_node::storage::Options {
         gcp_project_id: None,
         sk_share_secret_id: None,
@@ -327,6 +349,7 @@ pub async fn setup(spawner: &mut ClusterSpawner) -> anyhow::Result<Context> {
         storage_options,
         log_options,
         ethereum,
+        tron,
     })
 }
 
