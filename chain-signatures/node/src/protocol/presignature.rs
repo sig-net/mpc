@@ -593,11 +593,18 @@ impl PresignatureSpawner {
             "starting protocol to generate a new presignature",
         );
 
+        if self.contains(id.id).await {
+            return Err(InitializationError::BadParameters(format!(
+                "presignature {} is already stored",
+                id.id
+            )));
+        }
+
         let Some(slot) = self.presignatures.create_slot(id.id, owner).await else {
             // Dropping the positor here releases the reservation (proposer only),
             // returning the pair to the pool.
             return Err(InitializationError::BadParameters(format!(
-                "presignature {} is already generating, in use, or stored",
+                "presignature {} is already generating or in use",
                 id.id
             )));
         };
