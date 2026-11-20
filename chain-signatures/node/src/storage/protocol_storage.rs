@@ -446,7 +446,7 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
                     redis.call("HDEL", artifact_key, unpack(outdated))
                     -- also delete holders sets for each outdated artifact
                     for _, oid in ipairs(outdated) do
-                        redis.call("DEL", artifact_key .. ':holders:' .. oid)
+                        redis.call("UNLINK", artifact_key .. ':holders:' .. oid)
                     end
                     -- clear the outdated list for the next batch
                     outdated = {}
@@ -459,7 +459,7 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
                 redis.call("HDEL", artifact_key, unpack(outdated))
                 -- also delete holders sets for each outdated artifact
                 for _, oid in ipairs(outdated) do
-                    redis.call("DEL", artifact_key .. ':holders:' .. oid)
+                    redis.call("UNLINK", artifact_key .. ':holders:' .. oid)
                 end
             end
 
@@ -480,7 +480,7 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
                         redis.call("HDEL", artifact_key, id)
                     end
                     redis.call("SREM", owner_key, id)
-                    redis.call("DEL", holders_key)
+                    redis.call("UNLINK", holders_key)
                     table.insert(not_found, id)
                 end
             end
@@ -545,7 +545,7 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
 
             -- Store holders in a dedicated Redis set
             local holders_key = artifact_key .. ':holders:' .. artifact_id
-            redis.call("DEL", holders_key)
+            redis.call("UNLINK", holders_key)
             if num_holders > 0 then
                 redis.call("SADD", holders_key, unpack(ARGV, 4, 3 + num_holders))
             end
@@ -645,7 +645,7 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
             -- Read and delete the holders set
             local holders_key = artifact_key .. ':holders:' .. artifact_id
             local holders = redis.call("SMEMBERS", holders_key)
-            redis.call("DEL", holders_key)
+            redis.call("UNLINK", holders_key)
 
             return {artifact, holders}
         "#;
@@ -740,7 +740,7 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
                 table.insert(del, artifact_key .. ':holders:' .. id)
             end
 
-            redis.call("DEL", unpack(del))
+            redis.call("UNLINK", unpack(del))
         "#;
 
         let start = Instant::now();
@@ -889,7 +889,7 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
 
             local holders_key = artifact_key .. ':holders:' .. artifact_id
             local holders = redis.call("SMEMBERS", holders_key)
-            redis.call("DEL", holders_key)
+            redis.call("UNLINK", holders_key)
 
             return {artifact, holders}
         "#;
@@ -974,7 +974,7 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
                         local count = redis.call('SCARD', holders_key)
                         if count < threshold then
                             redis.call('HDEL', artifact_key, id)
-                            redis.call('DEL', holders_key)
+                            redis.call('UNLINK', holders_key)
                             redis.call('SREM', owner_key, id)
                             table.insert(removed, id)
                         else
