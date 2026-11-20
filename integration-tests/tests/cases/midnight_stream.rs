@@ -9,7 +9,8 @@ use alloy::rpc::types::{TransactionInput, TransactionReceipt, TransactionRequest
 use anyhow::Context as _;
 use integration_tests::cluster;
 use integration_tests::midnight::{
-    AdversarialScenario, CallPlacement, MidnightContext, PlacementScenario,
+    AdversarialScenario, CallPlacement, MidnightContext, PlacementScenario, TargetChain,
+    VaultOperation,
 };
 use k256::elliptic_curve::sec1::ToEncodedPoint as _;
 use mpc_chain_integration_core::utils::test::ChainIndexerStream;
@@ -1018,8 +1019,22 @@ async fn midnight_vault_operations_complete_with_real_mpc() -> anyhow::Result<()
             && result.operations.len() == operations.len(),
         "unexpected vault operations {operations:?}"
     );
+    expect_settled_by_cluster(&cluster, &mut events, &mut observed, &result.operations).await?;
+    midnight.shutdown().await?;
+    Ok(())
+}
+
+/// Checks every vault operation the cluster indexed, signed and attested executed at the
+/// height and over the output the driver saw, then waits for every node to checkpoint the
+/// requests' completion.
+async fn expect_settled_by_cluster(
+    cluster: &cluster::Cluster,
+    events: &mut ChainIndexerStream,
+    observed: &mut Observed,
+    operations: &[VaultOperation],
+) -> anyhow::Result<()> {
     let mut request_ids = BTreeSet::new();
-    for operation in &result.operations {
+    for operation in operations {
         // Whether a send stays within the guaranteed budget depends on its circuit and the
         // ledger state, so a notification may come from either transcript; the placement
         // test pins both. Each must come from the transaction that sent it.
@@ -1027,6 +1042,8 @@ async fn midnight_vault_operations_complete_with_real_mpc() -> anyhow::Result<()
         tracing::info!(
             operation = operation.operation,
             ?phase,
+            send_to_signature_ms = operation.send_to_signature_ms,
+            broadcast_to_attestation_ms = operation.broadcast_to_attestation_ms,
             "vault request notified"
         );
         anyhow::ensure!(
@@ -1041,7 +1058,7 @@ async fn midnight_vault_operations_complete_with_real_mpc() -> anyhow::Result<()
         );
     }
     observed
-        .until(&mut events, "every vault request's events", |observed| {
+        .until(events, "every vault request's events", |observed| {
             request_ids.iter().all(|id| {
                 observed.indexed().contains(id)
                     && observed.responded.contains(id)
@@ -1049,19 +1066,135 @@ async fn midnight_vault_operations_complete_with_real_mpc() -> anyhow::Result<()
             })
         })
         .await?;
-    for operation in &result.operations {
+    for operation in operations {
         let id = request_id(&operation.request_id)?;
         expect_executed_attestation(
             &id,
             &observed.attested[&id],
-            operation.evm_block_height,
+            operation.block_height,
             &hex::decode(&operation.output)?,
         )?;
     }
-    let final_block = observed.next_block(&mut events).await?;
+    let final_block = observed.next_block(events).await?;
     for id in &request_ids {
-        wait_for_completed_checkpoint(&cluster, *id, final_block).await?;
+        wait_for_completed_checkpoint(cluster, *id, final_block).await?;
     }
+    Ok(())
+}
+
+/// The vault's Tron withdraw with the real MPC and a TRE chain, beside an ETH withdraw on the
+/// same vault. An ETH and a Tron deposit fund a vault coin of each colour; then the two
+/// withdraws run side by side, each attestation flushed while the other request is open, so
+/// each must fold only into its own chain's last-seen height, and each is offered to the
+/// other chain's complete circuit before the real completes.
+#[ignore = "starts a real Midnight node, indexer, proof server, Anvil, TRE, and MPC cluster"]
+#[serial]
+#[test(tokio::test)]
+async fn midnight_vault_tron_withdraw_with_real_mpc() -> anyhow::Result<()> {
+    let cluster = cluster::spawn().ethereum().midnight().tron().await?;
+    cluster.wait().signable().await?;
+    let midnight = cluster
+        .midnight
+        .as_ref()
+        .context("Midnight context was not started")?;
+    let ethereum = cluster
+        .nodes
+        .ctx()
+        .ethereum
+        .as_ref()
+        .context("Ethereum context was not started")?;
+    let tron = cluster
+        .nodes
+        .ctx()
+        .tron
+        .as_ref()
+        .context("TRE was not started")?;
+    let root_public_key =
+        mpc_crypto::near_public_key_to_affine_point(cluster.root_public_key().await?);
+    let indexer = MidnightIndexer::new(
+        midnight.config.clone(),
+        MockStateManager::new(),
+        NoopChainTelemetry,
+        root_public_key,
+    )
+    .await?;
+    let mut events = ChainIndexerStream::start(indexer, EVENT_TIMEOUT).await?;
+    let mpc_public_key = format!(
+        "0x{}",
+        hex::encode(root_public_key.to_encoded_point(false).as_bytes())
+    );
+
+    let mut observed = Observed::default();
+    let run = midnight.run_vault_tron(
+        &mpc_public_key,
+        &ethereum.sandbox.external_http_endpoint,
+        &ethereum.sandbox.secret_key,
+        &tron.external_http_endpoint,
+        &tron.funder_private_key,
+    );
+    tokio::pin!(run);
+    let result = tokio::time::timeout(Duration::from_secs(45 * 60), async {
+        loop {
+            tokio::select! {
+                result = &mut run => return result,
+                event = events.next_event() => {
+                    observed.record(event.context("Midnight indexer stopped during the vault run")?);
+                }
+            }
+        }
+    })
+    .await
+    .context("the Tron vault run exceeded 45 minutes")??;
+
+    let operations = result
+        .operations
+        .iter()
+        .map(|operation| (operation.operation.as_str(), operation.chain))
+        .collect::<BTreeMap<_, _>>();
+    anyhow::ensure!(
+        operations
+            == BTreeMap::from([
+                ("deposit", TargetChain::Ethereum),
+                ("tronDeposit", TargetChain::Tron),
+                ("withdraw", TargetChain::Ethereum),
+                ("tronWithdraw", TargetChain::Tron),
+            ])
+            && result.operations.len() == operations.len(),
+        "unexpected vault operations {operations:?}"
+    );
+    expect_settled_by_cluster(&cluster, &mut events, &mut observed, &result.operations).await?;
+
+    let height_of = |name: &str| {
+        result
+            .operations
+            .iter()
+            .find(|operation| operation.operation == name)
+            .map(|operation| operation.block_height)
+            .with_context(|| format!("no {name} operation"))
+    };
+    let withdraw = height_of("withdraw")?;
+    let tron_withdraw = height_of("tronWithdraw")?;
+    let last_seen = &result.last_seen;
+    anyhow::ensure!(
+        tron_withdraw > last_seen.before.tron
+            && last_seen.after_ethereum.ethereum == last_seen.before.ethereum.max(withdraw)
+            && last_seen.after_ethereum.tron == last_seen.before.tron
+            && last_seen.after_tron.tron == tron_withdraw
+            && last_seen.after_tron.ethereum == last_seen.after_ethereum.ethereum,
+        "an attestation moved the other chain's last-seen height: {last_seen:?}"
+    );
+    let refusals = &result.cross_chain_refusals;
+    tracing::info!(?refusals, "cross-chain completes refused");
+    anyhow::ensure!(
+        refusals.tron_complete_of_ethereum.contains("Wrong action")
+            && refusals.ethereum_complete_of_tron.contains("Wrong action"),
+        "a complete was refused for another reason: {refusals:?}"
+    );
+    anyhow::ensure!(
+        result.recipient.after.checked_sub(result.recipient.before) == Some(100_000),
+        "the Tron recipient received {:?}",
+        result.recipient
+    );
     midnight.shutdown().await?;
     Ok(())
 }

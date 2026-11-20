@@ -57,7 +57,7 @@ import {
   type CallerContract,
   type CallerProviders,
 } from "./providers.js";
-import { runVault, runVaultPartialSend } from "./vault.js";
+import { runVault, runVaultPartialSend, runVaultTron } from "./vault.js";
 import { createCallerPrivateState } from "./witnesses.js";
 
 interface RoleSeeds {
@@ -188,6 +188,13 @@ interface RunVaultPartialSendRequest extends Omit<RunVaultRequest, "op"> {
   op: "runVaultPartialSend";
 }
 
+interface RunVaultTronRequest extends Omit<RunVaultRequest, "op"> {
+  op: "runVaultTron";
+  tronRpcUrl: string;
+  tronFunderKey: string;
+  tronTokenArtifact: string;
+}
+
 interface ShutdownRequest {
   op: "shutdown";
 }
@@ -205,6 +212,7 @@ type Request =
   | FireTwinRequest
   | RunVaultRequest
   | RunVaultPartialSendRequest
+  | RunVaultTronRequest
   | ShutdownRequest;
 
 interface Session {
@@ -686,6 +694,25 @@ async function dispatch(request: Request): Promise<unknown> {
       deployerSeed: active.roleSeeds.deployer,
       userSeed: active.roleSeeds.invoker,
       userFacade: active.facade,
+    });
+  }
+  if (request.op === "runVaultTron") {
+    return runVaultTron({
+      config: active.config,
+      artifactDir: active.artifactDir,
+      centralAddress: active.centralAddress,
+      responderAddress: active.responderAddress,
+      mpcPublicKey: request.mpcPublicKey,
+      evmRpcUrl: request.evmRpcUrl,
+      evmFunderKey: request.evmFunderKey,
+      deployerSeed: active.roleSeeds.deployer,
+      userSeed: active.roleSeeds.invoker,
+      userFacade: active.facade,
+      tron: {
+        rpcUrl: request.tronRpcUrl,
+        funderKey: request.tronFunderKey,
+        tokenArtifact: request.tronTokenArtifact,
+      },
     });
   }
   if (request.op === "submitPlacement") {

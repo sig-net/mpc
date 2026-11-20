@@ -26,6 +26,12 @@ const vaultWitnesses: Witnesses<VaultPrivateState> = {
     privateState,
     privateState.secretKey,
   ],
+  // The Tron window checks compare whole seconds; Compact cannot divide, and the circuit
+  // asserts the quotient.
+  secondsOfMillis: ({ privateState }, millis): [VaultPrivateState, bigint] => [
+    privateState,
+    millis / 1000n,
+  ],
 };
 
 export type VaultContract = Contract<VaultPrivateState>;
