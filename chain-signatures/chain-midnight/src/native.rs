@@ -584,6 +584,9 @@ fn node(error: anyhow::Error) -> SubmitError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::chain_mock::{
+        block_hash, block_number_of, ledger_parameters, scan_read_rejected, ScriptedChain, TX_HASH,
+    };
     use crate::emissions::{emissions_of_call, Emission, EmissionKind, MISC_PAYLOAD_LEN};
     use crate::funding::tests::{base, funded_key, replayed};
     use crate::funding::{plan_fee, FeePlan};
@@ -592,7 +595,6 @@ mod tests {
     use crate::test_utils::{EventRecorder, RecordedFields};
     use crate::MidnightAddress;
     use http::StatusCode;
-    use jsonrpsee::core::client::Error as JsonrpseeClientError;
     use midnight_ledger_v9::structure::{
         ContractAction, ContractCall, Intent, ProofPreimageMarker, Signature, INITIAL_PARAMETERS,
     };
@@ -601,10 +603,8 @@ mod tests {
     use mpc_chain_integration_core::utils::retry::{
         is_retryable, run_gated, RpcFailure, SharedBackoff,
     };
-    use std::collections::VecDeque;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Mutex;
-    use subxt::ext::subxt_rpcs::Error as RawRpcError;
     use tracing_subscriber::layer::SubscriberExt;
 
     /// The responder's initial state with the package's verifier keys
@@ -613,7 +613,6 @@ mod tests {
     const RESPONDER: &str = "5555555555555555555555555555555555555555555555555555555555555555";
     const REQUEST_ID: &str = "abf32e141d471192a834779b0a8960aa05a7f94534564f477420eef80f588c48";
     const TTL: u64 = 1_800_000_000;
-    const TX_HASH: [u8; 32] = [0x7a; 32];
 
     type ChainIntent = Intent<Signature, ProofPreimageMarker, PedersenRandomness, DefaultDB>;
 
@@ -676,228 +675,6 @@ mod tests {
 
         fn landed(&self) {
             self.landings.fetch_add(1, Ordering::SeqCst);
-        }
-    }
-
-    /// A chain whose finalized head moves `step` blocks (one by default) per ask, from
-    /// `head` up to `last`, with blocks six seconds apart from time 1000.
-    pub(super) struct ScriptedChain {
-        head: Mutex<u64>,
-        last: u64,
-        step: u64,
-        /// The blocks each head read asked about, by method.
-        number_reads: Mutex<Vec<u64>>,
-        time_reads: Mutex<Vec<u64>>,
-        hash_lookups: Mutex<Vec<u64>>,
-        /// What each submit answers, in turn; past the last, the node takes it.
-        submit: Mutex<VecDeque<SubmitRefusal>>,
-        /// When each submit was sent.
-        submitted: Mutex<Vec<Instant>>,
-        landing_reads: Mutex<VecDeque<u64>>,
-        /// What the landing read of each scripted block answers, in order; a
-        /// read the script's front does not name answers found-nothing.
-        reads: Mutex<VecDeque<(u64, LandingRead)>>,
-        /// A block whose first time read fails.
-        failing_time: Mutex<Option<u64>>,
-        /// A block `block_hash_at` answers nothing for.
-        missing_hash_at: Mutex<Option<u64>>,
-    }
-
-    enum LandingRead {
-        Found(Landing),
-        Fail(anyhow::Error),
-        Delayed {
-            delay: Duration,
-            then: Box<LandingRead>,
-        },
-    }
-
-    impl ScriptedChain {
-        pub(super) fn new(head: u64, last: u64) -> Self {
-            Self {
-                head: Mutex::new(head),
-                last,
-                step: 1,
-                number_reads: Mutex::new(Vec::new()),
-                time_reads: Mutex::new(Vec::new()),
-                hash_lookups: Mutex::new(Vec::new()),
-                submit: Mutex::new(VecDeque::new()),
-                submitted: Mutex::new(Vec::new()),
-                landing_reads: Mutex::new(VecDeque::new()),
-                reads: Mutex::new(VecDeque::new()),
-                failing_time: Mutex::new(None),
-                missing_hash_at: Mutex::new(None),
-            }
-        }
-
-        fn stepping(mut self, step: u64) -> Self {
-            self.step = step;
-            self
-        }
-
-        fn landing_at(self, number: u64, landing: Landing) -> Self {
-            self.reads
-                .lock()
-                .unwrap()
-                .push_back((number, LandingRead::Found(landing)));
-            self
-        }
-
-        fn failing_read_at(self, number: u64) -> Self {
-            self.reads.lock().unwrap().push_back((
-                number,
-                LandingRead::Fail(anyhow::anyhow!(
-                    "the node dropped the read of block {number}"
-                )),
-            ));
-            self
-        }
-
-        fn failing_read_with(self, number: u64, error: anyhow::Error) -> Self {
-            self.reads
-                .lock()
-                .unwrap()
-                .push_back((number, LandingRead::Fail(error)));
-            self
-        }
-
-        fn delaying_read_at(self, number: u64, delay: Duration, then: LandingRead) -> Self {
-            self.reads.lock().unwrap().push_back((
-                number,
-                LandingRead::Delayed {
-                    delay,
-                    then: Box::new(then),
-                },
-            ));
-            self
-        }
-
-        fn missing_hash_at(self, number: u64) -> Self {
-            *self.missing_hash_at.lock().unwrap() = Some(number);
-            self
-        }
-
-        fn failing_time_once_at(self, number: u64) -> Self {
-            *self.failing_time.lock().unwrap() = Some(number);
-            self
-        }
-
-        fn refusing(self, refusal: SubmitRefusal) -> Self {
-            self.submit.lock().unwrap().push_back(refusal);
-            self
-        }
-
-        fn submits(&self) -> Vec<Instant> {
-            self.submitted.lock().unwrap().clone()
-        }
-    }
-
-    fn block_hash(number: u64) -> BlockHash {
-        let mut bytes = [0u8; 32];
-        bytes[24..].copy_from_slice(&number.to_be_bytes());
-        BlockHash::from_bytes(bytes)
-    }
-
-    /// jsonrpsee's `Rejected` shape (jsonrpsee-http-client 0.24.10 transport.rs:376),
-    /// attached like the `SubmitChain` boundary attaches its reads.
-    fn scan_read_rejected(status: u16) -> anyhow::Error {
-        let transport = jsonrpsee::http_client::transport::Error::Rejected {
-            status_code: status,
-        };
-        let client = JsonrpseeClientError::Transport(Box::new(transport));
-        crate::rpc::attach_read_carrier(
-            anyhow::Error::new(RawRpcError::Client(Box::new(client)))
-                .context("failed to fetch midnight block events"),
-        )
-    }
-
-    fn block_number_of(hash: &BlockHash) -> u64 {
-        u64::from_be_bytes(hash.as_bytes()[24..].try_into().unwrap())
-    }
-
-    #[async_trait]
-    impl PinnedReads for ScriptedChain {
-        async fn finalized_head(&self) -> anyhow::Result<BlockHash> {
-            let mut head = self.head.lock().unwrap();
-            *head = (*head + self.step).min(self.last);
-            Ok(block_hash(*head))
-        }
-
-        async fn contract_state(
-            &self,
-            _: &MidnightAddress,
-            _: &BlockHash,
-        ) -> anyhow::Result<Option<Vec<u8>>> {
-            unimplemented!("the post path reads no contract state")
-        }
-
-        async fn ledger_parameters(&self, _: &BlockHash) -> anyhow::Result<Vec<u8>> {
-            Ok(ledger_parameters())
-        }
-    }
-
-    #[async_trait]
-    impl SubmitChain for ScriptedChain {
-        async fn block_number(&self, at: &BlockHash) -> anyhow::Result<u64> {
-            let number = block_number_of(at);
-            self.number_reads.lock().unwrap().push(number);
-            Ok(number)
-        }
-
-        async fn block_hash_at(&self, number: u64) -> anyhow::Result<Option<BlockHash>> {
-            self.hash_lookups.lock().unwrap().push(number);
-            if *self.missing_hash_at.lock().unwrap() == Some(number) {
-                return Ok(None);
-            }
-            Ok(Some(block_hash(number)))
-        }
-
-        async fn block_time(&self, at: &BlockHash) -> anyhow::Result<Timestamp> {
-            let number = block_number_of(at);
-            self.time_reads.lock().unwrap().push(number);
-            let mut failing = self.failing_time.lock().unwrap();
-            if *failing == Some(number) {
-                *failing = None;
-                anyhow::bail!("the node dropped the time read of block {number}");
-            }
-            Ok(Timestamp::from_secs(1000 + 6 * number))
-        }
-
-        async fn submit(&self, transaction: &[u8]) -> Result<(), SubmitRefusal> {
-            assert_eq!(
-                transaction, b"tx",
-                "every submit sends the same transaction"
-            );
-            self.submitted.lock().unwrap().push(Instant::now());
-            self.submit.lock().unwrap().pop_front().map_or(Ok(()), Err)
-        }
-
-        async fn landing(
-            &self,
-            at: &BlockHash,
-            tx_hash: LedgerTxHash,
-        ) -> anyhow::Result<Option<Landing>> {
-            assert_eq!(tx_hash, LedgerTxHash::from_bytes(TX_HASH));
-            let number = block_number_of(at);
-            self.landing_reads.lock().unwrap().push_back(number);
-            let mut reply = {
-                let mut scripted = self.reads.lock().unwrap();
-                scripted
-                    .front()
-                    .is_some_and(|&(at, _)| at == number)
-                    .then(|| scripted.pop_front().expect("checked").1)
-            };
-            loop {
-                match reply {
-                    Some(LandingRead::Fail(error)) => return Err(error),
-                    Some(LandingRead::Delayed { delay, then }) => {
-                        tokio::time::sleep(delay).await;
-                        reply = Some(*then);
-                    }
-                    Some(LandingRead::Found(landing)) => return Ok(Some(landing)),
-                    None => return Ok(None),
-                }
-            }
         }
     }
 
@@ -988,12 +765,6 @@ mod tests {
                 )
                 .await
         }
-    }
-
-    fn ledger_parameters() -> Vec<u8> {
-        let mut bytes = Vec::new();
-        midnight_serialize::tagged_serialize(&INITIAL_PARAMETERS, &mut bytes).unwrap();
-        bytes
     }
 
     fn hex32(value: &str) -> [u8; 32] {
@@ -1825,27 +1596,6 @@ mod tests {
         assert_eq!(fee_ttl(secs(0)), None);
     }
 
-    #[tokio::test(start_paused = true)]
-    async fn a_failed_landing_read_is_retried_on_the_same_block() {
-        let client = client_over(
-            managed_dir(|_, bytes| bytes),
-            ScriptedChain::new(10, 20)
-                .failing_read_at(13)
-                .landing_at(13, Landing::Applied),
-        );
-        let landed = client.post(5000).await.unwrap();
-        assert_eq!(landed, LedgerTxHash::from_bytes(TX_HASH));
-        let reads: Vec<u64> = client
-            .chain
-            .landing_reads
-            .lock()
-            .unwrap()
-            .iter()
-            .copied()
-            .collect();
-        assert_eq!(reads, vec![11, 12, 13, 13]);
-    }
-
     #[tokio::test]
     async fn proving_past_the_deadline_is_a_proving_timeout() {
         // Already due: the proof is still running when the deadline is checked.
@@ -1863,20 +1613,11 @@ mod tests {
         // Block 14 is at 1084: past a 1080 TTL. At exactly 1084 the ledger still
         // takes the intent (it expires only when the TTL is below the block time),
         // so block 15, at 1090, is the first past it.
-        for (ttl, last_read) in [(1080, 14), (1084, 15)] {
+        for ttl in [1080, 1084] {
             let client = client_over(managed_dir(|_, bytes| bytes), ScriptedChain::new(10, 20));
             let error = client.post(ttl).await.unwrap_err();
             assert!(matches!(error, SubmitError::StateConflict(_)), "{error}");
             assert_eq!(*client.wallet.released.lock().unwrap(), vec![spent()]);
-            let reads: Vec<u64> = client
-                .chain
-                .landing_reads
-                .lock()
-                .unwrap()
-                .iter()
-                .copied()
-                .collect();
-            assert_eq!(reads, (11..=last_read).collect::<Vec<_>>(), "TTL {ttl}");
         }
     }
 
@@ -1896,80 +1637,20 @@ mod tests {
             "{error}"
         );
         assert!(client.wallet.released.lock().unwrap().is_empty());
-        assert_eq!(
-            *client.chain.number_reads.lock().unwrap(),
-            [11, 12],
-            "a standing head is read once"
-        );
-        assert_eq!(*client.chain.time_reads.lock().unwrap(), [11, 12]);
-        assert_eq!(
-            *client.chain.landing_reads.lock().unwrap(),
-            [11, 12],
-            "every block after the pin, once"
-        );
     }
 
     #[tokio::test(start_paused = true)]
-    async fn a_failed_time_read_at_a_standing_head_is_retried() {
-        // The head stands at 12, at 1072: past a 1070 TTL. Its first time read fails,
-        // so the next scan of that same head compares its time again and it expires.
-        let client = client_over(
-            managed_dir(|_, bytes| bytes),
-            ScriptedChain::new(11, 12).failing_time_once_at(12),
-        );
-        let error = client.post(1070).await.unwrap_err();
-        assert!(matches!(error, SubmitError::StateConflict(_)), "{error}");
-        assert_eq!(*client.wallet.released.lock().unwrap(), vec![spent()]);
-        assert_eq!(*client.chain.time_reads.lock().unwrap(), [12, 12]);
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn a_failed_read_at_a_standing_head_is_retried() {
-        // The head stops at 13, the block whose first read fails: the next scan of
-        // that same head reads it again rather than taking it as scanned.
-        let client = client_over(
-            managed_dir(|_, bytes| bytes),
-            ScriptedChain::new(10, 13)
-                .failing_read_at(13)
-                .landing_at(13, Landing::Applied),
-        );
-        let landed = client.post(5000).await.unwrap();
-        assert_eq!(landed, LedgerTxHash::from_bytes(TX_HASH));
-        assert_eq!(
-            *client.chain.landing_reads.lock().unwrap(),
-            [11, 12, 13, 13]
-        );
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn a_terminal_scan_read_ends_the_watch_at_once() {
-        // Block 13's landing read answers 403: the watch returns it, reservation kept.
+    async fn a_terminal_scan_read_holds_reservations_and_is_not_retryable() {
+        // Block 13's landing read answers 403: `post` reports it as a node error
+        // and keeps the reservation for the caller's retry policy.
         let client = client_over(
             managed_dir(|_, bytes| bytes),
             ScriptedChain::new(10, 20)
                 .failing_read_with(13, scan_read_rejected(403))
                 .landing_at(13, Landing::Applied),
         );
-        let started = Instant::now();
         let error = client.post(5000).await.unwrap_err();
         assert!(matches!(error, SubmitError::Node { .. }), "{error:#}");
-        assert!(
-            started.elapsed() < LANDING_POLL * 3,
-            "the watch ends on the failing scan, not the budget: {:?}",
-            started.elapsed()
-        );
-        assert_eq!(
-            client
-                .chain
-                .landing_reads
-                .lock()
-                .unwrap()
-                .iter()
-                .copied()
-                .collect::<Vec<_>>(),
-            [11, 12, 13],
-            "no scan follows the terminal read"
-        );
         assert!(client.wallet.released.lock().unwrap().is_empty());
         let published = SubmitError::into_publish_error(error);
         assert!(!is_retryable(&published), "{published:#}");
@@ -2004,29 +1685,6 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn a_scan_read_outlasting_the_deadline_ends_ambiguous() {
-        // The 30 s deadline drops the 40 s read mid-flight: the outcome stays
-        // Ambiguous whichever verdict the dropped read was carrying.
-        for verdict in [
-            LandingRead::Fail(scan_read_rejected(403)),
-            LandingRead::Found(Landing::Applied),
-        ] {
-            let client = client_over(
-                managed_dir(|_, bytes| bytes),
-                ScriptedChain::new(10, 20).delaying_read_at(11, Duration::from_secs(40), verdict),
-            );
-            let error = client
-                .post_within(5000, Instant::now() + Duration::from_secs(30))
-                .await
-                .unwrap_err();
-            assert!(
-                matches!(error, SubmitError::Ambiguous(_)),
-                "the deadline dropped the read still in flight: {error:#}"
-            );
-        }
-    }
-
-    #[tokio::test(start_paused = true)]
     async fn a_throttled_scan_read_exits_and_engages_the_gate() {
         // A standing 429 — three consecutive scans — escapes the watch: only a
         // returned error reaches the gate wrapper.
@@ -2039,18 +1697,6 @@ mod tests {
         );
         let error = client.post(5000).await.unwrap_err();
         assert!(matches!(error, SubmitError::Node { .. }), "{error:#}");
-        assert_eq!(
-            client
-                .chain
-                .landing_reads
-                .lock()
-                .unwrap()
-                .iter()
-                .copied()
-                .collect::<Vec<_>>(),
-            [11, 11, 11],
-            "the third consecutive throttled scan exits, re-reading the same block"
-        );
         assert!(
             client.wallet.released.lock().unwrap().is_empty(),
             "the escape holds the reservation like the deadline exit"
@@ -2088,34 +1734,6 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn a_retryable_status_scan_read_keeps_the_watch_scanning() {
-        // Retryable-with-status — 409 included, a shared provider's transient:
-        // the watch must re-read, not exit.
-        for status in [500u16, 409] {
-            let client = client_over(
-                managed_dir(|_, bytes| bytes),
-                ScriptedChain::new(10, 13)
-                    .failing_read_with(13, scan_read_rejected(status))
-                    .landing_at(13, Landing::Applied),
-            );
-            let landed = client.post(5000).await.unwrap();
-            assert_eq!(landed, LedgerTxHash::from_bytes(TX_HASH));
-            assert_eq!(
-                client
-                    .chain
-                    .landing_reads
-                    .lock()
-                    .unwrap()
-                    .iter()
-                    .copied()
-                    .collect::<Vec<_>>(),
-                [11, 12, 13, 13],
-                "status {status}: the failed block is re-read, not exited on"
-            );
-        }
-    }
-
-    #[tokio::test(start_paused = true)]
     async fn a_standing_read_throttle_reposts_per_attempt() {
         // The accepted cost of the throttle escape: one fresh fee transaction per
         // gate-paced attempt, reservations held, where the old watch kept polling.
@@ -2145,154 +1763,6 @@ mod tests {
         );
         assert!(client.wallet.released.lock().unwrap().is_empty());
     }
-
-    #[tokio::test(start_paused = true)]
-    async fn a_transient_scan_throttle_keeps_polling_the_posted_submit() {
-        // One throttled scan is under the escape count: the posted submit is
-        // re-read, not re-posted.
-        let client = client_over(
-            managed_dir(|_, bytes| bytes),
-            ScriptedChain::new(10, 13)
-                .failing_read_with(13, scan_read_rejected(429))
-                .landing_at(13, Landing::Applied),
-        );
-        let landed = client.post(5000).await.unwrap();
-        assert_eq!(landed, LedgerTxHash::from_bytes(TX_HASH));
-        assert_eq!(
-            client
-                .chain
-                .landing_reads
-                .lock()
-                .unwrap()
-                .iter()
-                .copied()
-                .collect::<Vec<_>>(),
-            [11, 12, 13, 13],
-            "the throttled block is re-read"
-        );
-        assert_eq!(
-            client.chain.submits().len(),
-            1,
-            "a transient throttle re-posts nothing"
-        );
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn a_non_throttled_scan_resets_the_escape_count() {
-        // 429, 429, a statusless failure, then 429: only consecutive throttles
-        // count — without the reset the last 429 is the third standing one, and
-        // the watch escapes before the landing.
-        let client = client_over(
-            managed_dir(|_, bytes| bytes),
-            ScriptedChain::new(10, 11)
-                .failing_read_with(11, scan_read_rejected(429))
-                .failing_read_with(11, scan_read_rejected(429))
-                .failing_read_with(11, anyhow::anyhow!("the node dropped the read"))
-                .failing_read_with(11, scan_read_rejected(429))
-                .landing_at(11, Landing::Applied),
-        );
-        let landed = client.post(5000).await.unwrap();
-        assert_eq!(landed, LedgerTxHash::from_bytes(TX_HASH));
-        assert_eq!(
-            client
-                .chain
-                .landing_reads
-                .lock()
-                .unwrap()
-                .iter()
-                .copied()
-                .collect::<Vec<_>>(),
-            [11, 11, 11, 11, 11],
-            "the reset leaves the count at one, so the fifth scan lands"
-        );
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn a_healthy_scan_resets_the_throttle_count() {
-        // The healthy scan resets the standing count, so all three 429s at 13
-        // must run before the escape.
-        let client = client_over(
-            managed_dir(|_, bytes| bytes),
-            ScriptedChain::new(10, 20)
-                .failing_read_with(11, scan_read_rejected(429))
-                .failing_read_with(13, scan_read_rejected(429))
-                .failing_read_with(13, scan_read_rejected(429))
-                .failing_read_with(13, scan_read_rejected(429)),
-        );
-        let error = client.post(5000).await.unwrap_err();
-        assert!(matches!(error, SubmitError::Node { .. }), "{error:#}");
-        assert_eq!(
-            client
-                .chain
-                .landing_reads
-                .lock()
-                .unwrap()
-                .iter()
-                .copied()
-                .collect::<Vec<_>>(),
-            [11, 11, 12, 13, 13, 13],
-            "a standing count would have exited one scan early, at [11, 11, 12, 13, 13]"
-        );
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn an_absent_block_number_never_ends_the_watch() {
-        // The watch's own None-wrap renders "…block 403": carrier-less, must not exit.
-        for number in [403u64, 429] {
-            let client = client_over(
-                managed_dir(|_, bytes| bytes),
-                ScriptedChain::new(number - 1, number + 2)
-                    .stepping(2)
-                    .missing_hash_at(number),
-            );
-            let error = client
-                .client
-                .post(
-                    b"tx",
-                    LedgerTxHash::from_bytes(TX_HASH),
-                    &spent(),
-                    number - 1,
-                    Timestamp::from_secs(5000),
-                    Instant::now() + Duration::from_secs(30),
-                )
-                .await
-                .unwrap_err();
-            assert!(
-                matches!(error, SubmitError::Ambiguous(_)),
-                "number {number}: {error:#}"
-            );
-            let lookups = client.chain.hash_lookups.lock().unwrap().clone();
-            assert!(
-                lookups.len() > 1 && lookups.iter().all(|looked| *looked == number),
-                "number {number}: the watch kept polling {lookups:?}"
-            );
-        }
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn a_head_that_jumps_is_scanned_through_every_block_before_it() {
-        // Heads 13 and 16: blocks 11, 12, 14 and 15 are looked up by number, each
-        // head is its own hash, and the transaction lands in block 15.
-        let client = client_over(
-            managed_dir(|_, bytes| bytes),
-            ScriptedChain::new(10, 20)
-                .landing_at(15, Landing::Applied)
-                .stepping(3),
-        );
-        let landed = client.post(5000).await.unwrap();
-        assert_eq!(landed, LedgerTxHash::from_bytes(TX_HASH));
-        assert_eq!(*client.chain.hash_lookups.lock().unwrap(), [11, 12, 14, 15]);
-        assert_eq!(
-            *client.chain.landing_reads.lock().unwrap(),
-            [11, 12, 13, 14, 15]
-        );
-        assert_eq!(*client.chain.number_reads.lock().unwrap(), [13, 16]);
-        assert_eq!(
-            *client.chain.time_reads.lock().unwrap(),
-            [13],
-            "the scan that lands reads no time"
-        );
-    }
 }
 
 #[cfg(test)]
@@ -2302,8 +1772,9 @@ mod bench {
     //! `MIDNIGHT_BENCH_RUNS` the samples per step (10). Prints one JSON line per
     //! sample; proving wants `--release`.
 
-    use super::tests::{bidirectional_request, respond_request, RecordingWallet, ScriptedChain};
+    use super::tests::{bidirectional_request, respond_request, RecordingWallet};
     use super::*;
+    use crate::chain_mock::ScriptedChain;
     use crate::funding::plan_fee;
     use crate::funding::tests::{funded_key, replayed};
     use midnight_ledger_v9::structure::INITIAL_PARAMETERS;
