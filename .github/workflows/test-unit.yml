@@ -69,10 +69,7 @@ jobs:
         run: echo "OPENSSL_NO_VENDOR=1" >> $GITHUB_ENV
 
       - name: Install cargo-near
-        run: |
-          if ! cargo near --version 2>/dev/null | grep -qF 0.22.0; then
-            curl --proto '=https' --tlsv1.2 -LsSf https://github.com/near/cargo-near/releases/download/cargo-near-v0.22.0/cargo-near-installer.sh | sh
-          fi
+        run: scripts/install-cargo-near.sh
 
       - name: Compile Contract
         run: just build contract
