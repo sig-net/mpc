@@ -1,7 +1,8 @@
-//! The watch over one submitted transaction: the finalized blocks after its
-//! submit, scanned for it until one holds it, its TTL passes, the budget ends,
-//! or a read verdict ends the watch at once. `native::post` translates the end
-//! into the wallet's reservation actions and a `SubmitError`.
+//! The watch over one submitted transaction. It scans the finalized blocks
+//! after its submit until one holds it, its TTL passes, or the budget ends;
+//! a terminal read verdict exits at once and `THROTTLED_SCANS_TO_EXIT`
+//! consecutive throttled ones escape to the publisher's gate. The caller,
+//! `NativeIntentClient::post`, turns the end into reservation and error.
 
 use std::time::Duration;
 
