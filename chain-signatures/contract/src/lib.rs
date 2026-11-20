@@ -14,7 +14,7 @@ use k256::elliptic_curve::sec1::ToEncodedPoint;
 use k256::Scalar;
 use mpc_crypto::{
     derive_epsilon_near, derive_key, kdf::check_ec_signature, near_public_key_to_affine_point,
-    ScalarExt as _,
+    RequestPurpose, ScalarExt as _,
 };
 use mpc_primitives::CheckpointDigest;
 use near_sdk::env::panic_str;
@@ -86,7 +86,8 @@ impl Default for MpcContract {
 // User contract API
 #[near]
 impl MpcContract {
-    /// `key_version` must be less than or equal to the value at `latest_key_version`
+    /// `key_version` must be at most the highest supported key version
+    /// (`MAX_SUPPORTED_MPC_KEY_VERSION`); `latest_key_version` gives the default.
     /// To avoid overloading the network with too many requests,
     /// we ask for a small deposit for each signature request.
     /// The fee changes based on how busy the network is.
@@ -137,8 +138,13 @@ impl MpcContract {
         );
         let entropy = near_sdk::env::random_seed_array();
         env::log_str(&serde_json::to_string(&entropy).unwrap());
-        let epsilon = derive_epsilon_near(request.key_version, &predecessor, &path)
-            .map_err(|_| SignError::UnsupportedKeyVersion)?;
+        let epsilon = derive_epsilon_near(
+            request.key_version,
+            RequestPurpose::Plain,
+            &predecessor,
+            &path,
+        )
+        .map_err(|_| SignError::UnsupportedKeyVersion)?;
 
         // lock the request such that it can't be submitted again until released either by erroring out
         // or by finishing the request when the signature is submitted.
@@ -173,7 +179,7 @@ impl MpcContract {
         predecessor: Option<AccountId>,
     ) -> Result<PublicKey, Error> {
         let predecessor = predecessor.unwrap_or_else(env::predecessor_account_id);
-        let epsilon = derive_epsilon_near(key_version, &predecessor, &path)
+        let epsilon = derive_epsilon_near(key_version, RequestPurpose::Plain, &predecessor, &path)
             .map_err(|_| SignError::UnsupportedKeyVersion)?;
         let derived_public_key =
             derive_key(near_public_key_to_affine_point(self.public_key()?), epsilon);

@@ -13,7 +13,7 @@ use mpc_primitives::{
 };
 use mpc_utils::time::current_unix_timestamp;
 use sha3::Digest as _;
-use signet_crypto::{derive_epsilon_sol, ScalarExt as _};
+use signet_crypto::{derive_epsilon_sol, RequestPurpose, ScalarExt as _};
 use signet_program::{
     RespondBidirectionalEvent, SignBidirectionalEvent, SignatureRequestedEvent,
     SignatureRespondedEvent,
@@ -80,15 +80,20 @@ impl SolanaSignEvent {
                     return None;
                 }
 
-                let epsilon = derive_epsilon_sol(ev.key_version, &ev.sender.to_string(), &ev.path)
-                    .inspect_err(|_| {
-                        tracing::info!(
-                            ?sign_id,
-                            key_version = ev.key_version,
-                            "unsupported key version; dropping sign request"
-                        )
-                    })
-                    .ok()?;
+                let epsilon = derive_epsilon_sol(
+                    ev.key_version,
+                    RequestPurpose::Plain,
+                    &ev.sender.to_string(),
+                    &ev.path,
+                )
+                .inspect_err(|_| {
+                    tracing::info!(
+                        ?sign_id,
+                        key_version = ev.key_version,
+                        "unsupported key version; dropping sign request"
+                    )
+                })
+                .ok()?;
                 Some(IndexedSignRequest::sign(
                     sign_id,
                     SignArgs {
@@ -103,15 +108,20 @@ impl SolanaSignEvent {
                 ))
             }
             SolanaSignEvent::SignBidirectional(ev) => {
-                let epsilon = derive_epsilon_sol(ev.key_version, &ev.sender.to_string(), &ev.path)
-                    .inspect_err(|_| {
-                        tracing::info!(
-                            ?sign_id,
-                            key_version = ev.key_version,
-                            "unsupported key version; dropping sign request"
-                        )
-                    })
-                    .ok()?;
+                let epsilon = derive_epsilon_sol(
+                    ev.key_version,
+                    RequestPurpose::Bidirectional,
+                    &ev.sender.to_string(),
+                    &ev.path,
+                )
+                .inspect_err(|_| {
+                    tracing::info!(
+                        ?sign_id,
+                        key_version = ev.key_version,
+                        "unsupported key version; dropping sign request"
+                    )
+                })
+                .ok()?;
                 let target = Chain::from_caip2_chain_id(&ev.caip2_id).ok()?;
                 let payload = match bidirectional_payload_scalar(target, &ev.serialized_transaction)
                 {

@@ -44,8 +44,8 @@ pub(crate) fn published_failure(
 }
 const SOLANA_RESPOND_BIDIRECTIONAL_PATH: &str = "solana response key";
 const HYDRATION_RESPOND_BIDIRECTIONAL_PATH: &str = "hydration response key";
-pub const CANTON_RESPOND_BIDIRECTIONAL_PATH: &str = "canton response key";
-pub const MIDNIGHT_RESPOND_BIDIRECTIONAL_PATH: &str = "midnight response key";
+const CANTON_RESPOND_BIDIRECTIONAL_PATH: &str = "canton response key";
+const MIDNIGHT_RESPOND_BIDIRECTIONAL_PATH: &str = "midnight response key";
 
 fn respond_bidirectional_path(chain: Chain) -> Option<&'static str> {
     match chain {
@@ -372,6 +372,30 @@ mod tests {
             from_address: **Address::ZERO,
             nonce: 0,
         })
+    }
+
+    /// The response key must be the attestation key clients derive. Fails if the highest
+    /// supported key version gives the attestation key its own purpose before
+    /// `response_key` derives it with `derive_attestation_epsilon`.
+    #[test]
+    fn response_key_is_the_attestation_key() {
+        for chain in [
+            Chain::Solana,
+            Chain::Hydration,
+            Chain::Canton,
+            Chain::Midnight,
+        ] {
+            let mut tx = (*sample_bidirectional_tx(chain, [0; 32])).clone();
+            tx.key_version = mpc_primitives::MAX_SUPPORTED_MPC_KEY_VERSION;
+            let (_, epsilon) = response_key(&tx).unwrap();
+            let attestation = mpc_crypto::kdf::derive_attestation_epsilon(
+                tx.key_version,
+                chain,
+                &tx.sender_string().unwrap(),
+            )
+            .unwrap();
+            assert_eq!(epsilon, attestation, "{chain:?}");
+        }
     }
 
     #[tokio::test]

@@ -13,7 +13,7 @@ use mpc_primitives::{
     SignatureRespondedEvent, MAX_SECP256K1_SCALAR,
 };
 use mpc_utils::time::current_unix_timestamp;
-use signet_crypto::{derive_epsilon_eth, ScalarExt as _};
+use signet_crypto::{derive_epsilon_eth, RequestPurpose, ScalarExt as _};
 use tokio::sync::mpsc;
 
 /// Derives request-specific entropy from the finalized containing block and request ID.
@@ -118,6 +118,7 @@ fn sign_request_from_filtered_log(log: Log, block_hash: [u8; 32]) -> Option<Inde
 
     let epsilon = derive_epsilon_eth(
         event.key_version,
+        RequestPurpose::Plain,
         format!("0x{}", event.requester.encode_hex()).as_str(),
         &event.path,
     )

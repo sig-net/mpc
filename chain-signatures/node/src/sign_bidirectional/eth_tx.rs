@@ -152,7 +152,7 @@ mod derive_tests {
     use alloy::primitives::Address;
     use k256::elliptic_curve::sec1::FromEncodedPoint;
     use k256::{AffinePoint, EncodedPoint};
-    use mpc_crypto::derive_epsilon_near;
+    use mpc_crypto::{derive_epsilon_near, RequestPurpose};
     use mpc_primitives::LEGACY_MPC_KEY_VERSION_0;
 
     #[test]
@@ -164,8 +164,13 @@ mod derive_tests {
         let mpc_pk = hex::decode(mpc_key).unwrap();
         let mpc_pk = EncodedPoint::from_bytes(mpc_pk).unwrap();
         let mpc_pk = AffinePoint::from_encoded_point(&mpc_pk).unwrap();
-        let derivation_epsilon =
-            derive_epsilon_near(LEGACY_MPC_KEY_VERSION_0, &account_id, "test").unwrap();
+        let derivation_epsilon = derive_epsilon_near(
+            LEGACY_MPC_KEY_VERSION_0,
+            RequestPurpose::Plain,
+            &account_id,
+            "test",
+        )
+        .unwrap();
         let expected: Address = "0x083c8776b5e447e91bae43b7883a92a9bdb66d1d"
             .parse()
             .unwrap();

@@ -25,7 +25,7 @@ We are using an extended version of the [CAIP-10](https://chainagnostic.org/CAIP
 
 ### Derivation Path Structure
 
-A key's derivation path names the key version and the key's purpose, which is what the key signs. This section gives key version 2, the latest; [Earlier Key Versions](#earlier-key-versions) gives versions 0 and 1.
+A key's derivation path names the key version and the key's purpose, which is what the key signs. This section gives key version 2; [Earlier Key Versions](#earlier-key-versions) gives versions 0 and 1.
 
 | `PURPOSE` | Signs | Derivation path |
 |---|---|---|

@@ -5,7 +5,9 @@ use integration_tests::utils;
 use k256::elliptic_curve::sec1::ToEncodedPoint as _;
 use mpc_contract::config::ProtocolConfig;
 use mpc_contract::update::ProposeUpdateArgs;
-use mpc_crypto::{derive_epsilon_near, derive_key, reconstruct_signature, x_coordinate, ScalarExt};
+use mpc_crypto::{
+    derive_epsilon_near, derive_key, reconstruct_signature, x_coordinate, RequestPurpose, ScalarExt,
+};
 use mpc_node::protocol::cryptography::set_resharing_running_timeout;
 use mpc_node::protocol::state::{NodeStatus, ResharingStatus};
 use mpc_node::sign_bidirectional::public_key_to_address;
@@ -123,8 +125,12 @@ async fn test_key_derivation() -> anyhow::Result<()> {
         nodes.wait().signable().await?;
         let outcome = nodes.sign().path(hd_path).await?;
 
-        let derivation_epsilon =
-            derive_epsilon_near(LATEST_MPC_KEY_VERSION, outcome.account.id(), hd_path)?;
+        let derivation_epsilon = derive_epsilon_near(
+            LATEST_MPC_KEY_VERSION,
+            RequestPurpose::Plain,
+            outcome.account.id(),
+            hd_path,
+        )?;
         let user_pk = derive_key(mpc_pk, derivation_epsilon);
         let reconstructed = reconstruct_signature(
             &user_pk,
