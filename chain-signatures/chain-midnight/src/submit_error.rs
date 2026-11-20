@@ -50,7 +50,7 @@ pub(crate) enum SubmitError {
     StateConflict(String),
     /// The posted transaction expired unlanded: the node took it, but no
     /// finalized block held it before its TTL. Retried like `StateConflict`,
-    /// and struck with it (`native::implicates_restored_state`).
+    /// and struck with it (`SubmitError::strikes_restored_state`).
     #[error("[state_conflict] {0}")]
     ExpiredUnlanded(String),
     /// The transaction may still land.
@@ -94,6 +94,15 @@ impl SubmitError {
             self,
             Self::BadRequest(_) | Self::ContractMismatch(_) | Self::GateRefusal { .. }
         )
+    }
+
+    /// Whether the failure implicates a restored wallet's snapshot, counting
+    /// toward dropping its checkpoint.
+    // A refusal is the stale-snapshot signature; an expiry unlanded strikes with
+    // it. Every other class would discard the checkpoint for conditions the
+    // replay cannot fix.
+    pub(crate) fn strikes_restored_state(&self) -> bool {
+        matches!(self, Self::StateConflict(_) | Self::ExpiredUnlanded(_))
     }
 
     /// As the publisher's error, the class's verdict riding as a carrier so the
@@ -208,7 +217,7 @@ mod tests {
                 error
             );
             assert_eq!(
-                crate::native::implicates_restored_state(&error),
+                error.strikes_restored_state(),
                 strike,
                 "{code}'s strike verdict"
             );
