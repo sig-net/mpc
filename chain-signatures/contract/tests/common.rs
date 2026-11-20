@@ -14,12 +14,12 @@ use k256::{AffinePoint, FieldBytes, Secp256k1};
 use mpc_contract::primitives::{CandidateInfo, ParticipantInfo, Participants, SignRequest};
 use mpc_contract::update::UpdateId;
 use mpc_crypto::kdf::{check_ec_signature, derive_secret_key};
-use mpc_crypto::{derive_epsilon_near, derive_key};
+use mpc_crypto::{derive_epsilon, derive_key, KeyPurpose};
 use near_workspaces::network::Sandbox;
 use near_workspaces::types::{AccountId, NearToken};
 use near_workspaces::{Account, Contract, Worker};
 use signature::DigestSigner;
-use signet_primitives::{SignId, Signature, LATEST_MPC_KEY_VERSION};
+use signet_primitives::{Chain, SignId, Signature, LATEST_MPC_KEY_VERSION};
 
 pub const INVALID_CONTRACT: &str = "../res/mpc_test_contract.wasm";
 pub const PARTICIPANT_LEN: usize = 3;
@@ -205,7 +205,15 @@ pub async fn create_response(
     let (digest, scalar_hash, payload_hash) = process_message(msg).await;
     let pk = sk.public_key();
 
-    let epsilon = derive_epsilon_near(LATEST_MPC_KEY_VERSION, predecessor_id, path).unwrap();
+    let epsilon = derive_epsilon(
+        LATEST_MPC_KEY_VERSION,
+        Chain::NEAR,
+        KeyPurpose::Plain {
+            sender: predecessor_id.as_str(),
+            path,
+        },
+    )
+    .unwrap();
     let derived_sk = derive_secret_key(sk, epsilon);
     let derived_pk = derive_key(pk.into(), epsilon);
     let signing_key = k256::ecdsa::SigningKey::from(&derived_sk);

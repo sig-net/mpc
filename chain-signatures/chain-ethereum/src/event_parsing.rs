@@ -13,7 +13,7 @@ use mpc_primitives::{
     SignatureRespondedEvent, MAX_SECP256K1_SCALAR,
 };
 use mpc_utils::time::current_unix_timestamp;
-use signet_crypto::{derive_epsilon_eth, ScalarExt as _};
+use signet_crypto::{derive_epsilon, KeyPurpose, ScalarExt as _};
 use tokio::sync::mpsc;
 
 /// Derives request-specific entropy from the finalized containing block and request ID.
@@ -116,17 +116,15 @@ fn sign_request_from_filtered_log(log: Log, block_hash: [u8; 32]) -> Option<Inde
         return None;
     }
 
-    let epsilon = derive_epsilon_eth(
+    let epsilon = derive_epsilon(
         event.key_version,
-        format!("0x{}", event.requester.encode_hex()).as_str(),
-        &event.path,
+        Chain::Ethereum,
+        KeyPurpose::Plain {
+            sender: &format!("0x{}", event.requester.encode_hex()),
+            path: &event.path,
+        },
     )
-    .inspect_err(|_| {
-        tracing::info!(
-            key_version = event.key_version,
-            "unsupported key version; dropping sign request"
-        )
-    })
+    .inspect_err(|err| tracing::info!(%err, "dropping sign request"))
     .ok()?;
 
     let tx_hash = log.transaction_hash;

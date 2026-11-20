@@ -1483,10 +1483,13 @@ mod tests {
         assert_eq!(request.id, SignId::new(genuine_rid));
         assert_eq!(
             request.args.epsilon,
-            signet_crypto::derive_epsilon_midnight(
+            signet_crypto::derive_epsilon(
                 1,
-                &hex::encode(CALLER),
-                &hex::encode(genuine.path),
+                Chain::Midnight,
+                signet_crypto::KeyPurpose::Bidirectional {
+                    sender: &hex::encode(CALLER),
+                    path: &hex::encode(genuine.path),
+                },
             )
             .unwrap(),
             "the signing key derives from the contract the record was read from"

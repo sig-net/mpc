@@ -42,26 +42,15 @@ pub(crate) fn published_failure(
         (None, _) => is_failed_execution_response(own),
     }
 }
-const SOLANA_RESPOND_BIDIRECTIONAL_PATH: &str = "solana response key";
-const HYDRATION_RESPOND_BIDIRECTIONAL_PATH: &str = "hydration response key";
-pub const CANTON_RESPOND_BIDIRECTIONAL_PATH: &str = "canton response key";
-pub const MIDNIGHT_RESPOND_BIDIRECTIONAL_PATH: &str = "midnight response key";
-
-fn respond_bidirectional_path(chain: Chain) -> Option<&'static str> {
-    match chain {
-        Chain::Solana => Some(SOLANA_RESPOND_BIDIRECTIONAL_PATH),
-        Chain::Hydration => Some(HYDRATION_RESPOND_BIDIRECTIONAL_PATH),
-        Chain::Canton => Some(CANTON_RESPOND_BIDIRECTIONAL_PATH),
-        Chain::Midnight => Some(MIDNIGHT_RESPOND_BIDIRECTIONAL_PATH),
-        _ => None,
-    }
-}
-
-/// Whether `request` asks for its chain's attestation key without being the leg-2
-/// attestation the respond path builds. False on chains `respond_bidirectional_path` omits.
+/// Whether `request` asks for its chain's attestation key without being the network's
+/// own response, which is signed with it.
 pub(crate) fn claims_attestation_key(request: &IndexedSignRequest) -> bool {
     !matches!(request.kind, SignKind::RespondBidirectional(_))
-        && respond_bidirectional_path(request.chain) == Some(request.args.path.as_str())
+        && mpc_crypto::kdf::is_reserved_path(
+            request.args.key_version,
+            request.chain,
+            &request.args.path,
+        )
 }
 
 /// The key tweak and payload a genuine published Midnight response for `tx` is signed with.
@@ -70,7 +59,7 @@ pub(crate) fn published_midnight_signing_args(
     published: &PublishedAttestation,
 ) -> anyhow::Result<(Scalar, Scalar)> {
     let payload = published_midnight_payload(&tx.request_id, published)?;
-    let epsilon = tx.epsilon(MIDNIGHT_RESPOND_BIDIRECTIONAL_PATH)?;
+    let epsilon = response_key(tx)?;
     Ok((epsilon, payload))
 }
 
@@ -230,8 +219,7 @@ impl CompletedTx {
             "Respond bidirectional message hash: {:?}",
             hex::encode(payload.to_bytes())
         );
-        let (path, epsilon) = response_key(&self.tx)?;
-        let path = path.to_string();
+        let epsilon = response_key(&self.tx)?;
         let entropy = response_entropy(&self.first_leg_entropy, &payload, &epsilon);
         Ok(IndexedSignRequest::respond_bidirectional(
             SignId::new(request_id_bytes),
@@ -239,7 +227,7 @@ impl CompletedTx {
                 entropy,
                 epsilon,
                 payload,
-                path,
+                path: String::new(),
                 key_version: self.tx.key_version,
             },
             source_chain,
@@ -274,11 +262,16 @@ fn response_payload(
     })
 }
 
-/// The path and epsilon a response for `tx` is signed with.
-fn response_key(tx: &BidirectionalTx) -> anyhow::Result<(&'static str, Scalar)> {
-    let path = respond_bidirectional_path(tx.source_chain)
-        .ok_or_else(|| anyhow::anyhow!("Unsupported chain: {}", tx.source_chain))?;
-    Ok((path, tx.epsilon(path)?))
+/// The epsilon a response for `tx` is signed with: the requester's attestation key.
+fn response_key(tx: &BidirectionalTx) -> anyhow::Result<Scalar> {
+    let purpose = mpc_crypto::KeyPurpose::Attestation {
+        sender: &tx.sender_string()?,
+    };
+    Ok(mpc_crypto::derive_epsilon(
+        tx.key_version,
+        tx.source_chain,
+        purpose,
+    )?)
 }
 
 /// The payload a response with `output` is signed with, on source chains other than Midnight.
@@ -298,7 +291,7 @@ pub(crate) fn published_output_signing_args(
     tx: &BidirectionalTx,
     output: &[u8],
 ) -> anyhow::Result<(Scalar, Scalar)> {
-    let (_, epsilon) = response_key(tx)?;
+    let epsilon = response_key(tx)?;
     let payload = published_output_payload(tx.source_chain, &tx.request_id, output)?;
     Ok((epsilon, payload))
 }
@@ -360,7 +353,7 @@ mod tests {
             source_chain,
             target_chain: Chain::Ethereum,
             caip2_id: "eip155:1".to_string(),
-            key_version: 0,
+            key_version: mpc_primitives::LATEST_MPC_KEY_VERSION,
             deposit: 0,
             path: "test".to_string(),
             algo: String::new(),
@@ -372,6 +365,31 @@ mod tests {
             from_address: **Address::ZERO,
             nonce: 0,
         })
+    }
+
+    /// A response is signed with the requester's attestation key and names no path.
+    #[test]
+    fn a_response_is_signed_with_the_attestation_key() {
+        for chain in [
+            Chain::Solana,
+            Chain::Hydration,
+            Chain::Canton,
+            Chain::Midnight,
+        ] {
+            let tx = sample_bidirectional_tx(chain, [0x32; 32]);
+            let sender = tx.sender_string().unwrap();
+            let request = CompletedTx::new(tx, None, None, 456, [0; 32])
+                .create_sign_request_from_serialized_output(vec![1; 32])
+                .unwrap();
+            let attestation = mpc_crypto::derive_epsilon(
+                mpc_primitives::LATEST_MPC_KEY_VERSION,
+                chain,
+                mpc_crypto::KeyPurpose::Attestation { sender: &sender },
+            )
+            .unwrap();
+            assert_eq!(request.args.epsilon, attestation, "{chain:?}");
+            assert_eq!(request.args.path, "", "{chain:?}");
+        }
     }
 
     #[tokio::test]
@@ -429,7 +447,7 @@ mod tests {
         assert_eq!(
             respond.attestation.unwrap(),
             AttestationMetadata {
-                key_version: 0,
+                key_version: mpc_primitives::LATEST_MPC_KEY_VERSION,
                 block_height: 456,
                 outcome_kind: AttestationOutcomeKind::Failed
             }
@@ -760,7 +778,7 @@ mod tests {
 
         assert_eq!(request.chain, Chain::Midnight);
         assert_eq!(request.args.payload, expected_payload);
-        assert_eq!(request.args.path, MIDNIGHT_RESPOND_BIDIRECTIONAL_PATH);
+        assert_eq!(request.args.path, "");
     }
 
     #[tokio::test]
@@ -780,7 +798,7 @@ mod tests {
         assert_eq!(response.attestation, Some(metadata));
         assert!(response.output.is_empty());
         assert_eq!(response.origin_indexed_at, Some(100));
-        assert_eq!(request.args.path, MIDNIGHT_RESPOND_BIDIRECTIONAL_PATH);
+        assert_eq!(request.args.path, "");
         assert_eq!(
             request.args.payload,
             Scalar::from_bytes(
@@ -913,17 +931,21 @@ mod tests {
         }
     }
 
-    /// The network's own leg-2 attestation and the attack name the same path, so the
-    /// request kind is all that separates them.
+    /// Below key version 2 a request naming the reserved path asks for the attestation
+    /// key; the network's own response is signed with it and passes.
     #[test]
-    fn claims_attestation_key_separates_the_attack_from_leg_two() {
-        let tx = sample_bidirectional_tx(Chain::Solana, [0x30; 32]);
-        let leg_two = CompletedTx::new(tx, None, None, 456, [0; 32])
+    fn claims_attestation_key_refuses_requests_on_the_reserved_path() {
+        let mut tx = (*sample_bidirectional_tx(Chain::Solana, [0x30; 32])).clone();
+        tx.key_version = 1;
+        let mut response = CompletedTx::new(Arc::new(tx), None, None, 456, [0; 32])
             .create_sign_request_from_serialized_output(vec![1; 32])
             .unwrap();
-        assert!(!claims_attestation_key(&leg_two));
+        assert!(!claims_attestation_key(&response));
+        // As a response built before responses named no path.
+        response.args.path = "solana response key".to_string();
+        assert!(!claims_attestation_key(&response));
 
-        let mut attack = leg_two.clone();
+        let mut attack = response.clone();
         attack.kind = SignKind::Sign;
         assert!(claims_attestation_key(&attack));
 
@@ -931,8 +953,16 @@ mod tests {
         let mut leg_one =
             (*crate::backlog::mock::mock_bidi_request(SignId::new([0x31; 32]), Chain::Solana))
                 .clone();
-        leg_one.args.path = SOLANA_RESPOND_BIDIRECTIONAL_PATH.to_string();
+        leg_one.args.path = "solana response key".to_string();
+        leg_one.args.key_version = 1;
         assert!(claims_attestation_key(&leg_one));
+
+        let mut v2 = attack.clone();
+        v2.args.key_version = 2;
+        assert!(
+            !claims_attestation_key(&v2),
+            "from key version 2 the path is ordinary"
+        );
 
         attack.chain = Chain::Ethereum;
         assert!(

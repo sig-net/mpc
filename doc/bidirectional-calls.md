@@ -428,7 +428,7 @@ processable(req): bool
     req.target parses to a chain this MPC can watch
     key derivation is valid: parameters canonical, key derivable for the
       source chain, a key version the MPC supports
-    at key version 1, which has no purposes (M1):
+    below key version 2, whose derivation paths name no purpose (M1):
       req.key's path is not the attestation key's
     req.tx is non-empty, parses as an unsigned transaction in target's
       format, commits to the network this MPC watches for target (EVM:
@@ -545,8 +545,8 @@ Properties:
   could have a transaction signed that uses up a bidirectional request's
   replay protection unnoticed (Section 6). The MPC picks a key's purpose
   from the signing API a request comes on, never from its fields (Distinct
-  keys, Section 5). Key version 1 has no purposes: there the attestation
-  key lies under a reserved path that no request on any signing API may
+  keys, Section 5). Key version 1's derivation paths name no purpose: there
+  the attestation key lies under a reserved path that no request on any signing API may
   name (`processable`). Nothing keeps a bidirectional request's key from
   another signing API at key version 1: where one maps the same contract,
   path and key version to the same key, M1 holds only from key version 2.
@@ -1150,12 +1150,18 @@ or forged bytes fail verification.
 Target chains are Ethereum and Tron (`Chain::supports_bidirectional_signing`).
 Source chains are Midnight, Solana, Hydration and Canton.
 
+Refusing key version 0 at admission applies at once, not from a source
+height (Section 6): a key version 0 bidirectional request on Solana,
+Hydration or Canton still waiting for its response gets none. A deployment
+confirms none is pending before it upgrades to a node that refuses them.
+
 Still to change:
 
 * `local` keeps the latest signature and the latest attestation per request.
 * Unviable from another request's response, on Solana, Hydration and Canton.
 * Refusing non-canonical request fields.
-* Key version 2, with purposes (account-derivation.md).
+* Signing at key version 2 (account-derivation.md), once the SDKs support
+  it: the key derivation and the MPC's choice of purpose are in place.
 * A root key of its own for each key version after 2.
 * Catch-up for Hydration.
 * Hydration and Canton: source block time, so §4.3's expiry bound

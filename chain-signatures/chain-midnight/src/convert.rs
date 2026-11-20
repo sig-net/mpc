@@ -40,10 +40,6 @@ pub fn generate_sign_request(
         read_address,
     );
 
-    anyhow::ensure!(
-        record.key_version >= 1,
-        "key_version 0 predates bidirectional signing: at least 1 is required"
-    );
     let key_version = u32::from(record.key_version);
     let algo = match record.algo {
         MpcSignatureAlgorithm::Ecdsa => "ECDSA".to_string(),
@@ -58,10 +54,12 @@ pub fn generate_sign_request(
         )),
     };
 
+    // The SDK reserves these bytes below key version 2; the key derivation only sees
+    // their hex rendering, so it cannot refuse them itself.
     let mut response_key_path = [0; 32];
     response_key_path[..21].copy_from_slice(b"midnight response key");
     anyhow::ensure!(
-        record.path != response_key_path,
+        key_version >= 2 || record.path != response_key_path,
         "path is reserved for the MPC response key"
     );
 
@@ -78,7 +76,14 @@ pub fn generate_sign_request(
 
     // The one render of the requester.
     let requester = read_address.to_hex();
-    let epsilon = signet_crypto::derive_epsilon_midnight(key_version, &requester, &path)?;
+    let epsilon = signet_crypto::derive_epsilon(
+        key_version,
+        Chain::Midnight,
+        signet_crypto::KeyPurpose::Bidirectional {
+            sender: &requester,
+            path: &path,
+        },
+    )?;
 
     let serialized = serialized_transaction(record, root_pk, epsilon)?;
     // The wire choice above and the hash choice here read the same discriminant,
@@ -230,8 +235,15 @@ mod tests {
         let raw = mpc_tron_wire::pb::RawTransaction::parse(&event.serialized_transaction).unwrap();
         // `owned_by_requester` recomputes the owner from the same public
         // inputs; pinning it here keeps the two crates on one formula.
-        let epsilon =
-            signet_crypto::derive_epsilon_midnight(1, &READ_ADDRESS.to_hex(), &event.path).unwrap();
+        let epsilon = signet_crypto::derive_epsilon(
+            1,
+            Chain::Midnight,
+            signet_crypto::KeyPurpose::Bidirectional {
+                sender: &READ_ADDRESS.to_hex(),
+                path: &event.path,
+            },
+        )
+        .unwrap();
         let owner = TronAddress::from_evm(derive_user_address(test_root_pk(), epsilon));
         assert_eq!(raw.owner_address().unwrap(), owner.as_bytes().to_vec());
 
@@ -331,13 +343,52 @@ mod tests {
         assert_ne!(request.args.path, reserved);
         assert_ne!(
             request.args.epsilon,
-            signet_crypto::derive_epsilon_midnight(
+            signet_crypto::derive_epsilon(
                 request.args.key_version,
-                &READ_ADDRESS.to_hex(),
-                reserved,
+                Chain::Midnight,
+                signet_crypto::KeyPurpose::Attestation {
+                    sender: &READ_ADDRESS.to_hex(),
+                },
             )
             .unwrap(),
         );
+
+        // From key version 2 the bytes are an ordinary path; until that version is
+        // served, the record fails only at the key version cap.
+        record.path = ascii_padded(reserved.as_bytes());
+        record.key_version = 2;
+        let result = generate_sign_request(
+            &record,
+            &READ_ADDRESS,
+            REQUEST_ID,
+            BLOCK_HASH,
+            INDEXED_TS,
+            test_root_pk(),
+        );
+        if mpc_primitives::LATEST_MPC_KEY_VERSION < 2 {
+            let error = result.expect_err("key version 2 is not served yet");
+            assert_eq!(
+                error.downcast_ref::<signet_crypto::DeriveError>(),
+                Some(&signet_crypto::DeriveError::UnsupportedKeyVersion(2)),
+                "{error:#}"
+            );
+        } else {
+            let request = result.unwrap();
+            let path = hex::encode(record.path);
+            assert_eq!(request.args.path, path);
+            assert_eq!(
+                request.args.epsilon,
+                signet_crypto::derive_epsilon(
+                    2,
+                    Chain::Midnight,
+                    signet_crypto::KeyPurpose::Bidirectional {
+                        sender: &READ_ADDRESS.to_hex(),
+                        path: &path,
+                    },
+                )
+                .unwrap(),
+            );
+        }
     }
 
     #[test]
@@ -460,10 +511,13 @@ mod tests {
         )
         .expect_err("key_version 0 predates bidirectional signing")
         .to_string();
-        assert!(err.contains("key_version"), "err: {err}");
+        assert!(
+            err.contains("key version 0: predates bidirectional signing"),
+            "err: {err}"
+        );
 
         let mut record = caller_record();
-        record.key_version = 2;
+        record.key_version = u8::try_from(mpc_primitives::LATEST_MPC_KEY_VERSION + 1).unwrap();
         let err = generate_sign_request(
             &record,
             &READ_ADDRESS,
@@ -472,9 +526,9 @@ mod tests {
             INDEXED_TS,
             test_root_pk(),
         )
-        .expect_err("a key_version above LATEST must be rejected")
+        .expect_err("a key_version above the latest must be rejected")
         .to_string();
-        assert!(err.contains("key_version"), "err: {err}");
+        assert!(err.contains("is not supported"), "err: {err}");
     }
 
     #[test]
