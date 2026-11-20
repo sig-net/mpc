@@ -2,6 +2,7 @@
 //! it before it starts running.
 
 use crate::containers::Redis;
+use crate::mpc_fixture::checkpoint_settlement::{CheckpointSettlement, CheckpointSettlementHandle};
 use crate::mpc_fixture::fixture_interface::SharedOutput;
 use crate::mpc_fixture::fixture_tasks::MessageFilter;
 use crate::mpc_fixture::input::FixtureInput;
@@ -35,7 +36,7 @@ use mpc_node::rpc::{ContractStateWatcher, RpcChannel};
 use mpc_node::storage::keystore::{Keystore, MemoryKeystore};
 use mpc_node::storage::triple_storage::TriplePair;
 use mpc_node::stream::StreamContext;
-use mpc_primitives::Chain;
+use mpc_primitives::{Chain, CheckpointDigest};
 use near_sdk::AccountId;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -82,6 +83,10 @@ struct FixtureConfig {
 
     /// Overrides the publish failover schedule's observe lag; `None` is production.
     observe_lag: Option<std::time::Duration>,
+
+    /// Whether intercepted checkpoint votes settle checkpoints in the fixture.
+    /// On by default so the backlog advances as it does in production.
+    settle_checkpoints: bool,
 }
 
 /// Context required to start a fixture node.
@@ -136,6 +141,7 @@ impl FixtureConfig {
                 ..Default::default()
             },
             observe_lag: None,
+            settle_checkpoints: true,
         }
     }
 }
@@ -257,6 +263,12 @@ impl MpcFixtureBuilder {
         let (contract_state_watchers, shared_contract_state_tx) =
             ContractStateWatcher::test_batch(&account_ids, self.protocol_state);
 
+        // Shared across every node's mock network task: intercepted votes are
+        // tallied here and settled digests are pushed to each chain's watch.
+        let checkpoint_settlement: CheckpointSettlementHandle = Arc::new(std::sync::Mutex::new(
+            CheckpointSettlement::new(self.threshold, self.fixture_config.settle_checkpoints),
+        ));
+
         // Start each node's tokio tasks
         for (node, contract_state) in self.prepared_nodes.drain(..).zip(contract_state_watchers) {
             let node_context = MockedNodeContext {
@@ -277,6 +289,7 @@ impl MpcFixtureBuilder {
                     &mut fixture_input,
                     &output,
                     mock_chain.clone(),
+                    checkpoint_settlement.clone(),
                 )
                 .await;
 
@@ -375,6 +388,13 @@ impl MpcFixtureBuilder {
         self
     }
 
+    /// Keep checkpoints permanently unsettled, matching the fixture's old
+    /// behavior. Only for tests that depend on the base *not* advancing.
+    pub fn without_checkpoint_settlement(mut self) -> Self {
+        self.fixture_config.settle_checkpoints = false;
+        self
+    }
+
     /// Filter chain events for a specific node. Dropped events are not delivered.
     pub fn with_chain_event_filter(mut self, node_idx: usize, filter: ChainEventFilter) -> Self {
         self.chain_event_filters.insert(node_idx, filter);
@@ -422,6 +442,7 @@ impl MpcFixtureBuilder {
     /// Each node will have a independent deep-clone of the provided stream.
     /// Events are thus delivered to all nodes.
     pub async fn with_mock_stream(mut self, chain: Chain, stream: MockStream) -> Self {
+        let stream = stream.with_chain(chain);
         for node in &mut self.prepared_nodes {
             let cloned = stream.deep_clone().await;
             let prev = node.mock_streams.insert(chain, cloned);
@@ -489,6 +510,7 @@ impl MpcFixtureNodeBuilder {
         fixture_input: &mut Option<FixtureInput>,
         shared_output: &SharedOutput,
         mock_chain: Option<MockChain>,
+        checkpoint_settlement: CheckpointSettlementHandle,
     ) -> MpcFixtureNode {
         // overwrite the node defaults with the fixture config
         self.config.protocol = context.protocol_config.clone();
@@ -548,8 +570,25 @@ impl MpcFixtureNodeBuilder {
         ));
 
         let flat_mock_streams = self.mock_streams.values().cloned().collect::<Vec<_>>();
-        let (checkpoint_tx, checkpoints_rx) = watch::channel(None);
-        fixture_tasks::start_mock_stream_tasks(&flat_mock_streams, || {
+
+        // Each chain gets its own watch: the supervisor does not check a
+        // digest's chain before confirming it, so a shared watch would let one
+        // chain's settled checkpoint regress another chain's backlog.
+        let mut checkpoint_rxs: HashMap<Chain, watch::Receiver<Option<CheckpointDigest>>> =
+            HashMap::new();
+        for chain in self.mock_streams.keys() {
+            let rx = checkpoint_settlement
+                .lock()
+                .expect("checkpoint settlement mutex poisoned")
+                .new_watch(self.me, *chain);
+            checkpoint_rxs.insert(*chain, rx);
+        }
+
+        fixture_tasks::start_mock_stream_tasks(&flat_mock_streams, |chain| {
+            let checkpoints_rx = checkpoint_rxs
+                .get(&chain)
+                .expect("checkpoint watch for supervised chain")
+                .clone();
             StreamContext::new(
                 backlog.clone(),
                 sign_tx.clone(),
@@ -557,7 +596,7 @@ impl MpcFixtureNodeBuilder {
                 context.contract_state.clone(),
                 mesh_rx.clone(),
                 NodeClient::new(),
-                checkpoints_rx.clone(),
+                checkpoints_rx,
             )
             .with_observe_lag(context.observe_lag)
         });
@@ -565,6 +604,8 @@ impl MpcFixtureNodeBuilder {
         // handle outbox messages manually, we want them before they are
         // encrypted and we want to send them directly to other node's inboxes
         let _mock_network_handle = fixture_tasks::test_mock_network(
+            self.me,
+            checkpoint_settlement,
             context.routing_table,
             shared_output,
             self.messaging.outbox,
@@ -601,7 +642,6 @@ impl MpcFixtureNodeBuilder {
             triple_storage: triple_storage.to_ready(self.me),
             presignature_storage: presignature_storage.to_ready(self.me),
             backlog,
-            checkpoint_tx,
             contract: context.contract_state,
             web_handle: None,
         };
