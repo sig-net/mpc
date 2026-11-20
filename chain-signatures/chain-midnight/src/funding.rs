@@ -2220,13 +2220,17 @@ pub(crate) mod tests {
             vec![Some(resumed_at), Some(resumed_at), newest, newest, newest]
         );
 
+        // A failure between strikes does not clear them; only a landing does.
+        wallet.failed(false);
+        settle(&wallet).await;
+
         // The last of those was the first strike since the landing; this is the second.
         wallet.failed(true);
         settle(&wallet).await;
         assert_eq!(
             wallet.shared.snapshots().strikes,
             2,
-            "two strikes in a row keep the checkpoint"
+            "two strikes, with none landing between them, keep the checkpoint"
         );
 
         wallet.failed(true);
