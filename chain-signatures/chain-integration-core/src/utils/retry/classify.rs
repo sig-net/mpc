@@ -324,7 +324,7 @@ mod tests {
 
     #[test]
     fn the_throttle_statuses_are_exactly_402_and_429() {
-        for code in [401u16, 402, 403, 404, 405, 408, 429, 500] {
+        for code in 100u16..=599 {
             let status = StatusCode::from_u16(code).unwrap();
             assert_eq!(
                 is_throttle_status(status),
