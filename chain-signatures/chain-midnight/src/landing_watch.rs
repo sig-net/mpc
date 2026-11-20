@@ -12,8 +12,7 @@ use mpc_chain_integration_core::utils::retry::{is_throttle_status, RpcFailure};
 use midnight_base_crypto::time::Timestamp;
 use tokio::time::Instant;
 
-use crate::native::SubmitChain;
-use crate::rpc::{read_verdict, Landing};
+use crate::rpc::{read_verdict, Landing, SubmitChain};
 use crate::types::{BlockHash, LedgerTxHash};
 
 pub(crate) const LANDING_POLL: Duration = Duration::from_secs(2);

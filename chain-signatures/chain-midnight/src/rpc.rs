@@ -954,9 +954,7 @@ async fn metadata_at(rpc: &RpcClient, at: H256) -> anyhow::Result<subxt::Metadat
         .context("failed to fetch the midnight runtime metadata")
 }
 
-/// Finalized reads used by the publisher and its in-process tests, every one
-/// addressed by the hash `finalized_head` answers with. Every error out of
-/// an impl carries a read-partition verdict carrier (`attach_read_carrier`).
+/// Finalized reads used by the publisher and its in-process tests.
 #[async_trait::async_trait]
 pub(crate) trait PinnedReads: Send + Sync {
     async fn finalized_head(&self) -> anyhow::Result<BlockHash>;
@@ -966,6 +964,25 @@ pub(crate) trait PinnedReads: Send + Sync {
         at_hash: &BlockHash,
     ) -> anyhow::Result<Option<Vec<u8>>>;
     async fn ledger_parameters(&self, at_hash: &BlockHash) -> anyhow::Result<Vec<u8>>;
+}
+
+/// What the submit path needs from the node, beyond the pinned reads.
+#[async_trait::async_trait]
+pub(crate) trait SubmitChain: PinnedReads {
+    async fn block_number(&self, at: &BlockHash) -> anyhow::Result<u64>;
+    async fn block_hash_at(&self, number: u64) -> anyhow::Result<Option<BlockHash>>;
+    /// The block's `Timestamp::Now`, in whole seconds.
+    async fn block_time(
+        &self,
+        at: &BlockHash,
+    ) -> anyhow::Result<midnight_base_crypto::time::Timestamp>;
+    async fn submit(&self, transaction: &[u8]) -> Result<(), SubmitRefusal>;
+    /// The status the block reports for the ledger transaction `tx_hash`, if it holds it.
+    async fn landing(
+        &self,
+        at: &BlockHash,
+        tx_hash: LedgerTxHash,
+    ) -> anyhow::Result<Option<Landing>>;
 }
 
 /// The read-path verdict for a node error: oversized state terminal, an
@@ -1082,7 +1099,7 @@ fn classify_submit_reply(
 }
 
 #[async_trait::async_trait]
-impl crate::native::SubmitChain for MidnightPublisherRpc {
+impl SubmitChain for MidnightPublisherRpc {
     async fn block_number(&self, at: &BlockHash) -> anyhow::Result<u64> {
         self.number_at(at).await.map_err(attach_read_carrier)
     }
@@ -1547,11 +1564,19 @@ impl Reads {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::native::SubmitChain;
     use crate::submit_error::SubmitError;
     use jsonrpsee::server::ServerBuilder;
     use jsonrpsee::types::ErrorObjectOwned;
     use jsonrpsee::RpcModule;
+    use midnight_ledger_v9::structure::ContractAction;
+    use midnight_onchain_runtime::{
+        context::QueryContext,
+        cost_model::INITIAL_COST_MODEL,
+        ops::Op,
+        result_mode::ResultModeVerify,
+        state::{ChargedState, StateValue},
+    };
+    use midnight_storage::{arena::Sp, storage::Array};
     use mpc_chain_integration_core::utils::retry::{is_provider_throttled, is_retryable};
     use serde_json::json;
     use std::io::Write as _;
@@ -1974,16 +1999,6 @@ mod tests {
 
     #[tokio::test]
     async fn block_reader_extracts_fallible_notification_with_zero_noop() {
-        use midnight_ledger_v9::structure::ContractAction;
-        use midnight_onchain_runtime::{
-            context::QueryContext,
-            cost_model::INITIAL_COST_MODEL,
-            ops::Op,
-            result_mode::ResultModeVerify,
-            state::{ChargedState, StateValue},
-        };
-        use midnight_storage::{arena::Sp, storage::Array};
-
         let bytes = include_bytes!("../fixtures/fallible-deposit-tx-432.mn");
         let tx: DecodedTransaction =
             midnight_serialize::tagged_deserialize(&mut &bytes[..]).unwrap();
@@ -2072,10 +2087,6 @@ mod tests {
 
     #[tokio::test]
     async fn block_reader_extracts_fallible_notification_with_checkpoints() {
-        use midnight_ledger_v9::structure::ContractAction;
-        use midnight_onchain_runtime::ops::Op;
-        use midnight_storage::arena::Sp;
-
         let bytes = include_bytes!("../fixtures/fallible-deposit-tx-432.mn");
         let tx: DecodedTransaction =
             midnight_serialize::tagged_deserialize(&mut &bytes[..]).unwrap();
@@ -2143,9 +2154,6 @@ mod tests {
             &mut midnight_onchain_runtime::transcript::Transcript<midnight_storage::DefaultDB>,
         ),
     ) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
-        use midnight_ledger_v9::structure::ContractAction;
-        use midnight_storage::arena::Sp;
-
         let bytes = include_bytes!("../fixtures/fallible-deposit-tx-432.mn");
         let tx: DecodedTransaction =
             midnight_serialize::tagged_deserialize(&mut &bytes[..]).unwrap();
@@ -3816,8 +3824,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_submit_whose_runtime_cannot_be_read_is_never_sent() {
-        use crate::native::SubmitChain as _;
-
         let server = ServerBuilder::default().build("127.0.0.1:0").await.unwrap();
         let transport = connect_http(&http_config(server.local_addr().unwrap())).unwrap();
         let submits = Arc::new(AtomicUsize::new(0));
@@ -4083,8 +4089,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_missing_block_time_names_the_block_hash_in_full() {
-        use crate::native::SubmitChain as _;
-
         let block = BlockHash::from_0x_hex(&hash_of_byte(0x43)).unwrap();
         let (rpc, _handle, _log) = captured_landing_node(Vec::new(), None).await;
         let err = rpc
@@ -4098,8 +4102,6 @@ mod tests {
 
     #[tokio::test]
     async fn the_publisher_reads_a_landing_and_the_block_time_from_a_captured_block() {
-        use crate::native::SubmitChain as _;
-
         let applied = LedgerTxHash::from_bytes(crate::test_utils::hex_32(
             "ba41ac43f2cfa97e32357877b85210a7f2105f4930b60515e19aa9ec00bb0f5d",
         ));
@@ -4144,8 +4146,6 @@ mod tests {
     /// are each read once.
     #[tokio::test]
     async fn the_publisher_reads_a_block_header_and_runtime_once() {
-        use crate::native::SubmitChain as _;
-
         let applied = LedgerTxHash::from_bytes(crate::test_utils::hex_32(
             "ba41ac43f2cfa97e32357877b85210a7f2105f4930b60515e19aa9ec00bb0f5d",
         ));
@@ -4225,8 +4225,6 @@ mod tests {
     /// 17th evicts the oldest, which is then read again.
     #[tokio::test]
     async fn the_publisher_keeps_the_last_sixteen_headers() {
-        use crate::native::SubmitChain as _;
-
         let (rpc, _handle, reads) = numbered_header_node().await;
         for byte in 1u8..=17 {
             assert_eq!(

@@ -33,7 +33,9 @@ use crate::funding::{dust_deficit, FeePayer, SealedTx, UnprovenTx};
 use crate::intent::{IntentRequest, RespondCircuit, Submitted};
 use crate::landing_watch::{watch_landing, WatchEnd};
 use crate::publisher::IntentClient;
-use crate::rpc::{Landing, PinnedReads, SubmitRefusal};
+#[cfg(test)]
+use crate::rpc::PinnedReads;
+use crate::rpc::{SubmitChain, SubmitRefusal};
 use crate::submit_error::SubmitError;
 use crate::types::{BlockHash, LedgerTxHash, NetworkId};
 
@@ -52,25 +54,6 @@ const FINALITY_SLACK: Duration = Duration::from_secs(60);
 /// shedding load is not asked again at a fixed pace.
 const RESEND_DELAY: Duration = Duration::from_secs(6);
 const MAX_RESEND_DELAY: Duration = Duration::from_secs(60);
-
-/// What the submit path needs from the node, beyond the pinned reads.
-/// Every read error carries a read-partition carrier; `submit`'s refusals
-/// classify themselves, and the watch's `Ok(None)`-to-error wraps stay
-/// carrier-less by design.
-#[async_trait]
-pub(crate) trait SubmitChain: PinnedReads {
-    async fn block_number(&self, at: &BlockHash) -> anyhow::Result<u64>;
-    async fn block_hash_at(&self, number: u64) -> anyhow::Result<Option<BlockHash>>;
-    /// The block's `Timestamp::Now`, in whole seconds.
-    async fn block_time(&self, at: &BlockHash) -> anyhow::Result<Timestamp>;
-    async fn submit(&self, transaction: &[u8]) -> Result<(), SubmitRefusal>;
-    /// The status the block reports for the ledger transaction `tx_hash`, if it holds it.
-    async fn landing(
-        &self,
-        at: &BlockHash,
-        tx_hash: LedgerTxHash,
-    ) -> anyhow::Result<Option<Landing>>;
-}
 
 /// What a submit spent before it asked the wallet to pay, for its log line.
 struct SubmitTimings {
@@ -600,29 +583,28 @@ fn node(error: anyhow::Error) -> SubmitError {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use crate::emissions::{emissions_of_call, Emission, EmissionKind, MISC_PAYLOAD_LEN};
+    use crate::funding::tests::{base, funded_key, replayed};
+    use crate::funding::{plan_fee, FeePlan};
+    use crate::landing_watch::LANDING_POLL;
+    use crate::rpc::Landing;
+    use crate::test_utils::{EventRecorder, RecordedFields};
     use crate::MidnightAddress;
-    use std::collections::VecDeque;
-    use std::sync::atomic::{AtomicU64, Ordering};
-    use std::sync::Mutex;
-
     use http::StatusCode;
     use jsonrpsee::core::client::Error as JsonrpseeClientError;
     use midnight_ledger_v9::structure::{
         ContractAction, ContractCall, Intent, ProofPreimageMarker, Signature, INITIAL_PARAMETERS,
     };
     use midnight_transient_crypto::commitment::PedersenRandomness;
+    use minocrab_publisher::{Attestation, EcdsaSignature};
     use mpc_chain_integration_core::utils::retry::{
         is_retryable, run_gated, RpcFailure, SharedBackoff,
     };
+    use std::collections::VecDeque;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::Mutex;
     use subxt::ext::subxt_rpcs::Error as RawRpcError;
-
-    use super::*;
-    use crate::emissions::{emissions_of_call, Emission, EmissionKind, MISC_PAYLOAD_LEN};
-    use crate::funding::tests::{base, funded_key, replayed};
-    use crate::funding::{plan_fee, FeePlan};
-    use crate::landing_watch::LANDING_POLL;
-    use crate::test_utils::{EventRecorder, RecordedFields};
-    use minocrab_publisher::{Attestation, EcdsaSignature};
     use tracing_subscriber::layer::SubscriberExt;
 
     /// The responder's initial state with the package's verifier keys
@@ -2320,12 +2302,11 @@ mod bench {
     //! `MIDNIGHT_BENCH_RUNS` the samples per step (10). Prints one JSON line per
     //! sample; proving wants `--release`.
 
-    use midnight_ledger_v9::structure::INITIAL_PARAMETERS;
-
     use super::tests::{bidirectional_request, respond_request, RecordingWallet, ScriptedChain};
     use super::*;
     use crate::funding::plan_fee;
     use crate::funding::tests::{funded_key, replayed};
+    use midnight_ledger_v9::structure::INITIAL_PARAMETERS;
 
     fn env(name: &str) -> String {
         std::env::var(name).unwrap_or_else(|_| panic!("{name} must be set"))
