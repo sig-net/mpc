@@ -299,6 +299,17 @@ counts as published once the event carrying it is final on the [source
 chain](#source-chain). See
 [bidirectional-calls.md §2](bidirectional-calls.md#2-vocabulary).
 
+## Purpose of the key
+
+What a key signs: [plain sign requests](#plain-sign-request),
+[bidirectional requests](#bidirectional-request),
+[attestations](#attestation) or a [system account](#system-account)'s
+transactions. It applies from key version 2. See
+[account-derivation.md](account-derivation.md#derivation-path-structure).
+
+*Code today:* the latest key version is 1 (`LATEST_MPC_KEY_VERSION`,
+`signet-primitives/src/lib.rs`), so no key has a purpose.
+
 ## Request
 
 What a contract asks the network to sign. A [bidirectional
@@ -353,6 +364,14 @@ Signet singleton, and the signet responder receives published signatures
 and attestations. See [bidirectional-calls.md
 §4.2](bidirectional-calls.md#42-signet-contract-per-source-chain).
 
+## Signing scheme
+
+The signature algorithm and curve a key signs with: ECDSA over secp256k1
+today, with EdDSA planned. A request names its signing scheme among its key
+parameters, in a field the contracts call `algo`. See
+[bidirectional-calls.md
+§7.1](bidirectional-calls.md#71-request-signbidirectionaleventv1).
+
 ## Source chain
 
 The chain a [request](#request) is made on and answered on.
@@ -366,6 +385,13 @@ It runs whenever a node connects or reconnects to a peer, and when a sign
 [presignature](#presignature) as missing (`MissingArtifact`) are synced again
 (`protocol/sync/`, `protocol/request/posit.rs`). See
 [state-sync.md](state-sync.md).
+
+## System account
+
+An account the MPC network itself controls on a chain, rather than one a
+[request](#request)'s sender controls: the admin of the Ethereum contract
+(`ChainSignatures.sol`), for instance. See
+[account-derivation.md](account-derivation.md#derivation-path-structure).
 
 ## Take
 
