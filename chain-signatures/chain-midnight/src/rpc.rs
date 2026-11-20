@@ -2689,7 +2689,7 @@ mod tests {
             // The watch's throttle counter keys on this predicate; terminal
             // verdicts (the classic set above) exit a scan without one.
             assert_eq!(
-                crate::native::throttled_scan(&read_verdict(&read)),
+                crate::landing_watch::throttled_scan(&read_verdict(&read)),
                 matches!(code, 402 | 429),
                 "{code}"
             );

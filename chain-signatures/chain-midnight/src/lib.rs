@@ -15,6 +15,7 @@ mod funding;
 mod hashing;
 mod indexer;
 mod intent;
+mod landing_watch;
 mod native;
 mod output_storage;
 mod publisher;

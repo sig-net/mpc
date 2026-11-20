@@ -12,7 +12,6 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::Context as _;
 use async_trait::async_trait;
 use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode, BASE_URL};
 use midnight_base_crypto::hash::HashOutput;
@@ -25,7 +24,6 @@ use midnight_onchain_state::state::ContractState;
 use midnight_storage::DefaultDB;
 use minocrab_publisher::intent::{build_intent, preimage_tx, PreimageIntent};
 use minocrab_publisher::{Deployment, InProcessProver, ManagedDir, SignerResolver};
-use mpc_chain_integration_core::utils::retry::{is_throttle_status, RpcFailure};
 use mpc_utils::task::AbortOnDrop;
 use rand::rngs::StdRng;
 use rand::{Rng as _, SeedableRng as _};
@@ -33,8 +31,9 @@ use tokio::time::Instant;
 
 use crate::funding::{dust_deficit, FeePayer, SealedTx, UnprovenTx};
 use crate::intent::{IntentRequest, RespondCircuit, Submitted};
+use crate::landing_watch::{watch_landing, WatchEnd};
 use crate::publisher::IntentClient;
-use crate::rpc::{read_verdict, Landing, PinnedReads, SubmitRefusal};
+use crate::rpc::{Landing, PinnedReads, SubmitRefusal};
 use crate::submit_error::SubmitError;
 use crate::types::{BlockHash, LedgerTxHash, NetworkId};
 
@@ -48,10 +47,6 @@ const MIN_FEE_TTL: Duration = Duration::from_secs(30);
 const WORK_RESERVE: Duration = Duration::from_secs(120);
 /// How long past its TTL a landed transaction may take to finalize.
 const FINALITY_SLACK: Duration = Duration::from_secs(60);
-const LANDING_POLL: Duration = Duration::from_secs(2);
-/// Consecutive throttled scans before the watch escapes to the gate: a transient
-/// 429 keeps polling the sent transaction; a standing one parks the chain.
-const THROTTLED_SCANS_TO_EXIT: u32 = 3;
 /// How long after a submit went unanswered the transaction is first sent again. Each
 /// further unanswered attempt doubles the wait, up to `MAX_RESEND_DELAY`, so a node
 /// shedding load is not asked again at a fixed pace.
@@ -415,109 +410,31 @@ impl<W: FeePayer, C: SubmitChain + 'static> NativeIntentClient<W, C> {
                 tx_hash,
             )))
         });
-        let landing = self.await_landing(tx_hash, after, ttl, deadline).await;
+        let end = watch_landing(self.chain.as_ref(), tx_hash, after, ttl, deadline).await;
         tracing::info!(
             tx_hash = %tx_hash,
             ?submitted,
             settled = ?started.elapsed(),
-            outcome = ?landing,
+            outcome = ?end,
             "midnight: respond settled"
         );
-        match landing? {
+        match end {
             // The respond's only transcript and the DUST spends are guaranteed, which
             // a partial success commits and readers read; the reservation ends when
             // the replay sees the spends.
-            Landing::Applied | Landing::PartialSuccess => Ok(tx_hash),
-            Landing::Expired => {
+            WatchEnd::Landed => Ok(tx_hash),
+            WatchEnd::Expired => {
                 self.wallet.release(spent);
                 Err(SubmitError::ExpiredUnlanded(format!(
                     "transaction {tx_hash} expired without landing"
                 )))
             }
+            WatchEnd::Budget => Err(SubmitError::Ambiguous(format!(
+                "transaction {tx_hash} was not seen finalized within the submit budget; it may \
+                 still land, and a later publisher retry may post the response again"
+            ))),
+            WatchEnd::TerminalRead(error) | WatchEnd::ThrottleEscape(error) => Err(node(error)),
         }
-    }
-
-    /// Scans each finalized block after `after` for `tx_hash` until it lands, until a
-    /// finalized block is past `ttl` without it (`Landing::Expired`), or until
-    /// `deadline`, when the outcome is unknown. A terminal read verdict exits at
-    /// once; `THROTTLED_SCANS_TO_EXIT` consecutive throttled ones escape to the
-    /// publisher's gate.
-    async fn await_landing(
-        &self,
-        tx_hash: LedgerTxHash,
-        after: u64,
-        ttl: Timestamp,
-        deadline: Instant,
-    ) -> Result<Landing, SubmitError> {
-        let mut scanned = after;
-        // The head a scan last finished at: while it stands, no block is new and its
-        // time was already compared with the TTL.
-        let mut scanned_head: Option<BlockHash> = None;
-        // Consecutive scans the provider throttled; any other outcome resets it.
-        let mut throttled_scans = 0u32;
-        loop {
-            let scan = async {
-                let head = self.chain.finalized_head().await?;
-                if scanned_head.as_ref() == Some(&head) {
-                    return anyhow::Ok(None);
-                }
-                let head_number = self.chain.block_number(&head).await?;
-                while scanned < head_number {
-                    let number = scanned + 1;
-                    let hash = if number == head_number {
-                        head
-                    } else {
-                        self.chain
-                            .block_hash_at(number)
-                            .await?
-                            .with_context(|| format!("the node has no finalized block {number}"))?
-                    };
-                    if let Some(landing) = self.chain.landing(&hash, tx_hash).await? {
-                        return Ok(Some(landing));
-                    }
-                    scanned = number;
-                }
-                if self.chain.block_time(&head).await? > ttl {
-                    return Ok(Some(Landing::Expired));
-                }
-                scanned_head = Some(head);
-                Ok(None)
-            };
-            match tokio::time::timeout_at(deadline, scan).await {
-                Ok(Ok(Some(landing))) => return Ok(landing),
-                Ok(Ok(None)) => throttled_scans = 0,
-                Ok(Err(error)) => {
-                    let failure = read_verdict(&error);
-                    if failure.is_terminal() {
-                        return Err(node(error));
-                    }
-                    if throttled_scan(&failure) {
-                        throttled_scans += 1;
-                    } else {
-                        throttled_scans = 0;
-                    }
-                    if throttled_scans >= THROTTLED_SCANS_TO_EXIT {
-                        return Err(node(error));
-                    }
-                    tracing::warn!(
-                        throttled = %format_args!("{throttled_scans}/{THROTTLED_SCANS_TO_EXIT}"),
-                        ?error,
-                        "midnight: watching for the respond transaction failed; retrying"
-                    );
-                }
-                Err(_) => break,
-            }
-            if tokio::time::timeout_at(deadline, tokio::time::sleep(LANDING_POLL))
-                .await
-                .is_err()
-            {
-                break;
-            }
-        }
-        Err(SubmitError::Ambiguous(format!(
-            "transaction {tx_hash} was not seen finalized within the submit budget; it may still \
-             land, and a later publisher retry may post the response again"
-        )))
     }
 }
 
@@ -674,14 +591,6 @@ fn node(error: anyhow::Error) -> SubmitError {
     SubmitError::Node { source: error }
 }
 
-/// Whether a failed scan read is the provider throttling, by core's typed
-/// 402/429 set (`retry::is_throttle_status`).
-// Not `is_provider_throttled`: its text fallback would read the watch's
-// renders, which carry block numbers.
-pub(crate) fn throttled_scan(failure: &RpcFailure) -> bool {
-    failure.status().is_some_and(is_throttle_status)
-}
-
 #[cfg(test)]
 mod tests {
     use crate::MidnightAddress;
@@ -704,6 +613,7 @@ mod tests {
     use crate::emissions::{emissions_of_call, Emission, EmissionKind, MISC_PAYLOAD_LEN};
     use crate::funding::tests::{base, funded_key, replayed};
     use crate::funding::{plan_fee, FeePlan};
+    use crate::landing_watch::LANDING_POLL;
     use minocrab_publisher::{Attestation, EcdsaSignature};
 
     /// The responder's initial state with the package's verifier keys
