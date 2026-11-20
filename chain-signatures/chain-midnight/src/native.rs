@@ -509,6 +509,7 @@ impl<W: FeePayer, C: SubmitChain + 'static> NativeIntentClient<W, C> {
                         return Err(node(error));
                     }
                     tracing::warn!(
+                        throttled = %format_args!("{throttled_scans}/{THROTTLED_SCANS_TO_EXIT}"),
                         ?error,
                         "midnight: watching for the respond transaction failed; retrying"
                     );
