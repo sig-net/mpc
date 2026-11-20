@@ -290,7 +290,7 @@ async fn process_execution_confirmed_failed_advance_parks_the_entry() {
     );
     assert_matches!(
         sign_rx.try_recv(),
-        Ok(SignCommand::Completion(id)) if id == tx.sign_id()
+        Ok(SignCommand::Retire(id)) if id == tx.sign_id()
     );
 }
 
@@ -2306,8 +2306,8 @@ async fn process_respond_bidirectional_event_duplicate_is_idempotent() {
         .unwrap()
         .unwrap();
     match first {
-        SignCommand::Completion(id) => assert_eq!(id, sign_id),
-        other => panic!("expected completion, got {other:?}"),
+        SignCommand::Responded { sign_id: id, .. } => assert_eq!(id, sign_id),
+        other => panic!("expected the response, got {other:?}"),
     }
 
     let no_second = timeout(Duration::from_millis(100), sign_rx.recv()).await;
@@ -2373,8 +2373,8 @@ async fn process_respond_event_duplicate_ethereum_is_idempotent() {
         .unwrap()
         .unwrap();
     match msg {
-        SignCommand::Completion(id) => assert_eq!(id, sign_id),
-        _ => panic!("expected completion"),
+        SignCommand::Responded { sign_id: id, .. } => assert_eq!(id, sign_id),
+        _ => panic!("expected the response"),
     }
 
     // Duplicate events should be ignored, not treated as an error.
@@ -2937,7 +2937,7 @@ async fn process_respond_bidirectional_event_sends_completion_before_catchup() {
         .await
         .unwrap()
         .unwrap();
-    assert_matches!(msg, SignCommand::Completion(id) if id == sign_id);
+    assert_matches!(msg, SignCommand::Responded { sign_id: id, .. } if id == sign_id);
 }
 
 #[tokio::test]
@@ -3151,7 +3151,7 @@ async fn decode_failure_parks_request_and_preserves_source_checkpoint() {
             );
             assert_matches!(
                 sign_rx.try_recv().expect("parked request must stop its signing task"),
-                SignCommand::Completion(id) if id == tx.sign_id()
+                SignCommand::Retire(id) if id == tx.sign_id()
             );
             assert!(sign_rx.try_recv().is_err(), "no response should be signed");
             assert_matches!(
@@ -3334,7 +3334,7 @@ async fn midnight_response_settles_entries_that_missed_the_outcome() {
             assert!(
                 matches!(
                     sign_rx.try_recv(),
-                    Ok(SignCommand::Completion(id)) if id == tx.sign_id()
+                    Ok(SignCommand::Responded { sign_id: id, .. }) if id == tx.sign_id()
                 ),
                 "{case}, {node}"
             );
@@ -3599,7 +3599,7 @@ async fn unobserved_response_settles_when_it_verifies() {
             "{case}"
         );
         assert_eq!(
-            matches!(sign_rx.try_recv(), Ok(SignCommand::Completion(id)) if id == tx.sign_id()),
+            matches!(sign_rx.try_recv(), Ok(SignCommand::Responded { sign_id: id, .. }) if id == tx.sign_id()),
             settles,
             "{case}"
         );
