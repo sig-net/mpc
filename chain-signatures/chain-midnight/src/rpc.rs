@@ -2653,14 +2653,8 @@ mod tests {
         }
     }
 
-    /// jsonrpsee's `Rejected` wire shape (jsonrpsee-http-client 0.24.10
-    /// transport.rs:376), as a raw HTTP status fails these reads.
     fn rejected_read(status: u16) -> anyhow::Error {
-        let transport = jsonrpsee::http_client::transport::Error::Rejected {
-            status_code: status,
-        };
-        let client = JsonrpseeClientError::Transport(Box::new(transport));
-        anyhow::Error::new(RawRpcError::Client(Box::new(client)))
+        crate::test_utils::rejected_http(status)
             .context("failed to fetch the midnight finalized head")
     }
 

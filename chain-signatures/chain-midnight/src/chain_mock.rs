@@ -5,10 +5,8 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use jsonrpsee::core::client::Error as JsonrpseeClientError;
 use midnight_base_crypto::time::Timestamp;
 use midnight_ledger_v9::structure::INITIAL_PARAMETERS;
-use subxt::ext::subxt_rpcs::Error as RawRpcError;
 use tokio::time::Instant;
 
 use crate::rpc::{Landing, PinnedReads, SubmitChain, SubmitRefusal};
@@ -139,16 +137,10 @@ pub(crate) fn block_number_of(hash: &BlockHash) -> u64 {
     u64::from_be_bytes(hash.as_bytes()[24..].try_into().unwrap())
 }
 
-/// jsonrpsee's `Rejected` shape (jsonrpsee-http-client 0.24.10 transport.rs:376),
-/// attached like the `SubmitChain` boundary attaches its reads.
+/// A scan read rejection, attached like the `SubmitChain` boundary attaches its reads.
 pub(crate) fn scan_read_rejected(status: u16) -> anyhow::Error {
-    let transport = jsonrpsee::http_client::transport::Error::Rejected {
-        status_code: status,
-    };
-    let client = JsonrpseeClientError::Transport(Box::new(transport));
     crate::rpc::attach_read_carrier(
-        anyhow::Error::new(RawRpcError::Client(Box::new(client)))
-            .context("failed to fetch midnight block events"),
+        crate::test_utils::rejected_http(status).context("failed to fetch midnight block events"),
     )
 }
 

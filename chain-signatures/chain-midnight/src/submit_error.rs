@@ -132,9 +132,8 @@ pub(crate) fn refusal_code(error: &anyhow::Error) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use jsonrpsee::core::client::Error as JsonrpseeClientError;
     use mpc_chain_integration_core::utils::retry::{is_provider_throttled, is_retryable};
-    use subxt::ext::subxt_rpcs::Error as RawRpcError;
+    use crate::test_utils::rejected_http;
 
     #[test]
     fn every_class_is_counted_with_its_code_verdict_and_strike() {
@@ -277,19 +276,9 @@ mod tests {
 
     #[test]
     fn node_statuses_classify_by_the_read_partition() {
-        fn rejected(status: u16) -> anyhow::Error {
-            anyhow::Error::new(RawRpcError::Client(Box::new(
-                JsonrpseeClientError::Transport(Box::new(
-                    jsonrpsee::http_client::transport::Error::Rejected {
-                        status_code: status,
-                    },
-                )),
-            )))
-        }
-
         // A real throttle: retryable, and the gate engages on the typed status.
         let throttled = SubmitError::Node {
-            source: rejected(429).context("reading the node's runtime"),
+            source: rejected_http(429).context("reading the node's runtime"),
         }
         .into_publish_error();
         assert!(is_retryable(&throttled), "{throttled:#}");
@@ -298,14 +287,14 @@ mod tests {
         // A shared provider's transient conflict retries, like midnight's other
         // reads — the send table would hand the publish to failover here.
         let conflict = SubmitError::Node {
-            source: rejected(409),
+            source: rejected_http(409),
         }
         .into_publish_error();
         assert!(is_retryable(&conflict), "{conflict:#}");
         assert!(!is_provider_throttled(&conflict), "{conflict:#}");
 
         let terminal = SubmitError::Node {
-            source: rejected(404),
+            source: rejected_http(404),
         }
         .into_publish_error();
         assert!(!is_retryable(&terminal), "{terminal:#}");
