@@ -215,13 +215,19 @@ fn cause_status(cause: &(dyn std::error::Error + 'static)) -> Option<StatusCode>
     StatusCode::from_u16(http.status).ok()
 }
 
+/// Whether the HTTP status is the provider throttling: 429 (rate limited) or
+/// 402 (payment required, e.g. exhausted credits).
+pub fn is_throttle_status(status: StatusCode) -> bool {
+    status == StatusCode::TOO_MANY_REQUESTS || status == StatusCode::PAYMENT_REQUIRED
+}
+
 /// Returns true if the error looks like the provider throttling us: HTTP 429
 /// (rate limited) or 402 (payment required, e.g. exhausted credits).
 pub fn is_provider_throttled(e: &anyhow::Error) -> bool {
     let (failure, status) = typed_signals(e);
     // Typed status is authoritative over body text (if present).
     if let Some(status) = status {
-        return status == StatusCode::TOO_MANY_REQUESTS || status == StatusCode::PAYMENT_REQUIRED;
+        return is_throttle_status(status);
     }
     // A carrier is a typed boundary's deliberate verdict: no status means no
     // throttle, regardless of embedded text.
@@ -313,6 +319,18 @@ mod tests {
                 "HTTP status client error ({code} Some Reason) for url (http://127.0.0.1:1234/)"
             );
             assert!(!is_retryable(&e), "{code} should not be retryable");
+        }
+    }
+
+    #[test]
+    fn the_throttle_statuses_are_exactly_402_and_429() {
+        for code in [401u16, 402, 403, 404, 405, 408, 429, 500] {
+            let status = StatusCode::from_u16(code).unwrap();
+            assert_eq!(
+                is_throttle_status(status),
+                matches!(code, 402 | 429),
+                "{code}"
+            );
         }
     }
 

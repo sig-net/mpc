@@ -25,7 +25,7 @@ use midnight_onchain_state::state::ContractState;
 use midnight_storage::DefaultDB;
 use minocrab_publisher::intent::{build_intent, preimage_tx, PreimageIntent};
 use minocrab_publisher::{Deployment, InProcessProver, ManagedDir, SignerResolver};
-use mpc_chain_integration_core::utils::retry::RpcFailure;
+use mpc_chain_integration_core::utils::retry::{is_throttle_status, RpcFailure};
 use mpc_utils::task::AbortOnDrop;
 use rand::rngs::StdRng;
 use rand::{Rng as _, SeedableRng as _};
@@ -674,15 +674,12 @@ fn node(error: anyhow::Error) -> SubmitError {
     SubmitError::Node { source: error }
 }
 
-/// Whether a failed scan read is the provider throttling — core's typed 402/429
-/// set (`is_provider_throttled`'s carrier arm), never its text-scanning call:
-/// the watch's renders carry block numbers. Delegate to a typed core predicate
-/// once the fallback is deleted (classify.rs TODO).
+/// Whether a failed scan read is the provider throttling, by core's typed
+/// 402/429 set (`retry::is_throttle_status`).
+// Not `is_provider_throttled`: its text fallback would read the watch's
+// renders, which carry block numbers.
 pub(crate) fn throttled_scan(failure: &RpcFailure) -> bool {
-    matches!(
-        failure.status().map(|status| status.as_u16()),
-        Some(402 | 429)
-    )
+    failure.status().is_some_and(is_throttle_status)
 }
 
 #[cfg(test)]
