@@ -61,6 +61,15 @@ pub(crate) async fn watch_landing<C: SubmitChain>(
     let mut scanned_head: Option<BlockHash> = None;
     // Consecutive scans the provider throttled; any other outcome resets it.
     let mut throttled_scans = 0u32;
+
+    // A block scan either finds the transaction in a finalized block or finds
+    // the chain has passed the intent's TTL. Kept separate from `WatchEnd` so
+    // `Landing` cannot carry the contradictory `Expired` state.
+    enum ScanOutcome {
+        Landed(Landing),
+        Expired,
+    }
+
     loop {
         let scan = async {
             let head = chain.finalized_head().await?;
@@ -79,19 +88,19 @@ pub(crate) async fn watch_landing<C: SubmitChain>(
                         .with_context(|| format!("the node has no finalized block {number}"))?
                 };
                 if let Some(landing) = chain.landing(&hash, tx_hash).await? {
-                    return Ok(Some(landing));
+                    return Ok(Some(ScanOutcome::Landed(landing)));
                 }
                 scanned = number;
             }
             if chain.block_time(&head).await? > ttl {
-                return Ok(Some(Landing::Expired));
+                return Ok(Some(ScanOutcome::Expired));
             }
             scanned_head = Some(head);
             Ok(None)
         };
         match tokio::time::timeout_at(deadline, scan).await {
-            Ok(Ok(Some(Landing::Expired))) => return WatchEnd::Expired,
-            Ok(Ok(Some(landed))) => return WatchEnd::Landed(landed),
+            Ok(Ok(Some(ScanOutcome::Expired))) => return WatchEnd::Expired,
+            Ok(Ok(Some(ScanOutcome::Landed(landing)))) => return WatchEnd::Landed(landing),
             Ok(Ok(None)) => throttled_scans = 0,
             Ok(Err(error)) => {
                 let failure = read_verdict(&error);
