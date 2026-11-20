@@ -717,17 +717,6 @@ impl Backlog {
         Ok(checkpoint)
     }
 
-    /// Hydrate the backlog from storage: initializes the pending checkpoint counter
-    /// and recovers local backlog state from the latest durable checkpoint if one exists.
-    pub async fn hydrate(
-        &self,
-        chain: Chain,
-        root_pk: PublicKey,
-    ) -> Result<Option<Checkpoint>, CheckpointError> {
-        self.checkpoints.hydrate(chain).await?;
-        self.recover_local(chain, root_pk).await
-    }
-
     /// Give each entry its stored records, once replay has rebuilt the backlog.
     pub(crate) async fn claim_local(&self, chain: Chain, records: Vec<(SignId, SignStatus)>) {
         let mut pending = self.pending(&chain).write().await;
@@ -738,14 +727,23 @@ impl Backlog {
         }
     }
 
-    /// Recovers local backlog state from the latest durable checkpoint if one exists.
+    /// Seeds the in-memory backlog from the confirmed base only.
+    /// The seed is whatever `load_latest` returns — the durable confirmed base — and nothing
+    /// else. Pending and orphan checkpoints are never used here: they remain durable, servable,
+    /// and promotable, but after a restart they must not seed the backlog we index or vote from.
     /// A body from an earlier version may be one adopted as sent, so its progress is rebuilt.
-    pub async fn recover_local(
+    pub async fn hydrate(
         &self,
         chain: Chain,
         root_pk: PublicKey,
     ) -> Result<Option<Checkpoint>, CheckpointError> {
-        let Some(checkpoint) = self.checkpoints.latest(chain).await? else {
+        let Some(checkpoint) = self
+            .checkpoints
+            .storage()
+            .load_latest(chain)
+            .await
+            .map_err(|source| CheckpointError::Storage { chain, source })?
+        else {
             return Ok(None);
         };
         if checkpoint.legacy_digest.is_some() {

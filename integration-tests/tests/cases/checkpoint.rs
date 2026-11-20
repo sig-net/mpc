@@ -200,6 +200,96 @@ async fn test_consensus_alignment_peer_fetch() {
     assert_eq!(persisted.unwrap().block_height, expected_height);
 }
 
+/// Encodes the confirmation-to-promotion gap from `doc/checkpoint-upgrade-safety.md`:
+/// nodes vote checkpoint D, the contract settles D, the whole cluster restarts *before*
+/// promotion, and the new binaries must still promote D from its durable orphan body
+/// (using the contract-settled digest, without re-indexing) and agree on the next one.
+/// After promotion it also rebuilds a fresh `Backlog` over the same storage to check a
+/// restarted node seeds only from the confirmed base, not from any leftover pending body.
+///
+/// The full mixed old/new binary restart belongs in the prod-compat workflow; this
+/// test pins the storage invariant with in-memory storage so it runs in CI.
+#[test(tokio::test(flavor = "multi_thread"))]
+async fn settled_checkpoint_survives_restart_before_promotion() {
+    let chain = Chain::Ethereum;
+    let interval = mpc_node::backlog::checkpoint_interval(chain).unwrap();
+
+    let mut next_digests = HashSet::new();
+    // Two independent nodes with identical state.
+    for _ in 0..2 {
+        let storage = CheckpointStorage::in_memory();
+        let backlog = Backlog::persisted(storage.clone());
+
+        // Same deterministic pending request on every node, so they build the same body.
+        backlog.insert_mock_sign(SignId::new([7; 32]), chain).await;
+        let checkpoint = backlog
+            .set_processed_block(chain, interval)
+            .await
+            .expect("auto-checkpoint");
+        let digest = checkpoint.digest();
+
+        // The contract settles D. A full restart happens before any promotion: only
+        // the durable storage survives, so recovery re-anchors from the confirmed base
+        // alone. Recovery demotes the pending body to an orphan: it leaves `pending`,
+        // stays servable by digest and promotable, but never seeds the backlog.
+        assert_eq!(storage.demote_pending_to_orphan(chain).await.unwrap(), 1);
+        assert!(
+            storage.load_pending(chain).await.unwrap().is_empty(),
+            "recovery must drain pending into the orphan set"
+        );
+        assert!(
+            storage.load_latest(chain).await.unwrap().is_none(),
+            "no base is set before promotion"
+        );
+        assert_eq!(
+            storage.find(chain, digest).await.unwrap(),
+            Some(checkpoint.clone()),
+            "the settled body must remain servable by digest as an orphan"
+        );
+        assert!(
+            backlog
+                .hydrate(chain, mock_root_pk())
+                .await
+                .unwrap()
+                .is_none(),
+            "an unpromoted pending body must not seed the restarted backlog"
+        );
+
+        // New binaries promote using the stored digest — no re-index, no recompute.
+        assert!(backlog.checkpoints().confirm(chain, digest).await.unwrap());
+        assert_eq!(
+            storage.load_latest(chain).await.unwrap(),
+            Some(checkpoint.clone()),
+            "the settled body must become the canonical base"
+        );
+
+        // Real restart after promotion: discard the live backlog and build a fresh one
+        // over the same durable storage. Promotion consumed the orphan body, so the
+        // only possible seed is the confirmed base.
+        let restarted = Backlog::persisted(storage.clone());
+        assert_eq!(
+            restarted.hydrate(chain, mock_root_pk()).await.unwrap(),
+            Some(checkpoint.clone()),
+            "a restarted backlog must seed from the confirmed base"
+        );
+        assert_eq!(
+            restarted.len_by_chain(chain).await,
+            1,
+            "the restarted backlog carries the base's pending request"
+        );
+
+        // And the next checkpoint each restarted node produces must still agree.
+        restarted.set_processed_block(chain, 2 * interval).await;
+        next_digests.insert(restarted.checkpoint(chain).await.unwrap().digest());
+    }
+
+    assert_eq!(
+        next_digests.len(),
+        1,
+        "nodes must agree on the next checkpoint after promoting the settled body"
+    );
+}
+
 #[test(tokio::test(flavor = "multi_thread"))]
 async fn test_consensus_alignment_consensus_changes_while_fetching() {
     let mut network = MpcFixtureBuilder::default()
