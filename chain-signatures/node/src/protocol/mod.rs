@@ -26,11 +26,14 @@ use crate::protocol::consensus::ConsensusProtocol;
 use crate::protocol::cryptography::CryptographicProtocol;
 use crate::protocol::message::{GeneratingMessage, ReadyMessage, ResharingMessage};
 use crate::protocol::request::SignatureSpawnerTask;
+use crate::protocol::state::StartedState;
 use crate::rpc::ContractStateWatcher;
+use crate::storage::keystore::Keystore;
 use crate::storage::presignature_storage::PresignatureStorage;
-use crate::storage::secret_storage::SecretNodeStorageVariant;
 use crate::storage::triple_storage::TripleStorage;
+use crate::storage::Initializing;
 
+use anyhow::Context as _;
 use near_account_id::AccountId;
 use semver::Version;
 use std::path::Path;
@@ -38,11 +41,46 @@ use std::time::{Duration, Instant};
 use sysinfo::{CpuRefreshKind, Disks, RefreshKind, System};
 use tokio::sync::{mpsc, watch};
 
+use crate::storage::protocol_storage::StockCounts;
+
+/// Whether a spawner should propose another generation: below its own floor
+/// and with a generation slot free. `stock` may be up to a second old, so
+/// the floor can be overshot by at most one second of proposals, bounded by
+/// `max_mine_generations`.
+pub(crate) fn should_generate(
+    stock: StockCounts,
+    mine_generations: usize,
+    min: usize,
+    max_mine_generations: usize,
+) -> bool {
+    stock.mine < min && mine_generations < max_mine_generations
+}
+
+/// Bounds a deliberator applies to a PROPOSE, from counts it already caches.
+/// Sized by the whole participant set with headroom for counts a tick behind.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AcceptLimits {
+    /// Refuse once this node runs or has accepted this many generations: a
+    /// margin above the network's cap.
+    pub ongoing: usize,
+    /// Refuse once the pool holds this many: a margin above the network's floors.
+    pub generated: usize,
+}
+
+impl AcceptLimits {
+    pub fn new(min_mine: usize, max_mine_generations: usize, num_nodes: usize) -> Self {
+        Self {
+            ongoing: num_nodes * 2 * max_mine_generations,
+            generated: num_nodes * 2 * min_mine,
+        }
+    }
+}
+
 pub struct MpcSignProtocol {
     pub(crate) my_account_id: AccountId,
-    pub(crate) secret_storage: SecretNodeStorageVariant,
-    pub(crate) triple_storage: TripleStorage,
-    pub(crate) presignature_storage: PresignatureStorage,
+    pub(crate) keystore: Keystore,
+    pub(crate) triple_storage: TripleStorage<Initializing>,
+    pub(crate) presignature_storage: PresignatureStorage<Initializing>,
     pub(crate) sign_task: SignatureSpawnerTask,
     pub(crate) generating: mpsc::Receiver<GeneratingMessage>,
     pub(crate) resharing: mpsc::Receiver<ResharingMessage>,
@@ -94,7 +132,7 @@ impl MpcSignProtocol {
         mut gov_client: G,
         contract_state: ContractStateWatcher,
         mesh_state: watch::Receiver<MeshState>,
-    ) {
+    ) -> anyhow::Result<()> {
         let _span = tracing::info_span!("running", "{}", self.my_account_id.as_str());
 
         crate::metrics::nodes::NODE_RUNNING.set(1);
@@ -106,34 +144,38 @@ impl MpcSignProtocol {
                 .as_secs() as i64,
         );
 
+        let key_share = self
+            .keystore
+            .load()
+            .await
+            .context("failed to read the key share store")?;
+        let mut state = NodeState::Started(StartedState { key_share });
         loop {
             let protocol_time = Instant::now();
             crate::metrics::protocols::PROTOCOL_ITER_CNT.inc();
 
             let mesh_state = mesh_state.borrow().clone();
             let crypto_time = Instant::now();
-            node.state = node.state.progress(&mut self, mesh_state).await;
-            node.update_watchers().await;
+            state = state.progress(&mut self, mesh_state).await;
+            node.update_watchers(&state).await;
             crate::metrics::protocols::PROTOCOL_LATENCY_ITER_CRYPTO
                 .observe(crypto_time.elapsed().as_secs_f64());
 
             if let Some(contract_state) = contract_state.state() {
                 let consensus_time = Instant::now();
-                node.state = node
-                    .state
+                state = state
                     .advance(&mut self, &mut gov_client, contract_state)
                     .await;
                 crate::metrics::protocols::PROTOCOL_LATENCY_ITER_CONSENSUS
                     .observe(consensus_time.elapsed().as_secs_f64());
-                node.update_watchers().await;
+                node.update_watchers(&state).await;
             }
 
-            let sleep_ms = match node.state {
+            let sleep_ms = match state {
                 NodeState::Generating(_) => 500,
                 NodeState::Resharing(_) => 500,
                 NodeState::Running(_) => 100,
 
-                NodeState::Starting => 1000,
                 NodeState::Started(_) => 1000,
                 NodeState::WaitingForConsensus(_) => 1000,
                 NodeState::Joining(_) => 1000,
@@ -255,5 +297,16 @@ mod tests {
     fn test_parse_node_version_invalid() {
         assert_eq!(parse_node_version("bad_version"), 999999999000);
         assert_eq!(parse_node_version(""), 999999999000);
+    }
+
+    #[test]
+    fn should_generate_branches() {
+        let stock = StockCounts {
+            mine: 3,
+            generated: 10,
+        };
+        assert!(should_generate(stock, 1, 5, 10));
+        assert!(!should_generate(stock, 1, 3, 10), "floor reached");
+        assert!(!should_generate(stock, 10, 5, 10), "generation cap");
     }
 }

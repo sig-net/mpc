@@ -2,14 +2,14 @@
 
 use integration_tests::mpc_fixture::{mock_stream::MockStream, MpcFixtureBuilder};
 use mpc_node::backlog::consensus::align_backlog_with_consensus;
-use mpc_node::backlog::mock::BacklogTestExt;
+use mpc_node::backlog::mock::{mock_root_pk, BacklogTestExt};
 use mpc_node::backlog::Backlog;
 use mpc_node::mesh::connection::NodeStatus;
 use mpc_node::mesh::MeshState;
-use mpc_node::node_client::{NodeClient, Options as NodeClientOptions};
+use mpc_node::node_client::NodeClient;
 use mpc_node::protocol::ParticipantInfo;
 use mpc_node::storage::CheckpointStorage;
-use mpc_primitives::{Chain, ChainConfig as _, CheckpointDigest, SignId};
+use mpc_primitives::{Chain, CheckpointDigest, SignId};
 use near_sdk::AccountId;
 use std::collections::HashSet;
 use std::time::Duration;
@@ -31,7 +31,7 @@ async fn test_web_server_serves_checkpoint() {
         .await;
 
     let chain = Chain::Ethereum;
-    let interval = chain.checkpoint_interval().unwrap();
+    let interval = mpc_node::backlog::checkpoint_interval(chain).unwrap();
 
     // Create checkpoint on node 0
     let cp = network.nodes[0]
@@ -72,7 +72,7 @@ async fn test_web_server_serves_checkpoint() {
     let response: mpc_node::web::CheckpointResponse =
         ciborium::from_reader(body.as_ref()).expect("should deserialize checkpoint");
     assert_eq!(response.version, mpc_node::CHECKPOINT_VERSION);
-    let checkpoints = response.checkpoints;
+    let checkpoints = response.facts;
 
     let retrieved = checkpoints
         .get(&chain)
@@ -82,7 +82,7 @@ async fn test_web_server_serves_checkpoint() {
         "retrieved checkpoint height should match"
     );
     assert_eq!(
-        retrieved.digest(),
+        mpc_node::backlog::Checkpoint::from(retrieved.clone()).digest(),
         digest,
         "retrieved checkpoint digest should match"
     );
@@ -104,7 +104,7 @@ async fn test_consensus_alignment_peer_fetch() {
         .await;
 
     let chain = Chain::Ethereum;
-    let interval = chain.checkpoint_interval().unwrap();
+    let interval = mpc_node::backlog::checkpoint_interval(chain).unwrap();
 
     // Node 0: create checkpoint
     let cp = network.nodes[0]
@@ -135,7 +135,7 @@ async fn test_consensus_alignment_peer_fetch() {
             ciborium::from_reader(body.as_ref()).unwrap();
         assert_eq!(response.version, mpc_node::CHECKPOINT_VERSION);
         assert!(
-            response.checkpoints.contains_key(&chain),
+            response.facts.contains_key(&chain),
             "web server should serve the checkpoint"
         );
     }
@@ -162,7 +162,7 @@ async fn test_consensus_alignment_peer_fetch() {
     let fresh_storage = CheckpointStorage::in_memory();
     let fresh_backlog = Backlog::persisted(fresh_storage.clone());
 
-    let node_client = NodeClient::new(&NodeClientOptions::default());
+    let node_client = NodeClient::new();
     let my_account_id: AccountId = "fresh-node.near".parse().unwrap();
 
     // Call align_backlog_with_consensus
@@ -175,6 +175,7 @@ async fn test_consensus_alignment_peer_fetch() {
             &mut mesh_rx,
             &node_client,
             &my_account_id,
+            mock_root_pk(),
         ),
     )
     .await;
@@ -246,7 +247,7 @@ async fn test_consensus_alignment_consensus_changes_while_fetching() {
     let fresh_backlog = Backlog::persisted(fresh_storage.clone());
     let fresh_backlog2 = fresh_backlog.clone();
 
-    let node_client = NodeClient::new(&NodeClientOptions::default());
+    let node_client = NodeClient::new();
     let my_account_id: AccountId = "fresh-node.near".parse().unwrap();
 
     // Spawn alignment in background; keep cp_tx here to send the abort signal.
@@ -258,6 +259,7 @@ async fn test_consensus_alignment_consensus_changes_while_fetching() {
             &mut mesh_rx,
             &node_client,
             &my_account_id,
+            mock_root_pk(),
         )
         .await
     });
@@ -300,7 +302,7 @@ async fn test_consensus_alignment_consensus_changes_while_fetching() {
 #[test(tokio::test(flavor = "multi_thread"))]
 async fn test_reset_converges_divergent_nodes() {
     let chain = Chain::Ethereum;
-    let interval = chain.checkpoint_interval().unwrap();
+    let interval = mpc_node::backlog::checkpoint_interval(chain).unwrap();
     let resume_after = interval * 2;
 
     let network = MpcFixtureBuilder::default()
@@ -343,7 +345,7 @@ async fn test_reset_converges_divergent_nodes() {
         digest: mpc_primitives::reset_checkpoint_digest(chain, resume_after),
     };
     let my_account_id: AccountId = "aligning.near".parse().unwrap();
-    let node_client = NodeClient::new(&NodeClientOptions::default());
+    let node_client = NodeClient::new();
 
     for node in &network.nodes {
         let (_cp_tx, mut checkpoints_rx) = tokio::sync::watch::channel(Some(settled));
@@ -358,6 +360,7 @@ async fn test_reset_converges_divergent_nodes() {
                 &mut mesh_rx,
                 &node_client,
                 &my_account_id,
+                mock_root_pk(),
             ),
         )
         .await

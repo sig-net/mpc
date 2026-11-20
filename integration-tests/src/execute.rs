@@ -1,48 +1,25 @@
 use anyhow::Context;
 use async_process::Child;
-use mpc_primitives::{Chain, ChainConfig as _};
-use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::OnceLock;
 
-pub(crate) const PACKAGE_MULTICHAIN: &str = "mpc-node";
-const COMPAT_SUBDIR: &str = "compat";
-const COMPAT_VERSIONS_JSON: &str = include_str!("../../scripts/prod-compat-versions.json");
+pub(crate) const MPC_NODE_PACKAGE: &str = "mpc-node";
 
-static COMPAT_VERSIONS: OnceLock<HashMap<String, String>> = OnceLock::new();
-
-fn compatibility_versions() -> &'static HashMap<String, String> {
-    COMPAT_VERSIONS.get_or_init(|| {
-        serde_json::from_str(COMPAT_VERSIONS_JSON)
-            .expect("invalid prod-compat-versions.json format")
-    })
-}
-
-fn compatibility_version(channel: &str) -> anyhow::Result<String> {
-    compatibility_versions()
-        .get(channel)
-        .cloned()
-        .ok_or_else(|| anyhow::anyhow!("unknown compatibility channel '{channel}'"))
-}
-
-/// Returns the compiled binary for the requested production channel (mainnet/testnet).
-/// Binaries are expected under target/compat/<channel>/<version>/release/mpc-node.
-pub fn compatibility_binary(channel: &str) -> anyhow::Result<PathBuf> {
-    let version = compatibility_version(channel)?;
+/// Returns the mpc-node binary of the latest release tag, built by
+/// `just build compat` under target/compat/latest/release/mpc-node.
+pub fn latest_release_binary() -> anyhow::Result<PathBuf> {
     let target_dir = target_dir().ok_or_else(|| {
         anyhow::anyhow!("could not locate target directory for compatibility binary")
     })?;
 
     let binary_path = target_dir
-        .join(COMPAT_SUBDIR)
-        .join(channel)
-        .join(&version)
+        .join("compat")
+        .join("latest")
         .join("release")
-        .join(PACKAGE_MULTICHAIN);
+        .join(MPC_NODE_PACKAGE);
 
     if !binary_path.exists() {
         anyhow::bail!(
-            "compatibility binary for {channel} ({version}) not found at {}. Run scripts/build-compat-binaries.sh to build it.",
+            "latest release binary not found at {}. Run `just build compat` to build it.",
             binary_path.display()
         );
     }
@@ -83,18 +60,17 @@ pub fn spawn_node_with_binary(
     binary_path: Option<PathBuf>,
     release: bool,
     node: &str,
-    cli: mpc_node::cli::Cli,
+    args: Vec<String>,
 ) -> anyhow::Result<Child> {
     let executable = match binary_path {
         Some(path) => path,
-        None => executable(release, PACKAGE_MULTICHAIN)
+        None => executable(release, MPC_NODE_PACKAGE)
             .with_context(|| format!("could not find target dir while starting {node} node"))?,
     };
 
     async_process::Command::new(&executable)
-        .args(cli.into_str_args())
+        .args(args)
         .env("RUST_LOG", "info,workspaces=warn")
-        .envs(Chain::checkpoint_env_vars())
         .envs(std::env::vars())
         .stdout(async_process::Stdio::inherit())
         .stderr(async_process::Stdio::inherit())

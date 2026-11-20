@@ -26,7 +26,8 @@ jobs:
 
     steps:
       - name: Comment on PR if this is a re-run
-        if: github.run_attempt > 1 && github.event_name == 'pull_request'
+        # Fork PRs get a read-only token, so commenting would fail the job.
+        if: github.run_attempt > 1 && github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork
         uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
         env:
           RUN_ATTEMPT: ${{ github.run_attempt }}
@@ -41,12 +42,6 @@ jobs:
 
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
-      - name: Install just
-        run: |
-          mkdir -p "$HOME/.cargo/bin"
-          curl --proto '=https' --tlsv1.2 -sSfL "https://github.com/casey/just/releases/download/1.54.0/just-1.54.0-x86_64-unknown-linux-musl.tar.gz" | tar zxf - -C "$HOME/.cargo/bin"
-          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
-
       - name: Login to GitHub Container Registry
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4
         with:
@@ -54,13 +49,10 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Pull Redis image
-        run: docker pull redis:7.4.2
-
-      - name: Install Rust (1.93.0)
-        uses: dtolnay/rust-toolchain@283fb51ee3c8a49cd7c8ff30102f3fcf3cfbe0e1 # 1.93.0
+      - name: Install Rust (1.95.0)
+        uses: dtolnay/rust-toolchain@035fceb3c12fb0c6a9461b52775e16473133e591 # 1.95.0
         with:
-          toolchain: 1.93.0
+          toolchain: 1.95.0
           targets: wasm32-unknown-unknown
 
       # Install system OpenSSL explicitly here so the build uses system OpenSSL instead of building OpenSSL from source
@@ -74,9 +66,11 @@ jobs:
         if: github.event_name == 'pull_request'
         run: |
           git fetch --quiet --depth=1 origin develop
-          git diff --name-only FETCH_HEAD...HEAD |
-            grep -qE '(^|/)(Cargo\.toml|Cargo\.lock|rust-toolchain(\.toml)?)$|^\.cargo/|^\.github/workflows/' &&
-            echo changed=true >> "$GITHUB_OUTPUT" || true
+          # Two trees, no merge base: the shallow checkout has no common history.
+          files=$(git diff --name-only FETCH_HEAD HEAD)
+          if grep -qE '(^|/)(Cargo\.toml|Cargo\.lock|rust-toolchain(\.toml)?)$|^\.cargo/|^\.github/workflows/' <<< "$files"; then
+            echo changed=true >> "$GITHUB_OUTPUT"
+          fi
 
       # Cache policy: doc/ci-caching.md
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
@@ -87,22 +81,15 @@ jobs:
           # Only save the cache if there are dependency changes or it's not a merge group
           save-if: ${{ github.event_name != 'merge_group' && (github.event_name != 'pull_request' || steps.depchange.outputs.changed == 'true') }}
 
-      - name: Install cargo-nextest
-        uses: taiki-e/install-action@e88e69ecdb9658bd172693dcdc2c84e7f0ab6a11 # nextest
+      # After the cache restore, which also restores ~/.cargo/bin over earlier installs.
+      - name: Install just and cargo-nextest
+        uses: taiki-e/install-action@ab49d3c64680143e184118bed66a46419fc15519 # v2.90.5
         with:
-          tool: nextest
-
-      - name: Install cargo-near
-        run: |
-          if ! command -v cargo-near >/dev/null; then
-            curl --proto '=https' --tlsv1.2 -LsSf https://github.com/near/cargo-near/releases/latest/download/cargo-near-installer.sh | sh
-          fi
+          tool: just@1.54.0,nextest@0.9.145
 
       - name: Build Chain-Signatures Integration Tests
         run: just build tests
 
-      # Artifacts (contract wasm + node binary) build inside the test recipe via its setup dependency,
-      # so setup.sh runs exactly once per job.
       - name: Test
         run: just test-fixture
         env:
@@ -117,7 +104,8 @@ jobs:
 
     steps:
       - name: Comment on PR if this is a re-run
-        if: github.run_attempt > 1 && github.event_name == 'pull_request'
+        # Fork PRs get a read-only token, so commenting would fail the job.
+        if: github.run_attempt > 1 && github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork
         uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
         env:
           RUN_ATTEMPT: ${{ github.run_attempt }}
@@ -132,12 +120,6 @@ jobs:
 
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
-      - name: Install just
-        run: |
-          mkdir -p "$HOME/.cargo/bin"
-          curl --proto '=https' --tlsv1.2 -sSfL "https://github.com/casey/just/releases/download/1.54.0/just-1.54.0-x86_64-unknown-linux-musl.tar.gz" | tar zxf - -C "$HOME/.cargo/bin"
-          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
-
       - name: Login to GitHub Container Registry
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4
         with:
@@ -145,16 +127,10 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # Pull the images in parallel.
-      - name: Pull Redis and Foundry images
-        run: |
-          printf '%s\n' redis:7.4.2 ghcr.io/foundry-rs/foundry:nightly \
-            | xargs -P "$(nproc)" -n 1 docker pull
-
-      - name: Install Rust (1.93.0)
-        uses: dtolnay/rust-toolchain@283fb51ee3c8a49cd7c8ff30102f3fcf3cfbe0e1 # 1.93.0
+      - name: Install Rust (1.95.0)
+        uses: dtolnay/rust-toolchain@035fceb3c12fb0c6a9461b52775e16473133e591 # 1.95.0
         with:
-          toolchain: 1.93.0
+          toolchain: 1.95.0
           targets: wasm32-unknown-unknown
 
       # Install system OpenSSL explicitly here so the build uses system OpenSSL instead of building OpenSSL from source
@@ -166,7 +142,7 @@ jobs:
       - name: Install Node.js
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: '18'
+          node-version: '22'
           cache: 'npm'
           cache-dependency-path: chain-signatures/contract-eth/package-lock.json
 
@@ -183,9 +159,11 @@ jobs:
         if: github.event_name == 'pull_request'
         run: |
           git fetch --quiet --depth=1 origin develop
-          git diff --name-only FETCH_HEAD...HEAD |
-            grep -qE '(^|/)(Cargo\.toml|Cargo\.lock|rust-toolchain(\.toml)?)$|^\.cargo/|^\.github/workflows/' &&
-            echo changed=true >> "$GITHUB_OUTPUT" || true
+          # Two trees, no merge base: the shallow checkout has no common history.
+          files=$(git diff --name-only FETCH_HEAD HEAD)
+          if grep -qE '(^|/)(Cargo\.toml|Cargo\.lock|rust-toolchain(\.toml)?)$|^\.cargo/|^\.github/workflows/' <<< "$files"; then
+            echo changed=true >> "$GITHUB_OUTPUT"
+          fi
 
       # Cache policy: doc/ci-caching.md
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
@@ -196,10 +174,11 @@ jobs:
           # Only save the cache if there are dependency changes or it's not a merge group
           save-if: ${{ github.event_name != 'merge_group' && (github.event_name != 'pull_request' || steps.depchange.outputs.changed == 'true') }}
 
-      - name: Install cargo-nextest
-        uses: taiki-e/install-action@e88e69ecdb9658bd172693dcdc2c84e7f0ab6a11 # nextest
+      # After the cache restore, which also restores ~/.cargo/bin over earlier installs.
+      - name: Install just and cargo-nextest
+        uses: taiki-e/install-action@ab49d3c64680143e184118bed66a46419fc15519 # v2.90.5
         with:
-          tool: nextest
+          tool: just@1.54.0,nextest@0.9.145
 
       - name: Install cargo-near
         run: |
@@ -234,15 +213,14 @@ jobs:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
       - name: Install just
-        run: |
-          mkdir -p "$HOME/.cargo/bin"
-          curl --proto '=https' --tlsv1.2 -sSfL "https://github.com/casey/just/releases/download/1.54.0/just-1.54.0-x86_64-unknown-linux-musl.tar.gz" | tar zxf - -C "$HOME/.cargo/bin"
-          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
-
-      - name: Install Rust (1.93.0)
-        uses: dtolnay/rust-toolchain@283fb51ee3c8a49cd7c8ff30102f3fcf3cfbe0e1 # 1.93.0
+        uses: taiki-e/install-action@ab49d3c64680143e184118bed66a46419fc15519 # v2.90.5
         with:
-          toolchain: 1.93.0
+          tool: just@1.54.0
+
+      - name: Install Rust (1.95.0)
+        uses: dtolnay/rust-toolchain@035fceb3c12fb0c6a9461b52775e16473133e591 # 1.95.0
+        with:
+          toolchain: 1.95.0
           components: clippy
 
       # Cache policy: doc/ci-caching.md
@@ -251,9 +229,11 @@ jobs:
         if: github.event_name == 'pull_request'
         run: |
           git fetch --quiet --depth=1 origin develop
-          git diff --name-only FETCH_HEAD...HEAD |
-            grep -qE '(^|/)(Cargo\.toml|Cargo\.lock|rust-toolchain(\.toml)?)$|^\.cargo/|^\.github/workflows/' &&
-            echo changed=true >> "$GITHUB_OUTPUT" || true
+          # Two trees, no merge base: the shallow checkout has no common history.
+          files=$(git diff --name-only FETCH_HEAD HEAD)
+          if grep -qE '(^|/)(Cargo\.toml|Cargo\.lock|rust-toolchain(\.toml)?)$|^\.cargo/|^\.github/workflows/' <<< "$files"; then
+            echo changed=true >> "$GITHUB_OUTPUT"
+          fi
 
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
@@ -265,7 +245,7 @@ jobs:
       - name: Install Node.js
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: '18'
+          node-version: '22'
           cache: 'npm'
           cache-dependency-path: chain-signatures/contract-eth/package-lock.json
       - name: Install Foundry (anvil)
@@ -276,3 +256,30 @@ jobs:
 
       - name: Test
         run: just test-eth
+
+  # TRE-backed Tron gate: dockerized java-tron + gate-deployed GateToken
+  tre-integration-test:
+    name: TRE Integration Tests
+    runs-on: warp-ubuntu-latest-x64-4x
+
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Install just
+        uses: taiki-e/install-action@ab49d3c64680143e184118bed66a46419fc15519 # v2.90.5
+        with:
+          tool: just@1.54.0
+
+      - name: Install Rust (1.95.0)
+        uses: dtolnay/rust-toolchain@035fceb3c12fb0c6a9461b52775e16473133e591 # 1.95.0
+
+      # Cache policy: doc/ci-caching.md — restore only; unit/anvil jobs
+      # maintain the shared workspace-dev key.
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          shared-key: workspace-dev
+          cache-targets: true
+          save-if: false
+
+      - name: Test
+        run: just test-tron-tre

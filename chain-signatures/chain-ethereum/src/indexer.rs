@@ -11,10 +11,11 @@ use alloy::sol_types::SolEvent;
 use anyhow::Context as _;
 use async_trait::async_trait;
 use futures_util::{Stream, StreamExt};
-use mpc_chain_integration_core::utils::retry::SharedBackoff;
+use mpc_chain_integration_core::utils::retry::{
+    retry_until_ok_or_terminal, retry_until_some_or_terminal, SharedBackoff,
+};
 use mpc_chain_integration_core::{ChainIndexer, ChainTelemetry, StateManager};
 use mpc_primitives::{Chain, ChainEvent, IndexedSignRequest};
-use mpc_utils::task::{retry_until_ok, retry_until_some};
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 use tokio::time::Duration;
@@ -185,7 +186,11 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
             .filter(|l| l.topic0() == Some(&ChainSignatures::SignatureResponded::SIGNATURE_HASH))
             .cloned()
             .collect();
-        let sign_requests = parse_filtered_logs(request_logs);
+        // Derive request-specific entropy from the finalized containing block hash.
+        // Unlike PREVRANDAO, which is known before this block is produced, the block
+        // hash includes its final contents. The request ID gives same-block requests
+        // different proposer seeds without making entropy requester-predictable.
+        let sign_requests = parse_filtered_logs(request_logs, block_hash.into());
 
         // Collect execution confirmations (if any) and emit ExecutionConfirmed events
         let watcher = ExecutionWatcher::new(
@@ -313,20 +318,31 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
 
     /// The catchup-live anchor: the first processable head + 1.
     /// Returns `None` on cancellation.
-    async fn sample_anchor(&self, cancel: &CancellationToken) -> Option<u64> {
-        let tag = if self.config.optimistic_requests {
+    async fn sample_anchor(&self, cancel: &CancellationToken) -> anyhow::Result<Option<u64>> {
+        let tag = if self.config.network.is_optimistic() {
             BlockNumberOrTag::Latest
         } else {
             BlockNumberOrTag::Finalized
         };
-        retry_until_some(
+        let block = retry_until_some_or_terminal(
             cancel,
             Self::RETRY_DELAY,
             "ethereum startup head sampling",
             || async { self.client.get_block(BlockId::Number(tag)).await },
         )
+        .await?;
+        Ok(block.map(|block| block.header.number.saturating_add(1)))
+    }
+
+    /// The chain id the RPC endpoint serves. Returns `None` on cancellation.
+    async fn sample_chain_id(&self, cancel: &CancellationToken) -> anyhow::Result<Option<u64>> {
+        retry_until_some_or_terminal(
+            cancel,
+            Self::RETRY_DELAY,
+            "ethereum startup chain id sampling",
+            || async { self.client.get_chain_id().await.map(Some) },
+        )
         .await
-        .map(|block| block.header.number.saturating_add(1))
     }
 
     /// Wait until `next` is processable (the head covers it), returning the
@@ -367,13 +383,24 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
                 item = stream.next() => item,
             };
             let Some(item) = item else { break };
-            retry_until_ok(
+            retry_until_ok_or_terminal(
                 cancel,
                 Self::RETRY_DELAY,
                 "ethereum block processing",
-                || async { self.process_catchup_item(events_tx, &item).await },
+                || async {
+                    self.process_catchup_item(events_tx, &item)
+                        .await
+                        .with_context(|| match &item {
+                            CatchupItem::BatchBlock { block, .. } => {
+                                format!("block {}", block.header.number)
+                            }
+                            CatchupItem::Missing(block_id) => block_id
+                                .as_u64()
+                                .map_or_else(|| format!("{block_id:?}"), |n| format!("block {n}")),
+                        })
+                },
             )
-            .await;
+            .await?;
         }
         Ok(())
     }
@@ -390,13 +417,27 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for EthereumIndexer<S, T> 
     ) -> anyhow::Result<()> {
         tracing::info!("ethereum indexer started");
 
+        // An endpoint on another network would feed this node that network's
+        // requests and receipts, and admission checks transactions against the
+        // configured network only.
+        let expected = self.config.chain_id();
+        let Some(actual) = self.sample_chain_id(&cancel).await? else {
+            tracing::debug!("ethereum indexer cancelled before the chain id was sampled");
+            return Ok(());
+        };
+        anyhow::ensure!(
+            actual == expected,
+            "ethereum RPC serves chain id {actual}, but network {} has chain id {expected}",
+            self.config.network
+        );
+
         // Spawn the finalized head watcher.
         let mut finalized_watcher = self
             .finalized_head
             .spawn_watcher(self.client.clone(), cancel.clone());
 
         // Anchor = tip-at-startup + 1: the catchup-live boundary.
-        let Some(anchor) = self.sample_anchor(&cancel).await else {
+        let Some(anchor) = self.sample_anchor(&cancel).await? else {
             tracing::debug!("ethereum indexer cancelled before the startup tip was sampled");
             return Ok(());
         };
@@ -470,12 +511,18 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for EthereumIndexer<S, T> 
 
 #[cfg(test)]
 mod tests {
+    use crate::abi::ChainSignatures;
     use crate::client::CatchupItem;
+    use crate::config::EthNetwork;
+    use crate::event_parsing::derive_request_entropy;
     use crate::test_utils;
     use alloy::eips::BlockNumberOrTag;
+    use alloy::primitives::{Address, FixedBytes, Log as PrimitiveLog, U256};
     use alloy::rpc::types::BlockId;
+    use alloy::sol_types::SolEvent;
     use futures_util::StreamExt;
     use mockito::{Matcher, Server};
+    use mpc_chain_integration_core::utils::retry::is_retryable;
     use mpc_chain_integration_core::utils::stream::chain_event_channel;
     use mpc_chain_integration_core::{ChainIndexer, StateManager};
     use mpc_primitives::{Chain, ChainEvent};
@@ -485,6 +532,55 @@ mod tests {
     use tokio::sync::mpsc;
     use tokio::time::Duration;
     use tokio_util::sync::CancellationToken;
+
+    fn requested_log() -> alloy::rpc::types::Log {
+        let event = ChainSignatures::SignatureRequested {
+            sender: Address::from([0x11; 20]),
+            payload: FixedBytes::from([0x22; 32]),
+            keyVersion: 1,
+            deposit: U256::from(1000u64),
+            chainId: U256::from(31337u64),
+            path: "m/44'/60'/0'/0/0".to_string(),
+            algo: "ecdsa".to_string(),
+            dest: String::new(),
+            params: "{}".to_string(),
+        };
+        alloy::rpc::types::Log {
+            inner: PrimitiveLog::new_unchecked(
+                Address::ZERO,
+                vec![ChainSignatures::SignatureRequested::SIGNATURE_HASH],
+                event.encode_data().into(),
+            ),
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn indexed_request_entropy_uses_its_block_hash_and_request_id() {
+        let server = Server::new_async().await;
+        let item = test_utils::batch_block(1, vec![requested_log()]);
+        let CatchupItem::BatchBlock { block, .. } = &item else {
+            unreachable!("batch_block returns a BatchBlock")
+        };
+        let block_hash: [u8; 32] = block.header.hash.into();
+        let indexer = test_utils::TestIndexerBuilder::new(server.url())
+            .build()
+            .await;
+        let (events_tx, mut events_rx) = chain_event_channel();
+
+        indexer
+            .process_catchup_item(&events_tx, &item)
+            .await
+            .expect("request block processes");
+
+        let Some(ChainEvent::SignRequest { request, .. }) = events_rx.recv().await else {
+            panic!("expected SignRequest");
+        };
+        assert_eq!(
+            request.args.entropy,
+            derive_request_entropy(block_hash, request.id.request_id)
+        );
+    }
 
     #[tokio::test]
     async fn sample_anchor_fetches_finalized_head_directly() {
@@ -506,10 +602,88 @@ mod tests {
             .await;
 
         assert_eq!(
-            indexer.sample_anchor(&CancellationToken::new()).await,
+            indexer
+                .sample_anchor(&CancellationToken::new())
+                .await
+                .unwrap(),
             Some(43)
         );
         finalized_mock.assert_async().await;
+    }
+
+    /// An RPC that keeps failing past the client's own retries is retried, not refused.
+    /// A persistent 401 fails run() promptly instead of parking in the polls.
+    #[tokio::test]
+    async fn startup_polls_hand_terminal_errors_to_the_supervisor() {
+        let mut server = Server::new_async().await;
+
+        let http = server
+            .mock("POST", "/")
+            .with_status(401)
+            .expect(1)
+            .create_async()
+            .await;
+
+        let indexer = test_utils::TestIndexerBuilder::new(server.url())
+            .build()
+            .await;
+        let (events_tx, mut events_rx) = chain_event_channel();
+
+        let err = tokio::time::timeout(
+            Duration::from_secs(30),
+            indexer.run(events_tx, CancellationToken::new()),
+        )
+        .await
+        .expect("run() must fail fast instead of parking in the polls")
+        .unwrap_err();
+        assert!(!is_retryable(&err), "{err:#}");
+        assert!(events_rx.try_recv().is_err(), "no events");
+        http.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn sample_chain_id_retries_until_the_rpc_answers() {
+        // The test client makes 3 attempts per call, so this takes 4 sampling rounds.
+        const FAILURES: u64 = 10;
+        let mut server = Server::new_async().await;
+        let calls = AtomicU64::new(0);
+        let chain_id_mock = server
+            .mock("POST", "/")
+            .match_body(Matcher::PartialJson(json!({"method": "eth_chainId"})))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body_from_request(move |req| {
+                let body: serde_json::Value =
+                    serde_json::from_slice(req.body().expect("request body")).expect("json body");
+                let id = &body["id"];
+                let reply = if calls.fetch_add(1, Ordering::Relaxed) < FAILURES {
+                    json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "error": {"code": -32000, "message": "unavailable"}
+                    })
+                } else {
+                    json!({"jsonrpc": "2.0", "id": id, "result": format!("{:#x}", EthNetwork::Sepolia.chain_id())})
+                };
+                reply.to_string().into_bytes()
+            })
+            .expect(FAILURES as usize + 1)
+            .create_async()
+            .await;
+        let indexer = test_utils::TestIndexerBuilder::new(server.url())
+            .build()
+            .await;
+
+        let chain_id = tokio::time::timeout(
+            Duration::from_secs(10),
+            indexer.sample_chain_id(&CancellationToken::new()),
+        )
+        .await
+        .expect("the chain id should be sampled once the RPC answers")
+        .unwrap();
+
+        assert_eq!(chain_id, Some(EthNetwork::Sepolia.chain_id()));
+        chain_id_mock.assert_async().await;
     }
 
     #[tokio::test]
@@ -528,14 +702,66 @@ mod tests {
             .create_async()
             .await;
         let mut builder = test_utils::TestIndexerBuilder::new(server.url());
-        builder.eth.optimistic_requests = true;
+        builder.eth.network = crate::config::EthNetwork::Anvil;
         let indexer = builder.build().await;
 
         assert_eq!(
-            indexer.sample_anchor(&CancellationToken::new()).await,
+            indexer
+                .sample_anchor(&CancellationToken::new())
+                .await
+                .unwrap(),
             Some(43)
         );
         latest_mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn read_side_409s_retry_through_process_range() {
+        let mut server = Server::new_async().await;
+
+        let conflict = server
+            .mock("POST", "/")
+            .with_status(409)
+            .expect(2)
+            .create_async()
+            .await;
+        let served = server
+            .mock("POST", "/")
+            .match_body(Matcher::PartialJson(json!({
+                "method": "eth_getBlockByNumber",
+                "params": ["0xc", false]
+            })))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body_from_request(|req| {
+                let body: serde_json::Value =
+                    serde_json::from_slice(req.body().expect("request body")).expect("json body");
+                let id = body["id"].as_u64().expect("request id");
+                test_utils::block_response(id, 12).to_string().into_bytes()
+            })
+            .expect(1)
+            .create_async()
+            .await;
+
+        let indexer = test_utils::TestIndexerBuilder::new(server.url())
+            .build()
+            .await;
+        let (events_tx, mut events_rx) = chain_event_channel();
+
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            indexer.process_range(&events_tx, 12, 13, &CancellationToken::new()),
+        )
+        .await
+        .expect("a read-side 409 must stay in the retry loop, not escalate")
+        .unwrap();
+
+        assert!(matches!(
+            events_rx.recv().await,
+            Some(ChainEvent::Block(12))
+        ));
+        conflict.assert_async().await;
+        served.assert_async().await;
     }
 
     #[tokio::test]
@@ -847,7 +1073,7 @@ mod tests {
 
         assert!(events_rx.try_recv().is_err());
         // The underlying RPC error propagates
-        assert!(err.to_string().contains("error sending request"));
+        assert!(format!("{err:#}").contains("error sending request"));
     }
 
     #[tokio::test]
@@ -904,6 +1130,24 @@ mod tests {
             .into_bytes()
     }
 
+    /// Answers `eth_chainId` with `chain_id`, echoing the request id.
+    async fn mock_chain_id(server: &mut mockito::ServerGuard, chain_id: u64) -> mockito::Mock {
+        server
+            .mock("POST", "/")
+            .match_body(Matcher::PartialJson(json!({"method": "eth_chainId"})))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body_from_request(move |req| {
+                let body: serde_json::Value =
+                    serde_json::from_slice(req.body().expect("request body")).expect("json body");
+                json!({"jsonrpc": "2.0", "id": body["id"], "result": format!("{chain_id:#x}")})
+                    .to_string()
+                    .into_bytes()
+            })
+            .create_async()
+            .await
+    }
+
     /// Fixture for running the indexer in a test with a mock JSON-RPC server.
     /// Holds the mock server, finalized block, and other state for running the indexer in tests.
     struct RunFixture {
@@ -918,6 +1162,7 @@ mod tests {
         async fn spawn(processed: u64, finalized: u64) -> Self {
             let mut server = Server::new_async().await;
             let finalized = Arc::new(AtomicU64::new(finalized));
+            mock_chain_id(&mut server, EthNetwork::Sepolia.chain_id()).await;
 
             // Anchor sampling + finalized head polling.
             server
@@ -1004,6 +1249,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn run_refuses_an_rpc_on_another_network() {
+        let mut server = Server::new_async().await;
+        let chain_id_mock = mock_chain_id(&mut server, 1).await;
+        let blocks_mock = server
+            .mock("POST", "/")
+            .match_body(Matcher::PartialJson(
+                json!({"method": "eth_getBlockByNumber"}),
+            ))
+            .expect(0)
+            .create_async()
+            .await;
+        let indexer = test_utils::TestIndexerBuilder::new(server.url())
+            .build()
+            .await;
+
+        let (events_tx, _events_rx) = chain_event_channel();
+        let err = tokio::time::timeout(
+            Duration::from_secs(5),
+            indexer.run(events_tx, CancellationToken::new()),
+        )
+        .await
+        .expect("run() should fail without retrying")
+        .expect_err("another network's endpoint should be refused");
+
+        assert!(
+            err.to_string()
+                .contains("chain id 1, but network sepolia has chain id 11155111"),
+            "{err:#}"
+        );
+        chain_id_mock.assert_async().await;
+        blocks_mock.assert_async().await;
+    }
+
+    #[tokio::test]
     async fn run_processes_catchup_range_in_order() {
         let mut f = RunFixture::spawn(5, 9).await;
 
@@ -1036,6 +1315,52 @@ mod tests {
         );
 
         f.cancel_and_join().await;
+    }
+
+    /// The live tail hands terminal errors to the supervisor too: after
+    /// CatchupCompleted, a 401 exits run() instead of spinning at 500 ms.
+    #[tokio::test]
+    async fn run_exits_on_a_terminal_live_tail_failure() {
+        // catchup consumes the fixture's batch mock first, so the live-tail
+        // batch request falls through to the 401 mock below
+        let mut f = RunFixture::spawn(9, 11).await;
+        assert!(matches!(f.next_event().await, ChainEvent::Block(10)));
+        assert!(matches!(f.next_event().await, ChainEvent::Block(11)));
+        assert!(matches!(f.next_event().await, ChainEvent::CatchupCompleted));
+
+        // batch 401 degrades block 12 to Missing; the refetch 401s
+        let batch = f
+            ._server
+            .mock("POST", "/")
+            .match_body(Matcher::Regex(r"^\[".to_string()))
+            .with_status(401)
+            .expect(1)
+            .create_async()
+            .await;
+        let refetch = f
+            ._server
+            .mock("POST", "/")
+            .match_body(Matcher::PartialJson(json!({
+                "method": "eth_getBlockByNumber",
+                "params": ["0xc", false]
+            })))
+            .with_status(401)
+            .expect(1)
+            .create_async()
+            .await;
+
+        f.finalized.store(12, Ordering::Relaxed);
+
+        let err = tokio::time::timeout(Duration::from_secs(30), &mut f.run_handle)
+            .await
+            .expect("run() must exit on a terminal live-tail failure")
+            .expect("run task panicked")
+            .expect_err("a terminal live-tail error must exit run()");
+        assert!(!is_retryable(&err), "{err:#}");
+        assert!(format!("{err:#}").contains("block 12"), "{err:#}");
+        assert!(f.events_rx.try_recv().is_err(), "no events");
+        batch.assert_async().await;
+        refetch.assert_async().await;
     }
 
     #[tokio::test]

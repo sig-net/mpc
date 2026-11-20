@@ -415,7 +415,6 @@ async fn run_stale_task_test(drop_respond_event: bool) {
     let node_2 = Participant::from(2);
     let bad_request_seed = 3u32;
     let bad_sign_id = sign_request(bad_request_seed).id;
-    let signature_timeout_ms = 5_000;
 
     let tracker = SignatureTracker::default();
     let tracker_counts = Arc::clone(&tracker.counts);
@@ -423,7 +422,7 @@ async fn run_stale_task_test(drop_respond_event: bool) {
 
     let mut builder = MpcFixtureBuilder::new(3, 2)
         .only_generate_signatures()
-        .with_signature_timeout_ms(signature_timeout_ms)
+        .with_timeouts(|t| t.signature_generation = Duration::from_secs(5))
         .with_mock_stream(Chain::Solana, MockStream::default())
         .await
         // Exclude node 2 from generation for the bad request by dropping its Accept.
@@ -475,9 +474,13 @@ async fn run_stale_task_test(drop_respond_event: bool) {
             .process_sign_requests(Chain::Solana, &[sign_request(seed)])
             .await;
 
+        // Count publishes only: checkpoint votes are RPC actions too, and one
+        // of those must not stand in for a stuck request.
         match tokio::time::timeout(
             per_request_timeout,
-            network.wait_for_actions(completed as usize + 1),
+            network.wait_for_actions_matching(completed as usize + 1, |action| {
+                action.contains("RpcAction::Publish")
+            }),
         )
         .await
         {
@@ -554,7 +557,7 @@ async fn run_stale_task_test(drop_respond_event: bool) {
             .await;
 
         let actions = network
-            .assert_actions(completed as usize + 1, Duration::from_secs(30))
+            .assert_publish_actions(completed as usize + 1, Duration::from_secs(30))
             .await;
         assert_eq!(actions.len(), completed as usize + 1);
     } else {

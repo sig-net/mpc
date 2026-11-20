@@ -3,6 +3,7 @@ use crate::mesh::MeshState;
 use crate::node_client::NodeClient;
 use crate::protocol::contract::primitives::ParticipantInfo;
 use crate::types::CheckpointWatcher;
+use mpc_chain_integration_core::StateManager;
 
 use crate::backlog::Checkpoint;
 use cait_sith::protocol::Participant;
@@ -21,6 +22,7 @@ pub async fn align_backlog_with_consensus(
     mesh_state: &mut watch::Receiver<MeshState>,
     node_client: &NodeClient,
     my_account_id: &AccountId,
+    root_pk: mpc_primitives::PublicKey,
 ) -> Option<u64> {
     let checkpoint_digest = *checkpoints_rx.borrow_and_update().as_ref()?;
 
@@ -44,11 +46,25 @@ pub async fn align_backlog_with_consensus(
         }
     }
 
-    tracing::warn!(
-        ?chain,
-        ?checkpoint_digest.digest,
-        "Consensus checkpoint mismatch/divergence detected: triggering regression"
-    );
+    // Below the consensus height the node cannot hold that checkpoint yet.
+    let processed = backlog.get_processed_block(chain).await;
+    let behind = processed.is_none_or(|height| height < checkpoint_digest.height);
+    if behind {
+        tracing::info!(
+            ?chain,
+            consensus_height = checkpoint_digest.height,
+            ?processed,
+            "behind the consensus checkpoint: catching up"
+        );
+    } else {
+        tracing::warn!(
+            ?chain,
+            ?checkpoint_digest.digest,
+            consensus_height = checkpoint_digest.height,
+            ?processed,
+            "Consensus checkpoint mismatch/divergence detected: triggering regression"
+        );
+    }
     // A reset settles this digest for a state no node has produced, so
     // `find_consensus_checkpoint` would poll peers forever. Rebuild it instead
     // and fall through to the ordinary regression path, which is what makes a
@@ -74,9 +90,14 @@ pub async fn align_backlog_with_consensus(
         .await?
     };
 
-    if let Err(err) = backlog.regress(&fetched_checkpoint).await {
+    if let Err(err) = backlog.regress(&fetched_checkpoint, root_pk).await {
         tracing::error!(error = %format_args!("{err:#}"), %chain, "failed to regress backlog to checkpoint");
         return None;
+    }
+    if behind {
+        tracing::info!(%chain, "backlog rebased onto the consensus checkpoint");
+    } else {
+        tracing::warn!(%chain, "backlog regressed via consensus checkpoint");
     }
 
     Some(fetched_checkpoint.block_height)
@@ -213,7 +234,7 @@ mod tests {
     use crate::backlog::{Backlog, BacklogEntry, Checkpoint};
     use crate::mesh::connection::NodeStatus;
     use crate::mesh::MeshState;
-    use crate::node_client::{NodeClient, Options as NodeClientOptions};
+    use crate::node_client::NodeClient;
     use crate::protocol::ParticipantInfo;
     use cait_sith::protocol::Participant;
     use mpc_chain_integration_core::StateManager;
@@ -240,7 +261,7 @@ mod tests {
             let backlog = Backlog::new();
             let (checkpoints_tx, checkpoints_rx) = watch::channel(digest);
             let (mesh_tx, mesh_rx) = watch::channel(MeshState::default());
-            let node_client = NodeClient::new(&NodeClientOptions::default());
+            let node_client = NodeClient::new();
             let my_account_id: AccountId = "test.near".parse().unwrap();
             Self {
                 chain,
@@ -262,6 +283,7 @@ mod tests {
                 &mut self.mesh_rx,
                 &self.node_client,
                 &self.my_account_id,
+                k256::AffinePoint::GENERATOR,
             )
             .await
         }
@@ -410,7 +432,7 @@ mod tests {
                     chain,
                     block_height: case.peer_checkpoint_height,
                     pending_requests,
-                    cumulative_digest: Checkpoint::empty_cumulative_digest(),
+                    legacy_digest: None,
                 };
                 peer_digest = peer_checkpoint.digest();
 
@@ -418,10 +440,11 @@ mod tests {
                 let peer_url = s.url();
 
                 let mut response_map = HashMap::new();
-                response_map.insert(chain, peer_checkpoint);
+                response_map.insert(chain, peer_checkpoint.facts());
                 let response = crate::web::CheckpointResponse {
                     version: crate::CHECKPOINT_VERSION,
-                    checkpoints: response_map,
+                    facts: response_map,
+                    ..Default::default()
                 };
                 let mut body = Vec::new();
                 ciborium::into_writer(&response, &mut body).unwrap();
@@ -540,7 +563,8 @@ mod tests {
         ciborium::into_writer(
             &crate::web::CheckpointResponse {
                 version: crate::CHECKPOINT_VERSION + 1,
-                checkpoints: [(chain, checkpoint.clone())].into_iter().collect(),
+                facts: [(chain, checkpoint.facts())].into_iter().collect(),
+                ..Default::default()
             },
             &mut newer_body,
         )
@@ -559,7 +583,8 @@ mod tests {
         ciborium::into_writer(
             &crate::web::CheckpointResponse {
                 version: crate::CHECKPOINT_VERSION,
-                checkpoints: [(chain, checkpoint)].into_iter().collect(),
+                facts: [(chain, checkpoint.facts())].into_iter().collect(),
+                ..Default::default()
             },
             &mut current_body,
         )
@@ -585,13 +610,7 @@ mod tests {
                 info
             }),
         ];
-        let result = query_peers_checkpoint(
-            &peers,
-            &NodeClient::new(&NodeClientOptions::default()),
-            chain,
-            digest,
-        )
-        .await;
+        let result = query_peers_checkpoint(&peers, &NodeClient::new(), chain, digest).await;
 
         assert!(result.is_some());
         newer_mock.assert_async().await;
@@ -716,6 +735,7 @@ mod tests {
                 &mut mesh_rx_clone,
                 &node_client_clone,
                 &my_account_id_clone,
+                k256::AffinePoint::GENERATOR,
             )
             .await
         });

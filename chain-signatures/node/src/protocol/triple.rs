@@ -1,14 +1,15 @@
-use super::message::{MessageChannel, PositMessage, PositProtocolId, TripleMessage};
+use super::message::{MessageChannel, PositProtocolId, TripleMessage};
 use super::posit::{PositAction, PositInternalAction, Posits};
 use super::MpcSignProtocol;
 use crate::config::Config;
 use crate::mesh::MeshState;
+use crate::protocol::{should_generate, AcceptLimits};
+use crate::storage::protocol_storage::StockCounts;
 
 use crate::protocol::posit::{PositRejectReason, Positor};
 use crate::storage::triple_storage::{TriplePair, TriplePairSlot, TripleStorage};
 use crate::types::TripleProtocol;
 use mpc_chain_near::AffinePointExt as _;
-use mpc_contract::config::ProtocolConfig;
 use mpc_utils::task::JoinMap;
 
 use cait_sith::protocol::{Action, InitializationError, Participant};
@@ -16,17 +17,21 @@ use cait_sith::triples::{TriplePub, TripleShare};
 use chrono::Utc;
 use k256::Secp256k1;
 use serde::{Deserialize, Serialize};
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{mpsc, watch, Semaphore};
 use tokio::task::JoinHandle;
 
 use std::collections::HashSet;
 use std::fmt;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 /// Unique number used to identify a specific ongoing triple generation protocol.
 /// Without `TripleId` it would be unclear where to route incoming cait-sith triple generation
 /// messages.
 pub type TripleId = u64;
+
+/// Triple pokes running at once per node, which bounds the CPU they take from messaging.
+const MAX_CONCURRENT_TRIPLE_POKES: usize = 2;
 
 /// A completed triple.
 #[derive(Clone, Serialize, Deserialize, Debug)]
@@ -40,14 +45,13 @@ struct TripleGenerator {
     me: Participant,
     owner: Participant,
     participants: Vec<Participant>,
-    /// Option to temporarily move it to a blocking task. Must be Some in all
-    /// other circumstances.
-    protocol: Option<TripleProtocol>,
+    protocol: TripleProtocol,
     timeout: Duration,
     slot: TriplePairSlot,
     created: Instant,
     inbox: mpsc::Receiver<TripleMessage>,
     msg: MessageChannel,
+    pokes: Arc<Semaphore>,
     #[cfg(feature = "debug-page")]
     debug_view: crate::web::debug::DebugPageTaskHandle,
 }
@@ -63,6 +67,7 @@ impl TripleGenerator {
         timeout: Duration,
         slot: TriplePairSlot,
         msg: &MessageChannel,
+        pokes: Arc<Semaphore>,
         _node_account_id: &str,
     ) -> Result<Self, InitializationError> {
         #[cfg(feature = "debug-page")]
@@ -83,12 +88,13 @@ impl TripleGenerator {
             me,
             owner,
             participants,
-            protocol: Some(Box::new(protocol)),
+            protocol: Box::new(protocol),
             timeout,
             slot,
             created: Instant::now(),
             inbox,
             msg: msg.clone(),
+            pokes,
             #[cfg(feature = "debug-page")]
             debug_view: crate::web::debug::register_task(
                 node_account_id.to_string(),
@@ -127,30 +133,32 @@ impl TripleGenerator {
             .observe(self.created.elapsed().as_millis() as f64);
 
         loop {
+            // Let tasks this one woke (outbox, next permit holder) run before the next poke.
+            tokio::task::yield_now().await;
+            // Held only while poking, never while waiting for a peer's message.
+            let Ok(Ok(permit)) = tokio::time::timeout(
+                self.timeout.saturating_sub(self.created.elapsed()),
+                self.pokes.acquire(),
+            )
+            .await
+            else {
+                crate::metrics::protocols::TRIPLE_GENERATOR_FAILURES.inc();
+                if self.owner == self.me {
+                    crate::metrics::protocols::TRIPLE_GENERATOR_OWNED_FAILURES.inc();
+                }
+                tracing::warn!(
+                    id = self.id,
+                    "triple generation timeout waiting for a poke permit"
+                );
+                break;
+            };
             let poke_start_time = Instant::now();
-            // Temporarily move protocol into blocking task and restore it immediately after.
-            let mut protocol = self.protocol.take().expect("must be always be Some");
-
-            let poke_result =
-                match tokio::task::spawn_blocking(move || (protocol.poke(), protocol)).await {
-                    Ok((res, protocol)) => {
-                        self.protocol = Some(protocol);
-                        res
-                    }
-                    Err(err) => {
-                        crate::metrics::protocols::TRIPLE_GENERATOR_FAILURES.inc();
-                        if self.owner == self.me {
-                            crate::metrics::protocols::TRIPLE_GENERATOR_OWNED_FAILURES.inc();
-                        }
-                        tracing::warn!(
-                            id = self.id,
-                            ?err,
-                            elapsed = ?start_time.elapsed(),
-                            "triple generation failed in a spawned blocking task",
-                        );
-                        return;
-                    }
-                };
+            // Hands this worker's other tasks to another thread while the poke runs.
+            let poke_result = tokio::task::block_in_place(|| self.protocol.poke());
+            let poke_end_time = Instant::now();
+            drop(permit);
+            // Lets an abort requested during the poke take effect before its action runs.
+            tokio::task::yield_now().await;
 
             let action = match poke_result {
                 Ok(action) => action,
@@ -171,9 +179,9 @@ impl TripleGenerator {
 
             total_wait += poke_start_time - poke_last_time;
             total_pokes += 1;
-            poke_last_time = Instant::now();
+            poke_last_time = poke_end_time;
             crate::metrics::protocols::TRIPLE_POKE_CPU_TIME
-                .observe(poke_start_time.elapsed().as_millis() as f64);
+                .observe((poke_end_time - poke_start_time).as_millis() as f64);
             #[cfg(feature = "debug-page")]
             self.render_debug(total_pokes);
 
@@ -187,10 +195,7 @@ impl TripleGenerator {
                         }
                         break;
                     };
-                    self.protocol
-                        .as_mut()
-                        .expect("must always be Some")
-                        .message(msg.from, msg.data);
+                    self.protocol.message(msg.from, msg.data);
                 }
                 Action::SendMany(data) => {
                     for to in &self.participants {
@@ -292,7 +297,6 @@ impl Drop for TripleGenerator {
         let msg = self.msg.clone();
         tokio::spawn(async move {
             msg.unsubscribe_triple(id).await;
-            msg.filter_triple(id).await;
         });
     }
 }
@@ -306,11 +310,13 @@ pub struct TripleSpawner {
     /// The set of all ongoing triple generation protocols. This is a map of `TripleId` to
     /// the `JoinHandle` of the triple generation task. Calling `join_next` will wait on
     /// the next task to complete and return the result of the task. This is only restricted
-    /// through max introduction and concurrent generation in the system.
+    /// through `max_mine_generations`.
     ongoing: JoinMap<TripleId, ()>,
 
     /// The set of ongoing triples that are owned by the current node.
     ongoing_owned: HashSet<TripleId>,
+    /// Stock counts refreshed on the expiration tick; see [`StockCounts`].
+    stock: StockCounts,
 
     /// The protocol posits that are currently in progress.
     posits: Posits<TripleId, ()>,
@@ -320,6 +326,8 @@ pub struct TripleSpawner {
     epoch: u64,
     msg: MessageChannel,
     node_account_id: String,
+    /// Shared by this node's triple generators; see [`MAX_CONCURRENT_TRIPLE_POKES`].
+    pokes: Arc<Semaphore>,
 
     #[cfg(feature = "debug-page")]
     posits_debug_view: crate::web::debug::DebugPageTaskHandle,
@@ -357,9 +365,11 @@ impl TripleSpawner {
             triple_storage: storage.clone(),
             ongoing: JoinMap::new(),
             ongoing_owned: HashSet::new(),
+            stock: StockCounts::default(),
             posits: Posits::new(me),
             msg,
             node_account_id,
+            pokes: Arc::new(Semaphore::new(MAX_CONCURRENT_TRIPLE_POKES)),
             #[cfg(feature = "debug-page")]
             posits_debug_view,
         }
@@ -386,8 +396,14 @@ impl TripleSpawner {
         self.ongoing.len()
     }
 
-    pub fn len_introduced(&self) -> usize {
+    pub fn len_mine_generations(&self) -> usize {
         self.posits.len_proposed() + self.ongoing_owned.len()
+    }
+
+    /// Read the stock counts from storage. Called once a second from the run
+    /// loop, so the 100 ms stockpile tick decides from memory.
+    async fn refresh_stock(&mut self) {
+        self.stock = self.triple_storage.stock_counts(self.me).await;
     }
 
     /// Returns the number of unspent triples we will have in the manager once
@@ -396,23 +412,68 @@ impl TripleSpawner {
         self.triple_storage.len_generated().await + self.ongoing.len()
     }
 
+    /// Returns why a PROPOSE fails storage or load checks or `None` if they pass.
+    async fn propose_rejection(
+        &self,
+        id: TripleId,
+        from: Participant,
+        limits: AcceptLimits,
+    ) -> Option<PositRejectReason> {
+        // Generations this node runs or has promised to join: a PROPOSE it
+        // accepted commits it before the START arrives.
+        let committed = self.ongoing.len() + self.posits.len();
+        // A repeat of a posit we already hold commits nothing new, so the load
+        // bounds do not apply; `act` checks the proposer and refreshes its clock.
+        let repeat = self.posits.contains(&id);
+        if self.contains_ongoing(id) {
+            tracing::warn!(id, ?from, "triple already generating");
+            Some(PositRejectReason::AlreadyGenerating)
+        } else if !repeat && committed >= limits.ongoing {
+            tracing::warn!(id, ?from, committed, "triple generations saturated");
+            Some(PositRejectReason::Saturated)
+        } else if !repeat && self.stock.generated >= limits.generated {
+            tracing::warn!(
+                id,
+                ?from,
+                generated = self.stock.generated,
+                "triple pool overstocked"
+            );
+            Some(PositRejectReason::Overstocked)
+        } else if self.contains(id).await {
+            tracing::warn!(id, ?from, "triple already generated");
+            Some(PositRejectReason::AlreadyGenerating)
+        } else {
+            None
+        }
+    }
+
+    /// Lets integration tests feed posit messages without the run loop.
+    #[cfg(any(test, feature = "test-feature"))]
+    pub async fn process_posit_for_test(
+        &mut self,
+        id: TripleId,
+        from: Participant,
+        action: PositAction,
+        timeout: Duration,
+        limits: AcceptLimits,
+    ) {
+        self.process_posit(id, from, action, timeout, limits).await;
+    }
+
     async fn process_posit(
         &mut self,
         id: TripleId,
         from: Participant,
         action: PositAction,
         timeout: Duration,
+        limits: AcceptLimits,
     ) {
-        let internal_action = if self.contains_ongoing(id) {
-            tracing::warn!(id, ?from, ?action, "triple already generating");
-            PositInternalAction::Reply(PositAction::RejectWithReason(
-                PositRejectReason::AlreadyGenerating,
-            ))
-        } else if self.contains(id).await {
-            tracing::warn!(id, ?from, ?action, "triple already generated");
-            PositInternalAction::Reply(PositAction::RejectWithReason(
-                PositRejectReason::AlreadyGenerating,
-            ))
+        let rejection = match action {
+            PositAction::Propose => self.propose_rejection(id, from, limits).await,
+            _ => None,
+        };
+        let internal_action = if let Some(reason) = rejection {
+            PositInternalAction::Reply(PositAction::RejectWithReason(reason))
         } else {
             let internal_action = self.posits.act(id, from, self.threshold, &action);
             #[cfg(feature = "debug-page")]
@@ -422,19 +483,10 @@ impl TripleSpawner {
         };
 
         match internal_action {
-            PositInternalAction::None => {}
-            PositInternalAction::Abort => {}
+            PositInternalAction::None | PositInternalAction::Abort => {}
             PositInternalAction::Reply(action) => {
                 self.msg
-                    .send(
-                        self.me,
-                        from,
-                        PositMessage {
-                            id: PositProtocolId::Triple(id),
-                            from: self.me,
-                            action,
-                        },
-                    )
+                    .send_posit(self.me, from, PositProtocolId::Triple(id), action)
                     .await;
             }
             PositInternalAction::StartProtocol(participants, positor) => {
@@ -448,23 +500,14 @@ impl TripleSpawner {
     async fn propose_posit(&mut self, active: &[Participant]) {
         let pair_id = rand::random();
         self.posits.propose(pair_id, (), active);
-        for &p in active.iter() {
-            if p == self.me {
-                continue;
-            }
-
-            self.msg
-                .send(
-                    self.me,
-                    p,
-                    PositMessage {
-                        id: PositProtocolId::Triple(pair_id),
-                        from: self.me,
-                        action: PositAction::Propose,
-                    },
-                )
-                .await;
-        }
+        self.msg
+            .broadcast_posit(
+                self.me,
+                active,
+                PositProtocolId::Triple(pair_id),
+                PositAction::Propose,
+            )
+            .await;
     }
 
     async fn start_generation(
@@ -497,22 +540,14 @@ impl TripleSpawner {
         }
 
         self.ongoing_owned.insert(id);
-        for &to in &participants {
-            if to == self.me {
-                continue;
-            }
-            self.msg
-                .send(
-                    self.me,
-                    to,
-                    PositMessage {
-                        id: PositProtocolId::Triple(id),
-                        from: self.me,
-                        action: PositAction::Start(participants.clone()),
-                    },
-                )
-                .await;
-        }
+        self.msg
+            .broadcast_posit(
+                self.me,
+                &participants,
+                PositProtocolId::Triple(id),
+                PositAction::Start(participants.clone()),
+            )
+            .await;
     }
 
     async fn generate_with_id(
@@ -539,6 +574,7 @@ impl TripleSpawner {
             timeout,
             slot,
             &self.msg,
+            self.pokes.clone(),
             &self.node_account_id,
         )
         .await?;
@@ -549,28 +585,21 @@ impl TripleSpawner {
         Ok(())
     }
 
-    /// Generate new triples if this node owns fewer than the per-node minimum
-    /// (`min_triples`) and the network-wide total hasn't reached the cap (`max_triples`).
-    async fn stockpile(&mut self, participants: &[Participant], cfg: &ProtocolConfig) {
-        let not_enough_triples = {
-            // Network-wide cap: stop generating once total potential triples reach max_triples.
-            if self.len_potential().await >= cfg.triple.max_triples as usize {
-                false
-            } else {
-                // Per-node floor: generate if this node owns fewer than min_triples.
-                self.len_mine().await < cfg.triple.min_triples as usize
-                    && self.len_introduced() < cfg.max_concurrent_introduction as usize
-                    && self.ongoing.len() < cfg.max_concurrent_generation as usize
-            }
-        };
-
-        if not_enough_triples {
+    /// Generate new triple pairs if this node owns fewer than its floor.
+    async fn stockpile(&mut self, participants: &[Participant], cfg: &Config) {
+        if should_generate(
+            self.stock,
+            self.len_mine_generations(),
+            cfg.protocol.min_mine_triple_pairs as usize,
+            cfg.protocol.max_mine_generations as usize,
+        ) {
             self.propose_posit(participants).await;
         }
     }
 
     async fn run(
         mut self,
+        num_nodes: usize,
         mut mesh_state: watch::Receiver<MeshState>,
         mut cfg: watch::Receiver<Config>,
         ongoing_gen_tx: watch::Sender<usize>,
@@ -578,12 +607,16 @@ impl TripleSpawner {
         let mut stockpile_interval = tokio::time::interval(Duration::from_millis(100));
         stockpile_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut expiration_interval = tokio::time::interval(Duration::from_secs(1));
+        expiration_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut posits = self.msg.subscribe_triple_posit().await;
 
         let mut active = mesh_state.borrow().active().keys_vec();
-        let mut protocol = cfg.borrow().protocol.clone();
+        let mut config = cfg.borrow().clone();
+        let timeout = config.timeouts.triple_generation;
+        let mut limits = accept_limits(&config, num_nodes);
         let mut last_active_warn = None;
 
+        self.refresh_stock().await;
         loop {
             tokio::select! {
                 _ = expiration_interval.tick() => {
@@ -591,13 +624,18 @@ impl TripleSpawner {
                         let (id, PositInternalAction::StartProtocol(participants, positor)) = action else {
                             continue;
                         };
-                        let timeout = Duration::from_millis(protocol.triple.generation_timeout);
                         self.start_generation(id, participants, positor, timeout).await;
                     }
+                    self.refresh_stock().await;
+                    crate::metrics::storage::NUM_TRIPLES_MINE.set(self.stock.mine as i64);
+                    crate::metrics::storage::NUM_TRIPLES_TOTAL.set(self.stock.generated as i64);
+                    crate::metrics::protocols::NUM_TRIPLE_GENERATORS_INTRODUCED
+                        .set(self.len_mine_generations() as i64);
+                    crate::metrics::protocols::NUM_TRIPLE_GENERATORS_TOTAL
+                        .set(self.len_ongoing() as i64);
                 }
                 Some((id, from, action)) = posits.recv() => {
-                    let timeout = Duration::from_millis(protocol.triple.generation_timeout);
-                    self.process_posit(id, from, action, timeout).await;
+                    self.process_posit(id, from, action, timeout, limits).await;
                 }
                 // `join_next` returns None on the set being empty, so don't handle that case
                 Some(result) = self.ongoing.join_next(), if !self.ongoing.is_empty() => {
@@ -614,17 +652,9 @@ impl TripleSpawner {
                 _ = stockpile_interval.tick() => {
                     if active.len() >= self.threshold {
                         last_active_warn = None;
-                        self.stockpile(&active, &protocol).await;
+                        self.stockpile(&active, &config).await;
                         let _ = ongoing_gen_tx.send(self.ongoing.len());
 
-                        crate::metrics::storage::NUM_TRIPLES_MINE
-                            .set(self.len_mine().await as i64);
-                        crate::metrics::storage::NUM_TRIPLES_TOTAL
-                            .set(self.triple_storage.len_generated().await as i64);
-                        crate::metrics::protocols::NUM_TRIPLE_GENERATORS_INTRODUCED
-                            .set(self.len_introduced() as i64);
-                        crate::metrics::protocols::NUM_TRIPLE_GENERATORS_TOTAL
-                            .set(self.len_ongoing() as i64);
                     } else if last_active_warn.is_none_or(|i: Instant| i.elapsed() > Duration::from_secs(60)) {
                         tracing::warn!(
                             ?active,
@@ -635,7 +665,8 @@ impl TripleSpawner {
                     }
                 }
                 Ok(()) = cfg.changed() => {
-                    protocol = cfg.borrow().protocol.clone();
+                    config = cfg.borrow().clone();
+                    limits = accept_limits(&config, num_nodes);
                 }
                 Ok(()) = mesh_state.changed() => {
                     active = mesh_state.borrow().active().keys_vec();
@@ -643,6 +674,14 @@ impl TripleSpawner {
             }
         }
     }
+}
+
+fn accept_limits(config: &Config, num_nodes: usize) -> AcceptLimits {
+    AcceptLimits::new(
+        config.protocol.min_mine_triple_pairs as usize,
+        config.protocol.max_mine_generations as usize,
+        num_nodes,
+    )
 }
 
 impl Drop for TripleSpawner {
@@ -658,13 +697,19 @@ pub struct TripleSpawnerTask {
 }
 
 impl TripleSpawnerTask {
-    pub fn run(me: Participant, threshold: usize, epoch: u64, ctx: &MpcSignProtocol) -> Self {
+    pub fn run(
+        me: Participant,
+        threshold: usize,
+        num_nodes: usize,
+        epoch: u64,
+        ctx: &MpcSignProtocol,
+    ) -> Self {
         let (ongoing_gen_tx, ongoing_gen_rx) = watch::channel(0);
         let manager = TripleSpawner::new(
             me,
             threshold,
             epoch,
-            &ctx.triple_storage,
+            &ctx.triple_storage.to_ready(me),
             ctx.msg_channel.clone(),
             ctx.my_account_id.to_string(),
         );
@@ -672,6 +717,7 @@ impl TripleSpawnerTask {
         Self {
             ongoing_gen_rx,
             handle: tokio::spawn(manager.run(
+                num_nodes,
                 ctx.mesh_state.clone(),
                 ctx.config.clone(),
                 ongoing_gen_tx,

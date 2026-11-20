@@ -20,6 +20,7 @@ use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::registry::LookupSpan;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{EnvFilter, Layer};
+use url::Url;
 
 #[derive(Debug, Clone, clap::Parser)]
 pub struct Options {
@@ -34,43 +35,71 @@ pub struct Options {
     #[arg(
         long,
         env("MPC_OTLP_ENDPOINT"),
-        default_value = "http://localhost:4318"
+        default_value = "http://localhost:4318",
+        hide_env_values = true
     )]
-    pub otlp_endpoint: String,
+    pub otlp_endpoint: Url,
 
-    #[arg(long, env("MPC_DISABLE_GCP_LOGS"), default_value = "false")]
-    pub disable_gcp_logs: bool,
+    /// Console log format. `json` is GCP Cloud Logging structured output.
+    #[arg(long, env("MPC_LOG_FORMAT"), value_enum, default_value_t = LogFormat::Plain)]
+    pub log_format: LogFormat,
 }
 
 impl Default for Options {
     fn default() -> Self {
         Self {
             opentelemetry_level: OpenTelemetryLevel::default(),
-            otlp_endpoint: "http://localhost:4318".to_string(),
-            disable_gcp_logs: false,
+            otlp_endpoint: "http://localhost:4318".parse().expect("a valid literal"),
+            log_format: LogFormat::Plain,
         }
     }
 }
 
-impl Options {
-    pub fn into_str_args(self) -> Vec<String> {
-        let mut opts = vec![
-            "--opentelemetry-level".to_string(),
-            self.opentelemetry_level.to_string(),
-            "--otlp-endpoint".to_string(),
-            self.otlp_endpoint,
-        ];
-        if self.disable_gcp_logs {
-            opts.push("--disable-gcp-logs".to_string());
-        }
-        opts
-    }
+/// Deployment a node belongs to; labels logs and telemetry.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub enum Env {
+    Dev,
+    Testnet,
+    Mainnet,
+    /// Integration tests; test builds only.
+    #[cfg(feature = "test-feature")]
+    Test,
+}
 
-    pub fn test() -> Self {
-        Self {
-            disable_gcp_logs: true,
-            ..Default::default()
+impl Env {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Env::Dev => "dev",
+            Env::Testnet => "testnet",
+            Env::Mainnet => "mainnet",
+            #[cfg(feature = "test-feature")]
+            Env::Test => "test",
         }
+    }
+}
+
+impl Display for Env {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, clap::ValueEnum)]
+pub enum LogFormat {
+    /// Human-readable lines.
+    #[default]
+    Plain,
+    /// GCP Cloud Logging structured lines.
+    Json,
+}
+
+impl Display for LogFormat {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let str = match self {
+            LogFormat::Plain => "plain",
+            LogFormat::Json => "json",
+        };
+        write!(f, "{str}")
     }
 }
 
@@ -123,26 +152,6 @@ impl Drop for OtlpGuard {
     }
 }
 
-/// This will whether this code is being ran on top of GCP or not.
-async fn is_running_on_gcp() -> bool {
-    // Check if running in Google Cloud Run: https://cloud.google.com/run/docs/container-contract#services-env-vars
-    if std::env::var("K_SERVICE").is_ok() {
-        return true;
-    }
-
-    let resp = reqwest::Client::new()
-        .get("http://metadata.google.internal/computeMetadata/v1/instance/id")
-        .header("Metadata-Flavor", "Google")
-        .timeout(std::time::Duration::from_millis(200))
-        .send()
-        .await;
-
-    match resp {
-        Ok(resp) => resp.status().is_success(),
-        _ => false,
-    }
-}
-
 /// Formatter that adds the `NodeId({node_id})` to the log line. Useful for tests when
 /// multiple nodes are logging to the same std/err output.
 struct NodeIdFormatter {
@@ -176,25 +185,31 @@ where
     }
 }
 
-fn get_resource(env: &str, node_id: &str) -> Resource {
+fn get_resource(env: Env, node_id: &str) -> Resource {
     static RESOURCE: OnceLock<Resource> = OnceLock::new();
     RESOURCE
         .get_or_init(|| {
+            // OpenTelemetry resource conventions, so shared backends filter by them.
             Resource::builder()
-                .with_service_name(format!("mpc:{env}:{node_id}"))
-                .with_attributes(vec![
-                    KeyValue::new("env", env.to_string()),
-                    KeyValue::new("node_id", node_id.to_string()),
+                .with_service_name("mpc")
+                .with_attributes([
+                    KeyValue::new("deployment.environment.name", env.as_str()),
+                    KeyValue::new("service.instance.id", node_id.to_string()),
                 ])
                 .build()
         })
         .clone()
 }
 
-async fn init_otlp_logs(env: &str, node_id: &str, otlp_endpoint: &str) -> SdkLoggerProvider {
+/// `otlp_endpoint` plus `path`; a host-only `Url` renders with a trailing slash.
+fn otlp_url(otlp_endpoint: &Url, path: &str) -> String {
+    format!("{}/{path}", otlp_endpoint.as_str().trim_end_matches('/'))
+}
+
+async fn init_otlp_logs(env: Env, node_id: &str, otlp_endpoint: &Url) -> SdkLoggerProvider {
     let exporter = LogExporter::builder()
         .with_http()
-        .with_endpoint(format!("{otlp_endpoint}/v1/logs"))
+        .with_endpoint(otlp_url(otlp_endpoint, "v1/logs"))
         .build()
         .expect("Failed to create log exporter");
 
@@ -204,10 +219,10 @@ async fn init_otlp_logs(env: &str, node_id: &str, otlp_endpoint: &str) -> SdkLog
         .build()
 }
 
-async fn init_otlp_traces(env: &str, node_id: &str, otlp_endpoint: &str) -> SdkTracerProvider {
+async fn init_otlp_traces(env: Env, node_id: &str, otlp_endpoint: &Url) -> SdkTracerProvider {
     let exporter = SpanExporter::builder()
         .with_http()
-        .with_endpoint(format!("{otlp_endpoint}/v1/traces"))
+        .with_endpoint(otlp_url(otlp_endpoint, "v1/traces"))
         .build()
         .expect("Failed to create trace exporter");
 
@@ -221,7 +236,7 @@ async fn init_otlp_traces(env: &str, node_id: &str, otlp_endpoint: &str) -> SdkT
         .build()
 }
 
-pub async fn setup(env: &str, node_id: &str, options: &Options) -> OtlpGuard {
+pub async fn setup(env: Env, node_id: &str, options: &Options) -> OtlpGuard {
     let (otlp_guard, log_otlp_layer, otlp_tracer) = match options.opentelemetry_level {
         OpenTelemetryLevel::OFF => (OtlpGuard::default(), None, None),
         _ => {
@@ -241,8 +256,8 @@ pub async fn setup(env: &str, node_id: &str, options: &Options) -> OtlpGuard {
     };
     let otlp_filter = options.opentelemetry_level.level_filter();
 
-    let on_gcp = !options.disable_gcp_logs && is_running_on_gcp().await;
-    let log_fmt_layer = (!on_gcp).then(|| {
+    let json = options.log_format == LogFormat::Json;
+    let log_fmt_layer = (!json).then(|| {
         tracing_subscriber::fmt::layer()
             .with_ansi(std::io::stderr().is_terminal())
             .with_line_number(true)
@@ -250,7 +265,7 @@ pub async fn setup(env: &str, node_id: &str, options: &Options) -> OtlpGuard {
             .event_format(NodeIdFormatter::new(node_id))
             .with_filter(EnvFilter::from_default_env())
     });
-    let log_gcp_layer = on_gcp.then(|| {
+    let log_gcp_layer = json.then(|| {
         stackdriver_layer()
             .with_writer(std::io::stderr)
             .with_filter(EnvFilter::from_default_env())
@@ -266,14 +281,88 @@ pub async fn setup(env: &str, node_id: &str, options: &Options) -> OtlpGuard {
                 .with_filter(otlp_filter),
         )
         .init();
-    tracing::info!(gcp_logs = on_gcp, "Set global logging subscriber");
-
+    // Panics go through tracing so the line explaining a restart reaches OTLP.
+    // The default hook still runs afterwards, so `RUST_BACKTRACE` keeps working.
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        tracing::error!(panic = %info, "task panicked");
+        default_hook(info);
+    }));
+    // Not logging the endpoint: it may carry a token.
     tracing::info!(
-        "Logging parameters: env={}, node_id={}, options={:?}",
-        env,
+        %env,
         node_id,
-        options
+        otel_level = ?options.opentelemetry_level,
+        otlp = !matches!(options.opentelemetry_level, OpenTelemetryLevel::OFF),
+        log_format = %options.log_format,
+        "logging configured"
     );
 
     otlp_guard
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Env, LogFormat, Options};
+    use clap::{CommandFactory as _, Parser as _};
+
+    fn parse(extra: &[&str]) -> Result<Options, clap::Error> {
+        Options::try_parse_from(["test"].into_iter().chain(extra.iter().copied()))
+    }
+
+    /// The declared defaults, pinned: a change here changes every deployment that
+    /// sets nothing. Read from the command so `MPC_*` variables in the shell do not
+    /// leak in.
+    #[test]
+    fn defaults_are_pinned() {
+        let command = Options::command();
+        let default = |id: &str| {
+            let arg = command
+                .get_arguments()
+                .find(|arg| arg.get_id() == id)
+                .unwrap_or_else(|| panic!("{id} exists"));
+            arg.get_default_values()[0].to_string_lossy().into_owned()
+        };
+        assert_eq!(default("log_format"), "plain");
+        assert_eq!(default("opentelemetry_level"), "off");
+        assert_eq!(default("otlp_endpoint"), "http://localhost:4318");
+    }
+
+    #[test]
+    fn log_format_accepts_plain_and_json_only() {
+        assert_eq!(
+            parse(&["--log-format", "json"]).unwrap().log_format,
+            LogFormat::Json
+        );
+        assert_eq!(
+            parse(&["--log-format", "plain"]).unwrap().log_format,
+            LogFormat::Plain
+        );
+        assert!(parse(&["--log-format", "gcp"]).is_err());
+    }
+
+    /// The old negative flag is gone, not silently ignored.
+    #[test]
+    fn disable_gcp_logs_is_rejected() {
+        assert!(parse(&["--disable-gcp-logs"]).is_err());
+    }
+
+    /// The `--env` values, pinned: deployments set these names.
+    #[test]
+    fn env_values_are_pinned() {
+        use clap::ValueEnum as _;
+        let names: Vec<_> = Env::value_variants()
+            .iter()
+            .map(|env| env.as_str())
+            .collect();
+        let expected: &[&str] = if cfg!(feature = "test-feature") {
+            &["dev", "testnet", "mainnet", "test"]
+        } else {
+            &["dev", "testnet", "mainnet"]
+        };
+        assert_eq!(names, expected);
+        for env in Env::value_variants() {
+            assert_eq!(Env::from_str(env.as_str(), false).unwrap(), *env);
+        }
+    }
 }

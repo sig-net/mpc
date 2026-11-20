@@ -2,7 +2,9 @@ use crate::backlog::{
     Backlog, BacklogEntry, Bidirectional, Checkpoint, Checkpoints, Executing, Final, Generating,
     Initial, PendingRequests, Publishing, Sign, SignEntry,
 };
-use crate::sign_bidirectional::{BidirectionalProgress, SignProgress, SignStatus};
+use crate::sign_bidirectional::{
+    BidirectionalProgress, SignProgress, SignStatus, SDK_ALGO, SDK_DEST, SDK_PARAMS,
+};
 use cait_sith::protocol::Participant;
 use cait_sith::FullSignature;
 use k256::{AffinePoint, Scalar, Secp256k1};
@@ -37,6 +39,9 @@ pub trait BacklogTestExt: sealed::Sealed {
         &self,
         tx: &BidirectionalTx,
     ) -> SignEntry<Bidirectional<Final<Generating>>>;
+
+    /// Mark `chain` caught up, as its stream does at catchup.
+    fn mark_caught_up(&self, chain: Chain);
 }
 
 impl BacklogTestExt for Backlog {
@@ -78,6 +83,10 @@ impl BacklogTestExt for Backlog {
             .advance(ExecutionOutcome::Success { output: vec![] }, 456)
             .await
             .expect("advance to final generating")
+    }
+
+    fn mark_caught_up(&self, chain: Chain) {
+        self.set_caught_up(chain, true);
     }
 }
 
@@ -182,14 +191,14 @@ pub fn mock_bidi_request(id: SignId, chain: Chain) -> Arc<IndexedSignRequest> {
         0,
         SignBidirectionalEvent {
             sender: Default::default(),
-            serialized_transaction: vec![1, 2, 3],
-            dest: "test_dest".to_string(),
+            serialized_transaction: mock_unsigned_eth_tx(0, 0),
+            dest: SDK_DEST.to_string(),
             caip2_id: target_chain.caip2_chain_id().to_string(),
             key_version: 1,
             deposit: 0,
             path: "test".to_string(),
-            algo: "ECDSA".to_string(),
-            params: "{}".to_string(),
+            algo: SDK_ALGO.to_string(),
+            params: SDK_PARAMS.to_string(),
             chain,
             chain_ctx: None,
             output_deserialization_schema: vec![],
@@ -208,7 +217,7 @@ pub fn mock_bidirectional_tx(id: SignId, source_chain: Chain) -> BidirectionalTx
     BidirectionalTx {
         id: BidirectionalTxId(id.request_id),
         sender: [0u8; 32],
-        serialized_transaction: vec![1, 2, 3],
+        serialized_transaction: mock_unsigned_eth_tx(0, 0),
         source_chain,
         target_chain,
         caip2_id: target_chain.caip2_chain_id().to_string(),
@@ -224,6 +233,26 @@ pub fn mock_bidirectional_tx(id: SignId, source_chain: Chain) -> BidirectionalTx
         from_address: [0u8; 20],
         nonce: 0,
     }
+}
+
+/// The root key mock transactions derive their account from.
+pub fn mock_root_pk() -> mpc_primitives::PublicKey {
+    k256::AffinePoint::GENERATOR
+}
+
+/// An unsigned legacy Ethereum transaction on chain id 1, sending `value`.
+pub fn mock_unsigned_eth_tx(nonce: u64, value: u64) -> Vec<u8> {
+    let mut rlp = rlp::RlpStream::new_list(9);
+    rlp.append(&nonce);
+    rlp.append(&0u64);
+    rlp.append(&0u64);
+    rlp.append(&vec![0x11u8; 20]);
+    rlp.append(&value);
+    rlp.append(&Vec::<u8>::new());
+    rlp.append(&1u64);
+    rlp.append(&0u64);
+    rlp.append(&0u64);
+    rlp.out().to_vec()
 }
 
 /// Create a mock bidirectional transaction from a u8 seed without Arc wrapping.
@@ -252,6 +281,7 @@ pub fn mock_bidi_response_request(
             tx_id,
             output: vec![],
             attestation: None,
+            outcome_kind: None,
             origin_indexed_at: None,
             chain_ctx: None,
         },
@@ -283,7 +313,7 @@ pub fn mock_execution_entry_with_timestamp(
         mock_bidi_request(tx.sign_id(), chain)
     } else {
         let mut req = (*mock_bidi_request(tx.sign_id(), chain)).clone();
-        req.unix_timestamp_indexed = unix_timestamp_indexed;
+        req.unix_timestamp_indexed = Some(unix_timestamp_indexed);
         Arc::new(req)
     };
 

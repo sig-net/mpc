@@ -1,3 +1,5 @@
+#![cfg_attr(test, allow(clippy::disallowed_methods))]
+
 /// Version of the protocol (triples, presignatures, signatures) messages
 /// that the node can currently work with.
 pub const PROTOCOL_VERSION: u64 = 1;
@@ -29,6 +31,7 @@ macro_rules! assert_matches {
 }
 
 pub mod backlog;
+pub mod build;
 pub mod cli;
 pub mod config;
 pub mod gcp;

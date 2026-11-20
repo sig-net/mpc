@@ -1,8 +1,7 @@
 //! Publish failover: republish a response the proposer never got on chain.
 //!
-//! Every participant stores the [`PublishState`] when it marks the entry
-//! publishing. The schedule is a pure function of that entry, its stamp plus a
-//! per-node jitter, so a restart does not restart the clock.
+//! Every participant stamps the entry when it marks it publishing. The schedule is the later of
+//! that stamp and the first catch-up since starting or rebasing, plus a per-node jitter.
 //!
 //! The sweep lives in the chain stream on block events, gated on a completed
 //! catchup.
@@ -14,7 +13,7 @@
 //! The proposer is scheduled too. Its own deadline is one observe lag away, by
 //! which point its response is either observed, so the entry is gone, or it is
 //! not, and a second attempt is wanted. Skipping it would make the schedule
-//! depend on `is_proposer`, a local role that checkpoint recovery overwrites.
+//! depend on `is_proposer`, which a rebase drops and only a stored record restores.
 
 use crate::backlog::Publishing;
 
@@ -31,16 +30,16 @@ const FAILOVER_DUPLICATE_RATE: f64 = 2.0;
 pub const DEFAULT_OBSERVE_MARGIN: Duration = Duration::from_secs(15);
 
 /// The lag from one node publishing a response until another has observed it.
-/// `None` in production, giving chain finality plus the margin; a fixture pins it
-/// so its timing does not move when a finality constant does.
+/// `None` in production, giving the chain's observe latency plus the margin; a
+/// fixture pins it so its timing does not move when a chain constant does.
 pub(crate) fn observe_lag(chain: Chain, override_lag: Option<Duration>) -> Duration {
     override_lag.unwrap_or_else(|| {
-        Duration::from_secs(chain.expected_finality_time_secs()) + DEFAULT_OBSERVE_MARGIN
+        Duration::from_secs(chain.expected_observe_latency_secs()) + DEFAULT_OBSERVE_MARGIN
     })
 }
 
-/// The longest any participant can wait, for fixtures that outlast the schedule
-/// without restating it.
+/// The longest any participant can wait from the later of stamp and catch-up, for fixtures that
+/// outlast the schedule without restating it.
 #[cfg(any(test, feature = "test-feature"))]
 pub fn max_publish_failover_delay(
     chain: Chain,
@@ -72,21 +71,22 @@ fn failover_delay(participants: usize, jitter: f64, lag: Duration) -> Duration {
     lag + window.mul_f64(jitter)
 }
 
-/// Unix second from which `me` may publish this entry itself. `None` for an entry
-/// carrying no stamp, which never fails over; see
-/// [`PublishState::publishing_since`].
+/// Unix second from which `me` may publish this entry, `None` if it carries no stamp. Nodes
+/// restarting together wait from their first catch-up, or all would publish at its first block.
 pub(crate) fn publish_deadline(
     sign_id: &SignId,
     publish: &Publishing,
     me: &AccountId,
     lag: Duration,
+    failover_floor: Option<u64>,
 ) -> Option<u64> {
     let delay = failover_delay(
         publish.participants().len(),
         failover_jitter(sign_id, me),
         lag,
     );
-    Some(publish.publishing_since()? + delay.as_secs())
+    let since = publish.publishing_since()?;
+    Some(since.max(failover_floor.unwrap_or(0)) + delay.as_secs())
 }
 
 #[cfg(test)]
@@ -100,10 +100,33 @@ mod tests {
 
     const LAG: Option<Duration> = None;
 
+    /// Only Midnight takes its own lag; every other chain keeps finality plus the margin.
+    #[test]
+    fn midnight_observe_lag_outlasts_a_publish_and_others_keep_finality() {
+        assert_eq!(observe_lag(Chain::Midnight, LAG), Duration::from_secs(120));
+        for chain in [
+            Chain::Ethereum,
+            Chain::Solana,
+            Chain::Hydration,
+            Chain::Canton,
+        ] {
+            assert_eq!(
+                observe_lag(chain, LAG),
+                Duration::from_secs(chain.expected_finality_time_secs()) + DEFAULT_OBSERVE_MARGIN
+            );
+        }
+        assert_eq!(
+            observe_lag(Chain::Midnight, Some(Duration::ZERO)),
+            Duration::ZERO,
+            "a fixture override still wins"
+        );
+    }
+
     /// A proposer whose first attempt failed must still land inside the margin.
     #[test]
     fn observe_margin_outlasts_the_first_publish_retry() {
-        assert!(DEFAULT_OBSERVE_MARGIN > crate::rpc::PUBLISH_MIN_DELAY);
+        // Jitter adds up to one more minimum delay.
+        assert!(DEFAULT_OBSERVE_MARGIN > 2 * crate::rpc::PUBLISH_MIN_DELAY);
     }
 
     #[test]
@@ -123,9 +146,7 @@ mod tests {
         assert!(draws.iter().any(|draw| *draw != first));
     }
 
-    /// The deadline is anchored on the entry's own stamp, so an entry recovered
-    /// after a restart resumes its schedule instead of starting a new one, and
-    /// two nodes reach different deadlines for the same entry.
+    /// The stamp anchors the deadline, and two nodes reach different deadlines for the same entry.
     #[test]
     fn publish_deadline_follows_the_stamp_and_the_node() {
         let sign_id = SignId::new([1u8; 32]);
@@ -138,6 +159,7 @@ mod tests {
                 &mock_publishing_since(3, since),
                 who,
                 observe_lag(Chain::Solana, LAG),
+                None,
             )
         };
 
@@ -158,6 +180,36 @@ mod tests {
         assert!(
             deadline(None, &me).is_none(),
             "an entry written before the stamp existed never fails over"
+        );
+    }
+
+    #[test]
+    fn publish_deadline_counts_from_the_later_of_stamp_and_floor() {
+        let sign_id = SignId::new([1u8; 32]);
+        let me = account("node0.near");
+        let publish = mock_publishing_since(3, Some(1_000));
+        let deadline = |failover_floor| {
+            publish_deadline(
+                &sign_id,
+                &publish,
+                &me,
+                observe_lag(Chain::Solana, LAG),
+                failover_floor,
+            )
+            .expect("a stamped entry has a deadline")
+        };
+
+        let from_stamp = deadline(None);
+        assert_eq!(deadline(Some(1_000)), from_stamp);
+        assert_eq!(
+            deadline(Some(400)),
+            from_stamp,
+            "stamped after catching up, the schedule stays on the stamp"
+        );
+        assert_eq!(
+            deadline(Some(1_700)),
+            from_stamp + 700,
+            "stamped before catching up, the schedule moves to the catch-up"
         );
     }
 }

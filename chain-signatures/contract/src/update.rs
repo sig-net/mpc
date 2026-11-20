@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 use std::hash::Hash;
 
-use crate::config::Config;
+use crate::config::ProtocolConfig;
 use crate::primitives::StorageKey;
 
 use borsh::{self, BorshDeserialize, BorshSerialize};
@@ -43,14 +43,14 @@ impl From<u64> for UpdateId {
 #[allow(clippy::large_enum_variant)] // TODO: Config is big
 #[derive(Debug, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub enum Update {
-    Config(Config),
+    Config(ProtocolConfig),
     Contract(Vec<u8>),
 }
 
 #[derive(BorshDeserialize, BorshSerialize, Clone, Debug, Default)]
 pub struct ProposeUpdateArgs {
     pub code: Option<Vec<u8>>,
-    pub config: Option<Config>,
+    pub config: Option<ProtocolConfig>,
 }
 
 #[derive(Debug, BorshSerialize, BorshDeserialize)]
@@ -76,14 +76,18 @@ impl Default for ProposedUpdates {
 }
 
 impl ProposedUpdates {
-    pub fn required_deposit(code: &Option<Vec<u8>>, config: &Option<Config>) -> NearToken {
+    pub fn required_deposit(code: &Option<Vec<u8>>, config: &Option<ProtocolConfig>) -> NearToken {
         required_deposit(bytes_used(code, config))
     }
 
     /// Propose an update given the new contract code and/or config.
     ///
     /// Returns Some(UpdateId) if the update was successfully proposed, otherwise None.
-    pub fn propose(&mut self, code: Option<Vec<u8>>, config: Option<Config>) -> Option<UpdateId> {
+    pub fn propose(
+        &mut self,
+        code: Option<Vec<u8>>,
+        config: Option<ProtocolConfig>,
+    ) -> Option<UpdateId> {
         let bytes_used = bytes_used(&code, &config);
         let updates = match (code, config) {
             (Some(contract), Some(config)) => {
@@ -149,7 +153,7 @@ impl ProposedUpdates {
     }
 }
 
-fn bytes_used(code: &Option<Vec<u8>>, config: &Option<Config>) -> u128 {
+fn bytes_used(code: &Option<Vec<u8>>, config: &Option<ProtocolConfig>) -> u128 {
     let mut bytes_used = std::mem::size_of::<UpdateEntry>() as u128;
 
     // Assume a high max of 128 participant votes per update entry.

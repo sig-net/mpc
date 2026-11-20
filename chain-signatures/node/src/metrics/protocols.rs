@@ -11,7 +11,7 @@ use super::{
 pub(crate) static TRIPLE_LATENCY: LazyLock<Histogram> = LazyLock::new(|| {
     try_create_histogram_vec_with_node_account_id(
         "multichain_triple_latency_sec",
-        "Latency of multichain triple generation, start from starting generation, end when triple generation complete.",
+        "Latency of triple generation, start from starting generation, end when triple generation complete.",
         &[],
         Some(exponential_buckets(5.0, 1.5, 20).unwrap()),
     )
@@ -21,7 +21,7 @@ pub(crate) static TRIPLE_LATENCY: LazyLock<Histogram> = LazyLock::new(|| {
 pub(crate) static TRIPLE_LATENCY_TOTAL: LazyLock<Histogram> = LazyLock::new(|| {
     try_create_histogram_vec_with_node_account_id(
         "multichain_triple_latency_total_sec",
-        "Latency of multichain triple generation, start from generator creation, end when triple generation complete.",
+        "Latency of triple generation, start from generator creation, end when triple generation complete.",
         &[],
         Some(exponential_buckets(5.0, 1.5, 20).unwrap()),
     )
@@ -146,7 +146,7 @@ pub(crate) static TRIPLE_POKES_CNT: LazyLock<Histogram> = LazyLock::new(|| {
 pub(crate) static PRESIGNATURE_LATENCY: LazyLock<MetricsHistogram> = LazyLock::new(|| {
     MetricsHistogram::new(
         "multichain_presignature_latency_sec",
-        "Latency of multichain presignature generation, start from starting generation, end when presignature generation complete.",
+        "Latency of presignature generation, start from starting generation, end when presignature generation complete.",
         &[],
         Some(exponential_buckets(1.0, 1.5, 20).unwrap()),
     )
@@ -272,7 +272,7 @@ pub(crate) static PRESIGNATURE_POKES_CNT: LazyLock<Histogram> = LazyLock::new(||
 pub(crate) static SIGN_GENERATION_LATENCY: LazyLock<MetricsHistogram> = LazyLock::new(|| {
     MetricsHistogram::new(
         "multichain_sign_gen_latency_sec",
-        "Latency of multichain signing, from start signature generation to completion.",
+        "Latency of signing, from start signature generation to completion.",
         &[],
         Some(exponential_buckets(0.001, 2.0, 20).unwrap()),
     )
@@ -375,7 +375,7 @@ pub(crate) static SIGNATURE_POKES_CNT: LazyLock<Histogram> = LazyLock::new(|| {
 pub(crate) static PROTOCOL_LATENCY_ITER_TOTAL: LazyLock<Histogram> = LazyLock::new(|| {
     try_create_histogram_vec_with_node_account_id(
         "multichain_protocol_iter_total",
-        "Latency of multichain protocol iter, start of protocol till end of iteration",
+        "Latency of protocol iter, start of protocol till end of iteration",
         &[],
         Some(exponential_buckets(0.001, 3.0, 20).unwrap()),
     )
@@ -386,7 +386,7 @@ pub(crate) static PROTOCOL_LATENCY_ITER_TOTAL: LazyLock<Histogram> = LazyLock::n
 pub(crate) static PROTOCOL_LATENCY_ITER_CRYPTO: LazyLock<Histogram> = LazyLock::new(|| {
     try_create_histogram_vec_with_node_account_id(
         "multichain_protocol_iter_crypto",
-        "Latency of multichain protocol iter, start of crypto iter till end",
+        "Latency of protocol iter, start of crypto iter till end",
         &[],
         Some(exponential_buckets(0.001, 2.0, 20).unwrap()),
     )
@@ -397,7 +397,7 @@ pub(crate) static PROTOCOL_LATENCY_ITER_CRYPTO: LazyLock<Histogram> = LazyLock::
 pub(crate) static PROTOCOL_LATENCY_ITER_CONSENSUS: LazyLock<Histogram> = LazyLock::new(|| {
     try_create_histogram_vec_with_node_account_id(
         "multichain_protocol_iter_consensus",
-        "Latency of multichain protocol iter, start of consensus iter till end",
+        "Latency of protocol iter, start of consensus iter till end",
         &[],
         Some(exponential_buckets(0.001, 2.0, 20).unwrap()),
     )
@@ -408,7 +408,7 @@ pub(crate) static PROTOCOL_LATENCY_ITER_CONSENSUS: LazyLock<Histogram> = LazyLoc
 pub(crate) static PROTOCOL_ITER_CNT: LazyLock<Counter> = LazyLock::new(|| {
     try_create_counter_vec_with_node_account_id(
         "multichain_protocol_iter_count",
-        "Count of multichain protocol iter",
+        "Count of protocol iter",
         &[],
     )
     .unwrap()

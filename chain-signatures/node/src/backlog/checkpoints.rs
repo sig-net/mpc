@@ -2,11 +2,59 @@ use super::{BacklogEntry, PendingRequests, MAX_PENDING_CHECKPOINTS};
 use crate::storage::checkpoint_storage::CheckpointStorage;
 
 use enum_map::EnumMap;
-use mpc_primitives::Chain;
+use mpc_primitives::{BidirectionalTxId, Chain, SignArgs, SignId, SignKind};
 use sha3::Digest;
 use std::fmt;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+
+/// One request as nodes send it to each other. The digest hashes every field.
+/// A new field breaks the build until `digest_bytes` hashes it too.
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct EntryFacts {
+    pub id: SignId,
+    pub args: SignArgs,
+    pub chain: Chain,
+    pub kind: SignKind,
+    pub tx_ids: Vec<BidirectionalTxId>,
+    pub unviable_at: Option<u64>,
+}
+
+impl EntryFacts {
+    fn digest_bytes(&self) -> Vec<u8> {
+        let Self {
+            id,
+            args,
+            chain,
+            kind,
+            tx_ids,
+            unviable_at,
+        } = self;
+        let mut bytes = Vec::new();
+        ciborium::into_writer(&(id, args, chain, kind, tx_ids, unviable_at), &mut bytes)
+            .expect("encoding into memory cannot fail");
+        bytes
+    }
+}
+
+/// The checkpoint as peers exchange it; a node's own copy adds its progress.
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct CheckpointFacts {
+    pub chain: Chain,
+    pub block_height: u64,
+    pub entries: Vec<EntryFacts>,
+}
+
+impl From<CheckpointFacts> for Checkpoint {
+    fn from(facts: CheckpointFacts) -> Self {
+        Self {
+            chain: facts.chain,
+            block_height: facts.block_height,
+            pending_requests: facts.entries.into_iter().map(Into::into).collect(),
+            legacy_digest: None,
+        }
+    }
+}
 
 /// A checkpoint represents the backlog state at a specific block height.
 #[derive(serde::Serialize, serde::Deserialize, Clone, PartialEq, Eq)]
@@ -14,14 +62,20 @@ pub struct Checkpoint {
     pub chain: Chain,
     pub block_height: u64,
     pub pending_requests: Vec<BacklogEntry>,
-    /// Commitment to each pending request's checkpoint-consensus phase.
-    ///
-    /// Deliberately not `#[serde(default)]`: a missing digest must fail to
-    /// decode rather than deserialize as all-zeros, which consensus would
-    /// otherwise compare against as if it were a real commitment.
-    #[serde(with = "serde_bytes")]
-    pub cumulative_digest: [u8; 32],
+    /// Present only on a body written before the digest covered source facts. Such a body
+    /// hashes as it did then, over its entries' phases; the value itself is not trusted.
+    #[serde(
+        rename = "cumulative_digest",
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "serde_bytes"
+    )]
+    pub legacy_digest: Option<[u8; 32]>,
 }
+
+/// Above this many requests a checkpoint's `Debug` shows their count instead of their ids,
+/// which keeps a checkpoint log line under about 100 KB.
+const MAX_DEBUG_SIGN_IDS: usize = 1000;
 
 impl fmt::Debug for Checkpoint {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -36,15 +90,19 @@ impl fmt::Debug for Checkpoint {
             }
         }
 
-        f.debug_struct("Checkpoint")
+        let mut debug = f.debug_struct("Checkpoint");
+        debug
             .field("chain", &self.chain)
-            .field("block_height", &self.block_height)
-            .field(
+            .field("block_height", &self.block_height);
+        if self.pending_requests.len() <= MAX_DEBUG_SIGN_IDS {
+            debug.field(
                 "pending_requests",
                 &DebugPendingRequests(&self.pending_requests),
-            )
-            .field("cumulative_digest", &self.cumulative_digest)
-            .finish()
+            );
+        } else {
+            debug.field("pending_request_count", &self.pending_requests.len());
+        }
+        debug.finish()
     }
 }
 
@@ -61,12 +119,8 @@ impl Checkpoint {
             chain,
             block_height,
             pending_requests: Vec::new(),
-            cumulative_digest: Self::empty_cumulative_digest(),
+            legacy_digest: None,
         }
-    }
-
-    pub fn empty_cumulative_digest() -> [u8; 32] {
-        mpc_primitives::empty_cumulative_digest()
     }
 
     pub fn digest(&self) -> [u8; 32] {
@@ -76,8 +130,55 @@ impl Checkpoint {
             self.pending_requests
                 .iter()
                 .map(|entry| entry.sign_id().request_id),
-            self.cumulative_digest,
+            match self.legacy_digest {
+                Some(_) => self.legacy_entries_digest(),
+                None => self.entries_digest(),
+            },
         )
+    }
+
+    /// The hash earlier versions took over their entries.
+    fn legacy_entries_digest(&self) -> [u8; 32] {
+        let mut hasher = sha3::Sha3_256::new();
+        for entry in &self.pending_requests {
+            hasher.update([entry.status().consensus_tag()]);
+        }
+        hasher.finalize().into()
+    }
+
+    /// The source facts of each entry, which every node that processed the chain holds alike
+    /// (doc/checkpoints.md); a node's own progress stays out of it.
+    fn entries_digest(&self) -> [u8; 32] {
+        let mut hasher = sha3::Sha3_256::new();
+        for entry in &self.pending_requests {
+            hasher.update(entry.facts().digest_bytes());
+        }
+        hasher.finalize().into()
+    }
+
+    /// What a peer gets of this checkpoint.
+    pub(crate) fn facts(&self) -> CheckpointFacts {
+        CheckpointFacts {
+            chain: self.chain,
+            block_height: self.block_height,
+            entries: self
+                .pending_requests
+                .iter()
+                .map(BacklogEntry::facts)
+                .collect(),
+        }
+    }
+
+    /// This checkpoint with each entry's progress rebuilt from its source facts.
+    pub(crate) fn without_progress(&self, root_pk: mpc_primitives::PublicKey) -> Self {
+        Self {
+            pending_requests: self
+                .pending_requests
+                .iter()
+                .map(|entry| entry.without_progress(root_pk))
+                .collect(),
+            ..self.clone()
+        }
     }
 
     pub fn len(&self) -> usize {
@@ -109,6 +210,8 @@ pub struct Checkpoints {
 pub enum CheckpointError {
     #[error("pending checkpoint cap reached for {chain}")]
     PendingCap { chain: Chain, tx_count: usize },
+    #[error("a different pending checkpoint is stored for {chain} at height {height}")]
+    Conflict { chain: Chain, height: u64 },
     #[error("failed to persist checkpoint for {chain}: {source:#}")]
     Storage {
         chain: Chain,
@@ -146,16 +249,19 @@ impl Checkpoints {
             });
         }
 
-        let inserted = self
+        let count = self
             .storage
             .persist_pending(checkpoint)
             .await
-            .map_err(|source| CheckpointError::Storage { chain, source })?;
+            .map_err(|source| CheckpointError::Storage { chain, source })?
+            .ok_or(CheckpointError::Conflict {
+                chain,
+                height: checkpoint.block_height,
+            })?;
 
-        if inserted {
-            let new_count = self.pending_counts[chain].fetch_add(1, Ordering::AcqRel) + 1;
-            self.observe(chain, new_count);
-        }
+        // The count comes from storage: a write whose reply was lost is still counted.
+        self.pending_counts[chain].store(count, Ordering::Release);
+        self.observe(chain, count);
         Ok(())
     }
 
@@ -164,16 +270,11 @@ impl Checkpoints {
         let mut pending_requests = requests.requests.values().cloned().collect::<Vec<_>>();
         pending_requests.sort_by_key(|entry| entry.sign_id());
 
-        let mut cumulative = sha3::Sha3_256::new();
-        for entry in &pending_requests {
-            cumulative.update([entry.status().consensus_tag()]);
-        }
-
         Checkpoint {
             chain,
             block_height: requests.processed_block_height.unwrap_or(0),
             pending_requests,
-            cumulative_digest: cumulative.finalize().into(),
+            legacy_digest: None,
         }
     }
 
@@ -186,8 +287,9 @@ impl Checkpoints {
             .await
             .map_err(|source| CheckpointError::Storage { chain, source })?;
 
+        // Not a fault by itself: a node behind consensus has no such checkpoint yet.
         let Some(remaining_count) = outcome else {
-            tracing::warn!(
+            tracing::debug!(
                 ?chain,
                 ?digest,
                 "pending checkpoint not found for promotion"
@@ -272,8 +374,7 @@ impl Checkpoints {
         self.storage.find(chain, digest).await.ok().flatten()
     }
 
-    #[cfg(test)]
-    /// Returns the backing storage for tests that need to seed checkpoint state.
+    /// Returns the backing storage.
     pub(crate) fn storage(&self) -> &CheckpointStorage {
         &self.storage
     }
@@ -286,6 +387,41 @@ mod tests {
 
     fn checkpoint(height: u64) -> Checkpoint {
         Checkpoint::reset(Chain::Ethereum, height)
+    }
+
+    fn checkpoint_with_requests(count: usize) -> Checkpoint {
+        let mut checkpoint = checkpoint(100);
+        checkpoint.pending_requests = (0..count)
+            .map(|i| {
+                let mut id = [0u8; 32];
+                id[..8].copy_from_slice(&(i as u64).to_le_bytes());
+                BacklogEntry::new(crate::backlog::mock::mock_sign_request(
+                    mpc_primitives::SignId::new(id),
+                    Chain::Ethereum,
+                ))
+            })
+            .collect();
+        checkpoint
+    }
+
+    #[test]
+    fn debug_lists_sign_ids_up_to_the_limit() {
+        let debug = format!("{:?}", checkpoint_with_requests(MAX_DEBUG_SIGN_IDS));
+        assert_eq!(debug.matches("SignId(").count(), MAX_DEBUG_SIGN_IDS);
+        assert!(debug.len() < 100_000, "{} bytes", debug.len());
+    }
+
+    #[test]
+    fn debug_shows_only_the_count_above_the_limit() {
+        let debug = format!("{:?}", checkpoint_with_requests(MAX_DEBUG_SIGN_IDS + 1));
+        assert!(!debug.contains("SignId("), "{debug}");
+        assert!(
+            debug.contains(&format!(
+                "pending_request_count: {}",
+                MAX_DEBUG_SIGN_IDS + 1
+            )),
+            "{debug}"
+        );
     }
 
     #[tokio::test]
@@ -549,10 +685,8 @@ mod tests {
     async fn find_finds_confirmed_and_pending_checkpoints() {
         let storage = CheckpointStorage::in_memory();
         let checkpoints = Checkpoints::new(storage.clone());
-        let mut confirmed = checkpoint(1);
-        confirmed.cumulative_digest = [1; 32];
-        let mut pending = checkpoint(2);
-        pending.cumulative_digest = [2; 32];
+        let confirmed = checkpoint(1);
+        let pending = checkpoint(2);
 
         storage.persist(&confirmed).await.unwrap();
         checkpoints.persist_pending(&pending).await.unwrap();

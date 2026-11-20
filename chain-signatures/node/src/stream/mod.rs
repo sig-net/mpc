@@ -6,16 +6,17 @@ use crate::backlog::Backlog;
 use crate::mesh::MeshState;
 use crate::node_client::NodeClient;
 use crate::rpc::{ContractStateWatcher, RpcChannel};
+use crate::sign_bidirectional::SignStatus;
 use crate::stream::ops::{
-    process_block_event, process_execution_confirmed, process_respond_bidirectional_event,
-    process_respond_event, process_sign_request, publish_failover_due,
-    requeue_pending_sign_requests, resume_pending_publish_requests,
+    answer_unviable, process_block_event, process_execution_confirmed,
+    process_respond_bidirectional_event, process_respond_event, process_sign_request,
+    publish_failover_due, requeue_pending_sign_requests, resume_pending_publish_requests,
 };
 use crate::types::{CheckpointWatcher, SignCommand};
 
 use anyhow::Context;
 use mpc_chain_integration_core::ChainTelemetry;
-use mpc_primitives::{Chain, ChainEvent};
+use mpc_primitives::{Chain, ChainEvent, SignId};
 use std::time::Duration;
 use tokio::sync::{mpsc, watch};
 
@@ -29,9 +30,17 @@ pub struct StreamContext {
     pub node_client: NodeClient,
     pub checkpoints_rx: CheckpointWatcher,
     pub caught_up: bool,
+    /// Failover deadlines count from here at the earliest: this process's first catch-up on the
+    /// chain since starting or rebasing.
+    pub failover_floor: Option<u64>,
+    /// This node's stored records, read by recovery and applied on catching up.
+    pub local_records: Vec<(SignId, SignStatus)>,
     /// Overrides the failover schedule's observe lag; `None` is production. Fixtures
     /// pin it.
     pub observe_lag: Option<Duration>,
+    /// The chain id of the Ethereum network this node executes on; `None` when
+    /// Ethereum is not configured, which skips the admission check on it.
+    pub ethereum_chain_id: Option<u64>,
 }
 
 impl StreamContext {
@@ -53,8 +62,16 @@ impl StreamContext {
             node_client,
             checkpoints_rx,
             caught_up: false,
+            failover_floor: None,
+            local_records: Vec::new(),
             observe_lag: None,
+            ethereum_chain_id: None,
         }
+    }
+
+    pub fn with_ethereum_chain_id(mut self, chain_id: Option<u64>) -> Self {
+        self.ethereum_chain_id = chain_id;
+        self
     }
 
     /// Pin the publish failover schedule's observe lag, for fixtures that assert
@@ -73,7 +90,7 @@ impl StreamContext {
                 .await
                 .context("sign command channel closed")?;
         } else {
-            tracing::warn!(
+            tracing::debug!(
                 ?cmd,
                 "dropping sign command until catchup completes; the backlog requeues it on CatchupCompleted"
             );
@@ -96,10 +113,20 @@ pub(crate) async fn handle_chain_event<T: ChainTelemetry>(
                 return Ok(());
             }
             ctx.caught_up = true;
+            ctx.failover_floor
+                .get_or_insert_with(mpc_utils::time::current_unix_timestamp);
+            // Before the flag lets another chain's stream send this chain's entries to sign.
+            ctx.backlog
+                .claim_local(chain, std::mem::take(&mut ctx.local_records))
+                .await;
+            // Set before the requeue scan, so an entry that misses the scan sees it.
+            ctx.backlog.set_caught_up(chain, true);
+            ctx.backlog.forget_stale_local(chain).await;
 
             requeue_pending_sign_requests(ctx, chain)
                 .await
                 .context("failed to requeue pending sign requests")?;
+            answer_unviable(chain, ctx, root_pk).await;
             resume_pending_publish_requests(ctx, chain).await;
         }
         ChainEvent::SignRequest {
@@ -112,16 +139,16 @@ pub(crate) async fn handle_chain_event<T: ChainTelemetry>(
             let kind = request.request_kind();
 
             // Record the request's indexed timestamp if it's a new request
-            let is_new = process_sign_request(request, ctx)
+            let is_new = process_sign_request(request, ctx, root_pk, block_timestamp)
                 .await
                 .context("failed to process sign request")?;
 
             if is_new {
                 if let Some(ts) = block_timestamp {
-                    // Ethereum (~15 min finality) reports the block timestamp.
+                    // Ethereum, Solana, and Midnight report block timestamps;
+                    // Canton and Hydration do not yet.
                     telemetry.request_indexed_at(ts, kind);
                 } else {
-                    // Faster chains (Solana, Canton, Hydration) report no timestamp.
                     telemetry.request_indexed(kind);
                 }
             }
@@ -144,13 +171,23 @@ pub(crate) async fn handle_chain_event<T: ChainTelemetry>(
         }
         ChainEvent::ExecutionConfirmed {
             tx_id,
+            sign_id,
+            source_chain,
             block_height,
             result,
-            ..
         } => {
-            process_execution_confirmed(tx_id, block_height, result, ctx, chain)
-                .await
-                .context("failed to process execution confirmation")?;
+            process_execution_confirmed(
+                tx_id,
+                sign_id,
+                source_chain,
+                block_height,
+                result,
+                ctx,
+                chain,
+                root_pk,
+            )
+            .await
+            .context("failed to process execution confirmation")?;
         }
     }
 

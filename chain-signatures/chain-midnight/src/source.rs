@@ -1,10 +1,11 @@
 //! The node reads the indexer consumes: the [`ChainSource`] seam and its subxt implementation.
 
 use crate::config::MidnightConfig;
-use crate::emissions::SingletonCallEmissions;
+use crate::emissions::ContractCallEmissions;
 use crate::reader::Node;
 use crate::rpc::{BlockRef, MidnightRpc};
 use crate::state::decode_contract_state;
+use crate::types::{BlockHash, LedgerTxHash, MidnightAddress};
 
 use async_trait::async_trait;
 
@@ -14,6 +15,7 @@ pub(crate) struct BlockProofSeed {
     pub reported_block_number: u64,
     pub reported_block_hash: [u8; 32],
     pub singleton_address: [u8; 32],
+    pub responder_address: [u8; 32],
     pub scale_header: Vec<u8>,
     pub scale_body: Vec<Vec<u8>>,
     pub scale_system_events: Vec<u8>,
@@ -21,13 +23,22 @@ pub(crate) struct BlockProofSeed {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct CandidateTransactionEmissions {
-    pub ledger_tx_hash: [u8; 32],
+    /// The ledger transaction whose execution emitted the calls.
+    pub ledger_tx_hash: LedgerTxHash,
     pub extrinsic_index: u32,
-    pub calls: Vec<SingletonCallEmissions>,
+    /// `TxPartialSuccess`: any fallible phase of either contract's calls may have
+    /// rolled back.
+    pub partial_success: bool,
+    /// Calls to the singleton, where clients notify their requests.
+    pub singleton_calls: Vec<ContractCallEmissions>,
+    /// Calls to the responder, where responses are posted.
+    pub responder_calls: Vec<ContractCallEmissions>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct BlockEmissions {
+    /// The block's timestamp inherent (`Timestamp::set`), unix ms.
+    pub block_time_ms: u64,
     pub proof_seed: BlockProofSeed,
     pub candidates: Vec<CandidateTransactionEmissions>,
 }
@@ -49,13 +60,14 @@ pub(crate) trait ChainSource: Send + Sync {
     async fn block_emissions(
         &self,
         block: &BlockRef,
-        singleton: &[u8; 32],
+        singleton: &MidnightAddress,
+        responder: &MidnightAddress,
     ) -> anyhow::Result<Option<BlockEmissions>>;
-    /// The decoded state tree of `address_64hex` at `at_hash`.
+    /// The decoded state tree of `address` at `at_hash`.
     async fn contract_state_tree(
         &self,
-        address_64hex: &str,
-        at_hash: &str,
+        address: &MidnightAddress,
+        at_hash: &BlockHash,
     ) -> anyhow::Result<ContractState>;
 }
 
@@ -84,17 +96,18 @@ impl ChainSource for LiveSource {
     async fn block_emissions(
         &self,
         block: &BlockRef,
-        singleton: &[u8; 32],
+        singleton: &MidnightAddress,
+        responder: &MidnightAddress,
     ) -> anyhow::Result<Option<BlockEmissions>> {
-        self.rpc.block_emissions(block, singleton).await
+        self.rpc.block_emissions(block, singleton, responder).await
     }
 
     async fn contract_state_tree(
         &self,
-        address_64hex: &str,
-        at_hash: &str,
+        address: &MidnightAddress,
+        at_hash: &BlockHash,
     ) -> anyhow::Result<ContractState> {
-        match self.rpc.contract_state(address_64hex, at_hash).await? {
+        match self.rpc.contract_state(address, at_hash).await? {
             None => Ok(ContractState::Absent),
             Some(state) => Ok(match decode_contract_state(&state) {
                 Ok(tree) => ContractState::Tree(tree),
@@ -107,24 +120,27 @@ impl ChainSource for LiveSource {
 #[cfg(test)]
 mod proof_seed_tests {
     use super::*;
-    use crate::emissions::{Emission, EmissionKind, SingletonCallEmissions};
+    use crate::emissions::{ContractCallEmissions, Emission, EmissionKind};
 
     #[test]
     fn block_emissions_preserves_the_proof_seed_and_locator() {
         let expected = BlockEmissions {
+            block_time_ms: 1_700_000_000_000,
             proof_seed: BlockProofSeed {
                 reported_genesis_hash: [0x11; 32],
                 reported_block_number: 42,
                 reported_block_hash: [0x22; 32],
                 singleton_address: [0x33; 32],
+                responder_address: [0x34; 32],
                 scale_header: vec![0x44, 0x45],
                 scale_body: vec![vec![0x51], vec![0x52, 0x53], vec![0x54]],
                 scale_system_events: vec![0x61, 0x62, 0x63],
             },
             candidates: vec![CandidateTransactionEmissions {
-                ledger_tx_hash: [0x55; 32],
+                ledger_tx_hash: LedgerTxHash::from_bytes([0x55; 32]),
                 extrinsic_index: 1,
-                calls: vec![SingletonCallEmissions {
+                partial_success: false,
+                singleton_calls: vec![ContractCallEmissions {
                     phase: crate::emissions::TranscriptPhase::Guaranteed,
                     physical_segment: 1,
                     call_index: 1,
@@ -140,15 +156,16 @@ mod proof_seed_tests {
                         },
                     ],
                 }],
+                responder_calls: Vec::new(),
             }],
         };
 
         let carried = expected.clone();
         assert_eq!(carried, expected);
         assert_eq!(carried.candidates[0].extrinsic_index, 1);
-        assert_eq!(carried.candidates[0].calls[0].call_index, 1);
+        assert_eq!(carried.candidates[0].singleton_calls[0].call_index, 1);
         assert_eq!(
-            carried.candidates[0].calls[0].emissions[1].kind,
+            carried.candidates[0].singleton_calls[0].emissions[1].kind,
             EmissionKind::SignatureResponded
         );
     }

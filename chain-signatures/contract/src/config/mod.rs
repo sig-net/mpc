@@ -1,139 +1,97 @@
+#[deprecated(
+    since = "1.23.0",
+    note = "Kept for backward compatibility with pre-1.23 nodes; use config::ProtocolConfig instead"
+)]
+pub mod deprecated;
 mod impls;
 
-pub use impls::{min_to_ms, secs_to_ms};
-
-use std::collections::HashMap;
+#[allow(deprecated)]
+pub use deprecated::{
+    PresignatureConfig as DeprecatedPresignatureConfig, ProtocolConfig as DeprecatedProtocolConfig,
+    SignatureConfig as DeprecatedSignatureConfig, TripleConfig as DeprecatedTripleConfig,
+};
 
 use borsh::{self, BorshDeserialize, BorshSerialize};
-use near_sdk::serde::{Deserialize, Serialize};
 
-/// Dynamic value is used to store any kind of value in the contract state. These values
-/// can be deserialized on the fly to get the actual configurations, but the contract will
-/// not be the ones directly utilizing these values unless they are concrete types.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub struct DynamicValue(serde_json::Value);
-
-#[derive(
-    Clone, Default, Debug, Serialize, Deserialize, BorshSerialize, BorshDeserialize, PartialEq, Eq,
-)]
-pub struct Config {
-    pub protocol: ProtocolConfig,
-
-    /// The remaining entries that can be present in future forms of the configuration.
-    #[serde(flatten)]
-    pub other: HashMap<String, DynamicValue>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, BorshSerialize, BorshDeserialize, PartialEq, Eq)]
+/// Protocol parameters every node reads from the contract.
+#[derive(Clone, Debug, BorshSerialize, BorshDeserialize, PartialEq, Eq)]
 pub struct ProtocolConfig {
-    /// Message timeout in milliseconds for any protocol message that gets sent over the wire.
-    /// This can be overriden by more specific timeouts in each protocol.
-    pub message_timeout: u64,
-    /// Garbage collection timeout in milliseconds for any protocol message. This is the timeout
-    /// used for when any protocols have either been spent or failed, their IDs are kept to keep
-    /// track of the state of the protocol until this timeout reaches.
-    pub garbage_timeout: u64,
-    /// Maximum amount of concurrent protocol generation that can be introduced by this node.
-    /// This only includes protocols that generate triples and presignatures.
-    pub max_concurrent_introduction: u32,
-    /// Maximum amount of concurrent protocol generation that can be done per node.
-    /// This only includes protocols that generate triples and presignatures.
-    pub max_concurrent_generation: u32,
-    /// Configuration for triple generation.
-    pub triple: TripleConfig,
-    /// Configuration for presignature generation.
-    pub presignature: PresignatureConfig,
-    /// Configuration for signature generation.
-    pub signature: SignatureConfig,
-
-    /// The remaining entries that can be present in future forms of the configuration.
-    #[serde(flatten)]
-    pub other: HashMap<String, DynamicValue>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, BorshSerialize, BorshDeserialize, PartialEq, Eq)]
-pub struct TripleConfig {
-    /// Per-node minimum: each node generates triples until it owns at least this many.
-    pub min_triples: u32,
-    /// Network-wide cap: no new triples are generated once the total potential
-    /// count across all nodes reaches this limit.
-    pub max_triples: u32,
-    /// Timeout for triple generation in milliseconds.
-    pub generation_timeout: u64,
-
-    /// The remaining entries that can be present in future forms of the configuration.
-    #[serde(flatten)]
-    pub other: HashMap<String, DynamicValue>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, BorshSerialize, BorshDeserialize, PartialEq, Eq)]
-pub struct PresignatureConfig {
-    /// Per-node minimum: each node generates presignatures until it owns at least this many.
-    pub min_presignatures: u32,
-    /// Network-wide cap: no new presignatures are generated once the total
-    /// potential count across all nodes reaches this limit.
-    pub max_presignatures: u32,
-    /// Timeout for presignature generation in milliseconds.
-    pub generation_timeout: u64,
-
-    /// The remaining entries that can be present in future forms of the configuration.
-    #[serde(flatten)]
-    pub other: HashMap<String, DynamicValue>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, BorshSerialize, BorshDeserialize, PartialEq, Eq)]
-pub struct SignatureConfig {
-    /// Timeout for signature generation in milliseconds.
-    pub generation_timeout: u64,
-    /// Timeout for signature generation in milliseconds. This is the total timeout for
-    /// the signature generation process. Mainly used to include the whole generation of
-    /// signatures including their retries up till this timeout.
-    pub generation_timeout_total: u64,
-    /// Garbage collection timeout in milliseconds for signatures generated.
-    pub garbage_timeout: u64,
-
-    /// The remaining entries that can be present in future forms of the configuration.
-    #[serde(flatten)]
-    pub other: HashMap<String, DynamicValue>,
+    /// Per-node floor: each node generates triple pairs until it owns at least
+    /// this many. One pair builds one presignature.
+    pub min_mine_triple_pairs: u32,
+    /// Per-node floor: each node generates presignatures until it owns at least
+    /// this many.
+    pub min_mine_presignatures: u32,
+    /// Per-node cap on triple and presignature generations in flight at once:
+    /// proposals awaiting acceptance plus running protocols the node owns.
+    pub max_mine_generations: u32,
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::config::Config;
+    use crate::config::ProtocolConfig;
 
     #[test]
     fn test_load_config() {
         let config_macro = serde_json::json!({
-            "protocol": {
-                "message_timeout": 10000,
-                "garbage_timeout": 20000,
-                "max_concurrent_introduction": 10,
-                "max_concurrent_generation": 10,
-                "triple": {
-                    "min_triples": 10,
-                    "max_triples": 100,
-                    "generation_timeout": 10000
-                },
-                "presignature": {
-                    "min_presignatures": 10,
-                    "max_presignatures": 100,
-                    "generation_timeout": 10000
-                },
-                "signature": {
-                    "generation_timeout": 10000,
-                    "generation_timeout_total": 1000000,
-                    "garbage_timeout": 10000000
-                },
-                "string": "value",
-                "integer": 1000
-            },
-            "string": "value2",
-            "integer": 20
+            "min_mine_triple_pairs": 10,
+            "min_mine_presignatures": 20,
+            "max_mine_generations": 3
         });
 
-        let config: Config = serde_json::from_value(config_macro).unwrap();
-        assert_eq!(config.protocol.message_timeout, 10000);
-        assert_eq!(config.get("integer").unwrap(), serde_json::json!(20));
-        assert_eq!(config.get("string").unwrap(), serde_json::json!("value2"));
+        let config: ProtocolConfig = serde_json::from_value(config_macro).unwrap();
+        assert_eq!(config.min_mine_triple_pairs, 10);
+        assert_eq!(config.min_mine_presignatures, 20);
+        assert_eq!(config.max_mine_generations, 3);
+    }
+
+    #[test]
+    fn test_load_config_from_legacy_protocol_field() {
+        let legacy_json = serde_json::json!({
+            "protocol": {
+                "message_timeout": 300000,
+                "garbage_timeout": 7200000,
+                "max_concurrent_introduction": 4,
+                "max_concurrent_generation": 128,
+                "triple": {
+                    "min_triples": 15,
+                    "max_triples": 500,
+                    "generation_timeout": 600000
+                },
+                "presignature": {
+                    "min_presignatures": 25,
+                    "max_presignatures": 500,
+                    "generation_timeout": 45000
+                },
+                "signature": {
+                    "generation_timeout": 45000,
+                    "generation_timeout_total": 200000,
+                    "garbage_timeout": 86400000
+                }
+            }
+        });
+
+        let config: ProtocolConfig = serde_json::from_value(legacy_json).unwrap();
+        assert_eq!(config.min_mine_triple_pairs, 15);
+        assert_eq!(config.min_mine_presignatures, 25);
+        assert_eq!(config.max_mine_generations, 4);
+    }
+
+    #[test]
+    fn test_serialized_output_has_both_formats() {
+        let config = ProtocolConfig::new(16, 32, 2);
+        let val = serde_json::to_value(&config).unwrap();
+
+        assert_eq!(val["min_mine_triple_pairs"], 16);
+        assert_eq!(val["min_mine_presignatures"], 32);
+        assert_eq!(val["max_mine_generations"], 2);
+
+        // Verify old nodes will find protocol with synchronized floors
+        let protocol = &val["protocol"];
+        assert!(protocol.is_object());
+        assert_eq!(protocol["triple"]["min_triples"], 16);
+        assert_eq!(protocol["presignature"]["min_presignatures"], 32);
+        assert_eq!(protocol["max_concurrent_introduction"], 2);
+        assert_eq!(protocol["message_timeout"], 300000);
     }
 }

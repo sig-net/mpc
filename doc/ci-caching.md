@@ -15,7 +15,7 @@ How `Swatinem/rust-cache` is wired across workflows.
 
 | Key | Contents | Size | Used by |
 |---|---|---|---|
-| `workspace-full` | dev tree + release `mpc-node` | ~3.3 GB | midnight, cluster-test, fixture-test, canton, nightly, prod-compat |
+| `workspace-full` | dev tree + release `mpc-node` | ~3.3 GB | midnight, cluster-test, fixture-test, canton, prod-compat |
 | `workspace-dev` | dev tree only | ~0.9 GB | unit, anvil tests, TS seam, deploy-dev-contract |
 
 Two keys so a dev-only job can't claim a fresh key first and leave the

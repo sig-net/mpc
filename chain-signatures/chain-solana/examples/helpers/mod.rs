@@ -1,8 +1,11 @@
 //! Shared helpers for the Solana benchmark examples.
 
+#![allow(clippy::disallowed_methods)]
+
 use anyhow::anyhow;
 use mpc_chain_integration_core::{
-    utils::stream::chain_event_channel, MockStateManager, NoopChainTelemetry,
+    utils::retry::SharedBackoff, utils::stream::chain_event_channel, MockStateManager,
+    NoopChainTelemetry,
 };
 use mpc_chain_solana::{SolConfig, SolanaIndexer};
 
@@ -22,14 +25,17 @@ pub fn env_u64(name: &str, default: Option<u64>) -> anyhow::Result<u64> {
 }
 
 /// Build a [`SolConfig`] from the standard set of benchmark env vars
-/// (`RPC_URL`, `PROGRAM_ADDRESS`).
+/// (`MPC_SOL_RPC_HTTP_URL`, `MPC_SOL_PROGRAM_ADDRESS`).
 pub fn make_config() -> anyhow::Result<SolConfig> {
-    let rpc_http_url = opt_env("RPC_URL")?;
     Ok(SolConfig {
         // The bench only indexes; the signer is never used.
         account_sk: String::new(),
-        rpc_http_url,
-        program_address: opt_env("PROGRAM_ADDRESS")?,
+        rpc_http_url: opt_env("MPC_SOL_RPC_HTTP_URL")?
+            .parse()
+            .map_err(|e| anyhow!("invalid MPC_SOL_RPC_HTTP_URL: {e}"))?,
+        program_address: opt_env("MPC_SOL_PROGRAM_ADDRESS")?
+            .parse()
+            .map_err(|e| anyhow!("invalid MPC_SOL_PROGRAM_ADDRESS: {e}"))?,
         indexer: Default::default(),
     })
 }
@@ -65,7 +71,12 @@ pub async fn run_catchup(
     end: u64,
     label: &'static str,
 ) -> anyhow::Result<()> {
-    let indexer = SolanaIndexer::new(config, MockStateManager::new(), NoopChainTelemetry)?;
+    let indexer = SolanaIndexer::new(
+        config,
+        MockStateManager::new(),
+        NoopChainTelemetry,
+        SharedBackoff::new(),
+    )?;
     let (events_tx, mut events_rx) = chain_event_channel();
 
     tracing::info!(start, end, "{label}: starting catchup");

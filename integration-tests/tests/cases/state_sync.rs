@@ -712,7 +712,7 @@ async fn test_sync_rejects_impersonation() {
         "node1 should hold shares of every owner's artifacts: {before:?}"
     );
 
-    let node2_sk = node2.config.borrow().local.network.sign_sk.clone();
+    let node2_sk = node2.network.sign_sk.clone();
 
     // node2's key, but the signed envelope claims another sender.
     for victim in [node0.me, node1.me] {
@@ -741,7 +741,7 @@ async fn test_sync_reply_rejects_forged_responder() {
     let node0 = &fixture.nodes[0];
     let node1 = &fixture.nodes[1];
     let node2 = &fixture.nodes[2];
-    let node0_network = node0.config.borrow().local.network.clone();
+    let node0_network = node0.network.clone();
     let node0_triples = node0.owned_triples().await;
     let node0_presigs = node0.owned_presignatures().await;
     let update = SyncUpdate {
