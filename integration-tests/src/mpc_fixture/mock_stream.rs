@@ -9,9 +9,22 @@ use std::time::Duration;
 use tokio::sync::{mpsc, Mutex};
 use tokio_util::sync::CancellationToken;
 
-#[derive(Default, Clone)]
+#[derive(Clone)]
 pub struct MockStream {
+    /// Chain this stream is supervised on. The mock indexer's `CHAIN` is fixed,
+    /// but the fixture can register a stream under any chain; the checkpoint
+    /// watch must follow whichever chain the fixture supervises.
+    chain: Chain,
     inner: Arc<Mutex<InnerMockStream>>,
+}
+
+impl Default for MockStream {
+    fn default() -> Self {
+        Self {
+            chain: Chain::Solana,
+            inner: Arc::new(Mutex::new(InnerMockStream::default())),
+        }
+    }
 }
 
 /// Holds chain events to be processed in tests.
@@ -77,6 +90,16 @@ impl ChainIndexer for MockIndexer {
 }
 
 impl MockStream {
+    pub fn chain(&self) -> Chain {
+        self.chain
+    }
+
+    /// Bind the stream to the chain the fixture supervises it under.
+    pub fn with_chain(mut self, chain: Chain) -> Self {
+        self.chain = chain;
+        self
+    }
+
     /// Clones internal data to create different copies of the stream that can
     /// be drained independently. The standard clone only does an Arc::clone.
     pub async fn deep_clone(&self) -> Self {
@@ -87,6 +110,7 @@ impl MockStream {
             pending_events: guard.pending_events.clone(),
         };
         Self {
+            chain: self.chain,
             inner: Arc::new(Mutex::new(cloned)),
         }
     }

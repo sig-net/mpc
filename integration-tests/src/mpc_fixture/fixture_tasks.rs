@@ -1,6 +1,7 @@
 //! Tasks running for the MPC network fixture, simulating things like message
 //! passing between nodes and updates to the governance smart contract.
 
+use crate::mpc_fixture::checkpoint_settlement::CheckpointSettlementHandle;
 use crate::mpc_fixture::fixture_interface::SharedOutput;
 use crate::mpc_fixture::mock_chain::MockChain;
 use crate::mpc_fixture::mock_stream::{MockIndexer, MockStream};
@@ -11,6 +12,7 @@ use mpc_node::mesh::MeshState;
 use mpc_node::protocol::message::{MessageOutbox, SendMessage, SignedMessage};
 use mpc_node::rpc::RpcAction;
 use mpc_node::stream::{supervisor::run_supervised, StreamContext};
+use mpc_primitives::Chain;
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -22,6 +24,8 @@ pub type MessageFilter = Box<dyn FnMut(&SendMessage) -> bool + Send>;
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn test_mock_network(
+    me: Participant,
+    settlement: CheckpointSettlementHandle,
     routing_table: HashMap<Participant, Sender<Ciphered>>,
     shared_output: &SharedOutput,
     mut outbox: MessageOutbox,
@@ -104,6 +108,16 @@ pub(super) fn test_mock_network(
                         actions_changed.notify_one();
                     }
 
+                    // Mirror the contract's vote tally so checkpoints actually
+                    // settle in the fixture. Bookkeeping above and the publish
+                    // side effect below stay unchanged.
+                    if let RpcAction::VoteCheckpoint { checkpoint, .. } = &rpc {
+                        settlement
+                            .lock()
+                            .expect("checkpoint settlement mutex poisoned")
+                            .record_vote(me, *checkpoint);
+                    }
+
                     if let Some(chain) = &mock_chain {
                         chain.on_rpc_publish(&rpc).await;
                     }
@@ -120,16 +134,16 @@ pub(super) fn test_mock_network(
 }
 
 /// Supervise one chain indexer per mock stream. `make_ctx` builds a fresh
-/// [`StreamContext`] per stream, so the caller decides what the streams share
-/// without every dependency travelling through this signature.
+/// [`StreamContext`] per stream, receiving the stream's chain so the caller can
+/// hand it the matching checkpoint watch instead of sharing one across chains.
 pub(super) fn start_mock_stream_tasks(
     mock_streams: &[MockStream],
-    make_ctx: impl Fn() -> StreamContext,
+    make_ctx: impl Fn(Chain) -> StreamContext,
 ) {
     for stream in mock_streams {
         tokio::spawn(run_supervised(
             MockIndexer::from_stream(stream),
-            make_ctx(),
+            make_ctx(stream.chain()),
             NoopChainTelemetry,
         ));
     }
