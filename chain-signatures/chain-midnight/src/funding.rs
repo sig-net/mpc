@@ -163,7 +163,8 @@ pub(crate) trait FeePayer: Send + Sync {
     /// restarts from the latest checkpoint.
     fn failed(&self);
     /// A submit failed implicating a restored wallet's snapshot: the strike counts
-    /// toward dropping its checkpoint, and the replay restarts from the latest one.
+    /// toward dropping its checkpoint, and the replay restarts from the latest
+    /// checkpoint — from the first event once that strike drops it.
     fn struck(&self);
     /// A submit landed: the wallet in use can pay whatever it was restored from.
     fn landed(&self);
@@ -349,7 +350,8 @@ struct Snapshots {
     /// `kept_at`. Only keeping a checkpoint sets it; a forget or a replay started over
     /// from the first event clears it, and a reload leaves it.
     kept: Option<(Instant, u64)>,
-    /// Failed submits of a restored wallet, once used, since one landed.
+    /// `StateConflict` submits of a restored wallet since the last `landed` report;
+    /// a failure of another class does not clear them.
     strikes: u32,
     /// The stored checkpoint is being cleared; nothing is kept until it is.
     forget: bool,
@@ -1003,8 +1005,8 @@ impl FeePayer for FundingWallet {
 }
 
 impl FundingWallet {
-    /// Restarts the replay from the latest checkpoint, `forget` first discarding it
-    /// from memory and the store.
+    /// Restarts the replay from `Snapshots::latest`, or the first event once the
+    /// caller dropped it; `forget` also clears the stored checkpoint behind it.
     fn restart_replay(&self, forget: bool) {
         self.shared.state().reload = true;
         if forget {
