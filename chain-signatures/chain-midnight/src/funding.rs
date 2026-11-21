@@ -990,6 +990,9 @@ impl FeePayer for FundingWallet {
     }
 
     fn struck(&self) {
+        // TODO: re-check `restored` inside the snapshots lock; a start_over
+        // between the state read and that lock strikes a checkpoint it
+        // already dropped.
         let restored = self.shared.state().restored;
         // The strike before the reload, so a wake acting on it sees any forget.
         let mut forget = false;
