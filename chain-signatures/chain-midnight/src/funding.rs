@@ -999,10 +999,25 @@ impl FeePayer for FundingWallet {
         if restored {
             let mut snapshots = self.shared.snapshots();
             snapshots.strikes += 1;
+            // Strikes 1 and 2 are invisible in the metrics until the drop; the
+            // per-strike warn is the only record a checkpoint is half-struck.
+            tracing::warn!(
+                strikes = snapshots.strikes,
+                limit = RESTORE_STRIKES,
+                class = "state_conflict",
+                "midnight funding wallet: a submit of the restored wallet failed as \
+                 state_conflict"
+            );
+            // TODO: a `funding_wallet_strikes` gauge beside the replay-restart
+            // counter, set here and zeroed by `landed`; the telemetry handle is
+            // already on `Shared`.
             if snapshots.strikes >= RESTORE_STRIKES {
                 tracing::warn!(
-                    "midnight funding wallet: discarding the DUST checkpoint after its \
-                     restored wallets failed to land a submit; replaying from the first event"
+                    cause = "strikes",
+                    strikes = RESTORE_STRIKES,
+                    class = "state_conflict",
+                    "midnight funding wallet: discarding the DUST checkpoint; \
+                     replaying from the first event"
                 );
                 snapshots.latest = None;
                 snapshots.kept = None;
