@@ -391,7 +391,7 @@ pub(crate) struct FundingWallet {
 impl FundingWallet {
     /// Starts replaying at once, from the checkpoint in `checkpoints` when it has one
     /// for this key, so the first publish does not pay for the catch-up; `telemetry`
-    /// hears of each checkpoint the replay later drops.
+    /// hears of each replay the wallet later restarts from the first event.
     pub(crate) fn start(
         key: DustSecretKey,
         source: Arc<dyn DustEventSource>,
@@ -1010,8 +1010,9 @@ impl FeePayer for FundingWallet {
                  state_conflict"
             );
             // TODO: a `funding_wallet_strikes` gauge beside the replay-restart
-            // counter, set here and zeroed by `landed`; the telemetry handle is
-            // already on `Shared`.
+            // counter, set here and zeroed wherever strikes reset (`landed`, the
+            // forgetting strike, a start_over); the telemetry handle is already
+            // on `Shared`.
             if snapshots.strikes >= RESTORE_STRIKES {
                 tracing::warn!(
                     cause = "strikes",
@@ -2199,20 +2200,20 @@ pub(crate) mod tests {
         let resumed_at = checkpoint.applied;
         checkpoint.event_hash = event_hash(b"another chain's event");
         let source = RecordingSource::new(fixture_updates());
-        let drops = Arc::new(DropCauses::default());
+        let restarts = Arc::new(RestartCauses::default());
         let wallet = FundingWallet::start(
             key,
             source.clone(),
             Some(Arc::new(MemoryCheckpoints::holding(checkpoint))),
-            drops.clone(),
+            restarts.clone(),
         );
         ready(&wallet).await;
         assert_eq!(source.froms(), vec![Some(resumed_at), None]);
         assert_fully_replayed(&wallet);
         assert_eq!(
-            *drops.0.lock().unwrap(),
+            *restarts.0.lock().unwrap(),
             vec!["checkpoint_mismatch"],
-            "a checkpoint the indexer disagrees with is reported as dropped"
+            "a checkpoint the indexer disagrees with is reported as a replay restart"
         );
     }
 
@@ -2235,7 +2236,7 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn an_unreadable_checkpoint_is_ignored() {
-        let drops = Arc::new(DropCauses::default());
+        let restarts = Arc::new(RestartCauses::default());
         let source = RecordingSource::new(fixture_updates());
         let wallet = FundingWallet::start(
             funded_key(),
@@ -2244,13 +2245,13 @@ pub(crate) mod tests {
                 held: Mutex::new(Some(b"not a checkpoint".to_vec())),
                 clears: AtomicUsize::new(0),
             })),
-            drops.clone(),
+            restarts.clone(),
         );
         ready(&wallet).await;
         assert_eq!(source.froms(), vec![None]);
         assert_fully_replayed(&wallet);
         assert!(
-            drops.0.lock().unwrap().is_empty(),
+            restarts.0.lock().unwrap().is_empty(),
             "a restore that rejected its checkpoint replays from the first event uncounted"
         );
     }
@@ -2285,9 +2286,9 @@ pub(crate) mod tests {
     /// Replay-restart causes persist until the test reads them; Vec order matches
     /// restart order.
     #[derive(Default)]
-    struct DropCauses(Mutex<Vec<String>>);
+    struct RestartCauses(Mutex<Vec<String>>);
 
-    impl PublisherTelemetry for DropCauses {
+    impl PublisherTelemetry for RestartCauses {
         fn record_publish_metrics(&self, _action: &PublishAction) {}
 
         fn funding_wallet_replay_restarted(&self, cause: &str) {
@@ -2345,8 +2346,8 @@ pub(crate) mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn restored_wallets_struck_three_times_forget_the_checkpoint() {
-        let drops = Arc::new(DropCauses::default());
-        let (wallet, store, source, resumed_at) = restored_wallet_reporting(drops.clone()).await;
+        let restarts = Arc::new(RestartCauses::default());
+        let (wallet, store, source, resumed_at) = restored_wallet_reporting(restarts.clone()).await;
         // A landing clears the strikes; a non-implicating failure is none.
         for (strike, landed) in [(true, false), (true, true), (false, false), (true, false)] {
             if strike {
@@ -2385,7 +2386,7 @@ pub(crate) mod tests {
             "two strikes, with none landing between them, keep the checkpoint"
         );
         assert!(
-            drops.0.lock().unwrap().is_empty(),
+            restarts.0.lock().unwrap().is_empty(),
             "no checkpoint is dropped before the third strike"
         );
 
@@ -2405,7 +2406,7 @@ pub(crate) mod tests {
             "a landing reported after the third strike clears the store no second time"
         );
         assert_eq!(
-            *drops.0.lock().unwrap(),
+            *restarts.0.lock().unwrap(),
             vec!["strikes"],
             "only the strike that forgets the checkpoint is reported"
         );
@@ -2470,16 +2471,16 @@ pub(crate) mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn a_replay_that_cannot_absorb_an_event_is_reported_as_replay_failed() {
-        let drops = Arc::new(DropCauses::default());
+        let restarts = Arc::new(RestartCauses::default());
         let _wallet = FundingWallet::start(
             funded_key(),
             Arc::new(CatchesUpThenBreaks::default()),
             None,
-            drops.clone(),
+            restarts.clone(),
         );
         tokio::time::sleep(std::time::Duration::from_secs(70)).await;
         assert_eq!(
-            *drops.0.lock().unwrap(),
+            *restarts.0.lock().unwrap(),
             vec!["replay_failed"],
             "an event the replay cannot absorb is reported as a replay restart"
         );
@@ -2487,20 +2488,26 @@ pub(crate) mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn a_wallet_that_never_held_a_checkpoint_still_reports_its_replay_restarts() {
-        let drops = Arc::new(DropCauses::default());
+        let restarts = Arc::new(RestartCauses::default());
         // Pinned deliberately: a fresh wallet under an indexer that serves an
-        // undecodable event holds no checkpoint to drop, and the restart ticks the
-        // counter anyway — the unit is the restart, not the drop.
+        // undecodable event never holds a checkpoint — asserted below, for a
+        // completed keep always saves — and the restart ticks the counter
+        // anyway: the unit is the restart, not the drop.
         let mut updates = fixture_updates();
         updates[5].raw.truncate(10);
+        let store = Arc::new(MemoryCheckpoints::default());
         let _wallet = FundingWallet::start(
             funded_key(),
             RecordingSource::new(updates),
-            None,
-            drops.clone(),
+            Some(store.clone()),
+            restarts.clone(),
         );
         tokio::time::sleep(std::time::Duration::from_secs(10)).await;
-        let recorded = drops.0.lock().unwrap().clone();
+        assert!(
+            store.held.lock().unwrap().is_none(),
+            "a completed keep always saves, so the wallet never held a checkpoint"
+        );
+        let recorded = restarts.0.lock().unwrap().clone();
         assert!(
             !recorded.is_empty() && recorded.iter().all(|cause| cause == "replay_failed"),
             "a never-checkpointed wallet's restarts are reported by their cause: {recorded:?}"
@@ -4353,19 +4360,19 @@ pub(crate) mod tests {
         let checkpoint = checkpoint_after(10, &key);
         let resumed_at = checkpoint.applied;
         let source = RecordingSource::new(Vec::new());
-        let drops = Arc::new(DropCauses::default());
+        let restarts = Arc::new(RestartCauses::default());
         let wallet = FundingWallet::start(
             key,
             source.clone(),
             Some(Arc::new(MemoryCheckpoints::holding(checkpoint))),
-            drops.clone(),
+            restarts.clone(),
         );
         tokio::time::sleep(RESUME_TIMEOUT + std::time::Duration::from_secs(10)).await;
         assert_eq!(source.froms(), vec![Some(resumed_at), None]);
         assert_eq!(
-            *drops.0.lock().unwrap(),
+            *restarts.0.lock().unwrap(),
             vec!["resume_timeout"],
-            "a checkpoint the indexer never served in time is reported as dropped"
+            "a checkpoint the indexer never served in time is reported as a replay restart"
         );
         wallet.struck();
         tokio::time::sleep(std::time::Duration::from_secs(10)).await;
