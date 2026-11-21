@@ -89,14 +89,14 @@ type VaultLedger = ReturnType<typeof ledger>;
 
 /** Each action's request map: its ledger field and compiled ledger path. */
 const REQUEST_MAPS = {
-  [Action.approve]: { field: "bidirectionalApproveMap", path: [2, 12] },
-  [Action.deposit]: { field: "bidirectionalDepositMap", path: [2, 14] },
-  [Action.tronDeposit]: { field: "bidirectionalTronDepositMap", path: [3, 1] },
-  [Action.withdraw]: { field: "bidirectionalWithdrawMap", path: [3, 3] },
-  [Action.swap]: { field: "bidirectionalSwapMap", path: [3, 5] },
-  [Action.supply]: { field: "bidirectionalSupplyMap", path: [3, 7] },
-  [Action.redeem]: { field: "bidirectionalRedeemMap", path: [3, 9] },
-  [Action.tronWithdraw]: { field: "bidirectionalTronWithdrawMap", path: [3, 12] },
+  [Action.approve]: { field: "bidirectionalApproveMap", path: [1, 13] },
+  [Action.deposit]: { field: "bidirectionalDepositMap", path: [2, 0] },
+  [Action.tronDeposit]: { field: "bidirectionalTronDepositMap", path: [2, 2] },
+  [Action.withdraw]: { field: "bidirectionalWithdrawMap", path: [2, 4] },
+  [Action.swap]: { field: "bidirectionalSwapMap", path: [2, 6] },
+  [Action.supply]: { field: "bidirectionalSupplyMap", path: [2, 8] },
+  [Action.redeem]: { field: "bidirectionalRedeemMap", path: [2, 10] },
+  [Action.tronWithdraw]: { field: "bidirectionalTronWithdrawMap", path: [2, 13] },
 } as const;
 type VaultAction = keyof typeof REQUEST_MAPS;
 
@@ -1383,12 +1383,6 @@ class VaultRun {
       throw new Error(
         `the vault kept ${JSON.stringify(leftovers, (_, v: unknown) => (typeof v === "bigint" ? String(v) : v))}`,
       );
-    if (!settled.tronWithdrawRequestIds.member(hexToBytes(tronWithdraw.requestId))) {
-      throw new Error("the vault forgot the Tron withdraw's request id");
-    }
-    if (settled.tronWithdrawRequestIds.size() !== 2n) {
-      throw new Error("the vault forgot the refunded Tron withdraw's request id");
-    }
 
     return {
       vaultAddress: this.vaultAddress,

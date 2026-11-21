@@ -578,7 +578,7 @@ export pure circuit replaceNonceOutputSchema(): Bytes<2> {
 }
 
 // Nonce replacement requests (no calldata, 2-byte output schema).
-// Compiled path for MPC notification: [2, 10] (read from managed/erc20-vault/compiler/contract-info.json).
+// Compiled path for MPC notification: [1, 11] (read from managed/erc20-vault/compiler/contract-info.json).
 export ledger bidirectionalReplaceNonceMap: SignBidirectionalEventMapV1<EvmType2TxParams<2, 0, 0>, 2>;
 
 // inIndex -> the arguments of the replacement queued under it, from start to complete.
@@ -689,11 +689,11 @@ export circuit sendReplaceNonce(outIndex: Bytes<32>): [] {
   bidirectionalReplaceNonceMap.insert(requestId, request);
   evictionMap.insert(requestId, disclosedIndex);
 
-  // Notify the MPC (bidirectionalReplaceNonceMap's compiled ledger path, [2, 10]).
+  // Notify the MPC (bidirectionalReplaceNonceMap's compiled ledger path, [1, 11]).
   signetSigner.signBidirectional(
     requestId,
     constructSignBidirectionalEventNotificationV1(
-      kernel.self(), 2 as Uint<8>, [2, 10, 0, 0] as Vector<4, Uint<8>>,
+      kernel.self(), 2 as Uint<8>, [1, 11, 0, 0] as Vector<4, Uint<8>>,
     ),
   );
 }
@@ -734,7 +734,7 @@ export struct ApproveArgs {
 }
 
 // Approve requests of both spenders (2-word ERC20 approve, 34-byte output schema).
-// Compiled path for MPC notification: [2, 12] (read from managed/erc20-vault/compiler/contract-info.json).
+// Compiled path for MPC notification: [1, 13] (read from managed/erc20-vault/compiler/contract-info.json).
 export ledger bidirectionalApproveMap: SignBidirectionalEventMapV1<EvmType2TxParams<2, 0, 0>, 34>;
 
 // inIndex -> the arguments of the approval queued under it, from start to complete.
@@ -848,11 +848,11 @@ export circuit sendApprove(outIndex: Bytes<32>): [] {
   bidirectionalApproveMap.insert(requestId, request);
   evictionMap.insert(requestId, disclosedIndex);
 
-  // Notify the MPC (bidirectionalApproveMap's compiled ledger path, [2, 12]).
+  // Notify the MPC (bidirectionalApproveMap's compiled ledger path, [1, 13]).
   signetSigner.signBidirectional(
     requestId,
     constructSignBidirectionalEventNotificationV1(
-      kernel.self(), 2 as Uint<8>, [2, 12, 0, 0] as Vector<4, Uint<8>>,
+      kernel.self(), 2 as Uint<8>, [1, 13, 0, 0] as Vector<4, Uint<8>>,
     ),
   );
 }
@@ -903,7 +903,7 @@ export struct DepositArgs {
 }
 
 // Deposit requests (2-word ERC20 transfer, 34-byte output schema).
-// Compiled path for MPC notification: [2, 14] (read from managed/erc20-vault/compiler/contract-info.json).
+// Compiled path for MPC notification: [2, 0] (read from managed/erc20-vault/compiler/contract-info.json).
 export ledger bidirectionalDepositMap: SignBidirectionalEventMapV1<EvmType2TxParams<2, 0, 0>, 34>;
 
 // inIndex -> the arguments of the deposit queued under it, from start to complete.
@@ -995,11 +995,11 @@ export circuit sendDeposit(outIndex: Bytes<32>): [] {
   bidirectionalDepositMap.insert(requestId, request);
   evictionMap.insert(requestId, disclosedIndex);
 
-  // Notify the MPC (bidirectionalDepositMap's compiled ledger path, [2, 14]).
+  // Notify the MPC (bidirectionalDepositMap's compiled ledger path, [2, 0]).
   signetSigner.signBidirectional(
     requestId,
     constructSignBidirectionalEventNotificationV1(
-      kernel.self(), 2 as Uint<8>, [2, 14, 0, 0] as Vector<4, Uint<8>>,
+      kernel.self(), 2 as Uint<8>, [2, 0, 0, 0] as Vector<4, Uint<8>>,
     ),
   );
 }
@@ -1157,7 +1157,7 @@ export circuit sendTronDeposit(outIndex: Bytes<32>): [] {
   signetSigner.signBidirectional(
     requestId,
     constructSignBidirectionalEventNotificationV1(
-      kernel.self(), 2 as Uint<8>, [3, 1, 0, 0] as Vector<4, Uint<8>>,
+      kernel.self(), 2 as Uint<8>, [2, 2, 0, 0] as Vector<4, Uint<8>>,
     ),
   );
 }
@@ -1217,7 +1217,7 @@ export struct WithdrawArgs {
 }
 
 // Withdraw requests (2-word ERC20 transfer, 34-byte output schema).
-// Compiled path for MPC notification: [3, 3] (read from managed/erc20-vault/compiler/contract-info.json).
+// Compiled path for MPC notification: [2, 4] (read from managed/erc20-vault/compiler/contract-info.json).
 export ledger bidirectionalWithdrawMap: SignBidirectionalEventMapV1<EvmType2TxParams<2, 0, 0>, 34>;
 
 // inIndex -> the arguments of the withdrawal queued under it, from start to complete.
@@ -1324,11 +1324,11 @@ export circuit sendWithdraw(outIndex: Bytes<32>): [] {
   bidirectionalWithdrawMap.insert(requestId, request);
   evictionMap.insert(requestId, disclosedIndex);
 
-  // Notify the MPC (bidirectionalWithdrawMap's compiled ledger path, [3, 3]).
+  // Notify the MPC (bidirectionalWithdrawMap's compiled ledger path, [2, 4]).
   signetSigner.signBidirectional(
     requestId,
     constructSignBidirectionalEventNotificationV1(
-      kernel.self(), 2 as Uint<8>, [3, 3, 0, 0] as Vector<4, Uint<8>>,
+      kernel.self(), 2 as Uint<8>, [2, 4, 0, 0] as Vector<4, Uint<8>>,
     ),
   );
 }
@@ -1403,7 +1403,7 @@ export pure circuit swapOutputSchema(): Bytes<38> {
 }
 
 // Swap requests (7-word exactOutputSingle, 38-byte output schema).
-// Compiled path for MPC notification: [3, 5] (read from managed/erc20-vault/compiler/contract-info.json).
+// Compiled path for MPC notification: [2, 6] (read from managed/erc20-vault/compiler/contract-info.json).
 export ledger bidirectionalSwapMap: SignBidirectionalEventMapV1<EvmType2TxParams<7, 0, 0>, 38>;
 
 // inIndex -> the arguments of the swap queued under it, from start to complete.
@@ -1525,11 +1525,11 @@ export circuit sendSwap(outIndex: Bytes<32>): [] {
   bidirectionalSwapMap.insert(requestId, request);
   evictionMap.insert(requestId, disclosedIndex);
 
-  // Notify the MPC (bidirectionalSwapMap's compiled ledger path, [3, 5]).
+  // Notify the MPC (bidirectionalSwapMap's compiled ledger path, [2, 6]).
   signetSigner.signBidirectional(
     requestId,
     constructSignBidirectionalEventNotificationV1(
-      kernel.self(), 2 as Uint<8>, [3, 5, 0, 0] as Vector<4, Uint<8>>,
+      kernel.self(), 2 as Uint<8>, [2, 6, 0, 0] as Vector<4, Uint<8>>,
     ),
   );
 }
@@ -1625,7 +1625,7 @@ export struct SupplyArgs {
 }
 
 // Supply requests (2-word ERC-4626 deposit, 36-byte output schema).
-// Compiled path for MPC notification: [3, 7] (read from managed/erc20-vault/compiler/contract-info.json).
+// Compiled path for MPC notification: [2, 8] (read from managed/erc20-vault/compiler/contract-info.json).
 export ledger bidirectionalSupplyMap: SignBidirectionalEventMapV1<EvmType2TxParams<2, 0, 0>, 36>;
 
 // inIndex -> the arguments of the supply queued under it, from start to complete.
@@ -1731,11 +1731,11 @@ export circuit sendSupply(outIndex: Bytes<32>): [] {
   bidirectionalSupplyMap.insert(requestId, request);
   evictionMap.insert(requestId, disclosedIndex);
 
-  // Notify the MPC (bidirectionalSupplyMap's compiled ledger path, [3, 7]).
+  // Notify the MPC (bidirectionalSupplyMap's compiled ledger path, [2, 8]).
   signetSigner.signBidirectional(
     requestId,
     constructSignBidirectionalEventNotificationV1(
-      kernel.self(), 2 as Uint<8>, [3, 7, 0, 0] as Vector<4, Uint<8>>,
+      kernel.self(), 2 as Uint<8>, [2, 8, 0, 0] as Vector<4, Uint<8>>,
     ),
   );
 }
@@ -1815,7 +1815,7 @@ export struct RedeemArgs {
 }
 
 // Redeem requests (3-word ERC-4626 redeem, 36-byte output schema).
-// Compiled path for MPC notification: [3, 9] (read from managed/erc20-vault/compiler/contract-info.json).
+// Compiled path for MPC notification: [2, 10] (read from managed/erc20-vault/compiler/contract-info.json).
 export ledger bidirectionalRedeemMap: SignBidirectionalEventMapV1<EvmType2TxParams<3, 0, 0>, 36>;
 
 // inIndex -> the arguments of the redeem queued under it, from start to complete.
@@ -1923,11 +1923,11 @@ export circuit sendRedeem(outIndex: Bytes<32>): [] {
   bidirectionalRedeemMap.insert(requestId, request);
   evictionMap.insert(requestId, disclosedIndex);
 
-  // Notify the MPC (bidirectionalRedeemMap's compiled ledger path, [3, 9]).
+  // Notify the MPC (bidirectionalRedeemMap's compiled ledger path, [2, 10]).
   signetSigner.signBidirectional(
     requestId,
     constructSignBidirectionalEventNotificationV1(
-      kernel.self(), 2 as Uint<8>, [3, 9, 0, 0] as Vector<4, Uint<8>>,
+      kernel.self(), 2 as Uint<8>, [2, 10, 0, 0] as Vector<4, Uint<8>>,
     ),
   );
 }
@@ -2021,19 +2021,11 @@ export struct TronWithdrawArgs {
 export ledger vaultTronFeeLimit: Uint<64>;
 
 // Tron withdraw requests (2-word TRC-20 transfer, 34-byte output schema).
-// Compiled path for MPC notification: [3, 12] (read from managed/erc20-vault/compiler/contract-info.json).
+// Compiled path for MPC notification: [2, 13] (read from managed/erc20-vault/compiler/contract-info.json).
 export ledger bidirectionalTronWithdrawMap: SignBidirectionalEventMapV1<TronTxParams<2>, 34>;
 
 // inIndex -> the arguments of the Tron withdrawal queued under it, from start to complete.
 export ledger tronWithdrawArgsMap: Map<Uint<64>, TronWithdrawArgs>;
-
-// The request id of every Tron withdrawal ever started, never removed. The same fields
-// name the same Tron transaction: while the first request is open its twin's send is
-// refused, and once it has settled the MPC would sign the same transaction again and
-// attest its old receipt, which the twin's lastSeen refuses as stale. Either way the
-// twin's burned coin could never settle, so a start naming a used id is refused, and the
-// withdrawer picks another timestamp.
-export ledger tronWithdrawRequestIds: Set<RequestId>;
 
 // The margins, in seconds, by which the expiration must clear the MPC's admission bounds
 // at the block that runs the check (see assertTronExpirationWindowV1). The start keeps
@@ -2107,9 +2099,11 @@ circuit tronWithdrawEvent(args: TronWithdrawArgs): SignBidirectionalEventV1<Tron
 // else no unlinkability is guaranteed), burns the surrendered vault coin and takes the
 // withdraw fee: the coin spend is the authorisation. The vault's account signs and pays, so
 // the fee limit is the vault's own setting at start. The checks refuse a request the MPC
-// would never answer: fields Tron cannot encode, a window the MPC would not admit by the
-// send (with tronWithdrawStartMinRemainingSeconds left for the flush and the send), and
-// fields an earlier Tron withdrawal used.
+// would never answer: fields Tron cannot encode, and a window the MPC would not admit by
+// the send (with tronWithdrawStartMinRemainingSeconds left for the flush and the send).
+// Fields an earlier Tron withdrawal used name the same Tron transaction, which Tron takes
+// only once, so such a twin's coin can be left with nothing to settle it: the client picks
+// a fresh timestamp.
 export circuit startTronWithdraw(
   inIndex: Uint<64>,
   withdrawRequest: TronWithdrawRequest,
@@ -2153,9 +2147,6 @@ export circuit startTronWithdraw(
   const request = tronWithdrawEvent(args);
   assertTronTxParamsV1<2>(request.txParams);
   assertTronWithdrawWindow(args.tx.expiration, tronWithdrawStartMinRemainingSeconds());
-  const requestId = calculateTronRequestIdV1<2, 34>(request);
-  assert(!tronWithdrawRequestIds.member(requestId), "Tron transaction already requested");
-  tronWithdrawRequestIds.insert(requestId);
 
   tronWithdrawArgsMap.insert(disclosedIndex, args);
   inputRequestBuffer.insert(disclosedIndex, disclose(RequestBufferEntry {
@@ -2188,11 +2179,11 @@ export circuit sendTronWithdraw(outIndex: Bytes<32>): [] {
   bidirectionalTronWithdrawMap.insert(requestId, request);
   evictionMap.insert(requestId, disclosedIndex);
 
-  // Notify the MPC (bidirectionalTronWithdrawMap's compiled ledger path, [3, 12]).
+  // Notify the MPC (bidirectionalTronWithdrawMap's compiled ledger path, [2, 13]).
   signetSigner.signBidirectional(
     requestId,
     constructSignBidirectionalEventNotificationV1(
-      kernel.self(), 2 as Uint<8>, [3, 12, 0, 0] as Vector<4, Uint<8>>,
+      kernel.self(), 2 as Uint<8>, [2, 13, 0, 0] as Vector<4, Uint<8>>,
     ),
   );
 }
@@ -2265,8 +2256,8 @@ circuit assertTronWithdrawSendClosed(expiration: Uint<64>): [] {
 // Re-mints the amount of the Tron withdrawal queued under inIndex that was never sent and
 // can no longer be: sendTronWithdraw refuses it from the block time this checks, and its
 // coin was burned at start. Takes the withdrawal out of whichever request buffer holds it
-// and out of tronWithdrawArgsMap, so no flush or send can reach it again, and keeps its
-// request id in tronWithdrawRequestIds and the withdraw fee, as a failed withdrawal does.
+// and out of tronWithdrawArgsMap, so no flush or send can reach it again, and keeps the
+// withdraw fee, as a failed withdrawal does.
 // A send and a refund of one withdrawal exclude each other through the ledger: the send
 // needs the flushed entry this removes, and this needs the request id the send records to
 // be absent. Withdrawer-gated, once. mintNonce is caller-chosen and must be random, else
