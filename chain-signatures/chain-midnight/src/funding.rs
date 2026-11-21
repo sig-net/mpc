@@ -1199,6 +1199,7 @@ pub(crate) mod tests {
     use mpc_chain_integration_core::{NoopPublisherTelemetry, PublishAction};
     use rand::SeedableRng as _;
     use std::collections::VecDeque;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     /// The publisher seed `midnight-devtools`' real-stack driver funds.
     const FUNDED_SEED: &str = "0404040404040404040404040404040404040404040404040404040404040404";
@@ -2012,33 +2013,44 @@ pub(crate) mod tests {
     }
 
     #[derive(Default)]
-    struct MemoryCheckpoints(Mutex<Option<Vec<u8>>>);
+    struct MemoryCheckpoints {
+        held: Mutex<Option<Vec<u8>>>,
+        clears: AtomicUsize,
+    }
 
     #[async_trait]
     impl DustCheckpointStore for MemoryCheckpoints {
         async fn load(&self) -> anyhow::Result<Option<Vec<u8>>> {
-            Ok(self.0.lock().unwrap().clone())
+            Ok(self.held.lock().unwrap().clone())
         }
 
         async fn save(&self, checkpoint: &[u8]) -> anyhow::Result<()> {
-            *self.0.lock().unwrap() = Some(checkpoint.to_vec());
+            *self.held.lock().unwrap() = Some(checkpoint.to_vec());
             Ok(())
         }
 
         async fn clear(&self) -> anyhow::Result<()> {
-            *self.0.lock().unwrap() = None;
+            self.clears.fetch_add(1, Ordering::SeqCst);
+            *self.held.lock().unwrap() = None;
             Ok(())
         }
     }
 
     impl MemoryCheckpoints {
         fn holding(checkpoint: Checkpoint) -> Self {
-            Self(Mutex::new(Some(checkpoint.encode())))
+            Self {
+                held: Mutex::new(Some(checkpoint.encode())),
+                clears: AtomicUsize::new(0),
+            }
         }
 
         fn decoded(&self) -> Option<Checkpoint> {
-            let bytes = self.0.lock().unwrap().clone()?;
+            let bytes = self.held.lock().unwrap().clone()?;
             Some(Checkpoint::decode(&bytes).unwrap())
+        }
+
+        fn clears(&self) -> usize {
+            self.clears.load(Ordering::SeqCst)
         }
     }
 
@@ -2206,9 +2218,10 @@ pub(crate) mod tests {
         let wallet = FundingWallet::start(
             funded_key(),
             source.clone(),
-            Some(Arc::new(MemoryCheckpoints(Mutex::new(Some(
-                b"not a checkpoint".to_vec(),
-            ))))),
+            Some(Arc::new(MemoryCheckpoints {
+                held: Mutex::new(Some(b"not a checkpoint".to_vec())),
+                clears: AtomicUsize::new(0),
+            })),
             Arc::new(NoopPublisherTelemetry),
         );
         ready(&wallet).await;
@@ -2351,11 +2364,24 @@ pub(crate) mod tests {
         );
 
         wallet.struck();
+        // The forgetting strike came first; a late landing must be treated as
+        // already-forgotten, not re-processed.
+        wallet.landed();
         settle(&wallet).await;
         assert_eq!(
             source.froms().last(),
             Some(&None),
-            "the third strike replays from the first event"
+            "a landing reported after the third strike still replays from the first event"
+        );
+        assert_eq!(
+            store.clears(),
+            1,
+            "a landing reported after the third strike clears the store no second time"
+        );
+        assert_eq!(
+            wallet.shared.snapshots().strikes,
+            0,
+            "the strikes the forget zeroed stay zero"
         );
         assert_eq!(
             *drops.0.lock().unwrap(),
@@ -3902,7 +3928,7 @@ pub(crate) mod tests {
         let stored_after_strikes = store.decoded().map(|checkpoint| checkpoint.applied);
         // The fresh replay keeps a good checkpoint (simulated), then any later failure.
         let good = checkpoint_after(29, &funded_key());
-        *store.0.lock().unwrap() = Some(good.encode());
+        *store.held.lock().unwrap() = Some(good.encode());
         wallet.shared.snapshots().latest = Some(good);
         wallet.failed();
         tokio::time::sleep(std::time::Duration::from_secs(10)).await;
