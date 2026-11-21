@@ -67,9 +67,10 @@ const CHECKPOINT_MAGIC: &[u8; 16] = b"mpc-dust-ckpt-v1";
 /// How long a resumed subscription may stay silent before the checkpoint is dropped:
 /// the indexer serves the checkpoint's own event first, from what it has stored.
 const RESUME_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
-/// Failed submits of a restored wallet, after it was used and with none landing in
-/// between, before its checkpoint is dropped: the intent builder's snapshot strikes.
-/// Above one, because a healthy wallet is also refused at times.
+/// Strikes — submits a restored wallet's state was implicated in, with none landing
+/// in between — before its checkpoint is dropped: the intent builder's snapshot
+/// strikes. Above one, because a healthy wallet is also refused at times, and its
+/// spends also expire unlanded.
 const RESTORE_STRIKES: u32 = 3;
 /// How long a live subscription that holds itself caught up may apply nothing while
 /// the indexer names a newer event before it is replaced: a connection can stall
@@ -158,10 +159,12 @@ pub(crate) trait FeePayer: Send + Sync {
     fn reserve(&self, spent: &[DustNullifier], until: Timestamp);
     /// Ends the reservation of `spent`: the transaction spending them cannot land.
     fn release(&self, spent: &[DustNullifier]);
-    /// A submit failed for any reason but an unsynced wallet. The replay starts over
-    /// from the latest checkpoint, and `wallet_used` says whether the failure came
-    /// once the wallet was paying, so it can implicate the restored state.
-    fn failed(&self, wallet_used: bool);
+    /// A submit failed without implicating the wallet's restored state: the replay
+    /// restarts from the latest checkpoint.
+    fn failed(&self);
+    /// A submit failed implicating a restored wallet's snapshot: the strike counts
+    /// toward dropping its checkpoint, and the replay restarts from the latest one.
+    fn struck(&self);
     /// A submit landed: the wallet in use can pay whatever it was restored from.
     fn landed(&self);
 }
@@ -968,11 +971,15 @@ impl FeePayer for FundingWallet {
         self.shared.progress.send_replace(());
     }
 
-    fn failed(&self, wallet_used: bool) {
+    fn failed(&self) {
+        self.restart_replay(false);
+    }
+
+    fn struck(&self) {
         let restored = self.shared.state().restored;
-        // The strikes before the reload, so a wake acting on it sees any forget.
+        // The strike before the reload, so a wake acting on it sees any forget.
         let mut forget = false;
-        if restored && wallet_used {
+        if restored {
             let mut snapshots = self.shared.snapshots();
             snapshots.strikes += 1;
             if snapshots.strikes >= RESTORE_STRIKES {
@@ -987,6 +994,18 @@ impl FeePayer for FundingWallet {
                 forget = true;
             }
         }
+        self.restart_replay(forget);
+    }
+
+    fn landed(&self) {
+        self.shared.snapshots().strikes = 0;
+    }
+}
+
+impl FundingWallet {
+    /// Restarts the replay from the latest checkpoint, `forget` first discarding it
+    /// from memory and the store.
+    fn restart_replay(&self, forget: bool) {
         self.shared.state().reload = true;
         if forget {
             // Cleared at once, as the intent builder's forget was, whether or not a
@@ -1002,10 +1021,6 @@ impl FeePayer for FundingWallet {
             });
         }
         self.shared.wake.notify_one();
-    }
-
-    fn landed(&self) {
-        self.shared.snapshots().strikes = 0;
     }
 }
 
@@ -2185,7 +2200,7 @@ pub(crate) mod tests {
     #[tokio::test(start_paused = true)]
     async fn a_failed_submit_resumes_the_replay_from_the_latest_checkpoint() {
         let (wallet, store, source, resumed_at) = restored_wallet().await;
-        wallet.failed(false);
+        wallet.failed();
         settle(&wallet).await;
         assert_eq!(source.froms(), vec![Some(resumed_at), Some(resumed_at)]);
         assert_fully_replayed(&wallet);
@@ -2196,12 +2211,15 @@ pub(crate) mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn restored_wallets_failing_three_times_once_used_forget_the_checkpoint() {
+    async fn restored_wallets_struck_three_times_forget_the_checkpoint() {
         let (wallet, store, source, resumed_at) = restored_wallet().await;
-        // A landing between failures clears the strikes, and a failure before the
-        // wallet was used is no strike.
-        for (used, landed) in [(true, false), (true, true), (false, false), (true, false)] {
-            wallet.failed(used);
+        // A landing clears the strikes; a non-implicating failure is none.
+        for (strike, landed) in [(true, false), (true, true), (false, false), (true, false)] {
+            if strike {
+                wallet.struck();
+            } else {
+                wallet.failed();
+            }
             settle(&wallet).await;
             if landed {
                 wallet.landed();
@@ -2210,7 +2228,7 @@ pub(crate) mod tests {
         assert_eq!(
             wallet.shared.snapshots().strikes,
             1,
-            "a landing and a failure before paying count no strike"
+            "a landing and a non-implicating failure count no strike"
         );
         // The first reload resumes the restored checkpoint; its caught-up replay keeps
         // the newest event's, which the later reloads resume.
@@ -2220,16 +2238,20 @@ pub(crate) mod tests {
             vec![Some(resumed_at), Some(resumed_at), newest, newest, newest]
         );
 
+        // A failure between strikes does not clear them; only a landing does.
+        wallet.failed();
+        settle(&wallet).await;
+
         // The last of those was the first strike since the landing; this is the second.
-        wallet.failed(true);
+        wallet.struck();
         settle(&wallet).await;
         assert_eq!(
             wallet.shared.snapshots().strikes,
             2,
-            "two strikes in a row keep the checkpoint"
+            "two strikes, with none landing between them, keep the checkpoint"
         );
 
-        wallet.failed(true);
+        wallet.struck();
         settle(&wallet).await;
         assert_eq!(
             source.froms().last(),
@@ -2251,7 +2273,7 @@ pub(crate) mod tests {
         settle(&wallet).await;
         let newest = fixture_updates().last().unwrap().id;
         for _ in 0..RESTORE_STRIKES {
-            wallet.failed(true);
+            wallet.struck();
             settle(&wallet).await;
         }
         // Each failure resumes from the checkpoint the replay kept in memory.
@@ -2263,7 +2285,7 @@ pub(crate) mod tests {
     #[tokio::test(start_paused = true)]
     async fn a_wallet_whose_submit_just_failed_is_not_ready_until_it_reloads() {
         let (wallet, _store, _source, _resumed_at) = restored_wallet().await;
-        wallet.failed(false);
+        wallet.failed();
         // No await between the failure and the next publish's wait: the reload has not
         // run yet, and the state it will replace is not ready.
         let error = wallet
@@ -2293,7 +2315,7 @@ pub(crate) mod tests {
     async fn a_replay_started_over_carries_no_strikes() {
         let (wallet, _store, _source, _resumed_at) = restored_wallet().await;
         for _ in 0..RESTORE_STRIKES - 1 {
-            wallet.failed(true);
+            wallet.struck();
             settle(&wallet).await;
         }
         assert_eq!(wallet.shared.snapshots().strikes, RESTORE_STRIKES - 1);
@@ -2795,7 +2817,7 @@ pub(crate) mod tests {
         ready(&wallet).await;
         // A stall replacement was asked, then a submit failed, before the subscription woke.
         wallet.shared.state().resubscribe = true;
-        wallet.failed(false);
+        wallet.failed();
         tokio::time::sleep(std::time::Duration::from_secs(10)).await;
         assert!(!wallet.shared.state().reload, "the reload was acted on");
         ready(&wallet).await;
@@ -3309,7 +3331,7 @@ pub(crate) mod tests {
         let wallet = FundingWallet::start(key, source.clone(), Some(store.clone()));
         ready(&wallet).await;
         for _ in 0..RESTORE_STRIKES {
-            wallet.failed(true);
+            wallet.struck();
             settle(&wallet).await;
         }
         let newest = fixture_updates().last().unwrap().id;
@@ -3325,7 +3347,7 @@ pub(crate) mod tests {
         // The fresh replay's first failure is no strike; the next is the first strike
         // against the checkpoint it resumed from, so nothing is cleared again.
         for _ in 0..2 {
-            wallet.failed(true);
+            wallet.struck();
             settle(&wallet).await;
         }
         assert_eq!(
@@ -3344,7 +3366,7 @@ pub(crate) mod tests {
         let (wallet, _store, source, resumed_at) = restored_wallet().await;
         assert_eq!(source.froms(), vec![Some(resumed_at)]);
         for round in 1..=4 {
-            wallet.failed(false);
+            wallet.failed();
             // A reload resubscribes after the resubscribe delay, never a backoff.
             tokio::time::sleep(RESUBSCRIBE_DELAY + std::time::Duration::from_secs(1)).await;
             assert_eq!(source.froms().len(), round + 1, "failure {round}");
@@ -3408,7 +3430,7 @@ pub(crate) mod tests {
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
         assert_eq!(*source.froms.lock().unwrap(), vec![Some(resumed_at)]);
         assert_eq!(wallet.shared.state().applied, Some(newest));
-        wallet.failed(false);
+        wallet.failed();
         tokio::time::sleep(std::time::Duration::from_secs(10)).await;
         assert_eq!(
             *source.froms.lock().unwrap(),
@@ -3472,7 +3494,7 @@ pub(crate) mod tests {
         tokio::time::sleep(std::time::Duration::from_secs(30)).await;
         assert_eq!(*source.froms.lock().unwrap(), vec![Some(resumed_at), None]);
         // A submit in flight from before fails.
-        wallet.failed(true);
+        wallet.struck();
         tokio::time::sleep(std::time::Duration::from_secs(10)).await;
         assert_eq!(
             *source.froms.lock().unwrap(),
@@ -3502,14 +3524,14 @@ pub(crate) mod tests {
     async fn a_checkpoint_kept_as_the_third_strike_lands_is_forgotten_too() {
         let (wallet, _store, source, resumed_at) = restored_wallet().await;
         for _ in 0..RESTORE_STRIKES - 1 {
-            wallet.failed(true);
+            wallet.struck();
             settle(&wallet).await;
         }
         assert_eq!(source.froms().len(), 3);
         assert_eq!(source.froms()[0], Some(resumed_at));
         // A checkpoint is due when the third strike lands.
         tokio::time::sleep(CHECKPOINT_INTERVAL).await;
-        wallet.failed(true);
+        wallet.struck();
         // What the subscription does when that strike lands while it applies a batch:
         // it keeps the due checkpoint before it reaches the select that sees the wake.
         keep_checkpoint(&wallet.shared).await;
@@ -3594,7 +3616,7 @@ pub(crate) mod tests {
         assert_eq!(first, updates[19].id);
 
         tokio::time::sleep(std::time::Duration::from_secs(4 * 60)).await;
-        wallet.failed(false);
+        wallet.failed();
         tokio::time::sleep(std::time::Duration::from_secs(10)).await;
         ready(&wallet).await;
 
@@ -3643,10 +3665,10 @@ pub(crate) mod tests {
     async fn a_restart_racing_the_third_strike_still_forgets() {
         let (wallet, store, _source, _resumed_at) = restored_wallet().await;
         for _ in 0..2 {
-            wallet.failed(true);
+            wallet.struck();
             settle(&wallet).await;
         }
-        wallet.failed(true);
+        wallet.struck();
         // No await in between: the spawned clear has not run yet.
         start_over(&wallet.shared);
         tokio::time::sleep(std::time::Duration::from_secs(10)).await;
@@ -3656,7 +3678,7 @@ pub(crate) mod tests {
         let good = checkpoint_after(29, &funded_key());
         *store.0.lock().unwrap() = Some(good.encode());
         wallet.shared.snapshots().latest = Some(good);
-        wallet.failed(false);
+        wallet.failed();
         tokio::time::sleep(std::time::Duration::from_secs(10)).await;
         assert!(
             !forget_pending,
@@ -3726,12 +3748,12 @@ pub(crate) mod tests {
         let wallet = FundingWallet::start(key, source, Some(store.clone()));
         ready(&wallet).await;
         for _ in 0..RESTORE_STRIKES - 1 {
-            wallet.failed(true);
+            wallet.struck();
             settle(&wallet).await;
         }
         down.store(true, std::sync::atomic::Ordering::SeqCst);
         tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-        wallet.failed(true);
+        wallet.struck();
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
         assert!(
             store.decoded().is_none(),
@@ -3786,7 +3808,7 @@ pub(crate) mod tests {
         // No indexer, so no fresh replay keeps a checkpoint of its own afterwards.
         down.store(true, std::sync::atomic::Ordering::SeqCst);
         wallet.shared.snapshots().strikes = RESTORE_STRIKES - 1;
-        wallet.failed(true);
+        wallet.struck();
         tokio::time::sleep(std::time::Duration::from_secs(60)).await;
         assert_eq!(
             *store.log.lock().unwrap(),
@@ -3840,7 +3862,7 @@ pub(crate) mod tests {
         ready(&wallet).await;
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
         wallet.shared.snapshots().strikes = RESTORE_STRIKES - 1;
-        wallet.failed(true);
+        wallet.struck();
         // The replay from the first event catches up while the store is still clearing.
         tokio::time::sleep(std::time::Duration::from_secs(5)).await;
         visible.store(25, std::sync::atomic::Ordering::SeqCst);
@@ -3879,10 +3901,10 @@ pub(crate) mod tests {
     async fn nothing_is_kept_while_a_forget_is_pending() {
         let (wallet, _store, _source, _resumed_at) = restored_wallet().await;
         for _ in 0..RESTORE_STRIKES - 1 {
-            wallet.failed(true);
+            wallet.struck();
             settle(&wallet).await;
         }
-        wallet.failed(true);
+        wallet.struck();
         // No await until the keep below: the spawned clear has not run.
         start_over(&wallet.shared);
         apply(
@@ -3932,7 +3954,7 @@ pub(crate) mod tests {
         let ttl = Timestamp::from_secs(ctime.to_secs() + 180);
         let mut rng = StdRng::seed_from_u64(5);
         let base = base(&mut rng, ttl);
-        wallet.failed(false);
+        wallet.failed();
         let planned = wallet.plan(
             &base,
             &INITIAL_PARAMETERS,
@@ -4006,7 +4028,7 @@ pub(crate) mod tests {
         );
         tokio::time::sleep(std::time::Duration::from_secs(30)).await;
         assert_eq!(*source.froms.lock().unwrap(), vec![Some(resumed_at), None]);
-        wallet.failed(true);
+        wallet.struck();
         tokio::time::sleep(std::time::Duration::from_secs(10)).await;
         assert_eq!(
             *source.froms.lock().unwrap(),
@@ -4029,7 +4051,7 @@ pub(crate) mod tests {
         );
         tokio::time::sleep(RESUME_TIMEOUT + std::time::Duration::from_secs(10)).await;
         assert_eq!(source.froms(), vec![Some(resumed_at), None]);
-        wallet.failed(true);
+        wallet.struck();
         tokio::time::sleep(std::time::Duration::from_secs(10)).await;
         assert_eq!(
             source.froms(),

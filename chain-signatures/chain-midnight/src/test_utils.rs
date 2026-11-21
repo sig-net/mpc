@@ -2,6 +2,7 @@
 
 use crate::records::{MpcDestination, MpcSignatureAlgorithm, SignBidirectionalRecord};
 use crate::types::MidnightAddress;
+use jsonrpsee::core::client::Error as JsonrpseeClientError;
 use midnight_base_crypto::fab::{
     AlignedValue, Alignment, AlignmentAtom, AlignmentSegment, Value, ValueAtom,
 };
@@ -11,8 +12,20 @@ use midnight_storage::DefaultDB;
 use mpc_primitives::{
     Calldata, CompactMaybe, EvmAccessListEntry, EvmType2TxParams, TronTxParams, TxParams,
 };
+use subxt::ext::subxt_rpcs::Error as RawRpcError;
 
 use crate::reader::Node;
+
+/// jsonrpsee's `Rejected` wire shape (jsonrpsee-http-client 0.24.10
+/// transport.rs:376), as the node boundary returns it. Callers attach their
+/// own context or read carrier.
+pub(crate) fn rejected_http(status: u16) -> anyhow::Error {
+    let transport = jsonrpsee::http_client::transport::Error::Rejected {
+        status_code: status,
+    };
+    let client = JsonrpseeClientError::Transport(Box::new(transport));
+    anyhow::Error::new(RawRpcError::Client(Box::new(client)))
+}
 
 pub(crate) fn hex_32(value: &str) -> [u8; 32] {
     let mut decoded = [0u8; 32];
