@@ -209,6 +209,8 @@ impl<W: FeePayer, C: SubmitChain + 'static> NativeIntentClient<W, C> {
         Ok(bytes)
     }
 
+    /// Submits the given intent to the wallet, proving and paying for it as necessary.
+    /// Returns a `Submitted` result if successful, or a `SubmitError` otherwise.
     async fn submit_intent(&self, intent: &[u8]) -> Result<Submitted, SubmitError> {
         let deadline = Instant::now() + self.submit_timeout;
         let intent: PreimageIntent<DefaultDB> =
@@ -522,6 +524,7 @@ where
     }
 }
 
+/// Reports the result of a submit to the wallet, updating its state accordingly.
 fn report_submit<W: FeePayer>(wallet: &W, submitted: &Result<Submitted, SubmitError>) {
     match submitted {
         Ok(_) => wallet.landed(),
