@@ -1996,7 +1996,8 @@ export circuit completeRedeem(
 export struct TronWithdrawRequest {
   tokenAddress: Bytes<20>;
   amount: Uint<128>;
-  // The recipient's Tron address without its 0x41 prefix, which the vault adds.
+  // The recipient's Tron address without its 0x41 prefix: the 20 bytes the TRC-20
+  // transfer's ABI address argument carries.
   destTronAddress: Bytes<20>;
 }
 
