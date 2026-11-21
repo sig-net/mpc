@@ -373,6 +373,9 @@ impl<W: FeePayer, C: SubmitChain + 'static> NativeIntentClient<W, C> {
         let unanswered = match self.chain.submit(bytes).await {
             Ok(()) => false,
             Err(SubmitRefusal::Refused(reason)) => {
+                // TODO: exonerate refusing the wallet's own just-reserved
+                // nullifiers (a late landing, not a stale snapshot);
+                // ship a cycle regression test with it.
                 self.wallet.release(spent);
                 return Err(SubmitError::StateConflict(format!(
                     "the node refused the transaction: {reason}; nothing was posted"
