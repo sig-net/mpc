@@ -291,6 +291,16 @@ pub struct TronRecipient {
     pub after: u64,
 }
 
+/// A Tron withdraw left unsent until its window closed to sends, then refunded.
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UnsentRefund {
+    /// `sendTronWithdraw` once the window closed to sends.
+    pub late_send_refusal: String,
+    /// From the start to the refund.
+    pub waited_ms: u64,
+}
+
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct VaultTronRunResult {
@@ -300,6 +310,7 @@ pub struct VaultTronRunResult {
     pub last_seen: LastSeenSteps,
     pub cross_chain_refusals: CrossChainRefusals,
     pub recipient: TronRecipient,
+    pub unsent_refund: UnsentRefund,
 }
 
 #[derive(Deserialize)]

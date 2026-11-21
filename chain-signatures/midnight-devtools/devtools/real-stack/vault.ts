@@ -128,6 +128,10 @@ const TRON_WITHDRAW_FEE = 1_000n;
 const TRON_DEPOSIT_FEE_LIMIT = 100_000_000n;
 const TRON_ACCOUNT_TRX = 2_000_000_000n;
 const TRON_WINDOW_MS = 3_600_000n;
+// Two minutes above the start's 600 s minimum, which the block including the start must
+// still clear after proving; the unsent withdraw's refund opens about eleven minutes after
+// its start, mostly while the other withdraws run.
+const TRON_UNSENT_WINDOW_MS = 720_000n;
 
 export interface VaultRunInput {
   config: MidnightNodeConfig;
@@ -219,6 +223,11 @@ export interface VaultTronRunResult {
   crossChainRefusals: { tronCompleteOfEthereum: string; ethereumCompleteOfTron: string };
   /** The withdraw recipient's TRC-20 balance around the withdraw. */
   recipient: { address: string; before: number; after: number };
+  /**
+   * A Tron withdraw left unsent until its window closed to sends: the late send's refusal,
+   * and the refund that re-minted its amount.
+   */
+  unsentRefund: { lateSendRefusal: string; waitedMs: number };
 }
 
 /** A request its start circuit queued under `inIndex`. */
@@ -1043,7 +1052,47 @@ class VaultRun {
     return this.attest(executed);
   }
 
-  private async tronWindow(): Promise<{
+  // Starts a Tron withdraw of TRON_WITHDRAW_AMOUNT of `token` to `recipient` (21-byte) under
+  // a fresh window `windowMs` long, and returns that window.
+  private async startTronWithdraw(
+    inIndex: bigint,
+    token: Uint8Array,
+    recipient: Uint8Array,
+    windowMs: bigint,
+  ): Promise<Awaited<ReturnType<VaultRun["tronWindow"]>>> {
+    await this.input.userFacade.waitForSyncedState();
+    const configured = await this.readLedger();
+    const window = await this.tronWindow(windowMs);
+    // The fee coin goes to the fee recipient, so its output needs that recipient's key.
+    await submitCallTx(this.providers, {
+      ...createCallTxOptions(
+        vaultCompiledContract,
+        "startTronWithdraw",
+        this.vaultAddress,
+        VAULT_PRIVATE_STATE_ID,
+        new Map([
+          [
+            bytesToHex(configured.feeRecipientCoinPublicKey.bytes),
+            bytesToHex(configured.feeRecipientEncryptionPublicKey),
+          ],
+        ]),
+        [
+          inIndex,
+          {
+            tokenAddress: token.subarray(1),
+            amount: TRON_WITHDRAW_AMOUNT,
+            destTronAddress: recipient.subarray(1),
+          },
+          window,
+          this.coin(bytesToHex(token), TRON_WITHDRAW_AMOUNT + TRON_WITHDRAW_FEE, TargetChain.Tron),
+        ],
+      ),
+      privateStateId: VAULT_PRIVATE_STATE_ID,
+    });
+    return window;
+  }
+
+  private async tronWindow(windowMs = TRON_WINDOW_MS): Promise<{
     refBlockBytes: Uint8Array;
     refBlockHash: Uint8Array;
     timestamp: bigint;
@@ -1056,7 +1105,7 @@ class VaultRun {
       refBlockBytes: reference.refBlockBytes,
       refBlockHash: reference.refBlockHash,
       timestamp,
-      expiration: timestamp + TRON_WINDOW_MS,
+      expiration: timestamp + windowMs,
     };
   }
 
@@ -1162,6 +1211,22 @@ class VaultRun {
     await this.expectBalance(usdc, WITHDRAW_AMOUNT);
     await this.expectBalance(tokenHex, TRON_DEPOSIT_AMOUNT, TargetChain.Tron);
 
+    // Queued and flushed now, never sent: its refund opens while the other withdraws run.
+    diagnostics("queueing and flushing a Tron withdraw nobody will send in time");
+    const unsentInIndex = newInputIndex();
+    const unsentWindow = await this.startTronWithdraw(
+      unsentInIndex,
+      token,
+      tronAddressFromEvm(randomBytes(20)),
+      TRON_UNSENT_WINDOW_MS,
+    );
+    const unsentStartedAt = Date.now();
+    await this.flush([unsentInIndex], []);
+    const unsentOutIndex = [...(await this.readLedger()).outputRequestBuffer].find(
+      ([, { entry }]) => entry.action === Action.tronWithdraw && entry.inIndex === unsentInIndex,
+    )?.[0];
+    if (unsentOutIndex === undefined) throw new Error("the flush did not move the unsent withdraw");
+
     diagnostics("queueing the ETH and Tron withdraws");
     const recipient = tronAddressFromEvm(randomBytes(20));
     const recipientBefore = await tron.balanceOf(token, recipient);
@@ -1188,34 +1253,7 @@ class VaultRun {
       },
       this.coin(usdc, WITHDRAW_AMOUNT),
     );
-    await this.input.userFacade.waitForSyncedState();
-    const configured = await this.readLedger();
-    // The fee coin goes to the fee recipient, so its output needs that recipient's key.
-    await submitCallTx(this.providers, {
-      ...createCallTxOptions(
-        vaultCompiledContract,
-        "startTronWithdraw",
-        this.vaultAddress,
-        VAULT_PRIVATE_STATE_ID,
-        new Map([
-          [
-            bytesToHex(configured.feeRecipientCoinPublicKey.bytes),
-            bytesToHex(configured.feeRecipientEncryptionPublicKey),
-          ],
-        ]),
-        [
-          tronWithdrawStart.inIndex,
-          {
-            tokenAddress: token.subarray(1),
-            amount: TRON_WITHDRAW_AMOUNT,
-            destTronAddress: recipient.subarray(1),
-          },
-          await this.tronWindow(),
-          this.coin(tokenHex, TRON_WITHDRAW_AMOUNT + TRON_WITHDRAW_FEE, TargetChain.Tron),
-        ],
-      ),
-      privateStateId: VAULT_PRIVATE_STATE_ID,
-    });
+    await this.startTronWithdraw(tronWithdrawStart.inIndex, token, recipient, TRON_WINDOW_MS);
     const [withdrawSent, tronWithdrawSent] = await this.flushAndSend([
       withdrawStart,
       tronWithdrawStart,
@@ -1300,11 +1338,30 @@ class VaultRun {
     );
     await this.removed(withdraw);
     await this.removed(tronWithdraw);
-    // The burns stand: no refund coin is minted back.
+    // The burns stand: no refund coin is minted back. The unsent withdraw's coin is burned.
     await this.expectBalance(usdc, 0n);
     await this.expectBalance(
       tokenHex,
-      TRON_DEPOSIT_AMOUNT - TRON_WITHDRAW_AMOUNT - TRON_WITHDRAW_FEE,
+      TRON_DEPOSIT_AMOUNT - 2n * (TRON_WITHDRAW_AMOUNT + TRON_WITHDRAW_FEE),
+      TargetChain.Tron,
+    );
+
+    // From the expiration's whole seconds minus the send margin, the send is refused and
+    // the withdrawer's refund re-mints the amount; the fee stays taken.
+    const refundOpensAt =
+      Number(unsentWindow.expiration / 1000n - pureCircuits.tronWithdrawSendMinRemainingSeconds()) *
+      1000;
+    diagnostics(`waiting for the unsent withdraw's refund to open at ${refundOpensAt}`);
+    await new Promise((resolve) => setTimeout(resolve, Math.max(0, refundOpensAt - Date.now())));
+    const lateSendRefusal = await refusal(() => this.vault.callTx.sendTronWithdraw(unsentOutIndex));
+    if (!lateSendRefusal.includes("too close")) {
+      throw new Error(`the late send failed otherwise: ${lateSendRefusal}`);
+    }
+    await this.vault.callTx.refundUnsentTronWithdraw(unsentInIndex, randomBytes(32));
+    const waitedMs = Date.now() - unsentStartedAt;
+    await this.expectBalance(
+      tokenHex,
+      TRON_DEPOSIT_AMOUNT - TRON_WITHDRAW_AMOUNT - 2n * TRON_WITHDRAW_FEE,
       TargetChain.Tron,
     );
     const settled = await this.readLedger();
@@ -1329,6 +1386,9 @@ class VaultRun {
     if (!settled.tronWithdrawRequestIds.member(hexToBytes(tronWithdraw.requestId))) {
       throw new Error("the vault forgot the Tron withdraw's request id");
     }
+    if (settled.tronWithdrawRequestIds.size() !== 2n) {
+      throw new Error("the vault forgot the refunded Tron withdraw's request id");
+    }
 
     return {
       vaultAddress: this.vaultAddress,
@@ -1336,6 +1396,7 @@ class VaultRun {
       operations: this.operations,
       lastSeen: { before, afterEthereum, afterTron },
       crossChainRefusals: { tronCompleteOfEthereum, ethereumCompleteOfTron },
+      unsentRefund: { lateSendRefusal, waitedMs },
       recipient: {
         address: bytesToHex(recipient),
         before: Number(recipientBefore),

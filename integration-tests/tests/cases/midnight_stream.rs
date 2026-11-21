@@ -1086,7 +1086,9 @@ async fn expect_settled_by_cluster(
 /// same vault. An ETH and a Tron deposit fund a vault coin of each colour; then the two
 /// withdraws run side by side, each attestation flushed while the other request is open, so
 /// each must fold only into its own chain's last-seen height, and each is offered to the
-/// other chain's complete circuit before the real completes.
+/// other chain's complete circuit before the real completes. A third Tron withdraw, flushed
+/// and never sent, waits until its window closes to sends: the late send is refused and the
+/// withdrawer's refund re-mints its amount.
 #[ignore = "starts a real Midnight node, indexer, proof server, Anvil, TRE, and MPC cluster"]
 #[serial]
 #[test(tokio::test)]
@@ -1194,6 +1196,12 @@ async fn midnight_vault_tron_withdraw_with_real_mpc() -> anyhow::Result<()> {
         result.recipient.after.checked_sub(result.recipient.before) == Some(100_000),
         "the Tron recipient received {:?}",
         result.recipient
+    );
+    let unsent = &result.unsent_refund;
+    tracing::info!(?unsent, "unsent Tron withdraw refunded");
+    anyhow::ensure!(
+        unsent.late_send_refusal.contains("too close"),
+        "the late send was refused for another reason: {unsent:?}"
     );
     midnight.shutdown().await?;
     Ok(())

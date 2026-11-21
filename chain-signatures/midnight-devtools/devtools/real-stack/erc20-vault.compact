@@ -1988,8 +1988,10 @@ export circuit completeRedeem(
 // account (path "vault": its Tron address is 0x41 ‖ vaultEvmAddress) under the vault's fee
 // limit. Tron has no nonce: the withdrawer names the reference block and the validity
 // window, and a transaction that never lands expires, which the MPC attests unviable, so
-// the withdrawal is refunded. The vault's Tron account pays the energy and bandwidth, in
-// staked resources or burned TRX up to the fee limit.
+// the withdrawal is refunded. A withdrawal nobody sent before its window closed to sends
+// never reaches the MPC, so its withdrawer refunds it with refundUnsentTronWithdraw. The
+// vault's Tron account pays the energy and bandwidth, in staked resources or burned TRX up
+// to the fee limit.
 
 export struct TronWithdrawRequest {
   tokenAddress: Bytes<20>;
@@ -2239,4 +2241,76 @@ export circuit completeTronWithdraw(
       left<ZswapCoinPublicKey, ContractAddress>(ownPublicKey())
     );
   }
+}
+
+// Asserts the block time has reached the first one at which sendTronWithdraw refuses a
+// withdrawal expiring at `expiration`: assertTronWithdrawWindow admits a send only while
+// the block time is below h - tronWithdrawSendMinRemainingSeconds(), h the expiration's
+// whole seconds, so this asserts the complement, at least that. The start admitted only an
+// h above tronWithdrawStartMinRemainingSeconds(), so the difference cannot underflow.
+circuit assertTronWithdrawSendClosed(expiration: Uint<64>): [] {
+  const ms = disclose(expiration);
+  const seconds = disclose(secondsOfMillis(expiration));
+  assert(
+    seconds * 1000 <= ms && ms < seconds * 1000 + 1000,
+    "expirationSeconds is not the expiration in whole seconds"
+  );
+  assert(
+    blockTimeGte((seconds - tronWithdrawSendMinRemainingSeconds()) as Uint<64>),
+    "Tron withdrawal can still be sent"
+  );
+}
+
+// Re-mints the amount of the Tron withdrawal queued under inIndex that was never sent and
+// can no longer be: sendTronWithdraw refuses it from the block time this checks, and its
+// coin was burned at start. Takes the withdrawal out of whichever request buffer holds it
+// and out of tronWithdrawArgsMap, so no flush or send can reach it again, and keeps its
+// request id in tronWithdrawRequestIds and the withdraw fee, as a failed withdrawal does.
+// A send and a refund of one withdrawal exclude each other through the ledger: the send
+// needs the flushed entry this removes, and this needs the request id the send records to
+// be absent. Withdrawer-gated, once. mintNonce is caller-chosen and must be random, else
+// no hiding property is guaranteed.
+export circuit refundUnsentTronWithdraw(inIndex: Uint<64>, mintNonce: Bytes<32>): [] {
+  requireInitialised();
+  const disclosedIndex = disclose(inIndex);
+  assert(tronWithdrawArgsMap.member(disclosedIndex), "Tron withdrawal not open");
+  const args = tronWithdrawArgsMap.lookup(disclosedIndex);
+  const requestId = calculateTronRequestIdV1<2, 34>(tronWithdrawEvent(args));
+  assert(!bidirectionalTronWithdrawMap.member(requestId), "Request already sent");
+  assertTronWithdrawSendClosed(args.tx.expiration);
+
+  // Unflushed, the entry sits under inIndex. Flushed, the inIndex may hold another
+  // action's entry, and the entry sits under its requestIndex, which reads only the nonce
+  // (always 0 on Tron) and the args hash.
+  const queued = inputRequestBuffer.member(disclosedIndex) &&
+    inputRequestBuffer.lookup(disclosedIndex).action == Action.tronWithdraw;
+  const outIndex = requestIndex(RequestBufferEntry {
+    action: Action.tronWithdraw,
+    chain: Chain.tron,
+    useNextVaultAccountNonce: false,
+    evmNonce: 0 as Uint<64>,
+    inIndex: disclosedIndex,
+    commitment: default<Bytes<32>>,
+    argsHash: tronWithdrawArgsHash(args),
+  });
+  const entry = queued
+    ? inputRequestBuffer.lookup(disclosedIndex)
+    : outputRequestBuffer.lookup(outIndex).entry;
+  assert(
+    entry.commitment == ownershipCommitment(entry.inIndex, callerSecretKey()),
+    "Not the requester"
+  );
+
+  if (queued) {
+    inputRequestBuffer.remove(disclosedIndex);
+  } else {
+    outputRequestBuffer.remove(outIndex);
+  }
+  tronWithdrawArgsMap.remove(disclosedIndex);
+  mintShieldedToken(
+    vaultTronTokenDomainSeparator(args.request.tokenAddress),
+    args.request.amount as Uint<64>,
+    disclose(mintNonce),
+    left<ZswapCoinPublicKey, ContractAddress>(ownPublicKey())
+  );
 }
