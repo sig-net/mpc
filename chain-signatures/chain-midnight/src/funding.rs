@@ -2399,11 +2399,6 @@ pub(crate) mod tests {
             "a landing reported after the third strike clears the store no second time"
         );
         assert_eq!(
-            wallet.shared.snapshots().strikes,
-            0,
-            "the strikes the forget zeroed stay zero"
-        );
-        assert_eq!(
             *drops.0.lock().unwrap(),
             vec!["strikes"],
             "only the strike that forgets the checkpoint is reported"
@@ -4372,6 +4367,11 @@ pub(crate) mod tests {
             source.froms(),
             vec![Some(resumed_at), None, None],
             "the checkpoint that timed out is not resumed again"
+        );
+        assert_eq!(
+            wallet.shared.snapshots().strikes,
+            0,
+            "a strike after its checkpoint was dropped counts nothing"
         );
     }
 
