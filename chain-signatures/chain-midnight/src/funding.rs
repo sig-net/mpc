@@ -335,8 +335,7 @@ struct Shared {
     /// Wakes the subscription to act on `Synced::reload` or `Synced::resubscribe`.
     wake: tokio::sync::Notify,
     store: Option<Arc<dyn DustCheckpointStore>>,
-    /// Where each dropped checkpoint is reported; a drop restarts the replay from
-    /// the first event.
+    /// Where each replay restart from the first event is reported, by cause.
     telemetry: Arc<dyn PublisherTelemetry>,
     /// Held while a checkpoint is kept and while a forgotten one is cleared, so a clear
     /// is sent only once any save that started before its forget has ended, as the
@@ -991,9 +990,10 @@ impl FeePayer for FundingWallet {
     }
 
     fn struck(&self) {
-        // TODO: re-check `restored` inside the snapshots lock; a start_over
-        // between the state read and that lock strikes a checkpoint it
-        // already dropped.
+        // TODO: re-check `restored` inside the snapshots lock — a start_over in
+        // between strikes a checkpoint already dropped (safe to defer: its
+        // `restart()` clears `restored`, so no later `struck()` counts; the
+        // stray strike can only clear what is already gone).
         let restored = self.shared.state().restored;
         // The strike before the reload, so a wake acting on it sees any forget.
         let mut forget = false;
@@ -1010,9 +1010,8 @@ impl FeePayer for FundingWallet {
                  state_conflict"
             );
             // TODO: a `funding_wallet_strikes` gauge beside the replay-restart
-            // counter, set here and zeroed wherever strikes reset (`landed`, the
-            // forgetting strike, a start_over); the telemetry handle is already
-            // on `Shared`.
+            // counter, zeroed wherever strikes reset; `Shared` already holds the
+            // telemetry (safe to defer: logs cover strikes 1–2 meanwhile).
             if snapshots.strikes >= RESTORE_STRIKES {
                 tracing::warn!(
                     cause = "strikes",
@@ -1046,8 +1045,9 @@ impl FundingWallet {
             // Cleared at once, as the intent builder's forget was, whether or not a
             // subscription is live, and after any save already running. Spawned only
             // once the reload is set: nothing is kept between the forget and the reload.
-            // TODO: join this task and log its panic as `follow` does — a panicking
-            // clear leaves `forget` set forever.
+            // TODO: join this task and log its panic as `follow` does — a panic
+            // leaves `forget` set forever (safe to defer: `clear()` handles its
+            // own errors, and a stuck `forget` only stops checkpoint saves).
             let shared = self.shared.clone();
             tokio::spawn(async move {
                 let _storing = shared.storing.lock().await;
