@@ -26,3 +26,15 @@ pub(crate) static PUBLISH_REFUSALS: LazyLock<CounterVec> = LazyLock::new(|| {
     )
     .unwrap()
 });
+
+/// Funding wallet replay checkpoints dropped, by cause (`strikes`, `resume_timeout`,
+/// `checkpoint_mismatch`, `replay_failed` — Midnight's wallet today); each drop
+/// restarts the replay from the first event.
+pub(crate) static FUNDING_WALLET_CHECKPOINT_DROPS: LazyLock<CounterVec> = LazyLock::new(|| {
+    try_create_counter_vec_with_node_account_id(
+        "multichain_funding_wallet_checkpoint_drops",
+        "Funding wallet replay checkpoints dropped, by cause; each drop restarts the replay from the first event",
+        &["chain", "cause"],
+    )
+    .unwrap()
+});

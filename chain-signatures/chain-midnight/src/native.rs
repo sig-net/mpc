@@ -2226,6 +2226,7 @@ mod live {
     use crate::rpc::MidnightPublisherRpc;
     use crate::types::MidnightAddress;
     use minocrab_publisher::{Attestation, EcdsaSignature};
+    use mpc_chain_integration_core::NoopPublisherTelemetry;
 
     fn env(name: &str) -> String {
         std::env::var(name).unwrap_or_else(|_| panic!("{name} must be set"))
@@ -2259,6 +2260,7 @@ mod live {
                 config.publisher.indexer_ws_url.clone(),
             )),
             None,
+            Arc::new(NoopPublisherTelemetry),
         );
         let provers = Arc::new(
             Provers::new(

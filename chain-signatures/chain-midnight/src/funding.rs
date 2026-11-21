@@ -28,6 +28,7 @@ use midnight_ledger_v9::structure::{
 use midnight_storage::arena::Sp;
 use midnight_storage::DefaultDB;
 use midnight_transient_crypto::commitment::PedersenRandomness;
+use mpc_chain_integration_core::PublisherTelemetry;
 use mpc_utils::task::AbortOnDrop;
 use rand::rngs::StdRng;
 use rand::{CryptoRng, Rng};
@@ -334,6 +335,9 @@ struct Shared {
     /// Wakes the subscription to act on `Synced::reload` or `Synced::resubscribe`.
     wake: tokio::sync::Notify,
     store: Option<Arc<dyn DustCheckpointStore>>,
+    /// Where each dropped checkpoint is reported; a drop restarts the replay from
+    /// the first event.
+    telemetry: Arc<dyn PublisherTelemetry>,
     /// Held while a checkpoint is kept and while a forgotten one is cleared, so a clear
     /// is sent only once any save that started before its forget has ended, as the
     /// intent builder's flow lock ordered its snapshot saves and clears.
@@ -370,6 +374,10 @@ impl Shared {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
+
+    fn checkpoint_dropped(&self, cause: &str) {
+        self.telemetry.funding_checkpoint_dropped(cause);
+    }
 }
 
 /// The funding wallet, kept in sync in the background for as long as it lives.
@@ -381,11 +389,13 @@ pub(crate) struct FundingWallet {
 
 impl FundingWallet {
     /// Starts replaying at once, from the checkpoint in `checkpoints` when it has one
-    /// for this key, so the first publish does not pay for the catch-up.
+    /// for this key, so the first publish does not pay for the catch-up; `telemetry`
+    /// hears of each checkpoint the replay later drops.
     pub(crate) fn start(
         key: DustSecretKey,
         source: Arc<dyn DustEventSource>,
         checkpoints: Option<Arc<dyn DustCheckpointStore>>,
+        telemetry: Arc<dyn PublisherTelemetry>,
     ) -> Self {
         let (progress, _) = watch::channel(());
         let shared = Arc::new(Shared {
@@ -396,6 +406,7 @@ impl FundingWallet {
             snapshots: Mutex::default(),
             wake: tokio::sync::Notify::new(),
             store: checkpoints,
+            telemetry,
             storing: tokio::sync::Mutex::new(()),
         });
         let sync = AbortOnDrop(tokio::spawn(follow(shared.clone(), source.clone())));
@@ -570,7 +581,7 @@ async fn subscribe_once(shared: Arc<Shared>, source: Arc<dyn DustEventSource>) -
                             "midnight funding wallet: the indexer does not serve the DUST \
                              checkpoint's event; replaying from the first event"
                         );
-                        start_over(&shared);
+                        start_over(&shared, "resume_timeout");
                         return Ended::Restarted { caught_up };
                     }
                 };
@@ -611,7 +622,8 @@ async fn subscribe_once(shared: Arc<Shared>, source: Arc<dyn DustEventSource>) -
 
 /// Drops the replayed state and the latest checkpoint it may have come from, so the
 /// next subscription replays from the first event.
-fn start_over(shared: &Shared) {
+fn start_over(shared: &Shared, cause: &str) {
+    shared.checkpoint_dropped(cause);
     shared.state().restart();
     let mut snapshots = shared.snapshots();
     snapshots.latest = None;
@@ -748,7 +760,7 @@ fn apply(shared: &Shared, batch: Vec<anyhow::Result<DustEventUpdate>>) -> anyhow
     if let (Some((id, hash)), Some(first)) = (state.resume, updates.first()) {
         if first.id != id || event_hash(&first.raw) != hash {
             drop(state);
-            start_over(shared);
+            start_over(shared, "checkpoint_mismatch");
             return Err(anyhow::Error::new(Restarted).context(format!(
                 "the DUST checkpoint at event {id} does not match the indexer, which served \
                  event {} first",
@@ -788,7 +800,7 @@ fn apply(shared: &Shared, batch: Vec<anyhow::Result<DustEventUpdate>>) -> anyhow
             }
             Err(error) => {
                 drop(state);
-                start_over(shared);
+                start_over(shared, "replay_failed");
                 return Err(anyhow::Error::new(Restarted).context(format!("{error:#}")));
             }
         }
@@ -994,6 +1006,7 @@ impl FeePayer for FundingWallet {
                 snapshots.strikes = 0;
                 snapshots.forget = true;
                 forget = true;
+                self.shared.checkpoint_dropped("strikes");
             }
         }
         self.restart_replay(forget);
@@ -1183,6 +1196,7 @@ pub(crate) mod tests {
     use crate::dust_feed::Indexed;
     use async_trait::async_trait;
     use futures_util::stream::BoxStream;
+    use mpc_chain_integration_core::NoopPublisherTelemetry;
     use rand::SeedableRng as _;
     use std::collections::VecDeque;
 
@@ -1619,8 +1633,12 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn a_started_wallet_becomes_ready_on_its_own() {
-        let wallet =
-            FundingWallet::start(funded_key(), Arc::new(OnceSource(fixture_updates())), None);
+        let wallet = FundingWallet::start(
+            funded_key(),
+            Arc::new(OnceSource(fixture_updates())),
+            None,
+            Arc::new(NoopPublisherTelemetry),
+        );
         wallet
             .ready_by(Instant::now() + std::time::Duration::from_secs(30))
             .await
@@ -1651,7 +1669,12 @@ pub(crate) mod tests {
     #[tokio::test(start_paused = true)]
     async fn a_panicking_subscription_is_retried_rather_than_ending_the_replay() {
         let source = PanicsFirst(Default::default(), fixture_updates());
-        let wallet = FundingWallet::start(funded_key(), Arc::new(source), None);
+        let wallet = FundingWallet::start(
+            funded_key(),
+            Arc::new(source),
+            None,
+            Arc::new(NoopPublisherTelemetry),
+        );
         wallet
             .ready_by(Instant::now() + std::time::Duration::from_secs(30))
             .await
@@ -1715,7 +1738,12 @@ pub(crate) mod tests {
             .finish();
         let _subscriber_guard = tracing::subscriber::set_default(subscriber);
         let source = Arc::new(FailsTwice(Default::default()));
-        let _wallet = FundingWallet::start(funded_key(), source.clone(), None);
+        let _wallet = FundingWallet::start(
+            funded_key(),
+            source.clone(),
+            None,
+            Arc::new(NoopPublisherTelemetry),
+        );
         while source.0.load(std::sync::atomic::Ordering::SeqCst) < 3 {
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
@@ -1770,7 +1798,12 @@ pub(crate) mod tests {
             subscriptions: Default::default(),
             updates: fixture_updates(),
         });
-        let wallet = FundingWallet::start(funded_key(), source.clone(), None);
+        let wallet = FundingWallet::start(
+            funded_key(),
+            source.clone(),
+            None,
+            Arc::new(NoopPublisherTelemetry),
+        );
         // The second subscription starts only after the first one ended.
         while source
             .subscriptions
@@ -1814,7 +1847,12 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn dropping_the_wallet_ends_its_subscription() {
         let alive = Arc::new(());
-        let wallet = FundingWallet::start(funded_key(), Arc::new(Held(alive.clone())), None);
+        let wallet = FundingWallet::start(
+            funded_key(),
+            Arc::new(Held(alive.clone())),
+            None,
+            Arc::new(NoopPublisherTelemetry),
+        );
         while Arc::strong_count(&alive) < 3 {
             tokio::task::yield_now().await;
         }
@@ -1830,8 +1868,12 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn a_reservation_holds_until_its_utxos_are_spent_released_or_expired() {
-        let wallet =
-            FundingWallet::start(funded_key(), Arc::new(OnceSource(fixture_updates())), None);
+        let wallet = FundingWallet::start(
+            funded_key(),
+            Arc::new(OnceSource(fixture_updates())),
+            None,
+            Arc::new(NoopPublisherTelemetry),
+        );
         wallet
             .ready_by(Instant::now() + std::time::Duration::from_secs(30))
             .await
@@ -1872,8 +1914,12 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn a_reservation_the_replay_has_seen_partly_spent_still_holds_the_rest() {
-        let wallet =
-            FundingWallet::start(funded_key(), Arc::new(OnceSource(fixture_updates())), None);
+        let wallet = FundingWallet::start(
+            funded_key(),
+            Arc::new(OnceSource(fixture_updates())),
+            None,
+            Arc::new(NoopPublisherTelemetry),
+        );
         wallet
             .ready_by(Instant::now() + std::time::Duration::from_secs(30))
             .await
@@ -1908,8 +1954,12 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn a_replay_restarted_after_ready_plans_nothing_and_keeps_its_reservations() {
-        let wallet =
-            FundingWallet::start(funded_key(), Arc::new(OnceSource(fixture_updates())), None);
+        let wallet = FundingWallet::start(
+            funded_key(),
+            Arc::new(OnceSource(fixture_updates())),
+            None,
+            Arc::new(NoopPublisherTelemetry),
+        );
         wallet
             .ready_by(Instant::now() + std::time::Duration::from_secs(30))
             .await
@@ -1947,7 +1997,12 @@ pub(crate) mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn a_wallet_that_cannot_sync_reports_unsynced_at_its_deadline() {
-        let wallet = FundingWallet::start(funded_key(), Arc::new(OnceSource(Vec::new())), None);
+        let wallet = FundingWallet::start(
+            funded_key(),
+            Arc::new(OnceSource(Vec::new())),
+            None,
+            Arc::new(NoopPublisherTelemetry),
+        );
         let error = wallet
             .ready_by(Instant::now() + std::time::Duration::from_secs(5))
             .await
@@ -2068,6 +2123,7 @@ pub(crate) mod tests {
             funded_key(),
             Arc::new(OnceSource(fixture_updates())),
             Some(store.clone()),
+            Arc::new(NoopPublisherTelemetry),
         );
         ready(&wallet).await;
         let deadline = Instant::now() + std::time::Duration::from_secs(30);
@@ -2095,6 +2151,7 @@ pub(crate) mod tests {
             key,
             source.clone(),
             Some(Arc::new(MemoryCheckpoints::holding(checkpoint))),
+            Arc::new(NoopPublisherTelemetry),
         );
         ready(&wallet).await;
         assert_eq!(source.froms(), vec![Some(resumed_at)]);
@@ -2112,6 +2169,7 @@ pub(crate) mod tests {
             key,
             source.clone(),
             Some(Arc::new(MemoryCheckpoints::holding(checkpoint))),
+            Arc::new(NoopPublisherTelemetry),
         );
         ready(&wallet).await;
         assert_eq!(source.froms(), vec![Some(resumed_at), None]);
@@ -2128,6 +2186,7 @@ pub(crate) mod tests {
             Some(Arc::new(MemoryCheckpoints::holding(checkpoint_after(
                 10, &other,
             )))),
+            Arc::new(NoopPublisherTelemetry),
         );
         ready(&wallet).await;
         assert_eq!(source.froms(), vec![None]);
@@ -2143,6 +2202,7 @@ pub(crate) mod tests {
             Some(Arc::new(MemoryCheckpoints(Mutex::new(Some(
                 b"not a checkpoint".to_vec(),
             ))))),
+            Arc::new(NoopPublisherTelemetry),
         );
         ready(&wallet).await;
         assert_eq!(source.froms(), vec![None]);
@@ -2166,6 +2226,7 @@ pub(crate) mod tests {
             key,
             source.clone(),
             Some(Arc::new(MemoryCheckpoints::holding(checkpoint))),
+            Arc::new(NoopPublisherTelemetry),
         );
         wallet
             .ready_by(Instant::now() + std::time::Duration::from_secs(600))
@@ -2188,7 +2249,12 @@ pub(crate) mod tests {
         let resumed_at = checkpoint.applied;
         let store = Arc::new(MemoryCheckpoints::holding(checkpoint));
         let source = RecordingSource::new(fixture_updates());
-        let wallet = FundingWallet::start(key, source.clone(), Some(store.clone()));
+        let wallet = FundingWallet::start(
+            key,
+            source.clone(),
+            Some(store.clone()),
+            Arc::new(NoopPublisherTelemetry),
+        );
         ready(&wallet).await;
         (wallet, store, source, resumed_at)
     }
@@ -2270,7 +2336,12 @@ pub(crate) mod tests {
     #[tokio::test(start_paused = true)]
     async fn a_wallet_replayed_from_the_first_event_resumes_from_the_checkpoint_it_kept() {
         let source = RecordingSource::new(fixture_updates());
-        let wallet = FundingWallet::start(funded_key(), source.clone(), None);
+        let wallet = FundingWallet::start(
+            funded_key(),
+            source.clone(),
+            None,
+            Arc::new(NoopPublisherTelemetry),
+        );
         // Lets the caught-up replay keep its checkpoint before the first failure.
         settle(&wallet).await;
         let newest = fixture_updates().last().unwrap().id;
@@ -2305,6 +2376,7 @@ pub(crate) mod tests {
             funded_key(),
             Arc::new(CatchesUpThenBreaks::default()),
             Some(store.clone()),
+            Arc::new(NoopPublisherTelemetry),
         );
         // Kept once caught up; 60 s later the replay starts over and catches up again,
         // well inside the interval, and keeps again since nothing it kept survives.
@@ -2321,7 +2393,7 @@ pub(crate) mod tests {
             settle(&wallet).await;
         }
         assert_eq!(wallet.shared.snapshots().strikes, RESTORE_STRIKES - 1);
-        start_over(&wallet.shared);
+        start_over(&wallet.shared, "replay_failed");
         assert_eq!(
             wallet.shared.snapshots().strikes,
             0,
@@ -2410,7 +2482,12 @@ pub(crate) mod tests {
             subscriptions: Default::default(),
             updates: fixture_updates(),
         });
-        let wallet = FundingWallet::start(funded_key(), source.clone(), None);
+        let wallet = FundingWallet::start(
+            funded_key(),
+            source.clone(),
+            None,
+            Arc::new(NoopPublisherTelemetry),
+        );
         wallet
             .ready_by(Instant::now() + std::time::Duration::from_secs(60))
             .await
@@ -2442,7 +2519,12 @@ pub(crate) mod tests {
     #[tokio::test(start_paused = true)]
     async fn a_refused_subscription_is_retried_with_a_growing_delay() {
         let source = Arc::new(Refuses::default());
-        let _wallet = FundingWallet::start(funded_key(), source.clone(), None);
+        let _wallet = FundingWallet::start(
+            funded_key(),
+            source.clone(),
+            None,
+            Arc::new(NoopPublisherTelemetry),
+        );
         let attempts = || {
             source
                 .subscriptions
@@ -2530,7 +2612,12 @@ pub(crate) mod tests {
         let updates = fixture_updates();
         let newest = updates.last().unwrap().id;
         let source = StallsAt::new(updates.len() - 2, [Some(newest)]);
-        let wallet = FundingWallet::start(funded_key(), source.clone(), None);
+        let wallet = FundingWallet::start(
+            funded_key(),
+            source.clone(),
+            None,
+            Arc::new(NoopPublisherTelemetry),
+        );
         // The stalled subscription still names the last event it served the newest.
         wallet
             .ready_by(Instant::now() + std::time::Duration::from_secs(30))
@@ -2568,7 +2655,12 @@ pub(crate) mod tests {
         let newest = updates.last().unwrap().id;
         // A broken or mismatched indexer names an event once that it never serves.
         let source = StallsAt::new(updates.len(), [Some(newest + 1_000_000), Some(newest)]);
-        let wallet = FundingWallet::start(funded_key(), source.clone(), None);
+        let wallet = FundingWallet::start(
+            funded_key(),
+            source.clone(),
+            None,
+            Arc::new(NoopPublisherTelemetry),
+        );
         ready(&wallet).await;
         wallet.indexed_time().await.unwrap();
         assert!(!wallet.shared.state().is_ready());
@@ -2633,7 +2725,12 @@ pub(crate) mod tests {
     #[tokio::test(start_paused = true)]
     async fn a_replay_still_moving_toward_the_indexer_keeps_its_subscription() {
         let source = Arc::new(Trickles::default());
-        let wallet = FundingWallet::start(funded_key(), source.clone(), None);
+        let wallet = FundingWallet::start(
+            funded_key(),
+            source.clone(),
+            None,
+            Arc::new(NoopPublisherTelemetry),
+        );
         wallet
             .ready_by(Instant::now() + std::time::Duration::from_secs(30))
             .await
@@ -2701,7 +2798,12 @@ pub(crate) mod tests {
             gap: STALL_GRACE * 2,
             subscriptions: Default::default(),
         });
-        let wallet = FundingWallet::start(funded_key(), source.clone(), None);
+        let wallet = FundingWallet::start(
+            funded_key(),
+            source.clone(),
+            None,
+            Arc::new(NoopPublisherTelemetry),
+        );
         tokio::time::sleep(STALL_GRACE * 3).await;
         wallet.indexed_time().await.unwrap();
         wallet
@@ -2721,7 +2823,12 @@ pub(crate) mod tests {
     async fn an_indexer_that_names_no_newest_event_leaves_the_replay_ready() {
         let updates = fixture_updates();
         let source = StallsAt::new(updates.len() - 2, [None]);
-        let wallet = FundingWallet::start(funded_key(), source.clone(), None);
+        let wallet = FundingWallet::start(
+            funded_key(),
+            source.clone(),
+            None,
+            Arc::new(NoopPublisherTelemetry),
+        );
         ready(&wallet).await;
         wallet.indexed_time().await.unwrap();
         assert!(wallet.shared.state().is_ready());
@@ -2794,7 +2901,12 @@ pub(crate) mod tests {
             refusals: 2,
             opened: Mutex::default(),
         });
-        let wallet = FundingWallet::start(funded_key(), source.clone(), None);
+        let wallet = FundingWallet::start(
+            funded_key(),
+            source.clone(),
+            None,
+            Arc::new(NoopPublisherTelemetry),
+        );
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
         assert_eq!(
             wallet.shared.state().applied,
@@ -2814,8 +2926,12 @@ pub(crate) mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn a_failure_and_a_replacement_asked_at_once_still_reload() {
-        let wallet =
-            FundingWallet::start(funded_key(), Arc::new(OnceSource(fixture_updates())), None);
+        let wallet = FundingWallet::start(
+            funded_key(),
+            Arc::new(OnceSource(fixture_updates())),
+            None,
+            Arc::new(NoopPublisherTelemetry),
+        );
         ready(&wallet).await;
         // A stall replacement was asked, then a submit failed, before the subscription woke.
         wallet.shared.state().resubscribe = true;
@@ -2832,7 +2948,12 @@ pub(crate) mod tests {
             refusals: 0,
             opened: Mutex::default(),
         });
-        let wallet = FundingWallet::start(funded_key(), source.clone(), None);
+        let wallet = FundingWallet::start(
+            funded_key(),
+            source.clone(),
+            None,
+            Arc::new(NoopPublisherTelemetry),
+        );
         // The first subscription served everything and ended; follow waits to resubscribe.
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
         assert_eq!(source.opened.lock().unwrap().len(), 1);
@@ -2849,7 +2970,12 @@ pub(crate) mod tests {
         let updates = fixture_updates();
         let newest = updates.last().unwrap().id;
         let source = StallsAt::new(updates.len() - 3, [Some(newest), Some(newest - 1)]);
-        let wallet = FundingWallet::start(funded_key(), source.clone(), None);
+        let wallet = FundingWallet::start(
+            funded_key(),
+            source.clone(),
+            None,
+            Arc::new(NoopPublisherTelemetry),
+        );
         ready(&wallet).await;
         wallet.indexed_time().await.unwrap();
         wallet.indexed_time().await.unwrap();
@@ -2862,7 +2988,12 @@ pub(crate) mod tests {
         let newest = updates.last().unwrap().id;
         for stalls_at in [1, 3, updates.len() - 1] {
             let source = StallsAt::new(stalls_at, [Some(newest)]);
-            let wallet = FundingWallet::start(funded_key(), source.clone(), None);
+            let wallet = FundingWallet::start(
+                funded_key(),
+                source.clone(),
+                None,
+                Arc::new(NoopPublisherTelemetry),
+            );
             ready(&wallet).await;
             wallet.indexed_time().await.unwrap();
             wallet
@@ -2941,7 +3072,12 @@ pub(crate) mod tests {
             first: STALL_GRACE + std::time::Duration::from_secs(3),
             opened: Mutex::default(),
         });
-        let wallet = FundingWallet::start(funded_key(), source.clone(), None);
+        let wallet = FundingWallet::start(
+            funded_key(),
+            source.clone(),
+            None,
+            Arc::new(NoopPublisherTelemetry),
+        );
         // Subscription 1 has ended; 2 opened `RESUBSCRIBE_DELAY` later.
         tokio::time::sleep(RESUBSCRIBE_DELAY + std::time::Duration::from_secs(1)).await;
         assert_eq!(source.opened.lock().unwrap().len(), 2);
@@ -3000,7 +3136,12 @@ pub(crate) mod tests {
                 attempts,
                 subscriptions: Mutex::default(),
             });
-            let _wallet = FundingWallet::start(funded_key(), source.clone(), None);
+            let _wallet = FundingWallet::start(
+                funded_key(),
+                source.clone(),
+                None,
+                Arc::new(NoopPublisherTelemetry),
+            );
             tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
             let at = source.subscriptions.lock().unwrap();
             at.windows(2)
@@ -3124,6 +3265,7 @@ pub(crate) mod tests {
             key,
             source.clone(),
             Some(Arc::new(MemoryCheckpoints::holding(checkpoint))),
+            Arc::new(NoopPublisherTelemetry),
         );
         ready(&wallet).await;
         assert_eq!(
@@ -3188,7 +3330,12 @@ pub(crate) mod tests {
             froms: Mutex::default(),
         });
         let store = Arc::new(CountingCheckpoints::default());
-        let _wallet = FundingWallet::start(funded_key(), source.clone(), Some(store.clone()));
+        let _wallet = FundingWallet::start(
+            funded_key(),
+            source.clone(),
+            Some(store.clone()),
+            Arc::new(NoopPublisherTelemetry),
+        );
         tokio::time::sleep(past_interval * 4).await;
         assert_eq!(
             *store.0.lock().unwrap(),
@@ -3207,6 +3354,7 @@ pub(crate) mod tests {
             key,
             source.clone(),
             Some(Arc::new(MemoryCheckpoints::holding(checkpoint))),
+            Arc::new(NoopPublisherTelemetry),
         );
         ready(&wallet).await;
         // A quiet chain long past the resume timeout, and past any backoff after it.
@@ -3266,7 +3414,12 @@ pub(crate) mod tests {
             restarts: 2,
             subscriptions: Mutex::default(),
         });
-        let _wallet = FundingWallet::start(funded_key(), source.clone(), None);
+        let _wallet = FundingWallet::start(
+            funded_key(),
+            source.clone(),
+            None,
+            Arc::new(NoopPublisherTelemetry),
+        );
         // Restarts at 0 s and 4 s grow the delay to 8 s; the third subscription, at 12 s,
         // replays and drops; the fourth follows it by the 2 s resubscribe delay.
         tokio::time::sleep(std::time::Duration::from_secs(30)).await;
@@ -3280,7 +3433,12 @@ pub(crate) mod tests {
         let mut updates = fixture_updates();
         updates[5].raw.truncate(10);
         let source = RecordingSource::new(updates);
-        let _wallet = FundingWallet::start(funded_key(), source.clone(), None);
+        let _wallet = FundingWallet::start(
+            funded_key(),
+            source.clone(),
+            None,
+            Arc::new(NoopPublisherTelemetry),
+        );
         // Delays 4, 8, ..., 512 s sum to 1020 s; then 600 s each when capped, 1024, 2048 s uncapped.
         tokio::time::sleep(std::time::Duration::from_secs(1020 + 3 * 600 + 1)).await;
         assert_eq!(source.froms().len(), 9 + 3, "{:?}", source.froms());
@@ -3330,7 +3488,12 @@ pub(crate) mod tests {
             log: Mutex::default(),
         });
         let source = RecordingSource::new(fixture_updates());
-        let wallet = FundingWallet::start(key, source.clone(), Some(store.clone()));
+        let wallet = FundingWallet::start(
+            key,
+            source.clone(),
+            Some(store.clone()),
+            Arc::new(NoopPublisherTelemetry),
+        );
         ready(&wallet).await;
         for _ in 0..RESTORE_STRIKES {
             wallet.struck();
@@ -3426,6 +3589,7 @@ pub(crate) mod tests {
             key,
             source.clone(),
             Some(Arc::new(MemoryCheckpoints::holding(checkpoint))),
+            Arc::new(NoopPublisherTelemetry),
         );
         // The first subscription replays to the newest event and ends; the wallet waits
         // out the resubscribe delay.
@@ -3490,6 +3654,7 @@ pub(crate) mod tests {
             key,
             source.clone(),
             Some(Arc::new(MemoryCheckpoints::holding(checkpoint))),
+            Arc::new(NoopPublisherTelemetry),
         );
         // The resumed replay fails and starts over from the first event, which the
         // indexer has not served yet.
@@ -3508,7 +3673,12 @@ pub(crate) mod tests {
     #[tokio::test(start_paused = true)]
     async fn a_restart_after_catching_up_resubscribes_after_four_seconds() {
         let source = Arc::new(CatchesUpThenBreaks::default());
-        let _wallet = FundingWallet::start(funded_key(), source.clone(), None);
+        let _wallet = FundingWallet::start(
+            funded_key(),
+            source.clone(),
+            None,
+            Arc::new(NoopPublisherTelemetry),
+        );
         tokio::time::sleep(std::time::Duration::from_secs(200)).await;
         let at = source.0.lock().unwrap().clone();
         assert!(at.len() >= 3, "{} subscriptions", at.len());
@@ -3608,6 +3778,7 @@ pub(crate) mod tests {
                 froms: froms.clone(),
             }),
             Some(store.clone()),
+            Arc::new(NoopPublisherTelemetry),
         );
         ready(&wallet).await;
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
@@ -3672,7 +3843,7 @@ pub(crate) mod tests {
         }
         wallet.struck();
         // No await in between: the spawned clear has not run yet.
-        start_over(&wallet.shared);
+        start_over(&wallet.shared, "replay_failed");
         tokio::time::sleep(std::time::Duration::from_secs(10)).await;
         let forget_pending = wallet.shared.snapshots().forget;
         let stored_after_strikes = store.decoded().map(|checkpoint| checkpoint.applied);
@@ -3747,7 +3918,12 @@ pub(crate) mod tests {
             down: down.clone(),
             froms: Mutex::default(),
         });
-        let wallet = FundingWallet::start(key, source, Some(store.clone()));
+        let wallet = FundingWallet::start(
+            key,
+            source,
+            Some(store.clone()),
+            Arc::new(NoopPublisherTelemetry),
+        );
         ready(&wallet).await;
         for _ in 0..RESTORE_STRIKES - 1 {
             wallet.struck();
@@ -3802,7 +3978,12 @@ pub(crate) mod tests {
             down: down.clone(),
             froms: Mutex::default(),
         });
-        let wallet = FundingWallet::start(key, source, Some(store.clone()));
+        let wallet = FundingWallet::start(
+            key,
+            source,
+            Some(store.clone()),
+            Arc::new(NoopPublisherTelemetry),
+        );
         ready(&wallet).await;
         // The restored replay caught up and is keeping its first checkpoint.
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
@@ -3860,6 +4041,7 @@ pub(crate) mod tests {
                 froms: Arc::default(),
             }),
             Some(store.clone()),
+            Arc::new(NoopPublisherTelemetry),
         );
         ready(&wallet).await;
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
@@ -3908,7 +4090,7 @@ pub(crate) mod tests {
         }
         wallet.struck();
         // No await until the keep below: the spawned clear has not run.
-        start_over(&wallet.shared);
+        start_over(&wallet.shared, "replay_failed");
         apply(
             &wallet.shared,
             fixture_updates().into_iter().map(Ok).collect(),
@@ -3937,6 +4119,7 @@ pub(crate) mod tests {
             key,
             source.clone(),
             Some(Arc::new(MemoryCheckpoints::holding(checkpoint))),
+            Arc::new(NoopPublisherTelemetry),
         );
         wallet
             .ready_by(Instant::now() + std::time::Duration::from_secs(120))
@@ -3996,6 +4179,7 @@ pub(crate) mod tests {
                 froms: Arc::default(),
             }),
             Some(store.clone()),
+            Arc::new(NoopPublisherTelemetry),
         );
         ready(&wallet).await;
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
@@ -4027,6 +4211,7 @@ pub(crate) mod tests {
             key,
             source.clone(),
             Some(Arc::new(MemoryCheckpoints::holding(checkpoint))),
+            Arc::new(NoopPublisherTelemetry),
         );
         tokio::time::sleep(std::time::Duration::from_secs(30)).await;
         assert_eq!(*source.froms.lock().unwrap(), vec![Some(resumed_at), None]);
@@ -4050,6 +4235,7 @@ pub(crate) mod tests {
             key,
             source.clone(),
             Some(Arc::new(MemoryCheckpoints::holding(checkpoint))),
+            Arc::new(NoopPublisherTelemetry),
         );
         tokio::time::sleep(RESUME_TIMEOUT + std::time::Duration::from_secs(10)).await;
         assert_eq!(source.froms(), vec![Some(resumed_at), None]);
@@ -4121,7 +4307,12 @@ pub(crate) mod tests {
     #[tokio::test(start_paused = true)]
     async fn a_replay_that_caught_up_once_restarts_without_backoff_though_behind_at_the_end() {
         let source = Arc::new(CatchesUpFallsBehindThenBreaks(Mutex::default()));
-        let _wallet = FundingWallet::start(funded_key(), source.clone(), None);
+        let _wallet = FundingWallet::start(
+            funded_key(),
+            source.clone(),
+            None,
+            Arc::new(NoopPublisherTelemetry),
+        );
         tokio::time::sleep(std::time::Duration::from_secs(250)).await;
         let at = source.0.lock().unwrap().clone();
         assert!(at.len() >= 3, "{} subscriptions", at.len());
@@ -4238,7 +4429,12 @@ mod live {
             .map(|file| Arc::new(FileCheckpoints(file)) as Arc<dyn DustCheckpointStore>);
         let started = std::time::Instant::now();
         let key = dust_secret_key(&[0x42; 32]).unwrap();
-        let wallet = FundingWallet::start(key, Arc::new(IndexerDustEvents::new(url)), checkpoints);
+        let wallet = FundingWallet::start(
+            key,
+            Arc::new(IndexerDustEvents::new(url)),
+            checkpoints,
+            Arc::new(NoopPublisherTelemetry),
+        );
         wallet
             .ready_by(Instant::now() + std::time::Duration::from_secs(1800))
             .await

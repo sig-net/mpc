@@ -6,7 +6,9 @@ use mpc_utils::time::unix_elapsed;
 
 use super::{
     indexers::{BIDIRECTIONAL_EXTRACTION_FAILURES, LATEST_BLOCK_NUMBER, TRON_EXPIRY_SCAN_DEFERRED},
-    publishers::{FUNDING_WALLET_BALANCE, PUBLISH_REFUSALS},
+    publishers::{
+        FUNDING_WALLET_BALANCE, FUNDING_WALLET_CHECKPOINT_DROPS, PUBLISH_REFUSALS,
+    },
     requests::{record_indexing_step_reached, record_request_latency_since, SignRequestStep},
 };
 
@@ -49,6 +51,12 @@ impl PublisherTelemetry for NodeTelemetry {
     fn publish_refused(&self, code: &str) {
         PUBLISH_REFUSALS
             .with_label_values(&[self.chain.as_str(), code])
+            .inc();
+    }
+
+    fn funding_checkpoint_dropped(&self, cause: &str) {
+        FUNDING_WALLET_CHECKPOINT_DROPS
+            .with_label_values(&[self.chain.as_str(), cause])
             .inc();
     }
 }
