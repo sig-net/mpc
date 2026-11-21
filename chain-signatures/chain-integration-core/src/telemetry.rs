@@ -80,9 +80,9 @@ pub trait PublisherTelemetry: Send + Sync + 'static {
     /// Records a request the chain's publisher answered with an error code.
     fn publish_refused(&self, _code: &str) {}
 
-    /// Records a funding wallet's replay checkpoint being dropped, by cause; the
-    /// replay restarts from the first event after one.
-    fn funding_checkpoint_dropped(&self, _cause: &str) {}
+    /// Counts restarts, not drops: reported on every restart from the first
+    /// event, including when the wallet never held a checkpoint.
+    fn funding_wallet_replay_restarted(&self, _cause: &str) {}
 }
 
 /// No-op implementation for tests
