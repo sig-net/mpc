@@ -2235,6 +2235,7 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn an_unreadable_checkpoint_is_ignored() {
+        let drops = Arc::new(DropCauses::default());
         let source = RecordingSource::new(fixture_updates());
         let wallet = FundingWallet::start(
             funded_key(),
@@ -2243,11 +2244,15 @@ pub(crate) mod tests {
                 held: Mutex::new(Some(b"not a checkpoint".to_vec())),
                 clears: AtomicUsize::new(0),
             })),
-            Arc::new(NoopPublisherTelemetry),
+            drops.clone(),
         );
         ready(&wallet).await;
         assert_eq!(source.froms(), vec![None]);
         assert_fully_replayed(&wallet);
+        assert!(
+            drops.0.lock().unwrap().is_empty(),
+            "a restore that rejected its checkpoint replays from the first event uncounted"
+        );
     }
 
     #[tokio::test(start_paused = true)]
