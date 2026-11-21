@@ -426,7 +426,7 @@ impl<W: FeePayer, C: SubmitChain + 'static> NativeIntentClient<W, C> {
             Landing::Expired => {
                 self.wallet.release(spent);
                 Err(SubmitError::StateConflict(format!(
-                    "transaction {tx_hash} expired without landing; nothing was posted"
+                    "transaction {tx_hash} expired without landing"
                 )))
             }
         }
