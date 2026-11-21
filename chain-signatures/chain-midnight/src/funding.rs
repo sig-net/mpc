@@ -70,7 +70,7 @@ const CHECKPOINT_MAGIC: &[u8; 16] = b"mpc-dust-ckpt-v1";
 const RESUME_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 /// Strikes — submits a restored wallet's state was implicated in, with none landing
 /// in between — before its checkpoint is dropped: the intent builder's snapshot
-/// strikes. Above one, because a healthy wallet is also refused at times, and its
+/// strikes did. Above one, because a healthy wallet is also refused at times, and its
 /// spends also expire unlanded.
 const RESTORE_STRIKES: u32 = 3;
 /// How long a live subscription that holds itself caught up may apply nothing while
