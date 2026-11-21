@@ -694,7 +694,7 @@ mod tests {
         indexed_secs: u64,
         /// Where the replay stands once `ready_by` has waited for it, if it moves.
         caught_up_secs: Option<u64>,
-        failures: Mutex<Vec<bool>>,
+        strike_reports: Mutex<Vec<bool>>,
         landings: AtomicU64,
     }
 
@@ -737,11 +737,11 @@ mod tests {
         }
 
         fn failed(&self) {
-            self.failures.lock().unwrap().push(false);
+            self.strike_reports.lock().unwrap().push(false);
         }
 
         fn struck(&self) {
-            self.failures.lock().unwrap().push(true);
+            self.strike_reports.lock().unwrap().push(true);
         }
 
         fn landed(&self) {
@@ -1163,7 +1163,7 @@ mod tests {
             );
         }
         assert_eq!(
-            *client.wallet.failures.lock().unwrap(),
+            *client.wallet.strike_reports.lock().unwrap(),
             vec![false],
             "the wallet hears of the failed submit, from before it paid anything"
         );
@@ -1194,7 +1194,7 @@ mod tests {
         report_submit(&wallet, &Err(SubmitError::Ambiguous("unlanded".into())));
         assert_eq!(wallet.landings.load(Ordering::SeqCst), 1, "one landing");
         assert_eq!(
-            *wallet.failures.lock().unwrap(),
+            *wallet.strike_reports.lock().unwrap(),
             vec![true, false, false, false, false, false],
             "every failure but an unsynced wallet, with whether it can strike"
         );
@@ -1223,7 +1223,7 @@ mod tests {
         assert!(matches!(error, SubmitError::StateConflict(_)), "{error}");
         report_submit(&client.wallet, &Err(error));
         assert_eq!(
-            *client.wallet.failures.lock().unwrap(),
+            *client.wallet.strike_reports.lock().unwrap(),
             [true],
             "the refusal strikes"
         );
@@ -1247,7 +1247,7 @@ mod tests {
         assert!(matches!(error, SubmitError::StateConflict(_)), "{error}");
         report_submit(&client.wallet, &Err(error));
         assert_eq!(
-            *client.wallet.failures.lock().unwrap(),
+            *client.wallet.strike_reports.lock().unwrap(),
             [true],
             "the expiry unlanded strikes"
         );
@@ -1262,7 +1262,7 @@ mod tests {
             .submit(&intent)
             .await
             .expect_err("nothing can be proven");
-        assert_eq!(*client.wallet.failures.lock().unwrap(), vec![false]);
+        assert_eq!(*client.wallet.strike_reports.lock().unwrap(), vec![false]);
     }
 
     #[tokio::test]
@@ -1394,7 +1394,7 @@ mod tests {
         assert_eq!(*client.wallet.released.lock().unwrap(), vec![spent()]);
         report_submit(&client.wallet, &Err(error));
         assert_eq!(
-            *client.wallet.failures.lock().unwrap(),
+            *client.wallet.strike_reports.lock().unwrap(),
             [false],
             "a node that never carried the transaction strikes nothing"
         );
@@ -1424,7 +1424,7 @@ mod tests {
         let submitted = Err(error);
         report_submit(&client.wallet, &submitted);
         assert_eq!(
-            *client.wallet.failures.lock().unwrap(),
+            *client.wallet.strike_reports.lock().unwrap(),
             [false],
             "a runtime without the call strikes nothing"
         );
@@ -1567,7 +1567,7 @@ mod tests {
         assert!(matches!(error, SubmitError::Ambiguous(_)), "{error}");
         report_submit(&client.wallet, &Err(error));
         assert_eq!(
-            *client.wallet.failures.lock().unwrap(),
+            *client.wallet.strike_reports.lock().unwrap(),
             [false],
             "a submit that only outlived its watch strikes nothing"
         );
