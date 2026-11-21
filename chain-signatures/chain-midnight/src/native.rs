@@ -1200,8 +1200,6 @@ mod tests {
         );
     }
 
-    /// Each arm's error from its construction site in `post` reaches the wallet
-    /// through the report `submit` runs for every outcome.
     #[tokio::test(start_paused = true)]
     async fn post_failures_strike_the_restored_wallet_by_their_class() {
         let client = client_over(

@@ -355,7 +355,8 @@ struct Snapshots {
     /// from the first event clears it, and a reload leaves it.
     kept: Option<(Instant, u64)>,
     /// `StateConflict` submits of a restored wallet since the last `landed` report;
-    /// a failure of another class does not clear them.
+    /// a failure of another class does not clear them — the forgetting strike and
+    /// a replay started over from the first event do.
     strikes: u32,
     /// The stored checkpoint is being cleared; nothing is kept until it is.
     forget: bool,
@@ -2276,8 +2277,6 @@ pub(crate) mod tests {
         assert_eq!(wallet.shared.state().applied, Some(newest));
     }
 
-    /// A wallet resumed from a checkpoint after the fixture's tenth event, its store,
-    /// and the source recording where each subscription started.
     /// Replay-restart causes persist until the test reads them; Vec order matches
     /// restart order.
     #[derive(Default)]
@@ -2291,6 +2290,8 @@ pub(crate) mod tests {
         }
     }
 
+    /// A wallet resumed from a checkpoint after the fixture's tenth event, its store,
+    /// and the source recording where each subscription started.
     async fn restored_wallet_reporting(
         telemetry: Arc<dyn PublisherTelemetry>,
     ) -> (
