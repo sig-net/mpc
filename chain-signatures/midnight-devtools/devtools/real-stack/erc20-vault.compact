@@ -2221,7 +2221,6 @@ export circuit completeTronWithdraw(
   // compactc 0.36 fails with an internal error on a deserialize under a branch, so it runs
   // unguarded, over a zero byte unless the request executed.
   const transferred = deserialize<VaultResponse, 1>(executed ? output : default<Bytes<1>>).success;
-  // A refund of the fee on an unviable verdict is perhaps wanted but not yet implemented.
   if (
     outcomeRefunds(record.outputKind) ||
       (!transferred && args.request.tokenAddress != tronUsdtAddress)
