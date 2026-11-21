@@ -1029,6 +1029,8 @@ impl FundingWallet {
             // Cleared at once, as the intent builder's forget was, whether or not a
             // subscription is live, and after any save already running. Spawned only
             // once the reload is set: nothing is kept between the forget and the reload.
+            // TODO: join this task and log its panic as `follow` does — a panicking
+            // clear leaves `forget` set forever.
             let shared = self.shared.clone();
             tokio::spawn(async move {
                 let _storing = shared.storing.lock().await;
