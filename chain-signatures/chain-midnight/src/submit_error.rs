@@ -94,9 +94,23 @@ impl SubmitError {
     /// toward dropping its checkpoint.
     // A refusal is the stale-snapshot signature; an expiry unlanded strikes with
     // it. Every other class would discard the checkpoint for conditions the
-    // replay cannot fix.
+    // replay cannot fix. Each class is spelled out so a new one must take a
+    // verdict here rather than silently never strike.
     pub(crate) fn strikes_restored_state(&self) -> bool {
-        matches!(self, Self::StateConflict(_))
+        match self {
+            Self::StateConflict(_) => true,
+            Self::BadRequest(_)
+            | Self::ContractMismatch(_)
+            | Self::DeployMismatch(_)
+            | Self::GateRefusal { .. }
+            | Self::WalletUnsynced(_)
+            | Self::WalletBusy(_)
+            | Self::WalletUnfunded(_)
+            | Self::ProvingTimeout(_)
+            | Self::Ambiguous(_)
+            | Self::Internal(_)
+            | Self::Node { .. } => false,
+        }
     }
 
     /// As the publisher's error, the class's verdict riding as a carrier so the

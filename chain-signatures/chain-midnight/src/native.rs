@@ -1186,10 +1186,13 @@ mod tests {
                 source: rejected_http(429),
             }),
         );
+        // A submit that outlived its proving or landing budget implicates nothing.
+        report_submit(&wallet, &Err(SubmitError::ProvingTimeout("budget".into())));
+        report_submit(&wallet, &Err(SubmitError::Ambiguous("unlanded".into())));
         assert_eq!(wallet.landings.load(Ordering::SeqCst), 1, "one landing");
         assert_eq!(
             *wallet.failures.lock().unwrap(),
-            vec![true, false, false, false],
+            vec![true, false, false, false, false, false],
             "every failure but an unsynced wallet, with whether it can strike"
         );
     }
@@ -1386,6 +1389,12 @@ mod tests {
             .unwrap_err();
         assert!(matches!(error, SubmitError::Node { .. }), "{error}");
         assert_eq!(*client.wallet.released.lock().unwrap(), vec![spent()]);
+        report_submit(&client.wallet, &Err(error));
+        assert_eq!(
+            *client.wallet.failures.lock().unwrap(),
+            [false],
+            "a node that never carried the transaction strikes nothing"
+        );
         assert!(client.chain.landing_reads.lock().unwrap().is_empty());
     }
 
@@ -1409,8 +1418,17 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(*client.wallet.released.lock().unwrap(), vec![spent()]);
-
-        let error = error.into_publish_error();
+        let submitted = Err(error);
+        report_submit(&client.wallet, &submitted);
+        assert_eq!(
+            *client.wallet.failures.lock().unwrap(),
+            [false],
+            "a runtime without the call strikes nothing"
+        );
+        let error = match submitted {
+            Err(error) => error.into_publish_error(),
+            Ok(_) => unreachable!("a runtime without the call cannot submit"),
+        };
         assert_eq!(
             crate::submit_error::refusal_code(&error),
             Some("contract_mismatch"),
@@ -1544,6 +1562,12 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(error, SubmitError::Ambiguous(_)), "{error}");
+        report_submit(&client.wallet, &Err(error));
+        assert_eq!(
+            *client.wallet.failures.lock().unwrap(),
+            [false],
+            "a submit that only outlived its watch strikes nothing"
+        );
         let secs = |s| Duration::from_secs(s);
         assert_eq!(
             gaps(&client.chain.submits()),
