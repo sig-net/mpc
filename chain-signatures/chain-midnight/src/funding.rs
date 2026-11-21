@@ -1196,7 +1196,7 @@ pub(crate) mod tests {
     use crate::dust_feed::Indexed;
     use async_trait::async_trait;
     use futures_util::stream::BoxStream;
-    use mpc_chain_integration_core::NoopPublisherTelemetry;
+    use mpc_chain_integration_core::{NoopPublisherTelemetry, PublishAction};
     use rand::SeedableRng as _;
     use std::collections::VecDeque;
 
@@ -1426,6 +1426,7 @@ pub(crate) mod tests {
             snapshots: Mutex::default(),
             wake: tokio::sync::Notify::new(),
             store: None,
+            telemetry: Arc::new(NoopPublisherTelemetry),
             storing: tokio::sync::Mutex::new(()),
         }
     }
@@ -2165,15 +2166,21 @@ pub(crate) mod tests {
         let resumed_at = checkpoint.applied;
         checkpoint.event_hash = event_hash(b"another chain's event");
         let source = RecordingSource::new(fixture_updates());
+        let drops = Arc::new(DropCauses::default());
         let wallet = FundingWallet::start(
             key,
             source.clone(),
             Some(Arc::new(MemoryCheckpoints::holding(checkpoint))),
-            Arc::new(NoopPublisherTelemetry),
+            drops.clone(),
         );
         ready(&wallet).await;
         assert_eq!(source.froms(), vec![Some(resumed_at), None]);
         assert_fully_replayed(&wallet);
+        assert_eq!(
+            *drops.0.lock().unwrap(),
+            vec!["checkpoint_mismatch"],
+            "a checkpoint the indexer disagrees with is reported as dropped"
+        );
     }
 
     #[tokio::test]
@@ -2238,7 +2245,22 @@ pub(crate) mod tests {
 
     /// A wallet resumed from a checkpoint after the fixture's tenth event, its store,
     /// and the source recording where each subscription started.
-    async fn restored_wallet() -> (
+    /// Checkpoint drops persist until the test reads them; Vec order matches drop
+    /// order.
+    #[derive(Default)]
+    struct DropCauses(Mutex<Vec<String>>);
+
+    impl PublisherTelemetry for DropCauses {
+        fn record_publish_metrics(&self, _action: &PublishAction) {}
+
+        fn funding_checkpoint_dropped(&self, cause: &str) {
+            self.0.lock().unwrap().push(cause.to_owned());
+        }
+    }
+
+    async fn restored_wallet_reporting(
+        telemetry: Arc<dyn PublisherTelemetry>,
+    ) -> (
         FundingWallet,
         Arc<MemoryCheckpoints>,
         Arc<RecordingSource>,
@@ -2249,14 +2271,18 @@ pub(crate) mod tests {
         let resumed_at = checkpoint.applied;
         let store = Arc::new(MemoryCheckpoints::holding(checkpoint));
         let source = RecordingSource::new(fixture_updates());
-        let wallet = FundingWallet::start(
-            key,
-            source.clone(),
-            Some(store.clone()),
-            Arc::new(NoopPublisherTelemetry),
-        );
+        let wallet = FundingWallet::start(key, source.clone(), Some(store.clone()), telemetry);
         ready(&wallet).await;
         (wallet, store, source, resumed_at)
+    }
+
+    async fn restored_wallet() -> (
+        FundingWallet,
+        Arc<MemoryCheckpoints>,
+        Arc<RecordingSource>,
+        u64,
+    ) {
+        restored_wallet_reporting(Arc::new(NoopPublisherTelemetry)).await
     }
 
     /// Lets the subscription act on a failure, then waits for the wallet again.
@@ -2280,7 +2306,8 @@ pub(crate) mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn restored_wallets_struck_three_times_forget_the_checkpoint() {
-        let (wallet, store, source, resumed_at) = restored_wallet().await;
+        let drops = Arc::new(DropCauses::default());
+        let (wallet, store, source, resumed_at) = restored_wallet_reporting(drops.clone()).await;
         // A landing clears the strikes; a non-implicating failure is none.
         for (strike, landed) in [(true, false), (true, true), (false, false), (true, false)] {
             if strike {
@@ -2318,6 +2345,10 @@ pub(crate) mod tests {
             2,
             "two strikes, with none landing between them, keep the checkpoint"
         );
+        assert!(
+            drops.0.lock().unwrap().is_empty(),
+            "no checkpoint is dropped before the third strike"
+        );
 
         wallet.struck();
         settle(&wallet).await;
@@ -2325,6 +2356,11 @@ pub(crate) mod tests {
             source.froms().last(),
             Some(&None),
             "the third strike replays from the first event"
+        );
+        assert_eq!(
+            *drops.0.lock().unwrap(),
+            vec!["strikes"],
+            "only the strike that drops the checkpoint is reported"
         );
         assert_fully_replayed(&wallet);
         let kept = store
@@ -2383,6 +2419,23 @@ pub(crate) mod tests {
         tokio::time::sleep(std::time::Duration::from_secs(70)).await;
         let newest = fixture_updates().last().unwrap().id;
         assert_eq!(*store.0.lock().unwrap(), vec![newest, newest]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_replay_that_cannot_absorb_an_event_is_reported_as_replay_failed() {
+        let drops = Arc::new(DropCauses::default());
+        let _wallet = FundingWallet::start(
+            funded_key(),
+            Arc::new(CatchesUpThenBreaks::default()),
+            None,
+            drops.clone(),
+        );
+        tokio::time::sleep(std::time::Duration::from_secs(70)).await;
+        assert_eq!(
+            *drops.0.lock().unwrap(),
+            vec!["replay_failed"],
+            "an event the replay cannot absorb is reported as dropping the checkpoint"
+        );
     }
 
     #[tokio::test(start_paused = true)]
@@ -4231,14 +4284,20 @@ pub(crate) mod tests {
         let checkpoint = checkpoint_after(10, &key);
         let resumed_at = checkpoint.applied;
         let source = RecordingSource::new(Vec::new());
+        let drops = Arc::new(DropCauses::default());
         let wallet = FundingWallet::start(
             key,
             source.clone(),
             Some(Arc::new(MemoryCheckpoints::holding(checkpoint))),
-            Arc::new(NoopPublisherTelemetry),
+            drops.clone(),
         );
         tokio::time::sleep(RESUME_TIMEOUT + std::time::Duration::from_secs(10)).await;
         assert_eq!(source.froms(), vec![Some(resumed_at), None]);
+        assert_eq!(
+            *drops.0.lock().unwrap(),
+            vec!["resume_timeout"],
+            "a checkpoint the indexer never served in time is reported as dropped"
+        );
         wallet.struck();
         tokio::time::sleep(std::time::Duration::from_secs(10)).await;
         assert_eq!(
@@ -4388,6 +4447,7 @@ pub(crate) mod tests {
 mod live {
     use super::*;
     use crate::dust_feed::IndexerDustEvents;
+    use mpc_chain_integration_core::NoopPublisherTelemetry;
 
     /// A checkpoint in a file, as the node keeps one in Redis.
     struct FileCheckpoints(std::path::PathBuf);

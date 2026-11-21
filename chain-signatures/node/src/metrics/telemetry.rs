@@ -6,9 +6,7 @@ use mpc_utils::time::unix_elapsed;
 
 use super::{
     indexers::{BIDIRECTIONAL_EXTRACTION_FAILURES, LATEST_BLOCK_NUMBER, TRON_EXPIRY_SCAN_DEFERRED},
-    publishers::{
-        FUNDING_WALLET_BALANCE, FUNDING_WALLET_CHECKPOINT_DROPS, PUBLISH_REFUSALS,
-    },
+    publishers::{FUNDING_WALLET_BALANCE, FUNDING_WALLET_CHECKPOINT_DROPS, PUBLISH_REFUSALS},
     requests::{record_indexing_step_reached, record_request_latency_since, SignRequestStep},
 };
 
@@ -129,6 +127,28 @@ mod tests {
                 .with_label_values(&[chain, "wallet_unfunded"])
                 .get(),
             2.0
+        );
+    }
+
+    #[test]
+    fn checkpoint_drops_are_labelled_by_chain_and_cause() {
+        let telemetry = NodeTelemetry::new(Chain::Midnight);
+        let chain = Chain::Midnight.as_str();
+
+        telemetry.funding_checkpoint_dropped("strikes");
+        telemetry.funding_checkpoint_dropped("resume_timeout");
+
+        assert_eq!(
+            FUNDING_WALLET_CHECKPOINT_DROPS
+                .with_label_values(&[chain, "strikes"])
+                .get(),
+            1.0
+        );
+        assert_eq!(
+            FUNDING_WALLET_CHECKPOINT_DROPS
+                .with_label_values(&[chain, "resume_timeout"])
+                .get(),
+            1.0
         );
     }
 }
