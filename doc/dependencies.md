@@ -10,8 +10,8 @@ means a reviewer, or an agent's instructions, has to catch it.
 
 1. **Fewer dependencies.** A crate runs in the node next to the key shares,
    and its build script and proc macros run in CI with CI's credentials.
-2. **Pinned inputs.** A build takes the same versions on every machine and
-   every day, never `latest`.
+2. **Pinned inputs.** A build takes the same inputs on every machine and
+   every day.
 3. **Enforced by CI.** Every rule a tool can check fails CI when broken, so
    reviewers do not have to catch it.
 4. **Small, regular updates.** A security fix is never a jump over major
@@ -70,11 +70,9 @@ sha2.workspace = true                                # M1
 
 - **T1. One Rust version.** The exact release in `rust-toolchain.toml`. The
   workflows and the `Dockerfile` repeat it and change in the same PR. *(review)*
-- **T2. Exact versions.** A tool that a workflow downloads and an image tag
-  name an exact version, and `scripts/setup-deps.sh` installs the same ones.
-  The exception is `debian:bookworm-slim`, the base of the release image: it
-  floats because its `apt-get install` takes Debian's current packages
-  anyway. *(review)*
+- **T2. Exact versions.** A tool that a workflow downloads names an exact
+  version, and `scripts/setup-deps.sh` installs the same ones. An image names
+  its tag and digest: `redis:7.4.12@sha256:…`. *(review)*
 - **T3. Actions by commit.** An action is referenced by its full commit SHA,
   with the version in a comment (`actions/checkout@<sha> # v6`). A tag can be
   moved to other code, a commit cannot. *(review)*
@@ -108,8 +106,9 @@ An update is a `chore(deps)` PR with nothing else in it.
   change to drop it; the PR that removes the blocker removes the entry.
   *(review)*
 - **U2. Routine, after each release.** Right after a release is cut, one PR
-  runs `cargo update`. *(review)*
+  runs `cargo update` and moves images to their latest patch release.
+  *(review)*
 - **U3. One major version per PR**, or one family that moves together, like
   the `near-*` crates. *(review)*
-- **U4. The rest when needed.** The toolchain, tools, actions and images are
-  updated when a fix or a feature needs it. *(review)*
+- **U4. The rest when needed.** The toolchain, tools and actions are updated
+  when a fix or a feature needs it. *(review)*
