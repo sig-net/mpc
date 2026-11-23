@@ -106,8 +106,7 @@ An update is a `chore(deps)` PR with nothing else in it.
   change to drop it; the PR that removes the blocker removes the entry.
   *(review)*
 - **U2. Routine, once per release.** One PR runs `cargo update` and moves
-  images to their latest patch release; [Releasing](releasing.md#step-4-update-dependencies)
-  says when. *(review)*
+  images to their latest patch release. *(review)*
 - **U3. One major version per PR**, or one family that moves together, like
   the `near-*` crates. *(review)*
 - **U4. The rest when needed.** The toolchain, tools and actions are updated
