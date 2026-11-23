@@ -7,6 +7,9 @@ on:
     branches: [develop]
     paths: [Cargo.lock, "**/Cargo.toml", ".cargo/**", "deny.toml", "rust-toolchain*", .github/workflows/test-unit.yml]
   workflow_dispatch:
+  # Daily advisories check on develop; see the advisories job.
+  schedule:
+    - cron: '0 5 * * *'
 
 env:
   RUSTFLAGS: -D warnings
@@ -17,6 +20,7 @@ concurrency:
 
 jobs:
   lint-and-test:
+    if: github.event_name != 'schedule'
     runs-on: warp-ubuntu-latest-x64-4x
     name: Lint & Unit Tests
     steps:
@@ -112,6 +116,7 @@ jobs:
 
   audit:
     name: Dependency Audit
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -120,14 +125,12 @@ jobs:
         with:
           toolchain: 1.95.0
 
-      # Check the feature-resolved dependency graph: security advisories
-      # (vulnerabilities deny; `unmaintained`/`unsound` downgraded to warnings to
-      # match the previous cargo-audit behavior), license compliance, dependency
-      # bans, and source allow-listing.
+      # Check the feature-resolved dependency graph: license compliance,
+      # dependency bans and source allow-listing. Advisories run in their own job.
       - name: Check dependencies (cargo-deny)
         uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2
         with:
-          command: check advisories bans licenses sources -W unmaintained -W unsound --hide-inclusion-graph
+          command: check bans licenses sources --hide-inclusion-graph
 
       - name: Install cargo-machete
         uses: taiki-e/install-action@ab49d3c64680143e184118bed66a46419fc15519 # v2.90.5
@@ -136,3 +139,64 @@ jobs:
 
       - name: Check for unused dependencies (cargo-machete)
         run: cargo machete
+
+  # A new RustSec advisory fails every build that checks it, whatever the PR
+  # changes. So PRs and merge groups check advisories only when they change
+  # Cargo.lock or deny.toml; develop is checked daily, and a failure opens an issue.
+  advisories:
+    name: Advisories
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
+
+      - name: Detect Cargo.lock or deny.toml changes
+        id: scope
+        env:
+          BASE: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
+        run: |
+          if [ -z "$BASE" ]; then
+            echo "check=true" >> "$GITHUB_OUTPUT"
+          elif git diff --name-only "$BASE" HEAD | grep -qxE 'Cargo\.lock|deny\.toml'; then
+            echo "check=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Cargo.lock and deny.toml unchanged; advisories are checked daily on develop."
+          fi
+
+      - name: Install Rust toolchain
+        if: steps.scope.outputs.check == 'true'
+        uses: dtolnay/rust-toolchain@035fceb3c12fb0c6a9461b52775e16473133e591 # 1.95.0
+        with:
+          toolchain: 1.95.0
+
+      - name: Install cargo-deny
+        if: steps.scope.outputs.check == 'true'
+        uses: taiki-e/install-action@ab49d3c64680143e184118bed66a46419fc15519 # v2.90.5
+        with:
+          tool: cargo-deny@0.20.2
+
+      # Vulnerabilities deny; `unmaintained`/`unsound` are warnings.
+      - name: Check advisories (cargo-deny)
+        if: steps.scope.outputs.check == 'true'
+        run: |
+          set -o pipefail
+          cargo deny --color never check advisories -W unmaintained -W unsound --hide-inclusion-graph 2>&1 | tee advisories.txt
+
+      - name: Report on develop
+        if: failure() && github.event_name == 'schedule'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          title="Dependency advisories on develop"
+          { echo "The daily advisories check failed: $RUN_URL"; echo; echo '```'; grep -E '^(error|warning)\[|ID:|Advisory:' advisories.txt | head -100; echo '```'; } > body.md
+          issue=$(gh issue list --state open --search "\"$title\" in:title" --json number,title --jq ".[] | select(.title == \"$title\") | .number" | head -1)
+          if [ -n "$issue" ]; then
+            gh issue comment "$issue" --body-file body.md
+          else
+            gh issue create --title "$title" --body-file body.md
+          fi
