@@ -21,7 +21,7 @@ env:
 jobs:
   compat:
     name: Prod Compatibility Tests
-    runs-on: warp-ubuntu-latest-x64-4x
+    runs-on: warp-ubuntu-2404-x64-4x
 
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6

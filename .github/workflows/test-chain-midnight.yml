@@ -30,7 +30,7 @@ jobs:
   midnight-real-stack:
     # The first name is the required check; each test starts its own stack and cluster.
     name: ${{ matrix.name }}
-    runs-on: warp-ubuntu-latest-x64-4x
+    runs-on: warp-ubuntu-2404-x64-4x
     timeout-minutes: 90
     strategy:
       fail-fast: false

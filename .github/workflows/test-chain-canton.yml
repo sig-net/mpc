@@ -19,7 +19,7 @@ concurrency:
 jobs:
   canton:
     name: Canton ${{ matrix.suite.name }} Tests
-    runs-on: warp-ubuntu-latest-x64-4x
+    runs-on: warp-ubuntu-2404-x64-4x
     strategy:
       fail-fast: false
       matrix:
