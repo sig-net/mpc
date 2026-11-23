@@ -71,5 +71,9 @@ RUN echo "#!/bin/bash\nredis-server /etc/redis/redis.conf &\nexec env RUST_LOG=$
 
 WORKDIR /usr/local/bin
 
+# Mitigates memory growth until #1760: glibc's default arenas kept ~2 GB of
+# freed memory and got nodes OOM-killed; 4 arenas cut memory ~3x.
+ENV MALLOC_ARENA_MAX=4
+
 # Start Redis and the Rust application
 ENTRYPOINT [ "/start.sh" ]
