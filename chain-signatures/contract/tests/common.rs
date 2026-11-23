@@ -21,6 +21,9 @@ use near_workspaces::{Account, Contract, Worker};
 use signature::DigestSigner;
 use signet_primitives::{SignId, Signature, LATEST_MPC_KEY_VERSION};
 
+/// A minimal NEAR contract whose only method, `migrate`, panics.
+/// `test_invalid_contract_deploy` proposes it to check that a failed migration
+/// rolls the update back. Its source was removed; the binary is the fixture.
 pub const INVALID_CONTRACT: &str = "../res/mpc_test_contract.wasm";
 pub const PARTICIPANT_LEN: usize = 3;
 
