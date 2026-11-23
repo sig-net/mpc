@@ -78,7 +78,7 @@ Every second Tuesday is a **release day**. On it, in this order:
 1. [Promote to mainnet](#step-1-promote-to-mainnet) the release that soaked on testnet.
 2. [Cut the next release](#step-2-cut-the-release) on `develop`.
 3. [Promote it to testnet](#step-3-promote-to-testnet).
-4. [Update dependencies](#step-4-update-dependencies) on `develop`.
+4. [Update dependencies](#step-4-update-dependencies) on `develop`, for the next release.
 5. [Soak](#step-5-soak) the release on testnet until the next release day.
 
 ### Step 1: Promote to mainnet
@@ -120,7 +120,7 @@ Every second Tuesday is a **release day**. On it, in this order:
 
 ### Step 4: Update dependencies
 
-Open the routine dependency update PR against `develop`, as [U2](dependencies.md#updating) describes. Merged at the start of the cycle, it spends the cycle on `develop` and the next soak on testnet before it reaches mainnet.
+Open the routine dependency update PR ([U2](dependencies.md#updating)) against `develop`. It is not part of the release just cut: it ships with the next one.
 
 ### Step 5: Soak
 
