@@ -90,31 +90,6 @@ impl SubmitError {
         )
     }
 
-    /// Whether the failure implicates a restored wallet's snapshot, counting
-    /// toward dropping its checkpoint.
-    // A refusal is the stale-snapshot signature. Expiry strikes with it because
-    // an unanswered first submit turns the node's refusal into `Expired`
-    // (`native.rs::resend`); pure congestion expires too, absorbed by the strike
-    // threshold. Every other class would discard the checkpoint for conditions
-    // the replay cannot fix. Each class is spelled out so a new one must take a
-    // verdict here.
-    pub(crate) fn strikes_restored_state(&self) -> bool {
-        match self {
-            Self::StateConflict(_) => true,
-            Self::BadRequest(_)
-            | Self::ContractMismatch(_)
-            | Self::DeployMismatch(_)
-            | Self::GateRefusal { .. }
-            | Self::WalletUnsynced(_)
-            | Self::WalletBusy(_)
-            | Self::WalletUnfunded(_)
-            | Self::ProvingTimeout(_)
-            | Self::Ambiguous(_)
-            | Self::Internal(_)
-            | Self::Node { .. } => false,
-        }
-    }
-
     /// Whether sustained failures of this class implicate a restored wallet's
     /// snapshot.
     // Why these two: a checkpoint missing tree paths fails `internal` in
@@ -175,11 +150,10 @@ mod tests {
 
     #[test]
     fn every_class_is_counted_with_its_code_and_verdicts() {
-        type Class = (fn() -> SubmitError, bool, bool, bool);
+        type Class = (fn() -> SubmitError, bool, bool);
         let classes: [Class; 12] = [
             (
                 || SubmitError::BadRequest("reason".to_string()),
-                false,
                 false,
                 false,
             ),
@@ -187,12 +161,10 @@ mod tests {
                 || SubmitError::ContractMismatch("reason".to_string()),
                 false,
                 false,
-                false,
             ),
             (
                 || SubmitError::DeployMismatch("reason".to_string()),
                 true,
-                false,
                 false,
             ),
             (
@@ -201,71 +173,49 @@ mod tests {
                 },
                 false,
                 false,
-                false,
             ),
             (
                 || SubmitError::WalletUnsynced("reason".to_string()),
                 true,
-                false,
                 false,
             ),
             (
                 || SubmitError::WalletBusy("reason".to_string()),
                 true,
                 false,
-                false,
             ),
             (
                 || SubmitError::WalletUnfunded("reason".to_string()),
                 true,
-                false,
                 true,
             ),
             (
                 || SubmitError::ProvingTimeout("reason".to_string()),
                 true,
                 false,
-                false,
             ),
             (
                 || SubmitError::StateConflict("reason".to_string()),
                 true,
-                true,
                 false,
             ),
-            (
-                || SubmitError::Ambiguous("reason".to_string()),
-                true,
-                false,
-                false,
-            ),
-            (
-                || SubmitError::Internal("reason".to_string()),
-                true,
-                false,
-                true,
-            ),
+            (|| SubmitError::Ambiguous("reason".to_string()), true, false),
+            (|| SubmitError::Internal("reason".to_string()), true, true),
             (
                 || SubmitError::Node {
                     source: anyhow::anyhow!("reason"),
                 },
                 true,
                 false,
-                false,
             ),
         ];
-        for (class, retryable, strike, stuck) in classes {
+        for (class, retryable, stuck) in classes {
             let error = class();
             let code = error.code();
             assert!(
                 error.to_string().starts_with(&format!("[{code}]")),
                 "{} does not carry its code",
                 error
-            );
-            assert_eq!(
-                error.strikes_restored_state(),
-                strike,
-                "{code}'s strike verdict"
             );
             assert_eq!(
                 error.stuck_restored_state(),

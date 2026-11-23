@@ -358,6 +358,8 @@ impl<W: FeePayer, C: SubmitChain + 'static> NativeIntentClient<W, C> {
     /// finalized block past its TTL does not hold it, or a minute past its TTL. An ambiguous outcome comes
     /// no earlier than that minute, so the retry may plan the same UTXOs; if this
     /// transaction landed after all, the node refuses that spend.
+    /// Only here does a failure strike the restored wallet: `post` runs once the
+    /// fee was planned, so a conflict raised before paying can never strike.
     async fn post(
         &self,
         bytes: &[u8],
@@ -380,6 +382,7 @@ impl<W: FeePayer, C: SubmitChain + 'static> NativeIntentClient<W, C> {
                 // cycle regression test with it (safe to defer: a drop takes
                 // three of these in a row, and only costs a replay).
                 self.wallet.release(spent);
+                self.wallet.struck();
                 return Err(SubmitError::StateConflict(format!(
                     "the node refused the transaction: {reason}; nothing was posted"
                 )));
@@ -428,6 +431,10 @@ impl<W: FeePayer, C: SubmitChain + 'static> NativeIntentClient<W, C> {
             Landing::Applied | Landing::PartialSuccess => Ok(tx_hash),
             Landing::Expired => {
                 self.wallet.release(spent);
+                // Expiry strikes with the refusal: after an unanswered first
+                // submit, `resend` only logs the node's refusal, so a stale spend
+                // surfaces here as `Landing::Expired`.
+                self.wallet.struck();
                 Err(SubmitError::StateConflict(format!(
                     "transaction {tx_hash} expired without landing"
                 )))
@@ -515,9 +522,9 @@ where
 
     /// Tells the wallet how the submit ended, as the intent builder's parent did: a
     /// landing clears the strikes, and any failure but an unsynced wallet starts the
-    /// replay over from the latest checkpoint; a state conflict strikes the restored
-    /// state, and unfunded/internal failures sustained with none landing drop its
-    /// checkpoint once.
+    /// replay over from the latest checkpoint; `post` strikes the restored state
+    /// itself on a state conflict, and unfunded/internal failures sustained with
+    /// none landing drop its checkpoint once.
     async fn submit(&self, intent: &[u8]) -> anyhow::Result<Submitted> {
         let submitted = self.submit_intent(intent).await;
         report_submit(&self.wallet, &submitted);
@@ -529,8 +536,8 @@ where
 fn report_submit<W: FeePayer>(wallet: &W, submitted: &Result<Submitted, SubmitError>) {
     match submitted {
         Ok(_) => wallet.landed(),
-        Err(SubmitError::WalletUnsynced(_)) => {}
-        Err(error) if error.strikes_restored_state() => wallet.struck(),
+        // `post` reported the strike itself; a conflict before paying strikes nothing.
+        Err(SubmitError::WalletUnsynced(_) | SubmitError::StateConflict(_)) => {}
         Err(error) if error.stuck_restored_state() => wallet.stuck(),
         Err(_) => wallet.failed(),
     }
@@ -1214,7 +1221,6 @@ mod tests {
         assert_eq!(
             *wallet.reports.lock().unwrap(),
             vec![
-                Report::Struck,
                 Report::Failed,
                 Report::Stuck,
                 Report::Stuck,
@@ -1245,11 +1251,16 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(error, SubmitError::StateConflict(_)), "{error}");
+        assert_eq!(
+            *client.wallet.reports.lock().unwrap(),
+            [Report::Struck],
+            "post strikes the refusal itself"
+        );
         report_submit(&client.wallet, &Err(error));
         assert_eq!(
             *client.wallet.reports.lock().unwrap(),
             [Report::Struck],
-            "the refusal strikes"
+            "submit does not report the strike twice"
         );
 
         let client = client_over(
@@ -1269,11 +1280,16 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(error, SubmitError::StateConflict(_)), "{error}");
+        assert_eq!(
+            *client.wallet.reports.lock().unwrap(),
+            [Report::Struck],
+            "post strikes the expiry unlanded itself"
+        );
         report_submit(&client.wallet, &Err(error));
         assert_eq!(
             *client.wallet.reports.lock().unwrap(),
             [Report::Struck],
-            "the expiry unlanded strikes"
+            "submit does not report the strike twice"
         );
     }
 
