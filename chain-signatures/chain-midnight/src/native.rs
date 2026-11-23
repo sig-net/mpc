@@ -209,13 +209,9 @@ impl<W: FeePayer, C: SubmitChain + 'static> NativeIntentClient<W, C> {
         Ok(bytes)
     }
 
-    /// `wallet_used` is set once the wallet is asked to pay, as the intent builder's
-    /// `walletUsed` was: from there on, a failure can implicate the wallet's state.
-    async fn submit_intent(
-        &self,
-        intent: &[u8],
-        wallet_used: &mut bool,
-    ) -> Result<Submitted, SubmitError> {
+    /// Submits the given intent to the wallet, proving and paying for it as necessary.
+    /// Returns a `Submitted` result if successful, or a `SubmitError` otherwise.
+    async fn submit_intent(&self, intent: &[u8]) -> Result<Submitted, SubmitError> {
         let deadline = Instant::now() + self.submit_timeout;
         let intent: PreimageIntent<DefaultDB> =
             midnight_serialize::tagged_deserialize(&mut &intent[..]).map_err(|error| {
@@ -236,17 +232,15 @@ impl<W: FeePayer, C: SubmitChain + 'static> NativeIntentClient<W, C> {
             wallet_wait,
             prove_respond,
         };
-        self.pay_for(&base, deadline, before, wallet_used).await
+        self.pay_for(&base, deadline, before).await
     }
 
-    /// Pays for the proven respond `base` and posts it: the half of a submit that asks
-    /// the wallet to pay, and so the half that sets `wallet_used`.
+    /// Pays for the proven respond `base` and posts it.
     async fn pay_for(
         &self,
         base: &SealedTx,
         deadline: Instant,
         before: SubmitTimings,
-        wallet_used: &mut bool,
     ) -> Result<Submitted, SubmitError> {
         let head = self.chain.finalized_head().await.map_err(node)?;
         let parameters: LedgerParameters = midnight_serialize::tagged_deserialize(
@@ -277,7 +271,6 @@ impl<W: FeePayer, C: SubmitChain + 'static> NativeIntentClient<W, C> {
             self.network_id.as_str(),
             &mut StdRng::from_entropy(),
         );
-        *wallet_used = plan_used_wallet(&plan);
         let plan = plan?;
         let price_fee = stage.elapsed();
         let fee_tx = plan.tx;
@@ -365,6 +358,8 @@ impl<W: FeePayer, C: SubmitChain + 'static> NativeIntentClient<W, C> {
     /// finalized block past its TTL does not hold it, or a minute past its TTL. An ambiguous outcome comes
     /// no earlier than that minute, so the retry may plan the same UTXOs; if this
     /// transaction landed after all, the node refuses that spend.
+    /// Only here does a failure strike the restored wallet: `post` runs once the
+    /// fee was planned, so a conflict raised before paying can never strike.
     async fn post(
         &self,
         bytes: &[u8],
@@ -382,7 +377,12 @@ impl<W: FeePayer, C: SubmitChain + 'static> NativeIntentClient<W, C> {
         let unanswered = match self.chain.submit(bytes).await {
             Ok(()) => false,
             Err(SubmitRefusal::Refused(reason)) => {
+                // TODO: exonerate refusals of the wallet's own just-reserved
+                // nullifiers (a late landing, not a stale snapshot); ship a
+                // cycle regression test with it (safe to defer: a drop takes
+                // three of these in a row, and only costs a replay).
                 self.wallet.release(spent);
+                self.wallet.struck();
                 return Err(SubmitError::StateConflict(format!(
                     "the node refused the transaction: {reason}; nothing was posted"
                 )));
@@ -431,8 +431,12 @@ impl<W: FeePayer, C: SubmitChain + 'static> NativeIntentClient<W, C> {
             Landing::Applied | Landing::PartialSuccess => Ok(tx_hash),
             Landing::Expired => {
                 self.wallet.release(spent);
+                // Expiry strikes with the refusal: after an unanswered first
+                // submit, `resend` only logs the node's refusal, so a stale spend
+                // surfaces here as `Landing::Expired`.
+                self.wallet.struck();
                 Err(SubmitError::StateConflict(format!(
-                    "transaction {tx_hash} expired without landing; nothing was posted"
+                    "transaction {tx_hash} expired without landing"
                 )))
             }
         }
@@ -518,34 +522,24 @@ where
 
     /// Tells the wallet how the submit ended, as the intent builder's parent did: a
     /// landing clears the strikes, and any failure but an unsynced wallet starts the
-    /// replay over from the latest checkpoint.
+    /// replay over from the latest checkpoint; `post` strikes the restored state
+    /// itself on a state conflict, and unfunded/internal failures sustained with
+    /// none landing drop its checkpoint once.
     async fn submit(&self, intent: &[u8]) -> anyhow::Result<Submitted> {
-        let mut wallet_used = false;
-        let submitted = self.submit_intent(intent, &mut wallet_used).await;
-        report_submit(&self.wallet, &submitted, wallet_used);
+        let submitted = self.submit_intent(intent).await;
+        report_submit(&self.wallet, &submitted);
         submitted.map_err(SubmitError::into_publish_error)
     }
 }
 
-/// Whether planning the fee used the wallet. A fee it could not plan for its held
-/// UTXOs, or before it caught up, used nothing, as the intent builder's busy gate and
-/// readiness wait did not.
-fn plan_used_wallet(plan: &Result<crate::funding::FeePlan, SubmitError>) -> bool {
-    !matches!(
-        plan,
-        Err(SubmitError::WalletBusy(_) | SubmitError::WalletUnsynced(_))
-    )
-}
-
-fn report_submit<W: FeePayer>(
-    wallet: &W,
-    submitted: &Result<Submitted, SubmitError>,
-    wallet_used: bool,
-) {
+/// Reports the result of a submit to the wallet, updating its state accordingly.
+fn report_submit<W: FeePayer>(wallet: &W, submitted: &Result<Submitted, SubmitError>) {
     match submitted {
         Ok(_) => wallet.landed(),
-        Err(SubmitError::WalletUnsynced(_)) => {}
-        Err(_) => wallet.failed(wallet_used),
+        // `post` reported the strike itself; a conflict before paying strikes nothing.
+        Err(SubmitError::WalletUnsynced(_) | SubmitError::StateConflict(_)) => {}
+        Err(error) if error.stuck_restored_state() => wallet.stuck(),
+        Err(_) => wallet.failed(),
     }
 }
 
@@ -689,6 +683,7 @@ mod tests {
     use crate::emissions::{emissions_of_call, Emission, EmissionKind, MISC_PAYLOAD_LEN};
     use crate::funding::tests::{base, funded_key, replayed};
     use crate::funding::{plan_fee, FeePlan};
+    use crate::test_utils::rejected_http;
     use minocrab_publisher::{Attestation, EcdsaSignature};
 
     /// The responder's initial state with the package's verifier keys
@@ -701,6 +696,14 @@ mod tests {
 
     type ChainIntent = Intent<Signature, ProofPreimageMarker, PedersenRandomness, DefaultDB>;
 
+    /// How a submit's end was reported to the wallet.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum Report {
+        Failed,
+        Struck,
+        Stuck,
+    }
+
     /// A wallet that records reservations; the build and post paths never plan.
     #[derive(Default)]
     pub(super) struct RecordingWallet {
@@ -712,10 +715,8 @@ mod tests {
         indexed_secs: u64,
         /// Where the replay stands once `ready_by` has waited for it, if it moves.
         caught_up_secs: Option<u64>,
-        failures: Mutex<Vec<bool>>,
+        reports: Mutex<Vec<Report>>,
         landings: AtomicU64,
-        /// What the next `plan` refuses with.
-        plan_refusal: Mutex<Option<SubmitError>>,
     }
 
     impl FeePayer for RecordingWallet {
@@ -744,12 +745,7 @@ mod tests {
             _network_id: &str,
             _rng: &mut StdRng,
         ) -> Result<FeePlan, SubmitError> {
-            Err(self
-                .plan_refusal
-                .lock()
-                .unwrap()
-                .take()
-                .expect("these tests price no fee they do not refuse"))
+            unimplemented!("no test prices a fee")
         }
 
         fn reserve(&self, spent: &[DustNullifier], until: Timestamp) {
@@ -761,8 +757,16 @@ mod tests {
             self.released.lock().unwrap().push(spent.to_vec());
         }
 
-        fn failed(&self, wallet_used: bool) {
-            self.failures.lock().unwrap().push(wallet_used);
+        fn failed(&self) {
+            self.reports.lock().unwrap().push(Report::Failed);
+        }
+
+        fn struck(&self) {
+            self.reports.lock().unwrap().push(Report::Struck);
+        }
+
+        fn stuck(&self) {
+            self.reports.lock().unwrap().push(Report::Stuck);
         }
 
         fn landed(&self) {
@@ -1184,8 +1188,8 @@ mod tests {
             );
         }
         assert_eq!(
-            *client.wallet.failures.lock().unwrap(),
-            vec![false],
+            *client.wallet.reports.lock().unwrap(),
+            vec![Report::Failed],
             "the wallet hears of the failed submit, from before it paid anything"
         );
     }
@@ -1197,92 +1201,100 @@ mod tests {
             tx_id: LedgerTxHash::from_bytes([0x00; 32]),
             dust_balance: 1,
         });
-        report_submit(&wallet, &landed, true);
+        report_submit(&wallet, &landed);
+        report_submit(&wallet, &Err(SubmitError::WalletUnsynced("syncing".into())));
+        report_submit(&wallet, &Err(SubmitError::StateConflict("refused".into())));
+        report_submit(&wallet, &Err(SubmitError::WalletBusy("held".into())));
+        report_submit(&wallet, &Err(SubmitError::WalletUnfunded("empty".into())));
+        report_submit(&wallet, &Err(SubmitError::Internal("spending DUST".into())));
+        // A throttled read fails like any other, but implicates nothing.
         report_submit(
             &wallet,
-            &Err(SubmitError::WalletUnsynced("syncing".into())),
-            false,
+            &Err(SubmitError::Node {
+                source: rejected_http(429),
+            }),
         );
-        report_submit(
-            &wallet,
-            &Err(SubmitError::StateConflict("refused".into())),
-            true,
-        );
-        report_submit(&wallet, &Err(SubmitError::WalletBusy("held".into())), false);
-        // An empty wallet is a failure like any other, as the intent builder's
-        // `wallet_unfunded` was.
-        report_submit(
-            &wallet,
-            &Err(SubmitError::WalletUnfunded("empty".into())),
-            true,
-        );
+        // A submit that outlived its proving or landing budget implicates nothing.
+        report_submit(&wallet, &Err(SubmitError::ProvingTimeout("budget".into())));
+        report_submit(&wallet, &Err(SubmitError::Ambiguous("unlanded".into())));
         assert_eq!(wallet.landings.load(Ordering::SeqCst), 1, "one landing");
         assert_eq!(
-            *wallet.failures.lock().unwrap(),
-            vec![true, false, true],
-            "every failure but an unsynced wallet, with whether it used the wallet"
+            *wallet.reports.lock().unwrap(),
+            vec![
+                Report::Failed,
+                Report::Stuck,
+                Report::Stuck,
+                Report::Failed,
+                Report::Failed,
+                Report::Failed,
+            ],
+            "every failure but an unsynced wallet, with how it implicates the restored state"
         );
     }
 
-    #[test]
-    fn only_a_fee_planned_or_refused_for_its_funds_used_the_wallet() {
-        let local = replayed();
-        let ctime = local.sync_time;
-        let ttl = Timestamp::from_secs(ctime.to_secs() + 180);
-        let mut rng = StdRng::seed_from_u64(7);
-        let planned = plan_fee(
-            &funded_key(),
-            &local,
-            &[],
-            &base(&mut rng, ttl),
-            &INITIAL_PARAMETERS,
-            ctime,
-            ttl,
-            "undeployed",
-            &mut rng,
+    #[tokio::test(start_paused = true)]
+    async fn post_failures_strike_the_restored_wallet_by_their_class() {
+        let client = client_over(
+            managed_dir(|_, bytes| bytes),
+            ScriptedChain::new(10, 20, None)
+                .refusing(SubmitRefusal::Refused("1010: Invalid Transaction".into())),
         );
-        assert!(planned.is_ok());
-        assert!(plan_used_wallet(&planned));
-        assert!(plan_used_wallet(&Err(SubmitError::WalletUnfunded(
-            "short".into()
-        ))));
-        assert!(!plan_used_wallet(&Err(SubmitError::WalletBusy(
-            "held".into()
-        ))));
-        assert!(!plan_used_wallet(&Err(SubmitError::WalletUnsynced(
-            "behind".into()
-        ))));
+        let error = client
+            .post(
+                b"tx",
+                LedgerTxHash::from_bytes(TX_HASH),
+                &spent(),
+                10,
+                Timestamp::from_secs(5000),
+                deadline(),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(error, SubmitError::StateConflict(_)), "{error}");
+        assert_eq!(
+            *client.wallet.reports.lock().unwrap(),
+            [Report::Struck],
+            "post strikes the refusal itself"
+        );
+        report_submit(&client.wallet, &Err(error));
+        assert_eq!(
+            *client.wallet.reports.lock().unwrap(),
+            [Report::Struck],
+            "submit does not report the strike twice"
+        );
+
+        let client = client_over(
+            managed_dir(|_, bytes| bytes),
+            // Block 14, at 1084, is the first past a 1080 TTL.
+            ScriptedChain::new(10, 20, None),
+        );
+        let error = client
+            .post(
+                b"tx",
+                LedgerTxHash::from_bytes(TX_HASH),
+                &spent(),
+                10,
+                Timestamp::from_secs(1080),
+                deadline(),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(error, SubmitError::StateConflict(_)), "{error}");
+        assert_eq!(
+            *client.wallet.reports.lock().unwrap(),
+            [Report::Struck],
+            "post strikes the expiry unlanded itself"
+        );
+        report_submit(&client.wallet, &Err(error));
+        assert_eq!(
+            *client.wallet.reports.lock().unwrap(),
+            [Report::Struck],
+            "submit does not report the strike twice"
+        );
     }
 
     #[tokio::test]
-    async fn a_fee_planned_against_the_wallets_funds_used_it_and_one_it_held_did_not() {
-        for (refusal, used) in [
-            (SubmitError::WalletUnfunded("short".into()), true),
-            (SubmitError::WalletBusy("held".into()), false),
-        ] {
-            let client = client_over(
-                managed_dir(|_, bytes| bytes),
-                ScriptedChain::new(10, 20, None),
-            );
-            *client.wallet.plan_refusal.lock().unwrap() = Some(refusal);
-            let mut rng = StdRng::seed_from_u64(3);
-            let base = base(&mut rng, Timestamp::from_secs(2_000));
-            let before = SubmitTimings {
-                started: Instant::now(),
-                wallet_wait: Duration::ZERO,
-                prove_respond: Duration::ZERO,
-            };
-            let mut wallet_used = !used;
-            client
-                .pay_for(&base, deadline(), before, &mut wallet_used)
-                .await
-                .expect_err("the plan was refused");
-            assert_eq!(wallet_used, used);
-        }
-    }
-
-    #[tokio::test]
-    async fn a_submit_failing_before_the_wallet_pays_reports_it_unused() {
+    async fn a_submit_failing_before_the_wallet_pays_strikes_nothing() {
         let client = client();
         let intent = client.build(&respond_request()).await.unwrap();
         // The packaged keys are empty here, so proving the respond fails.
@@ -1290,7 +1302,11 @@ mod tests {
             .submit(&intent)
             .await
             .expect_err("nothing can be proven");
-        assert_eq!(*client.wallet.failures.lock().unwrap(), vec![false]);
+        assert_eq!(
+            *client.wallet.reports.lock().unwrap(),
+            vec![Report::Stuck],
+            "a proving failure before the wallet paid reports stuck, never a strike"
+        );
     }
 
     #[tokio::test]
@@ -1420,6 +1436,12 @@ mod tests {
             .unwrap_err();
         assert!(matches!(error, SubmitError::Node { .. }), "{error}");
         assert_eq!(*client.wallet.released.lock().unwrap(), vec![spent()]);
+        report_submit(&client.wallet, &Err(error));
+        assert_eq!(
+            *client.wallet.reports.lock().unwrap(),
+            [Report::Failed],
+            "a node that never carried the transaction strikes nothing"
+        );
         assert!(client.chain.landing_reads.lock().unwrap().is_empty());
     }
 
@@ -1443,8 +1465,17 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(*client.wallet.released.lock().unwrap(), vec![spent()]);
-
-        let error = error.into_publish_error();
+        let submitted = Err(error);
+        report_submit(&client.wallet, &submitted);
+        assert_eq!(
+            *client.wallet.reports.lock().unwrap(),
+            [Report::Failed],
+            "a runtime without the call strikes nothing"
+        );
+        let error = match submitted {
+            Err(error) => error.into_publish_error(),
+            Ok(_) => unreachable!("a runtime without the call cannot submit"),
+        };
         assert_eq!(
             crate::submit_error::refusal_code(&error),
             Some("contract_mismatch"),
@@ -1578,6 +1609,12 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(error, SubmitError::Ambiguous(_)), "{error}");
+        report_submit(&client.wallet, &Err(error));
+        assert_eq!(
+            *client.wallet.reports.lock().unwrap(),
+            [Report::Failed],
+            "a submit that only outlived its watch strikes nothing"
+        );
         let secs = |s| Duration::from_secs(s);
         assert_eq!(
             gaps(&client.chain.submits()),
@@ -2236,6 +2273,7 @@ mod live {
     use crate::rpc::MidnightPublisherRpc;
     use crate::types::MidnightAddress;
     use minocrab_publisher::{Attestation, EcdsaSignature};
+    use mpc_chain_integration_core::NoopPublisherTelemetry;
 
     fn env(name: &str) -> String {
         std::env::var(name).unwrap_or_else(|_| panic!("{name} must be set"))
@@ -2269,6 +2307,7 @@ mod live {
                 config.publisher.indexer_ws_url.clone(),
             )),
             None,
+            Arc::new(NoopPublisherTelemetry),
         );
         let provers = Arc::new(
             Provers::new(

@@ -109,6 +109,7 @@ impl MidnightPublisher {
                 config.publisher.indexer_ws_url.clone(),
             )),
             checkpoints,
+            telemetry.clone(),
         );
         let client = Arc::new(NativeIntentClient::new(
             rpc.clone(),
