@@ -7,7 +7,7 @@ use anyhow::Context as _;
 use http::StatusCode;
 use jsonrpsee::core::client::Error as JsonrpseeClientError;
 use jsonrpsee::types::error::{INVALID_PARAMS_CODE, OVERSIZED_RESPONSE_CODE};
-use mpc_chain_integration_core::utils::retry::{exhausted, RetryConfig};
+use mpc_chain_integration_core::utils::retry::{exhausted, RetryConfig, RpcFailure};
 use subxt::backend::legacy::rpc_methods::{BlockDetails, NumberOrHex};
 use subxt::backend::legacy::LegacyRpcMethods;
 use subxt::backend::rpc::RpcClient;
@@ -16,7 +16,6 @@ use subxt::ext::subxt_rpcs::{rpc_params, Error as RawRpcError, UserError};
 use subxt::utils::H256;
 use subxt::SubstrateConfig;
 
-use super::publisher::read_verdict;
 #[cfg(feature = "sandbox")]
 use super::transport::connect_http_endpoint;
 use super::transport::{MAX_CALLER_STATE_BYTES, MAX_RESPONSE_SIZE, MIN_PROVING_RESPONSE_CAP};
@@ -320,6 +319,32 @@ pub fn rejected_http_status(error: &anyhow::Error) -> Option<StatusCode> {
     })
 }
 
+/// The read-path verdict for a node error: oversized state terminal, an
+/// upstream carrier verbatim, else the read partition over the typed status.
+pub fn read_verdict(error: &anyhow::Error) -> RpcFailure {
+    if is_oversized_contract_state(error) {
+        return RpcFailure::terminal(format!("{error:#}"));
+    }
+    if let Some(failure) = RpcFailure::from_read_chain(error) {
+        return failure;
+    }
+    match rejected_http_status(error) {
+        Some(status) => RpcFailure::read_status(status, format!("{error:#}")),
+        None => RpcFailure::retryable(format!("{error:#}")),
+    }
+}
+
+/// The failed read above its carrier at the root (anyhow's `chain()` skips
+/// `context` values): reachable only via `downcast_ref::<ReadFailed>`, the
+/// field preserves the typed cause beyond the carrier's render.
+#[derive(Debug, thiserror::Error)]
+#[error("a publisher read failed")]
+struct ReadFailed(#[source] anyhow::Error);
+
+pub(super) fn attach_read_carrier(error: anyhow::Error) -> anyhow::Error {
+    anyhow::Error::new(read_verdict(&error)).context(ReadFailed(error))
+}
+
 /// The indexer loop's bool form of the publisher reads' verdict
 /// ([`read_verdict`]): one partition, one derivation.
 fn is_read_retryable(error: &anyhow::Error) -> bool {
@@ -495,7 +520,6 @@ mod tests {
     use super::*;
     use crate::rpc::support::*;
 
-    use crate::rpc::publisher::attach_read_carrier;
     use crate::rpc::publisher::MidnightPublisherRpc;
     use crate::rpc::transport::connect_http;
     use crate::submit_error::SubmitError;
@@ -625,6 +649,7 @@ mod tests {
         assert!(!is_provider_throttled(&retryable), "{retryable:#}");
     }
 
+    /// A real jsonrpsee server refuses a response over its cap. Under a cap that
     /// fits every admissible state that proves the state is over the limit; under
     /// a smaller cap it is the node's configuration, so the read is retried.
     #[tokio::test]

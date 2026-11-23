@@ -9,11 +9,9 @@ use subxt::utils::H256;
 use subxt::SubstrateConfig;
 
 use super::reads::{
-    is_oversized_contract_state, network_id, publisher_contract_state, rejected_http_status,
-    unwrap_runtime_api_result,
+    attach_read_carrier, network_id, publisher_contract_state, unwrap_runtime_api_result,
 };
 use super::transport::connect_http;
-use mpc_chain_integration_core::utils::retry::RpcFailure;
 
 use crate::config::MidnightConfig;
 use crate::types::{BlockHash, MidnightAddress, NetworkId};
@@ -243,32 +241,6 @@ pub trait PinnedReads: Send + Sync {
     async fn ledger_parameters(&self, at_hash: &BlockHash) -> anyhow::Result<Vec<u8>>;
 }
 
-/// The read-path verdict for a node error: oversized state terminal, an
-/// upstream carrier verbatim, else the read partition over the typed status.
-pub fn read_verdict(error: &anyhow::Error) -> RpcFailure {
-    if is_oversized_contract_state(error) {
-        return RpcFailure::terminal(format!("{error:#}"));
-    }
-    if let Some(failure) = RpcFailure::from_read_chain(error) {
-        return failure;
-    }
-    match rejected_http_status(error) {
-        Some(status) => RpcFailure::read_status(status, format!("{error:#}")),
-        None => RpcFailure::retryable(format!("{error:#}")),
-    }
-}
-
-/// The failed read above its carrier at the root (anyhow's `chain()` skips
-/// `context` values): reachable only via `downcast_ref::<ReadFailed>`, the
-/// field preserves the typed cause beyond the carrier's render.
-#[derive(Debug, thiserror::Error)]
-#[error("a publisher read failed")]
-struct ReadFailed(#[source] anyhow::Error);
-
-pub(super) fn attach_read_carrier(error: anyhow::Error) -> anyhow::Error {
-    anyhow::Error::new(read_verdict(&error)).context(ReadFailed(error))
-}
-
 #[async_trait::async_trait]
 impl PinnedReads for MidnightPublisherRpc {
     async fn finalized_head(&self) -> anyhow::Result<BlockHash> {
@@ -314,13 +286,16 @@ mod tests {
     use std::sync::atomic::Ordering;
     use std::sync::Arc;
 
+    use crate::rpc::reads::is_oversized_contract_state;
     use crate::rpc::submit::Landing;
     use crate::rpc::support::captured_applied_status_record;
     use crate::types::LedgerTxHash;
     use http::StatusCode;
     use jsonrpsee::types::error::OVERSIZED_RESPONSE_CODE;
     use jsonrpsee::RpcModule;
-    use mpc_chain_integration_core::utils::retry::{is_provider_throttled, is_retryable};
+    use mpc_chain_integration_core::utils::retry::{
+        is_provider_throttled, is_retryable, RpcFailure,
+    };
     use serde_json::json;
     use std::time::Duration;
     use subxt::ext::codec::{DecodeAll as _, Encode as _};

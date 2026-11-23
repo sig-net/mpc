@@ -478,8 +478,6 @@ mod tests {
         );
     }
 
-    /// A real jsonrpsee server refuses a response over its cap. Under a cap that
-
     /// A body without `Content-Length` overflows the client cap while streaming,
     /// a different jsonrpsee error from the up-front refusal; both are drops.
     #[tokio::test]
