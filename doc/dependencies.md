@@ -86,10 +86,11 @@ The `Dependency Audit` job runs on every PR and merge-queue run. `just audit`
 runs the same locally.
 
 - **C1. [`cargo deny check`](https://embarkstudios.github.io/cargo-deny/)**,
-  configured in `deny.toml`: known vulnerabilities from
-  [RustSec](https://rustsec.org/), sources and licenses (A3), duplicate and
-  `*` declarations (M1, M2). `unmaintained` and `unsound` advisories only
-  warn.
+  configured in `deny.toml`: sources and licenses (A3), duplicate and `*`
+  declarations (M1, M2). Known vulnerabilities from
+  [RustSec](https://rustsec.org/) are checked by the `Advisories` job, daily
+  on `develop` and on PRs that change `Cargo.lock` or `deny.toml`.
+  `unmaintained` and `unsound` advisories only warn.
 - **C2. [`cargo machete`](https://github.com/bnjbvr/cargo-machete)**: unused
   dependencies (M5).
 - **C3. `Cargo.lock` in sync** (M6). The `Lint & Unit Tests` job fails when
@@ -99,12 +100,12 @@ runs the same locally.
 
 An update is a `chore(deps)` PR with nothing else in it.
 
-- **U1. Security first.** A new advisory fails C1 on every open PR, so its
-  fix goes before them: an update, or an entry on the `ignore` list in
-  `deny.toml` when no fixed version can be taken or our code cannot reach
-  the vulnerable part. The entry's `reason` says which, and what has to
-  change to drop it; the PR that removes the blocker removes the entry.
-  *(review)*
+- **U1. Security first.** A new advisory fails the daily run, which opens or
+  updates an issue, and its fix goes first: an update, or an entry on the
+  `ignore` list in `deny.toml` when no fixed version can be taken or our code
+  cannot reach the vulnerable part. The entry's `reason` says which, and what
+  has to change to drop it; the PR that removes the blocker removes the
+  entry. *(review)*
 - **U2. Routine, after each release.** Right after a release is cut, one PR
   runs `cargo update` and moves images to their latest patch release.
   *(review)*
