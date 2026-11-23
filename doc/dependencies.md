@@ -3,6 +3,8 @@
 How the repository adds, declares, checks and updates what it takes from
 outside: Rust crates, the toolchain and tools, GitHub Actions and container
 images. The crate rules cover dev- and build-dependencies too.
+Each rule ends with how it is enforced: *CI* names the check that fails, *review*
+means a reviewer, or an agent's instructions, has to catch it.
 
 ## Principles
 
@@ -20,17 +22,18 @@ images. The crate rules cover dev- and build-dependencies too.
 - **A1. Needed.** Neither the standard library nor a dependency we already
   have does the job, and writing it ourselves would not be simpler.
   Cryptography always comes from a vetted crate. The PR states the use case.
+  *(review)*
 - **A2. Maintained.** Its security reports and bug reports get answered. A
-  stable crate without recent releases is fine.
+  stable crate without recent releases is fine. *(review)*
 - **A3. Allowed source and license.** `deny.toml` allows crates from
   crates.io and from two `sig-net` git repositories (`[sources]`), under
   permissive licenses such as MIT and Apache-2.0 (`[licenses]`). Widening
-  either list is a PR of its own.
+  either list is a PR of its own. *(CI: C1)*
 - **A4. No second version of a crate we already build.** If `Cargo.lock` has
   `sha2 0.11`, prefer a release of the new crate that also uses `0.11`.
-  `cargo tree -i sha2` shows which crate uses which version.
+  `cargo tree -i sha2` shows which crate uses which version. *(review)*
 - **A5. Only the features it needs.** The rest are off
-  (`default-features = false`).
+  (`default-features = false`). *(review)*
 
 ## Manifests
 
@@ -38,19 +41,19 @@ images. The crate rules cover dev- and build-dependencies too.
   `[workspace.dependencies]` of the root `Cargo.toml`. A member writes
   `workspace = true` and adds only the features it needs. A member that needs
   another major version declares it itself, with a comment: `chain-midnight`
-  keeps `sha2 0.10` because `hmac 0.12` requires it.
-- **M2. A plain version.** `"0.13.1"`, never `*`.
+  keeps `sha2 0.10` because `hmac 0.12` requires it. *(CI: C1)*
+- **M2. A plain version.** `"0.13.1"`, never `*`. *(CI: C1)*
 - **M3. An exact pin has a reason.** `"=1.0.38"` blocks every update of the
-  crate, security fixes included, so a comment says why it is pinned.
+  crate, security fixes included, so a comment says why it is pinned. *(review)*
 - **M4. A git dependency names the full commit hash** in `rev`, never a
-  branch or a tag.
+  branch or a tag. *(review)*
 - **M5. Nothing unused.** `cargo machete --fix` removes an unused dependency.
   The `ignored` list under `[package.metadata.cargo-machete]` is only for a
   crate machete cannot see, such as `serde_bytes`, which the code names only
-  inside `#[serde(with = "serde_bytes")]`.
+  inside `#[serde(with = "serde_bytes")]`. *(CI: C2)*
 - **M6. `Cargo.lock` is committed** and fixes the version we build. A PR
   changes it only as far as its own manifest change requires; other version
-  changes go through [Updating](#updating).
+  changes go through [Updating](#updating). *(CI: C3)*
 
 ```toml
 # Cargo.toml
@@ -66,18 +69,18 @@ sha2.workspace = true                                # M1
 ## Toolchain, tools, actions and images
 
 - **T1. One Rust version.** The exact release in `rust-toolchain.toml`. The
-  workflows and the `Dockerfile` repeat it and change in the same PR.
+  workflows and the `Dockerfile` repeat it and change in the same PR. *(review)*
 - **T2. Exact versions.** A tool that a workflow downloads and an image tag
   name an exact version, and `scripts/setup-deps.sh` installs the same ones.
   The exception is `debian:bookworm-slim`, the base of the release image: it
   floats because its `apt-get install` takes Debian's current packages
-  anyway.
+  anyway. *(review)*
 - **T3. Actions by commit.** An action is referenced by its full commit SHA,
   with the version in a comment (`actions/checkout@<sha> # v6`). A tag can be
-  moved to other code, a commit cannot.
+  moved to other code, a commit cannot. *(review)*
 - **T4. Downloads are verified.** A file the `Dockerfile` downloads, such as
   the Midnight prover keys and ZK parameters, is checked with `sha256sum`
-  against a hash written in the `Dockerfile`.
+  against a hash written in the `Dockerfile`. *(review)*
 
 ## Checks
 
@@ -103,9 +106,10 @@ An update is a `chore(deps)` PR with nothing else in it.
   `deny.toml` when no fixed version can be taken or our code cannot reach
   the vulnerable part. The entry's `reason` says which, and what has to
   change to drop it; the PR that removes the blocker removes the entry.
+  *(review)*
 - **U2. Routine, after each release.** Right after a release is cut, one PR
-  runs `cargo update`.
+  runs `cargo update`. *(review)*
 - **U3. One major version per PR**, or one family that moves together, like
-  the `near-*` crates.
+  the `near-*` crates. *(review)*
 - **U4. The rest when needed.** The toolchain, tools, actions and images are
-  updated when a fix or a feature needs it.
+  updated when a fix or a feature needs it. *(review)*
