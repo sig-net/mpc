@@ -33,4 +33,5 @@ How to write and update these docs: [Documentation conventions](../CONTRIBUTING.
 
 ## Build
 
+- [Dependencies](dependencies.md): how crates, tools, actions and images are added, pinned, checked and updated.
 - [CI caching](ci-caching.md): cache policy for the GitHub workflows.
