@@ -1,6 +1,6 @@
 # Only redis-server is copied into the runtime stage, so the Redis image must be
 # built on the same Debian release.
-FROM redis:7.4.12-bookworm AS redis-bin
+FROM redis:7.4.12-bookworm@sha256:2e3eb11462c4e3759e6972678dd051d150ff54b1e60714b3c33b701260172a90 AS redis-bin
 
 FROM node:22 AS eth-builder
 WORKDIR /usr/src/app/contract-eth
@@ -12,7 +12,7 @@ RUN npx hardhat compile
 # What the Midnight publisher proves with: the responder's packaged keys and IR, the
 # KZG parameters its circuits and the DUST spend need, and the DUST spend's keys. The
 # node fetches a missing file at runtime, so baking them in keeps proving offline.
-FROM debian:bookworm-slim AS midnight-artifacts
+FROM debian:bookworm-20261104-slim@sha256:734a72b3d6142a71993b4bc580ca01d8ca687f77a2c422d96a961d3376b179bc AS midnight-artifacts
 RUN apt-get update && apt-get install --assume-yes --no-install-recommends ca-certificates curl
 WORKDIR /tmp/midnight
 RUN curl -fsSL --retry 4 -o responder.tgz \
@@ -37,7 +37,7 @@ RUN curl -fsSL --retry 4 -o responder.tgz \
       "d211cacb22391b9db60f945787d98c16d344cbb4790246132117084c080399c1  dust/10/spend.bzkir" \
       | sha256sum -c
 
-FROM rust:1.95.0-bookworm AS node-builder
+FROM rust:1.95.0-bookworm@sha256:6258907abe69656e41cd992e0b705cdcfabcbbe3db374f92ed2d47121282d4a1 AS node-builder
 RUN rustc --version --verbose
 WORKDIR /usr/src/app
 ARG GIT_COMMIT_HASH
@@ -53,7 +53,7 @@ COPY Cargo.lock .
 COPY --from=eth-builder /usr/src/app/contract-eth/artifacts chain-signatures/contract-eth/artifacts
 RUN cargo build --release --locked --package mpc-node
 
-FROM debian:bookworm-slim AS runtime
+FROM debian:bookworm-20261104-slim@sha256:734a72b3d6142a71993b4bc580ca01d8ca687f77a2c422d96a961d3376b179bc AS runtime
 RUN apt-get update && apt-get install --assume-yes libssl-dev ca-certificates curl
 
 RUN update-ca-certificates

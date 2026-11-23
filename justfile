@@ -25,7 +25,7 @@ alias s := setup
 # Run GitHub workflows locally via act (needs Docker; pulls runner images on first run)
 # Usage: just run-ci [args] (e.g. just run-ci "-l" to list, just run-ci "-j lint-and-test")
 run-ci args="": (setup "act")
-    act -P warp-ubuntu-latest-x64-4x=catthehacker/ubuntu:act-latest -P ubuntu-latest=catthehacker/ubuntu:act-latest {{args}}
+    act -P warp-ubuntu-latest-x64-4x=catthehacker/ubuntu:act-latest-20261122@sha256:fc96e68f607a38291c8057b4280aeba5e7164994c7262c09b15dc81cd786f1f1 -P ubuntu-latest=catthehacker/ubuntu:act-latest-20261122@sha256:fc96e68f607a38291c8057b4280aeba5e7164994c7262c09b15dc81cd786f1f1 {{args}}
 
 # Run all integration tests
 # Usage: just t [filter]
@@ -146,11 +146,9 @@ tre-port := env_var_or_default('TRE_PORT', '9090')
 test-tron-tre:
     #!/usr/bin/env bash
     set -euo pipefail
-    # Tag-pinned only: the vendor publishes no digest, so a republished
-    # 2.0.0 tag would change this chain silently.
     trap 'docker rm -f tre >/dev/null 2>&1 || true' EXIT
     docker rm -f tre >/dev/null 2>&1 || true
-    docker run -d --name tre -p {{tre-port}}:9090 -e useDefaultPrivateKey=true tronbox/tre:2.0.0 >/dev/null
+    docker run -d --name tre -p {{tre-port}}:9090 -e useDefaultPrivateKey=true tronbox/tre:2.0.0@sha256:f4332e11df12a9f360639a4546fd046593909630fda48af00b30410c144342f0 >/dev/null
     # Readiness: account funding is async after healthcheck, and a deploy
     # built against the genesis block fails broadcast.
     ready=0

@@ -17,13 +17,16 @@ pub struct GcsEmulator {
 
 impl GcsEmulator {
     pub async fn run() -> anyhow::Result<Self> {
-        let container = GenericImage::new("fsouza/fake-gcs-server", "1.56.1")
-            .with_exposed_port(PORT.tcp())
-            .with_wait_for(WaitFor::message_on_stderr("server started at"))
-            .with_cmd(["-scheme", "http", "-backend", "memory", "-port", "4443"])
-            .start()
-            .await
-            .context("starting the GCS emulator")?;
+        let container = GenericImage::new(
+            "fsouza/fake-gcs-server",
+            "1.56.1@sha256:797ce226d62f947c009dc40246b30cfb456b8473d8241407f9d6f2c04e4d69ef",
+        )
+        .with_exposed_port(PORT.tcp())
+        .with_wait_for(WaitFor::message_on_stderr("server started at"))
+        .with_cmd(["-scheme", "http", "-backend", "memory", "-port", "4443"])
+        .start()
+        .await
+        .context("starting the GCS emulator")?;
         let host = container.get_host().await?;
         let host_port = container.get_host_port_ipv4(PORT).await?;
         let endpoint = format!("http://{host}:{host_port}");
