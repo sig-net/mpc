@@ -2,7 +2,7 @@
 # built on the same Debian release.
 FROM redis:7.4.12-bookworm AS redis-bin
 
-FROM node:22 AS eth-builder
+FROM node:22.23.5-bookworm AS eth-builder
 WORKDIR /usr/src/app/contract-eth
 COPY chain-signatures/contract-eth/package.json chain-signatures/contract-eth/package-lock.json ./
 RUN npm ci
