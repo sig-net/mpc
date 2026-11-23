@@ -9,7 +9,7 @@ pub use crate::{retry_op, retry_rpc};
 
 pub use classify::{
     http_status_read_retryable, http_status_retryable, is_provider_throttled, is_retryable,
-    is_retryable_typed, RpcFailure,
+    is_retryable_typed, is_throttle_status, RpcFailure,
 };
 pub use gate::{exhausted, run_gated, SharedBackoff};
 
