@@ -28,18 +28,6 @@ pub struct BlockRef {
     pub parent_hash: BlockHash,
 }
 
-impl From<H256> for BlockHash {
-    fn from(hash: H256) -> Self {
-        BlockHash::from_bytes(hash.0)
-    }
-}
-
-impl From<BlockHash> for H256 {
-    fn from(hash: BlockHash) -> Self {
-        H256(*hash.as_bytes())
-    }
-}
-
 pub struct MidnightRpc {
     client: OnlineClient<SubstrateConfig>,
     reads: Reads,

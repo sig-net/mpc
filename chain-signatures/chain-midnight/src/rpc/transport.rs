@@ -7,8 +7,10 @@ use jsonrpsee::core::traits::ToRpcParams;
 use jsonrpsee::http_client::{HttpClient, HttpClientBuilder};
 use subxt::backend::rpc::{RawRpcFuture, RawRpcSubscription, RawValue, RpcClient, RpcClientT};
 use subxt::ext::subxt_rpcs::{Error as RawRpcError, UserError};
+use subxt::utils::H256;
 
 use crate::config::{MidnightConfig, RpcConfig};
+use crate::types::BlockHash;
 
 /// Largest caller contract state the protocol admits, in decoded bytes. Every node
 /// applies the same limit, so admission does not depend on any node's RPC cap. The
@@ -168,6 +170,21 @@ impl RpcClientT for HttpRpcClient {
         })
     }
 }
+
+/// Subxt↔domain hash bridging; the impls are crate-scoped, so every rpc module
+/// that holds both types uses them without an import.
+impl From<H256> for BlockHash {
+    fn from(hash: H256) -> Self {
+        BlockHash::from_bytes(hash.0)
+    }
+}
+
+impl From<BlockHash> for H256 {
+    fn from(hash: BlockHash) -> Self {
+        H256(*hash.as_bytes())
+    }
+}
+
 pub(super) fn connect_http(config: &MidnightConfig) -> anyhow::Result<RpcClient> {
     connect_http_endpoint(config.node_url.as_str(), &config.rpc)
 }
