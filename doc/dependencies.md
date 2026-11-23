@@ -76,9 +76,9 @@ sha2.workspace = true                                # M1
 - **T3. Actions by commit.** An action is referenced by its full commit SHA,
   with the version in a comment (`actions/checkout@<sha> # v6`). A tag can be
   moved to other code, a commit cannot. *(review)*
-- **T4. Downloads are verified.** A file the `Dockerfile` downloads, such as
-  the Midnight prover keys and ZK parameters, is checked with `sha256sum`
-  against a hash written in the `Dockerfile`. *(review)*
+- **T4. Downloads are verified.** A file the `Dockerfile` or a workflow
+  downloads, such as the Midnight prover keys, is checked with `sha256sum`
+  against a hash written next to the download. *(review)*
 
 ## Checks
 
