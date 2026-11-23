@@ -13,6 +13,7 @@
 
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use anyhow::Context as _;
 use futures_util::StreamExt as _;
@@ -52,31 +53,34 @@ const FEE_PASSES: usize = 8;
 /// Events applied per replay; a batch only bounds how long the state lock is held.
 const REPLAY_BATCH: usize = 512;
 /// Backoff between subscription attempts.
-const RESUBSCRIBE_DELAY: std::time::Duration = std::time::Duration::from_secs(2);
+const RESUBSCRIBE_DELAY: Duration = Duration::from_secs(2);
 /// The header of a ledger event as ledger 8 serialized it.
 const LEDGER_8_EVENT_HEADER: &[u8] = b"midnight:event[v9]:";
 /// The longest backoff between subscriptions the indexer keeps refusing to open.
-const MAX_REFUSED_DELAY: std::time::Duration = std::time::Duration::from_secs(60);
+const MAX_REFUSED_DELAY: Duration = Duration::from_secs(60);
 /// The longest backoff between replays that keep restarting from the first event.
-const MAX_RESTART_DELAY: std::time::Duration = std::time::Duration::from_secs(600);
+const MAX_RESTART_DELAY: Duration = Duration::from_secs(600);
 /// The least time between two checkpoints a caught-up replay keeps; the first after a
 /// start, a forget or a replay from the first event is kept at once.
-const CHECKPOINT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(300);
+const CHECKPOINT_INTERVAL: Duration = Duration::from_secs(300);
 /// How long loading or keeping a checkpoint may take.
-const CHECKPOINT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+const CHECKPOINT_TIMEOUT: Duration = Duration::from_secs(30);
 const CHECKPOINT_MAGIC: &[u8; 16] = b"mpc-dust-ckpt-v1";
 /// How long a resumed subscription may stay silent before the checkpoint is dropped:
 /// the indexer serves the checkpoint's own event first, from what it has stored.
-const RESUME_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+const RESUME_TIMEOUT: Duration = Duration::from_secs(60);
 /// Strikes — submits a restored wallet's state was implicated in, with none landing
 /// in between — before its checkpoint is dropped: the intent builder's snapshot
 /// strikes did. Above one, because a healthy wallet is also refused at times, and its
 /// spends also expire unlanded.
 const RESTORE_STRIKES: u32 = 3;
+/// The sustained-failure window of `stuck`; the drop happens once, after which
+/// nothing is restored to drop again.
+const RESTORE_STUCK_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 /// How long a live subscription that holds itself caught up may apply nothing while
 /// the indexer names a newer event before it is replaced: a connection can stall
 /// without closing.
-const STALL_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
+const STALL_GRACE: Duration = Duration::from_secs(5);
 
 /// The DUST key of account 0 at index 0, derived the way the Midnight wallet SDK
 /// derives it from the same seed: BIP-32 `m/44'/2400'/0'/2/0`, then the ledger's
@@ -167,6 +171,10 @@ pub(crate) trait FeePayer: Send + Sync {
     /// toward dropping its checkpoint, and the replay restarts from the latest
     /// checkpoint — from the first event once that strike drops it.
     fn struck(&self);
+    /// A submit failed as `wallet_unfunded` or `internal`: sustained past
+    /// `RESTORE_STUCK_TIMEOUT` with none landing, drops a restored checkpoint once.
+    /// The replay restarts from the latest checkpoint meanwhile.
+    fn stuck(&self);
     /// A submit landed: the wallet in use can pay whatever it was restored from.
     fn landed(&self);
 }
@@ -357,8 +365,22 @@ struct Snapshots {
     /// a failure of another class does not clear them — the forgetting strike and
     /// a replay started over from the first event do.
     strikes: u32,
+    /// The first stuck failure since the last landing or drop; other classes
+    /// neither start nor reset it — they are no recovery.
+    stuck_since: Option<Instant>,
     /// The stored checkpoint is being cleared; nothing is kept until it is.
     forget: bool,
+}
+
+impl Snapshots {
+    /// Discards the checkpoint and its verdicts; `forget` clears the stored one.
+    fn discard(&mut self) {
+        self.latest = None;
+        self.kept = None;
+        self.strikes = 0;
+        self.stuck_since = None;
+        self.forget = true;
+    }
 }
 
 impl Shared {
@@ -629,6 +651,7 @@ fn start_over(shared: &Shared, cause: &str) {
     snapshots.latest = None;
     snapshots.kept = None;
     snapshots.strikes = 0;
+    snapshots.stuck_since = None;
     drop(snapshots);
     shared.progress.send_replace(());
 }
@@ -1020,10 +1043,7 @@ impl FeePayer for FundingWallet {
                     "midnight funding wallet: discarding the DUST checkpoint; \
                      replaying from the first event"
                 );
-                snapshots.latest = None;
-                snapshots.kept = None;
-                snapshots.strikes = 0;
-                snapshots.forget = true;
+                snapshots.discard();
                 forget = true;
                 self.shared.replay_restarted("strikes");
             }
@@ -1031,8 +1051,32 @@ impl FeePayer for FundingWallet {
         self.restart_replay(forget);
     }
 
+    fn stuck(&self) {
+        let restored = self.shared.state().restored;
+        let mut forget = false;
+        if restored {
+            let mut snapshots = self.shared.snapshots();
+            let since = snapshots.stuck_since.get_or_insert_with(Instant::now);
+            if since.elapsed() >= RESTORE_STUCK_TIMEOUT {
+                tracing::warn!(
+                    cause = "stuck",
+                    stuck_for = ?RESTORE_STUCK_TIMEOUT,
+                    "midnight funding wallet: a restored wallet kept failing as \
+                     unfunded/internal with none landing; discarding the DUST \
+                     checkpoint, replaying from the first event"
+                );
+                snapshots.discard();
+                forget = true;
+                self.shared.replay_restarted("stuck");
+            }
+        }
+        self.restart_replay(forget);
+    }
+
     fn landed(&self) {
-        self.shared.snapshots().strikes = 0;
+        let mut snapshots = self.shared.snapshots();
+        snapshots.strikes = 0;
+        snapshots.stuck_since = None;
     }
 }
 
@@ -1664,7 +1708,7 @@ pub(crate) mod tests {
             Arc::new(NoopPublisherTelemetry),
         );
         wallet
-            .ready_by(Instant::now() + std::time::Duration::from_secs(30))
+            .ready_by(Instant::now() + Duration::from_secs(30))
             .await
             .unwrap();
         assert_eq!(wallet.sync_time(), replayed().sync_time);
@@ -1700,7 +1744,7 @@ pub(crate) mod tests {
             Arc::new(NoopPublisherTelemetry),
         );
         wallet
-            .ready_by(Instant::now() + std::time::Duration::from_secs(30))
+            .ready_by(Instant::now() + Duration::from_secs(30))
             .await
             .unwrap();
     }
@@ -1769,7 +1813,7 @@ pub(crate) mod tests {
             Arc::new(NoopPublisherTelemetry),
         );
         while source.0.load(std::sync::atomic::Ordering::SeqCst) < 3 {
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            tokio::time::sleep(Duration::from_millis(100)).await;
         }
 
         let recorded = String::from_utf8(logs.0.lock().unwrap().clone()).unwrap();
@@ -1834,12 +1878,12 @@ pub(crate) mod tests {
             .load(std::sync::atomic::Ordering::SeqCst)
             < 2
         {
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            tokio::time::sleep(Duration::from_millis(100)).await;
         }
         assert!(wallet.shared.state().is_caught_up());
 
         let error = wallet
-            .ready_by(Instant::now() + std::time::Duration::from_secs(1))
+            .ready_by(Instant::now() + Duration::from_secs(1))
             .await
             .expect_err("an indexer that stopped delivering may be missing events");
         assert!(matches!(error, SubmitError::WalletUnsynced(_)), "{error}");
@@ -1899,7 +1943,7 @@ pub(crate) mod tests {
             Arc::new(NoopPublisherTelemetry),
         );
         wallet
-            .ready_by(Instant::now() + std::time::Duration::from_secs(30))
+            .ready_by(Instant::now() + Duration::from_secs(30))
             .await
             .unwrap();
         let local = replayed();
@@ -1945,7 +1989,7 @@ pub(crate) mod tests {
             Arc::new(NoopPublisherTelemetry),
         );
         wallet
-            .ready_by(Instant::now() + std::time::Duration::from_secs(30))
+            .ready_by(Instant::now() + Duration::from_secs(30))
             .await
             .unwrap();
         let local = replayed();
@@ -1985,7 +2029,7 @@ pub(crate) mod tests {
             Arc::new(NoopPublisherTelemetry),
         );
         wallet
-            .ready_by(Instant::now() + std::time::Duration::from_secs(30))
+            .ready_by(Instant::now() + Duration::from_secs(30))
             .await
             .unwrap();
         let local = replayed();
@@ -2028,7 +2072,7 @@ pub(crate) mod tests {
             Arc::new(NoopPublisherTelemetry),
         );
         let error = wallet
-            .ready_by(Instant::now() + std::time::Duration::from_secs(5))
+            .ready_by(Instant::now() + Duration::from_secs(5))
             .await
             .unwrap_err();
         assert!(matches!(error, SubmitError::WalletUnsynced(_)), "{error}");
@@ -2132,7 +2176,7 @@ pub(crate) mod tests {
 
     async fn ready(wallet: &FundingWallet) {
         wallet
-            .ready_by(Instant::now() + std::time::Duration::from_secs(30))
+            .ready_by(Instant::now() + Duration::from_secs(30))
             .await
             .unwrap();
     }
@@ -2161,13 +2205,13 @@ pub(crate) mod tests {
             Arc::new(NoopPublisherTelemetry),
         );
         ready(&wallet).await;
-        let deadline = Instant::now() + std::time::Duration::from_secs(30);
+        let deadline = Instant::now() + Duration::from_secs(30);
         let checkpoint = loop {
             if let Some(checkpoint) = store.decoded() {
                 break checkpoint;
             }
             assert!(Instant::now() < deadline, "no checkpoint was kept");
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            tokio::time::sleep(Duration::from_millis(10)).await;
         };
         let newest = fixture_updates().pop().unwrap();
         assert_eq!(checkpoint.applied, newest.id);
@@ -2276,7 +2320,7 @@ pub(crate) mod tests {
             Arc::new(NoopPublisherTelemetry),
         );
         wallet
-            .ready_by(Instant::now() + std::time::Duration::from_secs(600))
+            .ready_by(Instant::now() + Duration::from_secs(600))
             .await
             .unwrap();
         assert_eq!(source.froms(), vec![Some(resumed_at), None]);
@@ -2327,7 +2371,7 @@ pub(crate) mod tests {
 
     /// Lets the subscription act on a failure, then waits for the wallet again.
     async fn settle(wallet: &FundingWallet) {
-        tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+        tokio::time::sleep(Duration::from_secs(10)).await;
         ready(wallet).await;
     }
 
@@ -2418,6 +2462,53 @@ pub(crate) mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn a_restored_wallet_stuck_for_fifteen_minutes_forgets_the_checkpoint_once() {
+        let restarts = Arc::new(RestartCauses::default());
+        let (wallet, store, source, resumed_at) = restored_wallet_reporting(restarts.clone()).await;
+        // Below the timeout, stuck reports only restart the replay from the
+        // checkpoint; the caught-up replay then keeps the newest event's.
+        let newest = Some(fixture_updates().last().unwrap().id);
+        wallet.stuck();
+        settle(&wallet).await;
+        tokio::time::sleep(RESTORE_STUCK_TIMEOUT / 2).await;
+        wallet.stuck();
+        settle(&wallet).await;
+        assert_eq!(
+            source.froms(),
+            vec![Some(resumed_at), Some(resumed_at), newest],
+            "before the timeout the checkpoint is kept"
+        );
+        assert!(restarts.0.lock().unwrap().is_empty());
+
+        // A landing starts the wait over; other failure classes neither start nor
+        // reset it.
+        wallet.landed();
+        tokio::time::sleep(RESTORE_STUCK_TIMEOUT / 2).await;
+        wallet.stuck();
+        settle(&wallet).await;
+        wallet.failed();
+        settle(&wallet).await;
+        assert!(
+            store.clears() == 0 && wallet.shared.state().restored,
+            "a landing reset the wait, so nothing drops yet"
+        );
+
+        tokio::time::sleep(RESTORE_STUCK_TIMEOUT).await;
+        wallet.stuck();
+        settle(&wallet).await;
+        assert_eq!(source.froms().last(), Some(&None));
+        assert_eq!(store.clears(), 1);
+        assert_eq!(*restarts.0.lock().unwrap(), vec!["stuck"]);
+        assert_fully_replayed(&wallet);
+
+        // Drop-once: nothing is restored anymore.
+        wallet.stuck();
+        settle(&wallet).await;
+        assert_eq!(store.clears(), 1);
+        assert_eq!(*restarts.0.lock().unwrap(), vec!["stuck"]);
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn a_wallet_replayed_from_the_first_event_resumes_from_the_checkpoint_it_kept() {
         let source = RecordingSource::new(fixture_updates());
         let wallet = FundingWallet::start(
@@ -2446,7 +2537,7 @@ pub(crate) mod tests {
         // No await between the failure and the next publish's wait: the reload has not
         // run yet, and the state it will replace is not ready.
         let error = wallet
-            .ready_by(Instant::now() + std::time::Duration::from_millis(1))
+            .ready_by(Instant::now() + Duration::from_millis(1))
             .await
             .expect_err("a wallet about to reload is not ready");
         assert!(matches!(error, SubmitError::WalletUnsynced(_)), "{error}");
@@ -2464,7 +2555,7 @@ pub(crate) mod tests {
         );
         // Kept once caught up; 60 s later the replay starts over and catches up again,
         // well inside the interval, and keeps again since nothing it kept survives.
-        tokio::time::sleep(std::time::Duration::from_secs(70)).await;
+        tokio::time::sleep(Duration::from_secs(70)).await;
         let newest = fixture_updates().last().unwrap().id;
         assert_eq!(*store.0.lock().unwrap(), vec![newest, newest]);
     }
@@ -2478,7 +2569,7 @@ pub(crate) mod tests {
             None,
             restarts.clone(),
         );
-        tokio::time::sleep(std::time::Duration::from_secs(70)).await;
+        tokio::time::sleep(Duration::from_secs(70)).await;
         assert_eq!(
             *restarts.0.lock().unwrap(),
             vec!["replay_failed"],
@@ -2502,7 +2593,7 @@ pub(crate) mod tests {
             Some(store.clone()),
             restarts.clone(),
         );
-        tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+        tokio::time::sleep(Duration::from_secs(10)).await;
         assert!(
             store.held.lock().unwrap().is_none(),
             "a completed keep always saves, so the wallet never held a checkpoint"
@@ -2534,7 +2625,7 @@ pub(crate) mod tests {
     async fn a_wake_without_a_failure_changes_nothing() {
         let (wallet, _store, source, resumed_at) = restored_wallet().await;
         wallet.shared.wake.notify_one();
-        tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+        tokio::time::sleep(Duration::from_secs(60)).await;
         assert_eq!(source.froms(), vec![Some(resumed_at)]);
     }
 
@@ -2556,9 +2647,8 @@ pub(crate) mod tests {
             broken.max_id += 1;
             broken.raw.truncate(10);
             let caught_up: Vec<_> = updates.into_iter().map(Ok).collect();
-            let pause =
-                futures_util::stream::once(tokio::time::sleep(std::time::Duration::from_secs(60)))
-                    .filter_map(|()| async { None });
+            let pause = futures_util::stream::once(tokio::time::sleep(Duration::from_secs(60)))
+                .filter_map(|()| async { None });
             Ok(futures_util::stream::iter(caught_up)
                 .chain(pause)
                 .chain(futures_util::stream::iter([Ok(broken)]))
@@ -2618,7 +2708,7 @@ pub(crate) mod tests {
             Arc::new(NoopPublisherTelemetry),
         );
         wallet
-            .ready_by(Instant::now() + std::time::Duration::from_secs(60))
+            .ready_by(Instant::now() + Duration::from_secs(60))
             .await
             .unwrap();
     }
@@ -2661,9 +2751,9 @@ pub(crate) mod tests {
         };
         // Attempts at 0, 4, 12, 28 and 60 s, then one a minute: 14 in the first ten
         // minutes, where the resubscribe delay alone would make 300.
-        tokio::time::sleep(std::time::Duration::from_secs(61)).await;
+        tokio::time::sleep(Duration::from_secs(61)).await;
         assert_eq!(attempts(), 5);
-        tokio::time::sleep(std::time::Duration::from_secs(540)).await;
+        tokio::time::sleep(Duration::from_secs(540)).await;
         assert_eq!(attempts(), 14);
     }
 
@@ -2749,7 +2839,7 @@ pub(crate) mod tests {
         );
         // The stalled subscription still names the last event it served the newest.
         wallet
-            .ready_by(Instant::now() + std::time::Duration::from_secs(30))
+            .ready_by(Instant::now() + Duration::from_secs(30))
             .await
             .unwrap();
         assert_eq!(
@@ -2764,7 +2854,7 @@ pub(crate) mod tests {
         );
         let waited = Instant::now();
         wallet
-            .ready_by(Instant::now() + std::time::Duration::from_secs(60))
+            .ready_by(Instant::now() + Duration::from_secs(60))
             .await
             .unwrap();
         assert_eq!(wallet.shared.state().applied, Some(newest));
@@ -2772,8 +2862,7 @@ pub(crate) mod tests {
         let replaced_after = source.opened.lock().unwrap()[1] - waited;
         assert!(
             replaced_after >= STALL_GRACE
-                && replaced_after
-                    <= STALL_GRACE + RESUBSCRIBE_DELAY + std::time::Duration::from_secs(1),
+                && replaced_after <= STALL_GRACE + RESUBSCRIBE_DELAY + Duration::from_secs(1),
             "replaced {replaced_after:?} into the wait"
         );
     }
@@ -2796,11 +2885,11 @@ pub(crate) mod tests {
 
         let waited = Instant::now();
         wallet
-            .ready_by(Instant::now() + std::time::Duration::from_secs(60))
+            .ready_by(Instant::now() + Duration::from_secs(60))
             .await
             .unwrap();
         assert!(
-            waited.elapsed() <= STALL_GRACE + RESUBSCRIBE_DELAY + std::time::Duration::from_secs(1),
+            waited.elapsed() <= STALL_GRACE + RESUBSCRIBE_DELAY + Duration::from_secs(1),
             "{:?}",
             waited.elapsed()
         );
@@ -2832,7 +2921,7 @@ pub(crate) mod tests {
             });
             Ok(futures_util::stream::iter(updates)
                 .then(|update| async move {
-                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                    tokio::time::sleep(Duration::from_secs(1)).await;
                     Ok(update)
                 })
                 .chain(futures_util::stream::pending())
@@ -2861,14 +2950,14 @@ pub(crate) mod tests {
             Arc::new(NoopPublisherTelemetry),
         );
         wallet
-            .ready_by(Instant::now() + std::time::Duration::from_secs(30))
+            .ready_by(Instant::now() + Duration::from_secs(30))
             .await
             .unwrap();
         wallet.indexed_time().await.unwrap();
         assert!(!wallet.shared.state().is_ready());
         // 28 events still to come, a second apart: past the grace, never stalled for it.
         wallet
-            .ready_by(Instant::now() + std::time::Duration::from_secs(120))
+            .ready_by(Instant::now() + Duration::from_secs(120))
             .await
             .unwrap();
         assert_eq!(
@@ -2887,7 +2976,7 @@ pub(crate) mod tests {
     /// Serves the fixture one event every `gap`, each naming the fixture's newest, as a
     /// catch-up does; asked apart, it names the same.
     struct CatchesUpSlowly {
-        gap: std::time::Duration,
+        gap: Duration,
         subscriptions: std::sync::atomic::AtomicUsize,
     }
 
@@ -2936,7 +3025,7 @@ pub(crate) mod tests {
         tokio::time::sleep(STALL_GRACE * 3).await;
         wallet.indexed_time().await.unwrap();
         wallet
-            .ready_by(Instant::now() + std::time::Duration::from_secs(600))
+            .ready_by(Instant::now() + Duration::from_secs(600))
             .await
             .unwrap();
         assert_eq!(
@@ -3003,7 +3092,7 @@ pub(crate) mod tests {
             let first = rest.next().unwrap();
             Ok(futures_util::stream::iter([Ok(first)])
                 .chain(futures_util::stream::iter(rest).then(|update| async move {
-                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                    tokio::time::sleep(Duration::from_secs(1)).await;
                     Ok(update)
                 }))
                 .chain(futures_util::stream::pending())
@@ -3036,14 +3125,14 @@ pub(crate) mod tests {
             None,
             Arc::new(NoopPublisherTelemetry),
         );
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        tokio::time::sleep(Duration::from_millis(500)).await;
         assert_eq!(
             wallet.shared.state().applied,
             Some(updates[updates.len() - 3].id)
         );
         wallet.indexed_time().await.unwrap();
         wallet
-            .ready_by(Instant::now() + std::time::Duration::from_secs(120))
+            .ready_by(Instant::now() + Duration::from_secs(120))
             .await
             .unwrap();
         assert_eq!(
@@ -3065,7 +3154,7 @@ pub(crate) mod tests {
         // A stall replacement was asked, then a submit failed, before the subscription woke.
         wallet.shared.state().resubscribe = true;
         wallet.failed();
-        tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+        tokio::time::sleep(Duration::from_secs(10)).await;
         assert!(!wallet.shared.state().reload, "the reload was acted on");
         ready(&wallet).await;
     }
@@ -3084,13 +3173,13 @@ pub(crate) mod tests {
             Arc::new(NoopPublisherTelemetry),
         );
         // The first subscription served everything and ended; follow waits to resubscribe.
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        tokio::time::sleep(Duration::from_millis(500)).await;
         assert_eq!(source.opened.lock().unwrap().len(), 1);
         assert!(!wallet.shared.state().connected);
         // A replacement asked of it just before it ended, never acted on.
         wallet.shared.state().resubscribe = true;
         wallet.shared.wake.notify_one();
-        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+        tokio::time::sleep(Duration::from_secs(30)).await;
         assert_eq!(source.opened.lock().unwrap().len(), 2);
     }
 
@@ -3126,7 +3215,7 @@ pub(crate) mod tests {
             ready(&wallet).await;
             wallet.indexed_time().await.unwrap();
             wallet
-                .ready_by(Instant::now() + std::time::Duration::from_secs(60))
+                .ready_by(Instant::now() + Duration::from_secs(60))
                 .await
                 .unwrap();
             assert_eq!(
@@ -3142,7 +3231,7 @@ pub(crate) mod tests {
     /// Asked apart, it names the fixture's newest.
     struct SlowFirst {
         upto: usize,
-        first: std::time::Duration,
+        first: Duration,
         opened: Mutex<Vec<Instant>>,
     }
 
@@ -3198,7 +3287,7 @@ pub(crate) mod tests {
         let updates = fixture_updates();
         let source = Arc::new(SlowFirst {
             upto: updates.len() - 2,
-            first: STALL_GRACE + std::time::Duration::from_secs(3),
+            first: STALL_GRACE + Duration::from_secs(3),
             opened: Mutex::default(),
         });
         let wallet = FundingWallet::start(
@@ -3208,13 +3297,13 @@ pub(crate) mod tests {
             Arc::new(NoopPublisherTelemetry),
         );
         // Subscription 1 has ended; 2 opened `RESUBSCRIBE_DELAY` later.
-        tokio::time::sleep(RESUBSCRIBE_DELAY + std::time::Duration::from_secs(1)).await;
+        tokio::time::sleep(RESUBSCRIBE_DELAY + Duration::from_secs(1)).await;
         assert_eq!(source.opened.lock().unwrap().len(), 2);
         assert!(!wallet.shared.state().connected);
         // Named after it opened, so the name stands while it is slow to deliver.
         wallet.indexed_time().await.unwrap();
         wallet
-            .ready_by(Instant::now() + std::time::Duration::from_secs(120))
+            .ready_by(Instant::now() + Duration::from_secs(120))
             .await
             .unwrap();
         assert_eq!(
@@ -3271,7 +3360,7 @@ pub(crate) mod tests {
                 None,
                 Arc::new(NoopPublisherTelemetry),
             );
-            tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+            tokio::time::sleep(Duration::from_secs(3600)).await;
             let at = source.subscriptions.lock().unwrap();
             at.windows(2)
                 .map(|pair| (pair[1] - pair[0]).as_secs())
@@ -3338,7 +3427,7 @@ pub(crate) mod tests {
     /// Serves `batches` in order as separate deliveries, each after `gap` of
     /// silence, then stays open; records where each subscription started.
     struct Batches {
-        batches: Vec<(std::time::Duration, Vec<DustEventUpdate>)>,
+        batches: Vec<(Duration, Vec<DustEventUpdate>)>,
         froms: Mutex<Vec<Option<u64>>>,
     }
 
@@ -3385,8 +3474,8 @@ pub(crate) mod tests {
         let (first, rest) = updates.split_at(15);
         let source = Arc::new(Batches {
             batches: vec![
-                (std::time::Duration::ZERO, first.to_vec()),
-                (std::time::Duration::ZERO, rest.to_vec()),
+                (Duration::ZERO, first.to_vec()),
+                (Duration::ZERO, rest.to_vec()),
             ],
             froms: Mutex::default(),
         });
@@ -3442,15 +3531,15 @@ pub(crate) mod tests {
                 })
                 .collect()
         };
-        let past_interval = CHECKPOINT_INTERVAL + std::time::Duration::from_secs(1);
+        let past_interval = CHECKPOINT_INTERVAL + Duration::from_secs(1);
         let source = Arc::new(Batches {
             batches: vec![
                 // Behind the indexer: nothing is kept.
-                (std::time::Duration::ZERO, updates[..5].to_vec()),
+                (Duration::ZERO, updates[..5].to_vec()),
                 // Caught up: the first checkpoint.
-                (std::time::Duration::ZERO, caught_up_at(&updates[5..10])),
+                (Duration::ZERO, caught_up_at(&updates[5..10])),
                 // Progress inside the interval: not yet.
-                (std::time::Duration::ZERO, caught_up_at(&updates[10..15])),
+                (Duration::ZERO, caught_up_at(&updates[10..15])),
                 // Progress past the interval: the second checkpoint.
                 (past_interval, updates[15..].to_vec()),
                 // No progress past another interval: nothing new to keep.
@@ -3551,7 +3640,7 @@ pub(crate) mod tests {
         );
         // Restarts at 0 s and 4 s grow the delay to 8 s; the third subscription, at 12 s,
         // replays and drops; the fourth follows it by the 2 s resubscribe delay.
-        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+        tokio::time::sleep(Duration::from_secs(30)).await;
         let at = source.subscriptions.lock().unwrap().clone();
         assert!(at.len() >= 4, "{} subscriptions", at.len());
         assert_eq!(at[3] - at[2], RESUBSCRIBE_DELAY);
@@ -3569,7 +3658,7 @@ pub(crate) mod tests {
             Arc::new(NoopPublisherTelemetry),
         );
         // Delays 4, 8, ..., 512 s sum to 1020 s; then 600 s each when capped, 1024, 2048 s uncapped.
-        tokio::time::sleep(std::time::Duration::from_secs(1020 + 3 * 600 + 1)).await;
+        tokio::time::sleep(Duration::from_secs(1020 + 3 * 600 + 1)).await;
         assert_eq!(source.froms().len(), 9 + 3, "{:?}", source.froms());
     }
 
@@ -3662,7 +3751,7 @@ pub(crate) mod tests {
         for round in 1..=4 {
             wallet.failed();
             // A reload resubscribes after the resubscribe delay, never a backoff.
-            tokio::time::sleep(RESUBSCRIBE_DELAY + std::time::Duration::from_secs(1)).await;
+            tokio::time::sleep(RESUBSCRIBE_DELAY + Duration::from_secs(1)).await;
             assert_eq!(source.froms().len(), round + 1, "failure {round}");
             ready(&wallet).await;
         }
@@ -3722,11 +3811,11 @@ pub(crate) mod tests {
         );
         // The first subscription replays to the newest event and ends; the wallet waits
         // out the resubscribe delay.
-        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        tokio::time::sleep(Duration::from_secs(1)).await;
         assert_eq!(*source.froms.lock().unwrap(), vec![Some(resumed_at)]);
         assert_eq!(wallet.shared.state().applied, Some(newest));
         wallet.failed();
-        tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+        tokio::time::sleep(Duration::from_secs(10)).await;
         assert_eq!(
             *source.froms.lock().unwrap(),
             vec![Some(resumed_at), Some(newest), Some(newest)],
@@ -3787,11 +3876,11 @@ pub(crate) mod tests {
         );
         // The resumed replay fails and starts over from the first event, which the
         // indexer has not served yet.
-        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+        tokio::time::sleep(Duration::from_secs(30)).await;
         assert_eq!(*source.froms.lock().unwrap(), vec![Some(resumed_at), None]);
         // A submit in flight from before fails.
         wallet.struck();
-        tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+        tokio::time::sleep(Duration::from_secs(10)).await;
         assert_eq!(
             *source.froms.lock().unwrap(),
             vec![Some(resumed_at), None, None],
@@ -3808,16 +3897,12 @@ pub(crate) mod tests {
             None,
             Arc::new(NoopPublisherTelemetry),
         );
-        tokio::time::sleep(std::time::Duration::from_secs(200)).await;
+        tokio::time::sleep(Duration::from_secs(200)).await;
         let at = source.0.lock().unwrap().clone();
         assert!(at.len() >= 3, "{} subscriptions", at.len());
         // 60 s caught up before the event that cannot be absorbed, then 4 s.
         for pair in at.windows(2) {
-            assert_eq!(
-                pair[1] - pair[0],
-                std::time::Duration::from_secs(64),
-                "{at:?}"
-            );
+            assert_eq!(pair[1] - pair[0], Duration::from_secs(64), "{at:?}");
         }
     }
 
@@ -3878,7 +3963,7 @@ pub(crate) mod tests {
                             update.max_id = updates[shown - 1].id;
                             return Some((Ok(update), next + 1));
                         }
-                        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                        tokio::time::sleep(Duration::from_secs(1)).await;
                     }
                 }
             })
@@ -3910,21 +3995,21 @@ pub(crate) mod tests {
             Arc::new(NoopPublisherTelemetry),
         );
         ready(&wallet).await;
-        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        tokio::time::sleep(Duration::from_secs(1)).await;
         let first = store
             .decoded()
             .expect("first checkpoint kept at once")
             .applied;
         assert_eq!(first, updates[19].id);
 
-        tokio::time::sleep(std::time::Duration::from_secs(4 * 60)).await;
+        tokio::time::sleep(Duration::from_secs(4 * 60)).await;
         wallet.failed();
-        tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+        tokio::time::sleep(Duration::from_secs(10)).await;
         ready(&wallet).await;
 
-        tokio::time::sleep(std::time::Duration::from_secs(2 * 60)).await;
+        tokio::time::sleep(Duration::from_secs(2 * 60)).await;
         visible.store(updates.len(), std::sync::atomic::Ordering::SeqCst);
-        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+        tokio::time::sleep(Duration::from_secs(30)).await;
         ready(&wallet).await;
         // 6.5 min since the last kept checkpoint.
         let kept = store.decoded().unwrap().applied;
@@ -3973,7 +4058,7 @@ pub(crate) mod tests {
         wallet.struck();
         // No await in between: the spawned clear has not run yet.
         start_over(&wallet.shared, "replay_failed");
-        tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+        tokio::time::sleep(Duration::from_secs(10)).await;
         let forget_pending = wallet.shared.snapshots().forget;
         let stored_after_strikes = store.decoded().map(|checkpoint| checkpoint.applied);
         // The fresh replay keeps a good checkpoint (simulated), then any later failure.
@@ -3981,7 +4066,7 @@ pub(crate) mod tests {
         *store.held.lock().unwrap() = Some(good.encode());
         wallet.shared.snapshots().latest = Some(good);
         wallet.failed();
-        tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+        tokio::time::sleep(Duration::from_secs(10)).await;
         assert!(
             !forget_pending,
             "the third strike's forget was left pending"
@@ -4026,7 +4111,7 @@ pub(crate) mod tests {
                         if down.load(std::sync::atomic::Ordering::SeqCst) {
                             return None;
                         }
-                        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                        tokio::time::sleep(Duration::from_secs(1)).await;
                     }
                 }
             });
@@ -4059,9 +4144,9 @@ pub(crate) mod tests {
             settle(&wallet).await;
         }
         down.store(true, std::sync::atomic::Ordering::SeqCst);
-        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        tokio::time::sleep(Duration::from_secs(5)).await;
         wallet.struck();
-        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        tokio::time::sleep(Duration::from_secs(1)).await;
         assert!(
             store.decoded().is_none(),
             "the third strike clears the store with no subscription live"
@@ -4082,7 +4167,7 @@ pub(crate) mod tests {
 
         async fn save(&self, checkpoint: &[u8]) -> anyhow::Result<()> {
             self.log.lock().unwrap().push("save starts");
-            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            tokio::time::sleep(Duration::from_secs(5)).await;
             self.log.lock().unwrap().push("save lands");
             self.held.save(checkpoint).await
         }
@@ -4115,13 +4200,13 @@ pub(crate) mod tests {
         );
         ready(&wallet).await;
         // The restored replay caught up and is keeping its first checkpoint.
-        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        tokio::time::sleep(Duration::from_secs(1)).await;
         assert_eq!(*store.log.lock().unwrap(), vec!["save starts"]);
         // No indexer, so no fresh replay keeps a checkpoint of its own afterwards.
         down.store(true, std::sync::atomic::Ordering::SeqCst);
         wallet.shared.snapshots().strikes = RESTORE_STRIKES - 1;
         wallet.struck();
-        tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+        tokio::time::sleep(Duration::from_secs(60)).await;
         assert_eq!(
             *store.log.lock().unwrap(),
             vec!["save starts", "save lands", "clear"]
@@ -4146,7 +4231,7 @@ pub(crate) mod tests {
         }
 
         async fn clear(&self) -> anyhow::Result<()> {
-            tokio::time::sleep(std::time::Duration::from_secs(20)).await;
+            tokio::time::sleep(Duration::from_secs(20)).await;
             self.0.clear().await
         }
     }
@@ -4173,13 +4258,13 @@ pub(crate) mod tests {
             Arc::new(NoopPublisherTelemetry),
         );
         ready(&wallet).await;
-        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        tokio::time::sleep(Duration::from_secs(1)).await;
         wallet.shared.snapshots().strikes = RESTORE_STRIKES - 1;
         wallet.struck();
         // The replay from the first event catches up while the store is still clearing.
-        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        tokio::time::sleep(Duration::from_secs(5)).await;
         visible.store(25, std::sync::atomic::Ordering::SeqCst);
-        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        tokio::time::sleep(Duration::from_secs(5)).await;
         assert!(
             wallet.shared.snapshots().forget,
             "the clear is still running"
@@ -4194,13 +4279,13 @@ pub(crate) mod tests {
             "a checkpoint was kept while the store was clearing"
         );
 
-        tokio::time::sleep(std::time::Duration::from_secs(20)).await;
+        tokio::time::sleep(Duration::from_secs(20)).await;
         assert!(
             store.0.decoded().is_none(),
             "the clear left the store empty"
         );
         visible.store(updates.len(), std::sync::atomic::Ordering::SeqCst);
-        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        tokio::time::sleep(Duration::from_secs(5)).await;
         assert_eq!(
             store.0.decoded().map(|checkpoint| checkpoint.applied),
             updates.last().map(|update| update.id),
@@ -4241,7 +4326,7 @@ pub(crate) mod tests {
         let checkpoint = checkpoint_after(10, &key);
         let resumed_at = checkpoint.applied;
         let source = Arc::new(Batches {
-            batches: vec![(std::time::Duration::from_secs(45), fixture_updates())],
+            batches: vec![(Duration::from_secs(45), fixture_updates())],
             froms: Mutex::default(),
         });
         let wallet = FundingWallet::start(
@@ -4251,7 +4336,7 @@ pub(crate) mod tests {
             Arc::new(NoopPublisherTelemetry),
         );
         wallet
-            .ready_by(Instant::now() + std::time::Duration::from_secs(120))
+            .ready_by(Instant::now() + Duration::from_secs(120))
             .await
             .unwrap();
         assert_eq!(*source.froms.lock().unwrap(), vec![Some(resumed_at)]);
@@ -4311,17 +4396,17 @@ pub(crate) mod tests {
             Arc::new(NoopPublisherTelemetry),
         );
         ready(&wallet).await;
-        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        tokio::time::sleep(Duration::from_secs(1)).await;
         assert_eq!(store.decoded().unwrap().applied, updates[4].id);
         // At 4 min: progress inside the interval keeps nothing.
-        tokio::time::sleep(std::time::Duration::from_secs(4 * 60)).await;
+        tokio::time::sleep(Duration::from_secs(4 * 60)).await;
         visible.store(10, std::sync::atomic::Ordering::SeqCst);
-        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        tokio::time::sleep(Duration::from_secs(5)).await;
         assert_eq!(store.decoded().unwrap().applied, updates[4].id);
         // Past 5 min: the next progress is kept.
-        tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+        tokio::time::sleep(Duration::from_secs(60)).await;
         visible.store(15, std::sync::atomic::Ordering::SeqCst);
-        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        tokio::time::sleep(Duration::from_secs(5)).await;
         assert_eq!(store.decoded().unwrap().applied, updates[14].id);
     }
 
@@ -4342,10 +4427,10 @@ pub(crate) mod tests {
             Some(Arc::new(MemoryCheckpoints::holding(checkpoint))),
             Arc::new(NoopPublisherTelemetry),
         );
-        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+        tokio::time::sleep(Duration::from_secs(30)).await;
         assert_eq!(*source.froms.lock().unwrap(), vec![Some(resumed_at), None]);
         wallet.struck();
-        tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+        tokio::time::sleep(Duration::from_secs(10)).await;
         assert_eq!(
             *source.froms.lock().unwrap(),
             vec![Some(resumed_at), None, None],
@@ -4367,7 +4452,7 @@ pub(crate) mod tests {
             Some(Arc::new(MemoryCheckpoints::holding(checkpoint))),
             restarts.clone(),
         );
-        tokio::time::sleep(RESUME_TIMEOUT + std::time::Duration::from_secs(10)).await;
+        tokio::time::sleep(RESUME_TIMEOUT + Duration::from_secs(10)).await;
         assert_eq!(source.froms(), vec![Some(resumed_at), None]);
         assert_eq!(
             *restarts.0.lock().unwrap(),
@@ -4375,7 +4460,7 @@ pub(crate) mod tests {
             "a checkpoint the indexer never served in time is reported as a replay restart"
         );
         wallet.struck();
-        tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+        tokio::time::sleep(Duration::from_secs(10)).await;
         assert_eq!(
             source.froms(),
             vec![Some(resumed_at), None, None],
@@ -4426,7 +4511,7 @@ pub(crate) mod tests {
             // Each pause starts when the stream reaches it.
             let pause = |secs| {
                 futures_util::stream::once(async move {
-                    tokio::time::sleep(std::time::Duration::from_secs(secs)).await
+                    tokio::time::sleep(Duration::from_secs(secs)).await
                 })
                 .filter_map(|()| async { None })
             };
@@ -4453,15 +4538,11 @@ pub(crate) mod tests {
             None,
             Arc::new(NoopPublisherTelemetry),
         );
-        tokio::time::sleep(std::time::Duration::from_secs(250)).await;
+        tokio::time::sleep(Duration::from_secs(250)).await;
         let at = source.0.lock().unwrap().clone();
         assert!(at.len() >= 3, "{} subscriptions", at.len());
         for pair in at.windows(2) {
-            assert_eq!(
-                pair[1] - pair[0],
-                std::time::Duration::from_secs(65),
-                "{at:?}"
-            );
+            assert_eq!(pair[1] - pair[0], Duration::from_secs(65), "{at:?}");
         }
     }
 
@@ -4577,13 +4658,13 @@ mod live {
             Arc::new(NoopPublisherTelemetry),
         );
         wallet
-            .ready_by(Instant::now() + std::time::Duration::from_secs(1800))
+            .ready_by(Instant::now() + Duration::from_secs(1800))
             .await
             .unwrap();
         let ready_after = started.elapsed();
         if let (Some(file), false) = (&file, resuming) {
             while !file.exists() {
-                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                tokio::time::sleep(Duration::from_millis(100)).await;
             }
             println!(
                 "kept a {} byte checkpoint",

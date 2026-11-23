@@ -113,6 +113,28 @@ impl SubmitError {
         }
     }
 
+    /// Whether sustained failures of this class implicate a restored wallet's
+    /// snapshot.
+    // Why these two: a checkpoint missing tree paths fails `internal` in
+    // `fee_transaction`; one emptied by a bad indexer event stays `unfunded` —
+    // neither produces a refusal to strike. Node errors stay out, so a standing
+    // throttle cannot drop a healthy checkpoint.
+    pub(crate) fn stuck_restored_state(&self) -> bool {
+        match self {
+            Self::WalletUnfunded(_) | Self::Internal(_) => true,
+            Self::BadRequest(_)
+            | Self::ContractMismatch(_)
+            | Self::DeployMismatch(_)
+            | Self::GateRefusal { .. }
+            | Self::WalletUnsynced(_)
+            | Self::WalletBusy(_)
+            | Self::ProvingTimeout(_)
+            | Self::StateConflict(_)
+            | Self::Ambiguous(_)
+            | Self::Node { .. } => false,
+        }
+    }
+
     /// As the publisher's error, the class's verdict riding as a carrier so the
     /// core's retry and throttle checks never read the message, whose event ids
     /// and amounts can include a standalone 429 or 402.
@@ -150,11 +172,12 @@ mod tests {
     use mpc_chain_integration_core::utils::retry::{is_provider_throttled, is_retryable};
 
     #[test]
-    fn every_class_is_counted_with_its_code_verdict_and_strike() {
-        type Class = (fn() -> SubmitError, bool, bool);
+    fn every_class_is_counted_with_its_code_and_verdicts() {
+        type Class = (fn() -> SubmitError, bool, bool, bool);
         let classes: [Class; 12] = [
             (
                 || SubmitError::BadRequest("reason".to_string()),
+                false,
                 false,
                 false,
             ),
@@ -162,10 +185,12 @@ mod tests {
                 || SubmitError::ContractMismatch("reason".to_string()),
                 false,
                 false,
+                false,
             ),
             (
                 || SubmitError::DeployMismatch("reason".to_string()),
                 true,
+                false,
                 false,
             ),
             (
@@ -174,43 +199,60 @@ mod tests {
                 },
                 false,
                 false,
+                false,
             ),
             (
                 || SubmitError::WalletUnsynced("reason".to_string()),
                 true,
+                false,
                 false,
             ),
             (
                 || SubmitError::WalletBusy("reason".to_string()),
                 true,
                 false,
+                false,
             ),
             (
                 || SubmitError::WalletUnfunded("reason".to_string()),
                 true,
                 false,
+                true,
             ),
             (
                 || SubmitError::ProvingTimeout("reason".to_string()),
                 true,
+                false,
                 false,
             ),
             (
                 || SubmitError::StateConflict("reason".to_string()),
                 true,
                 true,
+                false,
             ),
-            (|| SubmitError::Ambiguous("reason".to_string()), true, false),
-            (|| SubmitError::Internal("reason".to_string()), true, false),
+            (
+                || SubmitError::Ambiguous("reason".to_string()),
+                true,
+                false,
+                false,
+            ),
+            (
+                || SubmitError::Internal("reason".to_string()),
+                true,
+                false,
+                true,
+            ),
             (
                 || SubmitError::Node {
                     source: anyhow::anyhow!("reason"),
                 },
                 true,
                 false,
+                false,
             ),
         ];
-        for (class, retryable, strike) in classes {
+        for (class, retryable, strike, stuck) in classes {
             let error = class();
             let code = error.code();
             assert!(
@@ -222,6 +264,11 @@ mod tests {
                 error.strikes_restored_state(),
                 strike,
                 "{code}'s strike verdict"
+            );
+            assert_eq!(
+                error.stuck_restored_state(),
+                stuck,
+                "{code}'s stuck verdict"
             );
             let error = error.into_publish_error().context("publishing");
             assert_eq!(refusal_code(&error), Some(code));

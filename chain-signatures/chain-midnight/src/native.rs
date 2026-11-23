@@ -515,8 +515,9 @@ where
 
     /// Tells the wallet how the submit ended, as the intent builder's parent did: a
     /// landing clears the strikes, and any failure but an unsynced wallet starts the
-    /// replay over from the latest checkpoint; only a state conflict implicates the
-    /// restored state.
+    /// replay over from the latest checkpoint; a state conflict strikes the restored
+    /// state, and unfunded/internal failures sustained with none landing drop its
+    /// checkpoint once.
     async fn submit(&self, intent: &[u8]) -> anyhow::Result<Submitted> {
         let submitted = self.submit_intent(intent).await;
         report_submit(&self.wallet, &submitted);
@@ -530,6 +531,7 @@ fn report_submit<W: FeePayer>(wallet: &W, submitted: &Result<Submitted, SubmitEr
         Ok(_) => wallet.landed(),
         Err(SubmitError::WalletUnsynced(_)) => {}
         Err(error) if error.strikes_restored_state() => wallet.struck(),
+        Err(error) if error.stuck_restored_state() => wallet.stuck(),
         Err(_) => wallet.failed(),
     }
 }
@@ -687,6 +689,14 @@ mod tests {
 
     type ChainIntent = Intent<Signature, ProofPreimageMarker, PedersenRandomness, DefaultDB>;
 
+    /// How a submit's end was reported to the wallet.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum Report {
+        Failed,
+        Struck,
+        Stuck,
+    }
+
     /// A wallet that records reservations; the build and post paths never plan.
     #[derive(Default)]
     pub(super) struct RecordingWallet {
@@ -698,7 +708,7 @@ mod tests {
         indexed_secs: u64,
         /// Where the replay stands once `ready_by` has waited for it, if it moves.
         caught_up_secs: Option<u64>,
-        strike_reports: Mutex<Vec<bool>>,
+        reports: Mutex<Vec<Report>>,
         landings: AtomicU64,
     }
 
@@ -741,11 +751,15 @@ mod tests {
         }
 
         fn failed(&self) {
-            self.strike_reports.lock().unwrap().push(false);
+            self.reports.lock().unwrap().push(Report::Failed);
         }
 
         fn struck(&self) {
-            self.strike_reports.lock().unwrap().push(true);
+            self.reports.lock().unwrap().push(Report::Struck);
+        }
+
+        fn stuck(&self) {
+            self.reports.lock().unwrap().push(Report::Stuck);
         }
 
         fn landed(&self) {
@@ -1167,8 +1181,8 @@ mod tests {
             );
         }
         assert_eq!(
-            *client.wallet.strike_reports.lock().unwrap(),
-            vec![false],
+            *client.wallet.reports.lock().unwrap(),
+            vec![Report::Failed],
             "the wallet hears of the failed submit, from before it paid anything"
         );
     }
@@ -1184,8 +1198,8 @@ mod tests {
         report_submit(&wallet, &Err(SubmitError::WalletUnsynced("syncing".into())));
         report_submit(&wallet, &Err(SubmitError::StateConflict("refused".into())));
         report_submit(&wallet, &Err(SubmitError::WalletBusy("held".into())));
-        // An empty wallet fails like any other, but implicates nothing.
         report_submit(&wallet, &Err(SubmitError::WalletUnfunded("empty".into())));
+        report_submit(&wallet, &Err(SubmitError::Internal("spending DUST".into())));
         // A throttled read fails like any other, but implicates nothing.
         report_submit(
             &wallet,
@@ -1198,9 +1212,17 @@ mod tests {
         report_submit(&wallet, &Err(SubmitError::Ambiguous("unlanded".into())));
         assert_eq!(wallet.landings.load(Ordering::SeqCst), 1, "one landing");
         assert_eq!(
-            *wallet.strike_reports.lock().unwrap(),
-            vec![true, false, false, false, false, false],
-            "every failure but an unsynced wallet, with whether it can strike"
+            *wallet.reports.lock().unwrap(),
+            vec![
+                Report::Struck,
+                Report::Failed,
+                Report::Stuck,
+                Report::Stuck,
+                Report::Failed,
+                Report::Failed,
+                Report::Failed,
+            ],
+            "every failure but an unsynced wallet, with how it implicates the restored state"
         );
     }
 
@@ -1225,8 +1247,8 @@ mod tests {
         assert!(matches!(error, SubmitError::StateConflict(_)), "{error}");
         report_submit(&client.wallet, &Err(error));
         assert_eq!(
-            *client.wallet.strike_reports.lock().unwrap(),
-            [true],
+            *client.wallet.reports.lock().unwrap(),
+            [Report::Struck],
             "the refusal strikes"
         );
 
@@ -1249,8 +1271,8 @@ mod tests {
         assert!(matches!(error, SubmitError::StateConflict(_)), "{error}");
         report_submit(&client.wallet, &Err(error));
         assert_eq!(
-            *client.wallet.strike_reports.lock().unwrap(),
-            [true],
+            *client.wallet.reports.lock().unwrap(),
+            [Report::Struck],
             "the expiry unlanded strikes"
         );
     }
@@ -1264,7 +1286,11 @@ mod tests {
             .submit(&intent)
             .await
             .expect_err("nothing can be proven");
-        assert_eq!(*client.wallet.strike_reports.lock().unwrap(), vec![false]);
+        assert_eq!(
+            *client.wallet.reports.lock().unwrap(),
+            vec![Report::Stuck],
+            "a proving failure before the wallet paid reports stuck, never a strike"
+        );
     }
 
     #[tokio::test]
@@ -1396,8 +1422,8 @@ mod tests {
         assert_eq!(*client.wallet.released.lock().unwrap(), vec![spent()]);
         report_submit(&client.wallet, &Err(error));
         assert_eq!(
-            *client.wallet.strike_reports.lock().unwrap(),
-            [false],
+            *client.wallet.reports.lock().unwrap(),
+            [Report::Failed],
             "a node that never carried the transaction strikes nothing"
         );
         assert!(client.chain.landing_reads.lock().unwrap().is_empty());
@@ -1426,8 +1452,8 @@ mod tests {
         let submitted = Err(error);
         report_submit(&client.wallet, &submitted);
         assert_eq!(
-            *client.wallet.strike_reports.lock().unwrap(),
-            [false],
+            *client.wallet.reports.lock().unwrap(),
+            [Report::Failed],
             "a runtime without the call strikes nothing"
         );
         let error = match submitted {
@@ -1569,8 +1595,8 @@ mod tests {
         assert!(matches!(error, SubmitError::Ambiguous(_)), "{error}");
         report_submit(&client.wallet, &Err(error));
         assert_eq!(
-            *client.wallet.strike_reports.lock().unwrap(),
-            [false],
+            *client.wallet.reports.lock().unwrap(),
+            [Report::Failed],
             "a submit that only outlived its watch strikes nothing"
         );
         let secs = |s| Duration::from_secs(s);
