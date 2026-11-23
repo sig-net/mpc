@@ -50,15 +50,20 @@ jobs:
           distribution: temurin
           java-version: '21'
 
+      # Same steps as get.digitalasset.com/install/install.sh, with the
+      # tarball checked against a pinned hash before it runs.
       - name: Install dpm (Canton CLI)
+        env:
+          DPM_VERSION: 3.6.4
+          DPM_SHA256: c31a89057ab950d4fafa53d19d12874032f5801ea82e6fa67056c223a0e2d6c8
+          DPM_REGISTRY: https://artifactregistry.googleapis.com/download/v1/projects/da-images/locations/europe/repositories/public-generic/files
         run: |
-          # dpm 3.6.4, fetched by exact URL and checksum, then bootstrapped the way
-          # get.digitalasset.com/install/install.sh does it.
-          tarball=dpm-3.6.4-linux-amd64.tar.gz
+          tarball="dpm-$DPM_VERSION-linux-amd64.tar.gz"
           curl -fsSL --retry 4 -o "/tmp/$tarball" \
-            "https://artifactregistry.googleapis.com/download/v1/projects/da-images/locations/europe/repositories/public-generic/files/dpm-sdk:3.6.4:$tarball:download?alt=media"
-          echo "c31a89057ab950d4fafa53d19d12874032f5801ea82e6fa67056c223a0e2d6c8  /tmp/$tarball" | sha256sum -c
-          mkdir -p /tmp/dpm && tar xzf "/tmp/$tarball" -C /tmp/dpm --strip-components 1
+            "$DPM_REGISTRY/dpm-sdk:$DPM_VERSION:$tarball:download?alt=media"
+          echo "$DPM_SHA256  /tmp/$tarball" | sha256sum -c
+          mkdir -p /tmp/dpm
+          tar xzf "/tmp/$tarball" -C /tmp/dpm --strip-components 1
           /tmp/dpm/bin/dpm bootstrap /tmp/dpm
           echo "$HOME/.dpm/bin" >> $GITHUB_PATH
           export PATH="$HOME/.dpm/bin:$PATH"
