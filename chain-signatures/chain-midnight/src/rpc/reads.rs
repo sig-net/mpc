@@ -26,10 +26,10 @@ use crate::types::{BlockHash, MidnightAddress, NetworkId};
 
 const STATE_TOO_LARGE: &str = "midnight contract state exceeds the protocol limit";
 
-/// What produced an [`OversizedContractState`] marker. The publish path treats
 /// The connected runtime is the canonical owner of the wallet network identity.
 pub(super) const NETWORK_ID_ENTRY: &str = "MidnightRuntimeApi_get_network_id";
 
+/// What produced an [`OversizedContractState`] marker. The publish path treats
 /// only a client-cap refusal as terminal, because [`MAX_RESPONSE_SIZE`] is a
 /// compile-time constant.
 #[derive(Debug)]

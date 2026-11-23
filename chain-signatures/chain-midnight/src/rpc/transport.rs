@@ -10,6 +10,7 @@ use subxt::ext::subxt_rpcs::{Error as RawRpcError, UserError};
 
 use crate::config::{MidnightConfig, RpcConfig};
 
+/// Largest caller contract state the protocol admits, in decoded bytes. Every node
 /// applies the same limit, so admission does not depend on any node's RPC cap. The
 /// node serves the state as hex inside JSON, so the response is a little over twice
 /// this; the limit must sit below half the RPC node's response cap (15 MiB by

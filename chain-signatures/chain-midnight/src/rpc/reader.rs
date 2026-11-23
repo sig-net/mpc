@@ -1153,7 +1153,6 @@ mod tests {
         }
     }
 
-    /// header and block read with its hash.
     /// An indexer node whose finalized head is `[0x43; 32]` at 0x1b0, each block `[b; 32]`
     /// numbered from it, answering `chain_getBlock` with `block`; the log names each
     /// header and block read with its hash.
@@ -1238,6 +1237,8 @@ mod tests {
         (rpc, handle, log)
     }
 
+    /// The head's kept block serves that head alone: a catch-up block below it is
+    /// fetched by its own hash.
     #[tokio::test]
     async fn the_kept_head_block_serves_that_head_alone() {
         let (rpc, _handle, log) = numbered_indexer_node(|block| block).await;

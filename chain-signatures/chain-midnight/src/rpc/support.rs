@@ -162,6 +162,7 @@ pub fn test_at_hash() -> BlockHash {
 pub const READ_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// A budget of `max_times` retries with near-zero delays, so tests pin attempt
+/// counts without waiting out production backoff.
 pub fn attempts(max_times: usize) -> RetryConfig {
     RetryConfig {
         min_delay: Duration::from_millis(1),

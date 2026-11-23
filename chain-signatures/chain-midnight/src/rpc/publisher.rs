@@ -500,8 +500,6 @@ mod tests {
         );
     }
 
-    /// `0x0a` still runs spec 1 and `0x0c`'s parent is `0x0b`. Each runtime's
-    /// metadata must be read at a block of that runtime, once.
     /// Block `0x0b` is the best block and the first under spec 2, so its parent
     /// `0x0a` still runs spec 1 and `0x0c`'s parent is `0x0b`. Each runtime's
     /// metadata must be read at a block of that runtime, once.
