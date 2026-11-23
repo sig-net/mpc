@@ -4,6 +4,8 @@
 //! The recorded-response replay runs in CI; live legs are opt-in via
 //! env vars (see README).
 
+#![allow(clippy::disallowed_methods)]
+
 use anyhow::{bail, Context};
 use k256::ecdsa::SigningKey;
 use mpc_chain_integration_core::{ChainIndexer, MockStateManager, StateManager};
@@ -403,7 +405,7 @@ impl Gate {
         let expected = accepted.receipt.execution_outcome(&tx)?;
 
         let state = MockStateManager::new();
-        state.watch_execution(Chain::Tron, tx).await;
+        state.watch_execution(tx).await;
         let mut run = spawn_watcher(self.watcher_config(), state)?;
         let deadline = Instant::now() + self.deadline;
         let confirmation = loop {

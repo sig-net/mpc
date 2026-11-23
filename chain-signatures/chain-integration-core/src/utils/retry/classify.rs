@@ -144,9 +144,23 @@ impl RpcFailure {
     /// Carrier reproducing `e`'s classification — verdict carrier or first
     /// typed status — with the full chain render as its message, so fan-out
     /// copies keep outer contexts. `None` when `e` has no typed signal.
-    /// The bare-status fallback is send-partitioned; read-side fan-outs
-    /// rebuild with `read_status`.
+    /// The bare-status fallback is send-partitioned; read paths use
+    /// [`RpcFailure::from_read_chain`].
     pub fn from_chain(e: &anyhow::Error) -> Option<Self> {
+        Self::from_chain_under(e, Self::send_status)
+    }
+
+    /// Read-partitioned counterpart of [`RpcFailure::from_chain`]: an upstream
+    /// carrier rides verbatim, a bare typed status retries everything but the
+    /// classic client errors.
+    pub fn from_read_chain(e: &anyhow::Error) -> Option<Self> {
+        Self::from_chain_under(e, Self::read_status)
+    }
+
+    fn from_chain_under(
+        e: &anyhow::Error,
+        partition: fn(StatusCode, String) -> Self,
+    ) -> Option<Self> {
         let (failure, status) = typed_signals(e);
         if let Some(failure) = failure {
             return Some(Self {
@@ -157,7 +171,7 @@ impl RpcFailure {
                 retry_after: failure.retry_after,
             });
         }
-        status.map(|status| Self::send_status(status, format!("{e:#}")))
+        status.map(|status| partition(status, format!("{e:#}")))
     }
 }
 
@@ -239,6 +253,21 @@ fn contains_status_code(s: &str, code: &str) -> bool {
         start = i + 1;
     }
     false
+}
+
+/// [`is_retryable`] without the text fallback: an untyped error is
+/// retryable. Use where error contexts carry item numbers ("slot 401")
+/// the fallback would read as status codes; bare statuses use the read
+/// partition (the supervisor loops only read).
+pub fn is_retryable_typed(e: &anyhow::Error) -> bool {
+    let (failure, status) = typed_signals(e);
+    if let Some(failure) = failure {
+        return !failure.terminal;
+    }
+    if let Some(status) = status {
+        return http_status_read_retryable(status);
+    }
+    true
 }
 
 /// Helper to identify whether an RPC error should be retried.
@@ -481,6 +510,65 @@ mod tests {
 
         // no typed signal at all
         assert!(RpcFailure::from_chain(&anyhow::anyhow!("plain failure")).is_none());
+    }
+
+    #[test]
+    fn from_read_chain_partitions_bare_statuses_by_reads() {
+        let bare = |status: u16| {
+            let err: AlloyTransportError = AlloyRpcError::Transport(TransportErrorKind::HttpError(
+                alloy::transports::HttpError {
+                    status,
+                    body: String::new(),
+                },
+            ));
+            anyhow::Error::new(err).context("a read failed")
+        };
+        for n in [409, 410, 429, 500] {
+            let rebuilt = RpcFailure::from_read_chain(&bare(n)).unwrap();
+            assert!(
+                is_retryable(&anyhow::Error::new(rebuilt).context("fan-out")),
+                "{n}"
+            );
+        }
+        for n in [400, 401, 403, 404, 405] {
+            let rebuilt = RpcFailure::from_read_chain(&bare(n)).unwrap();
+            assert!(
+                !is_retryable(&anyhow::Error::new(rebuilt).context("fan-out")),
+                "{n}"
+            );
+        }
+        // The two entry points diverge on the same bare status.
+        let send = RpcFailure::from_chain(&bare(409)).unwrap();
+        assert!(!is_retryable(&anyhow::Error::new(send).context("fan-out")));
+
+        // A carrier rides verbatim, partition irrelevant.
+        let carried = anyhow::Error::new(RpcFailure::terminal_code(-32007, "skipped".into()))
+            .context("a read failed");
+        let rebuilt = RpcFailure::from_read_chain(&carried).unwrap();
+        assert_eq!(rebuilt.code(), Some(-32007));
+        assert!(!is_retryable(
+            &anyhow::Error::new(rebuilt).context("fan-out")
+        ));
+    }
+
+    #[test]
+    fn typed_loop_check_partitions_bare_statuses_by_reads() {
+        let alloy_http_error = |status: u16| {
+            let kind = TransportErrorKind::HttpError(alloy::transports::HttpError {
+                status,
+                body: String::new(),
+            });
+            let err: AlloyTransportError = AlloyRpcError::Transport(kind);
+            anyhow::Error::new(err)
+        };
+        // the loops only read — send-terminal statuses retry there
+        for n in [409, 410, 422, 429, 301, 500] {
+            assert!(is_retryable_typed(&alloy_http_error(n)), "{n}");
+        }
+        for n in [400, 401, 403, 404, 405] {
+            assert!(!is_retryable_typed(&alloy_http_error(n)), "{n}");
+        }
+        assert!(!is_retryable(&alloy_http_error(409)));
     }
 
     #[test]

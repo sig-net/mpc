@@ -15,11 +15,12 @@ set -u
 
 RUST_VERSION="$(sed -n 's/^channel = "\(.*\)"/\1/p' "$(dirname "$0")/../rust-toolchain.toml")"
 WASM_TARGET="wasm32-unknown-unknown"
-REDIS_IMAGE="redis:7.4.2"
+REDIS_IMAGE="redis:7.4.12"
 SOLANA_VERSION="2.3.9"
 ANCHOR_VERSION="0.30.1"
 CANTON_SDK="3.5.1"
 COMPACTC_VERSION="0.36.0"
+CARGO_NEAR_VERSION="$(sed -n 's/^VERSION="\(.*\)"/\1/p' "$(dirname "$0")/install-cargo-near.sh")"
 
 MODE="${1:-}"
 SCOPE="${2:-}"
@@ -57,9 +58,9 @@ check_core() {
     if rustup component list --toolchain "$RUST_VERSION" 2>/dev/null | grep -q "clippy.*(installed)"; then ok "clippy ${RUST_VERSION}"; else miss "clippy ${RUST_VERSION}"; hint "rustup component add --toolchain ${RUST_VERSION} clippy"; fi
     if rustup component list --toolchain "$RUST_VERSION" 2>/dev/null | grep -q "rustfmt.*(installed)"; then ok "rustfmt ${RUST_VERSION}"; else miss "rustfmt ${RUST_VERSION}"; hint "rustup component add --toolchain ${RUST_VERSION} rustfmt"; fi
     if rustup target list --toolchain "$RUST_VERSION" 2>/dev/null | grep -q "${WASM_TARGET} (installed)"; then ok "${WASM_TARGET} target"; else miss "${WASM_TARGET} target"; hint "rustup target add --toolchain ${RUST_VERSION} ${WASM_TARGET}"; fi
-    if have cargo-near; then ok "cargo-near $(cargo-near --version 2>/dev/null | head -n 1)"; else miss "cargo-near"; hint "curl --proto '=https' --tlsv1.2 -LsSf https://github.com/near/cargo-near/releases/latest/download/cargo-near-installer.sh | sh"; fi
+    if cargo near --version 2>/dev/null | grep -qF "$CARGO_NEAR_VERSION"; then ok "cargo-near ${CARGO_NEAR_VERSION}"; else miss "cargo-near ${CARGO_NEAR_VERSION}"; hint "scripts/install-cargo-near.sh"; fi
     if have cargo-nextest; then ok "cargo-nextest $(cargo-nextest --version 2>/dev/null | head -n 1)"; else miss "cargo-nextest"; hint "curl -LsSf https://get.nexte.st/latest/linux | tar zxf - -C ~/.cargo/bin (macos: .../latest/mac)"; fi
-    if have cargo-audit; then ok "cargo-audit $(cargo-audit --version 2>/dev/null | head -n 1)"; else miss "cargo-audit"; hint "cargo install cargo-audit --locked"; fi
+    if have cargo-deny; then ok "$(cargo-deny --version 2>/dev/null | head -n 1)"; else miss "cargo-deny"; hint "cargo install cargo-deny --locked"; fi
     if have just; then ok "just $(just --version)"; else miss "just"; hint "curl --proto '=https' --tlsv1.2 -sSf https://just.systems/install.sh | bash -s -- --to ~/.cargo/bin"; fi
     if have git; then ok "git"; else miss "git"; fi
     if have curl; then ok "curl"; else miss "curl"; fi
@@ -131,13 +132,12 @@ ensure_nextest() {
 }
 
 ensure_cargo_near() {
-    have cargo-near && return 0
-    curl --proto '=https' --tlsv1.2 -LsSf https://github.com/near/cargo-near/releases/latest/download/cargo-near-installer.sh | sh
+    "$(dirname "$0")/install-cargo-near.sh"
 }
 
-ensure_cargo_audit() {
-    have cargo-audit && return 0
-    cargo install cargo-audit --locked
+ensure_cargo_deny() {
+    have cargo-deny && return 0
+    cargo install cargo-deny --locked
 }
 
 ensure_foundry() {
@@ -256,7 +256,7 @@ case "$MODE" in
         ensure_rust
         ensure_nextest
         ensure_cargo_near
-        ensure_cargo_audit
+        ensure_cargo_deny
         ensure_node
         ensure_foundry
         ensure_docker || true

@@ -13,7 +13,10 @@ use anyhow::{anyhow, Context};
 use async_process::{Child, Command};
 use backon::{ExponentialBuilder, Retryable};
 use bollard::errors::Error as DockerError;
-use bollard::models::{Ipam, NetworkCreateRequest, PortBinding};
+use bollard::models::{Ipam, Network, NetworkCreateRequest, PortBinding};
+use bollard::query_parameters::{
+    ListContainersOptions, ListNetworksOptionsBuilder, RemoveContainerOptions,
+};
 use bollard::Docker;
 use borsh::{BorshDeserialize, BorshSerialize};
 use cait_sith::protocol::Participant;
@@ -167,6 +170,63 @@ impl DockerClient {
         }
     }
 
+    pub async fn list_test_networks(&self) -> Result<Vec<Network>, bollard::errors::Error> {
+        let mut filters = HashMap::new();
+        filters.insert("name", vec!["^mpc_it_"]);
+        let options = ListNetworksOptionsBuilder::default()
+            .filters(&filters)
+            .build();
+        self.docker.list_networks(Some(options)).await
+    }
+
+    pub async fn remove_dead_networks(
+        &self,
+        networks: Vec<String>,
+    ) -> Result<(), bollard::errors::Error> {
+        let options = ListContainersOptions {
+            all: true,
+            limit: None,
+            size: false,
+            filters: Some(HashMap::from_iter([(
+                "network".to_string(),
+                networks.clone(),
+            )])),
+        };
+        let containers = self.docker.list_containers(Some(options)).await?;
+
+        for container in containers {
+            if let Some(container_id) = container.id {
+                match self
+                    .docker
+                    .remove_container(
+                        &container_id,
+                        Some(RemoveContainerOptions {
+                            force: true,
+                            ..Default::default()
+                        }),
+                    )
+                    .await
+                {
+                    Ok(_) => tracing::info!(container_id = %container_id, "removed container"),
+                    Err(e) => {
+                        tracing::warn!(container_id = %container_id, error = %e, "failed to remove container")
+                    }
+                }
+            }
+        }
+
+        for network in networks {
+            match self.docker.remove_network(&network).await {
+                Ok(_) => tracing::info!(network = %network, "removed network"),
+                Err(e) => {
+                    tracing::warn!(network = %network, error = %e, "failed to remove network")
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     /// Try and remove the docker network
     pub fn best_effort_remove_network(&self, network: String) {
         let docker = self.docker.clone();
@@ -252,7 +312,7 @@ impl Redis {
         let password = enable_debug.then(|| uuid::Uuid::new_v4().simple().to_string());
         let container = start_container_with_network_retry(
             || {
-                let container = GenericImage::new("redis", "7.4.2")
+                let container = GenericImage::new("redis", "7.4.12")
                     .with_exposed_port(Self::DEFAULT_REDIS_PORT.tcp())
                     .with_wait_for(WaitFor::message_on_stdout("Ready to accept connections"))
                     .with_network(&spawner.network);

@@ -5,9 +5,7 @@ use integration_tests::utils;
 use k256::elliptic_curve::sec1::ToEncodedPoint as _;
 use mpc_contract::config::ProtocolConfig;
 use mpc_contract::update::ProposeUpdateArgs;
-use mpc_crypto::{
-    self, derive_epsilon_near, derive_key, reconstruct_signature, x_coordinate, ScalarExt,
-};
+use mpc_crypto::{derive_epsilon_near, derive_key, reconstruct_signature, x_coordinate, ScalarExt};
 use mpc_node::protocol::cryptography::set_resharing_running_timeout;
 use mpc_node::protocol::state::{NodeStatus, ResharingStatus};
 use mpc_node::sign_bidirectional::public_key_to_address;

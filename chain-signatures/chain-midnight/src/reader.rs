@@ -7,6 +7,7 @@ use midnight_storage::DefaultDB;
 
 use crate::hashing::compute_request_id;
 use crate::records::{SignBidirectionalEventNotification, SignBidirectionalRecord};
+use crate::types::MidnightAddress;
 use mpc_primitives::{
     Calldata, CompactMaybe, EvmAccessListEntry, EvmType2TxParams, TronTxParams, TxParamType,
     TxParams,
@@ -514,10 +515,13 @@ fn boolean(cursor: &mut AtomCursor, what: &'static str) -> anyhow::Result<bool> 
 }
 
 /// A two-variant Compact enum: one declared byte, and only 0 or 1 is in range.
-fn bounded_enum(cursor: &mut AtomCursor, what: &'static str) -> anyhow::Result<u8> {
+fn one_byte_enum<T>(cursor: &mut AtomCursor, what: &'static str) -> anyhow::Result<T>
+where
+    T: TryFrom<u8>,
+    T::Error: std::error::Error + Send + Sync + 'static,
+{
     let value = uint::<u8>(cursor, 1, what)?;
-    anyhow::ensure!(value <= 1, "{what}: {value} exceeds the maximum 1");
-    Ok(value)
+    T::try_from(value).map_err(anyhow::Error::new)
 }
 
 fn decode_sign_bidirectional(
@@ -535,16 +539,16 @@ fn decode_sign_bidirectional(
     // `decode_tx_params` likewise mirrors the layout the discriminant names.
     let record = SignBidirectionalRecord {
         key_version: uint::<u8>(cursor, 1, "key_version")?,
-        sender: bytes_n::<32>(cursor, "sender")?,
+        sender: MidnightAddress::from_bytes(bytes_n::<32>(cursor, "sender")?),
         path: bytes_n::<32>(cursor, "path")?,
-        algo: bounded_enum(cursor, "algo")?,
+        algo: one_byte_enum(cursor, "algo")?,
         tx_params: {
             // Consume the tx_param_type atom (not used here)
             let _ = uint::<u8>(cursor, 1, "tx_param_type")?;
             decode_tx_params(cursor, layout)?
         },
         execution_dest: bytes_n::<64>(cursor, "execution_dest")?,
-        signature_dest: bounded_enum(cursor, "signature_dest")?,
+        signature_dest: one_byte_enum(cursor, "signature_dest")?,
         params: bytes_n::<64>(cursor, "params")?,
         output_deserialization_schema: bytes_dyn(cursor, "output_deserialization_schema")?,
         respond_serialization_schema: bytes_dyn(cursor, "respond_serialization_schema")?,
@@ -668,7 +672,7 @@ fn decode_tron_tx_params(
 mod tests {
     use super::*;
     use crate::emissions::{emissions_in, DecodedTransaction, Emission, EmissionKind};
-    use crate::records::SignBidirectionalEventNotification;
+    use crate::records::{RecordDiscriminantError, SignBidirectionalEventNotification};
     use crate::test_utils::{
         aligned_cell, alignment_of, array_of, atoms_from_record, cell_from_atoms, cell_from_record,
         hex_32, key_of, map_of, minimal_record, sample_record,
@@ -1087,6 +1091,34 @@ mod tests {
             .expect_err("an unknown tx_param_type must fail by name, not as capacity arithmetic")
             .to_string();
         assert!(err.contains("tx_param_type 2"), "err: {err}");
+    }
+
+    /// The refusal keeps its type in the chain: the field names the atom, the typed
+    /// error carries the byte, and both survive the composition.
+    #[test]
+    fn decode_record_refuses_unknown_discriminants_with_the_typed_cause_intact() {
+        let record = sample_record();
+        for (atom, field, typed) in [
+            (3usize, "algo", RecordDiscriminantError::Algo(2)),
+            (
+                atoms_from_record(&record).len() - 4,
+                "signature_dest",
+                RecordDiscriminantError::Destination(2),
+            ),
+        ] {
+            let mut atoms = atoms_from_record(&record);
+            atoms[atom] = vec![2];
+            let err = decode_record(&cell_from_atoms(&atoms, &widths_from_record(&record)))
+                .expect_err("an out-of-family discriminant must not decode");
+            let rendered = format!("{err:#}");
+            assert!(rendered.contains(field), "{rendered}");
+            assert!(rendered.contains("unsupported"), "{rendered}");
+            assert!(
+                err.chain()
+                    .any(|cause| cause.downcast_ref::<RecordDiscriminantError>() == Some(&typed)),
+                "the typed refusal must survive as a cause: {rendered}"
+            );
+        }
     }
 
     #[test]

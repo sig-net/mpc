@@ -261,7 +261,10 @@ impl SignatureSpawner {
         );
 
         // Watcher that increments the delayed metric if not completed within the expected response time.
-        let unix_timestamp_indexed = request.unix_timestamp_indexed;
+        // An adopted request has no indexing time, so its budget starts here.
+        let unix_timestamp_indexed = request
+            .unix_timestamp_indexed
+            .unwrap_or_else(mpc_utils::time::current_unix_timestamp);
         let expected_response_time_secs = chain.expected_response_time_secs();
         let already_elapsed = unix_elapsed(unix_timestamp_indexed);
         let remaining_time =
@@ -565,13 +568,15 @@ impl SignatureSpawner {
                     return;
                 }
 
-                record_request_latency_since(
-                    entry.chain(),
-                    SignRequestStep::AwaitingGeneration,
-                    "ok",
-                    entry.request().request_kind(),
-                    entry.request().unix_timestamp_indexed,
-                );
+                if let Some(indexed) = entry.request().unix_timestamp_indexed {
+                    record_request_latency_since(
+                        entry.chain(),
+                        SignRequestStep::AwaitingGeneration,
+                        "ok",
+                        entry.request().request_kind(),
+                        indexed,
+                    );
+                }
 
                 self.add_request(governance, entry, signature_timeout);
             }

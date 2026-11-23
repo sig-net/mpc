@@ -33,6 +33,11 @@ ignore = [
     { id = "RUSTSEC-2026-0398", reason = "zstd-safe 7 `Seekable::decompress` overruns a Vec; the `seekable` feature is not enabled anywhere in the graph; fix 8.2.0 needs zstd 0.14, blocked by near-primitives 0.37.x" },
     { id = "RUSTSEC-2026-0403", reason = "zstd-safe 7 legacy-frame streaming decompression can expose uninitialized memory; only near-primitives 0.37.x decompresses zstd (state parts, compressed data) and the node never calls those decoders; fix 8.2.0 needs zstd 0.14, blocked by near-primitives 0.37.x" },
     { id = "RUSTSEC-2026-0424", reason = "wasmtime 45 component-model borrowed-resource handles grow untracked host memory (DoS); component model disabled in near-vm-runner 0.37.x (component_model=false, core wasm only), same dev-only chain as RUSTSEC-2026-0222 (near-sdk unit-testing, wasmtime ^45 pinned by near-vm-runner 0.37.x); no patched 45.x release (fixed in 48.0.8+)" },
+    { id = "RUSTSEC-2026-0566", reason = "wasmtime-wasi unbounded host memory growth on empty stream writes; wasmtime-wasi is not in the graph (near-vm-runner 0.37.x uses core wasmtime only); same dev-only chain as RUSTSEC-2026-0222; no patched 45.x release (fixed in 48.0.9+)" },
+    { id = "RUSTSEC-2026-0567", reason = "wasmtime 45 aborts on atomics when the threads proposal is enabled without the `threads` cargo feature; near-vm-runner 0.37.x never enables the threads proposal; same dev-only chain as RUSTSEC-2026-0222; no patched 45.x release (fixed in 48.0.9+)" },
+    { id = "RUSTSEC-2026-0569", reason = "wasmtime 45 `Caller::get_module_export` panics in a host function not called from wasm; near-vm-runner 0.37.x resolves the memory export before running guest code to avoid it; same dev-only chain as RUSTSEC-2026-0222; no patched 45.x release (fixed in 48.0.9+)" },
+    { id = "RUSTSEC-2026-0571", reason = "wasmtime-wasi-http unbounded heap use on empty HTTP/2 body writes; wasmtime-wasi-http is not in the graph; same dev-only chain as RUSTSEC-2026-0222; no patched 45.x release (fixed in 48.0.9+)" },
+    { id = "RUSTSEC-2026-0573", reason = "wasmtime 45 aborts when a GC heap fills a reservation that is not page-aligned; the GC proposal is off in near-vm-runner 0.37.x (no `gc` cargo feature); same dev-only chain as RUSTSEC-2026-0222; no patched 45.x release (fixed in 48.0.9+)" },
 ]
 
 [licenses]
@@ -64,7 +69,15 @@ ignore = true
 
 [bans]
 multiple-versions = "warn"
-wildcards = "allow"
+wildcards = "deny"
+# Workspace crates depend on each other by path, without a version.
+allow-wildcard-paths = true
+
+# A crate declared more than once goes through [workspace.dependencies].
+[bans.workspace-dependencies]
+duplicates = "deny"
+include-path-dependencies = true
+unused = "deny"
 
 [sources]
 # Fail on any dependency from a registry or git repo not explicitly

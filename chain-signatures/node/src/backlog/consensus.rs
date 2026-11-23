@@ -440,10 +440,11 @@ mod tests {
                 let peer_url = s.url();
 
                 let mut response_map = HashMap::new();
-                response_map.insert(chain, peer_checkpoint);
+                response_map.insert(chain, peer_checkpoint.facts());
                 let response = crate::web::CheckpointResponse {
                     version: crate::CHECKPOINT_VERSION,
-                    checkpoints: response_map,
+                    facts: response_map,
+                    ..Default::default()
                 };
                 let mut body = Vec::new();
                 ciborium::into_writer(&response, &mut body).unwrap();
@@ -562,7 +563,8 @@ mod tests {
         ciborium::into_writer(
             &crate::web::CheckpointResponse {
                 version: crate::CHECKPOINT_VERSION + 1,
-                checkpoints: [(chain, checkpoint.clone())].into_iter().collect(),
+                facts: [(chain, checkpoint.facts())].into_iter().collect(),
+                ..Default::default()
             },
             &mut newer_body,
         )
@@ -581,7 +583,8 @@ mod tests {
         ciborium::into_writer(
             &crate::web::CheckpointResponse {
                 version: crate::CHECKPOINT_VERSION,
-                checkpoints: [(chain, checkpoint)].into_iter().collect(),
+                facts: [(chain, checkpoint.facts())].into_iter().collect(),
+                ..Default::default()
             },
             &mut current_body,
         )

@@ -90,7 +90,7 @@ impl StreamContext {
                 .await
                 .context("sign command channel closed")?;
         } else {
-            tracing::warn!(
+            tracing::debug!(
                 ?cmd,
                 "dropping sign command until catchup completes; the backlog requeues it on CatchupCompleted"
             );
