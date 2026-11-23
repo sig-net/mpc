@@ -13,7 +13,7 @@ async-trait.workspace = true
 bip32 = { workspace = true, features = ["alloc", "secp256k1"] }
 bytes = "1"
 futures-util.workspace = true
-google-cloud-storage = "=1.17.0"
+google-cloud-storage = "1.17.0"
 google-cloud-auth = { workspace = true, optional = true }
 hex.workspace = true
 # The BIP-32 master key over any 16 to 64 byte seed, as bip32 hashes it.
