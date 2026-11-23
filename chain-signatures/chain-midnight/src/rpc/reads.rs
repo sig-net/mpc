@@ -65,7 +65,7 @@ impl std::error::Error for OversizedContractState {
     }
 }
 
-pub(crate) fn oversized_contract_state(detail: impl Into<String>) -> anyhow::Error {
+pub fn oversized_contract_state(detail: impl Into<String>) -> anyhow::Error {
     anyhow::Error::new(OversizedContractState {
         detail: detail.into(),
         source: None,
@@ -73,7 +73,7 @@ pub(crate) fn oversized_contract_state(detail: impl Into<String>) -> anyhow::Err
     })
 }
 
-pub(crate) fn is_oversized_contract_state(err: &anyhow::Error) -> bool {
+pub fn is_oversized_contract_state(err: &anyhow::Error) -> bool {
     err.chain()
         .any(|cause| cause.is::<OversizedContractState>())
 }
@@ -301,7 +301,7 @@ pub(super) struct Reads {
 /// The HTTP status a transport rejection in `error`'s chain carries, if any.
 /// jsonrpsee stores a parsed `StatusCode` as u16 (jsonrpsee-http-client 0.24.10
 /// transport.rs:337), so `from_u16` cannot fail on what it produces.
-pub(crate) fn rejected_http_status(error: &anyhow::Error) -> Option<StatusCode> {
+pub fn rejected_http_status(error: &anyhow::Error) -> Option<StatusCode> {
     error.chain().find_map(|cause| {
         let RawRpcError::Client(client_error) = cause.downcast_ref::<RawRpcError>()? else {
             return None;
@@ -496,8 +496,8 @@ mod tests {
     use crate::rpc::support::*;
 
     use crate::rpc::publisher::attach_read_carrier;
+    use crate::rpc::publisher::MidnightPublisherRpc;
     use crate::rpc::transport::connect_http;
-    use crate::rpc::MidnightPublisherRpc;
     use crate::submit_error::SubmitError;
     use jsonrpsee::server::ServerBuilder;
     use jsonrpsee::RpcModule;

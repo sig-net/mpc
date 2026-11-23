@@ -16,8 +16,8 @@ use subxt::ext::subxt_rpcs::{Error as RawRpcError, UserError};
 use subxt::utils::H256;
 use subxt::SubstrateConfig;
 
+use crate::rpc::reader::BlockRef;
 use crate::rpc::statics::TxApplied;
-use crate::rpc::BlockRef;
 use crate::types::{BlockHash, MidnightAddress};
 
 /// The `Timestamp::set` moment the synthetic test body carries, unix ms.

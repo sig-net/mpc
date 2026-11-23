@@ -40,7 +40,7 @@ impl From<BlockHash> for H256 {
     }
 }
 
-pub(crate) struct MidnightRpc {
+pub struct MidnightRpc {
     client: OnlineClient<SubstrateConfig>,
     reads: Reads,
     head: std::sync::Mutex<Option<FinalizedHead>>,
@@ -185,7 +185,7 @@ impl MidnightRpc {
         Ok(block_ref)
     }
 
-    pub(crate) async fn block_emissions(
+    pub async fn block_emissions(
         &self,
         block_ref: &BlockRef,
         singleton: &MidnightAddress,
@@ -386,8 +386,8 @@ mod tests {
 
     use crate::config::RpcConfig;
     use crate::emissions::DecodedTransaction;
-    use crate::types::LedgerTxHash;
     use crate::rpc::statics::TxApplied;
+    use crate::types::LedgerTxHash;
 
     async fn read_fallible_capture(events: Vec<u8>) -> anyhow::Result<Option<BlockEmissions>> {
         read_fallible_transaction(

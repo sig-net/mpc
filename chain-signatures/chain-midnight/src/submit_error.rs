@@ -6,7 +6,7 @@
 
 use mpc_chain_integration_core::utils::retry::RpcFailure;
 
-use crate::rpc::read_verdict;
+use crate::rpc::publisher::read_verdict;
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum SubmitError {

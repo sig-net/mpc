@@ -13,7 +13,7 @@ use crate::types::{BlockHash, LedgerTxHash};
 
 /// Where a submitted ledger transaction ended up.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Landing {
+pub enum Landing {
     Applied,
     /// Applied but for a fallible segment; readers still read its guaranteed events.
     PartialSuccess,
@@ -23,7 +23,7 @@ pub(crate) enum Landing {
 
 /// Why `author_submitExtrinsic` did not take a transaction.
 #[derive(Debug)]
-pub(crate) enum SubmitRefusal {
+pub enum SubmitRefusal {
     /// The node answered with a refusal: nothing entered its pool.
     Refused(String),
     /// No answer arrived; the transaction may be in the pool.

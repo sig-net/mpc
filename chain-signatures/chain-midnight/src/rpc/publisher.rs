@@ -25,7 +25,7 @@ const LEDGER_PARAMETERS_ENTRY: &str = "MidnightRuntimeApi_get_ledger_parameters"
 ///
 /// Only `rpc` and `legacy` are `pub(super)`: the `SubmitChain` impl in
 /// `submit.rs` drives them, and nothing outside `rpc/` sees either type.
-pub(crate) struct MidnightPublisherRpc {
+pub struct MidnightPublisherRpc {
     pub(super) rpc: RpcClient,
     pub(super) legacy: LegacyRpcMethods<SubstrateConfig>,
     genesis_hash: H256,
@@ -233,7 +233,7 @@ async fn metadata_at(rpc: &RpcClient, at: H256) -> anyhow::Result<subxt::Metadat
 /// addressed by the hash `finalized_head` answers with. Every error out of
 /// an impl carries a read-partition verdict carrier (`attach_read_carrier`).
 #[async_trait::async_trait]
-pub(crate) trait PinnedReads: Send + Sync {
+pub trait PinnedReads: Send + Sync {
     async fn finalized_head(&self) -> anyhow::Result<BlockHash>;
     async fn contract_state(
         &self,
@@ -245,7 +245,7 @@ pub(crate) trait PinnedReads: Send + Sync {
 
 /// The read-path verdict for a node error: oversized state terminal, an
 /// upstream carrier verbatim, else the read partition over the typed status.
-pub(crate) fn read_verdict(error: &anyhow::Error) -> RpcFailure {
+pub fn read_verdict(error: &anyhow::Error) -> RpcFailure {
     if is_oversized_contract_state(error) {
         return RpcFailure::terminal(format!("{error:#}"));
     }
