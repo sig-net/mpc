@@ -299,7 +299,7 @@ pub(super) struct Reads {
 
 /// The HTTP status a transport rejection in `error`'s chain carries, if any.
 /// jsonrpsee stores a parsed `StatusCode` as u16 (jsonrpsee-http-client 0.24.10
-/// transport.rs:337), so `from_u16` cannot fail on what it produces.
+/// src/transport.rs:337), so `from_u16` cannot fail on what it produces.
 pub fn rejected_http_status(error: &anyhow::Error) -> Option<StatusCode> {
     error.chain().find_map(|cause| {
         let RawRpcError::Client(client_error) = cause.downcast_ref::<RawRpcError>()? else {
@@ -572,7 +572,7 @@ mod tests {
     }
 
     /// jsonrpsee's `Rejected` wire shape (jsonrpsee-http-client 0.24.10
-    /// transport.rs:376), as a raw HTTP status fails these reads.
+    /// src/transport.rs:376), as a raw HTTP status fails these reads.
     fn rejected_read(status: u16) -> anyhow::Error {
         let transport = jsonrpsee::http_client::transport::Error::Rejected {
             status_code: status,
@@ -585,7 +585,7 @@ mod tests {
     #[test]
     fn every_http_status_classifies_under_the_read_partition() {
         // Every status jsonrpsee can report — parsed StatusCode, so 100..=599
-        // (jsonrpsee-http-client 0.24.10 transport.rs:337) — at both call
+        // (jsonrpsee-http-client 0.24.10 src/transport.rs:337) — at both call
         // sites of the shared derivation.
         for code in 100..=599u16 {
             let read = attach_read_carrier(rejected_read(code));
