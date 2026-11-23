@@ -25,16 +25,16 @@ prometheus = "0.14.0"
 redis = "0.27.2"
 sysinfo.workspace = true
 tracing-stackdriver = "0.10.0"
-tracing-opentelemetry = "0.30.0"
-opentelemetry = { version = "0.29.0", default-features = false, features = [
+tracing-opentelemetry = "0.33.0"
+opentelemetry = { version = "0.32.0", default-features = false, features = [
     "trace",
 ] }
-opentelemetry-otlp = { version = "0.29.0" }
-opentelemetry_sdk = { version = "0.29.0", default-features = false, features = [
+opentelemetry-otlp = { version = "0.32.0" }
+opentelemetry_sdk = { version = "0.32.1", default-features = false, features = [
     "trace",
     "rt-tokio",
 ] }
-opentelemetry-appender-tracing = "0.29.1"
+opentelemetry-appender-tracing = "0.32.0"
 # workspace dependencies
 alloy.workspace = true
 anyhow.workspace = true
