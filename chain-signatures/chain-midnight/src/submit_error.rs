@@ -92,10 +92,12 @@ impl SubmitError {
 
     /// Whether the failure implicates a restored wallet's snapshot, counting
     /// toward dropping its checkpoint.
-    // A refusal is the stale-snapshot signature; an expiry unlanded strikes with
-    // it. Every other class would discard the checkpoint for conditions the
-    // replay cannot fix. Each class is spelled out so a new one must take a
-    // verdict here rather than silently never strike.
+    // A refusal is the stale-snapshot signature. Expiry strikes with it because
+    // an unanswered first submit turns the node's refusal into `Expired`
+    // (`native.rs::resend`); pure congestion expires too, absorbed by the strike
+    // threshold. Every other class would discard the checkpoint for conditions
+    // the replay cannot fix. Each class is spelled out so a new one must take a
+    // verdict here.
     pub(crate) fn strikes_restored_state(&self) -> bool {
         match self {
             Self::StateConflict(_) => true,
