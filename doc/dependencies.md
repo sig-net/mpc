@@ -17,10 +17,11 @@ images. The crate rules cover dev- and build-dependencies too.
 
 ## Adding a dependency
 
-- **A1. Needed.** The standard library, a dependency we already have, or a
-  few lines of our own code cannot do the job. The PR states the use case.
-- **A2. Maintained.** It has recent releases and its security reports get
-  answered.
+- **A1. Needed.** Neither the standard library nor a dependency we already
+  have does the job, and writing it ourselves would not be simpler.
+  Cryptography always comes from a vetted crate. The PR states the use case.
+- **A2. Maintained.** Its security reports and bug reports get answered. A
+  stable crate without recent releases is fine.
 - **A3. Allowed source and license.** `deny.toml` allows crates from
   crates.io and from two `sig-net` git repositories (`[sources]`), under
   permissive licenses such as MIT and Apache-2.0 (`[licenses]`). Widening
