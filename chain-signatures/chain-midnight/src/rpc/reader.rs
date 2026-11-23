@@ -11,7 +11,6 @@ use subxt::SubstrateConfig;
 use super::reads::{retry_read, Reads};
 use super::statics::{
     applied_status, decode_applied_transaction, AppliedStatus, SendMnTransaction, TimestampSet,
-    TxApplied,
 };
 use super::transport::connect_http;
 use crate::config::MidnightConfig;
@@ -388,6 +387,7 @@ mod tests {
     use crate::config::RpcConfig;
     use crate::emissions::DecodedTransaction;
     use crate::types::LedgerTxHash;
+    use crate::rpc::statics::TxApplied;
 
     async fn read_fallible_capture(events: Vec<u8>) -> anyhow::Result<Option<BlockEmissions>> {
         read_fallible_transaction(

@@ -16,7 +16,7 @@ use subxt::ext::subxt_rpcs::{rpc_params, Error as RawRpcError, UserError};
 use subxt::utils::H256;
 use subxt::SubstrateConfig;
 
-use super::publisher_rpc::read_verdict;
+use super::publisher::read_verdict;
 #[cfg(feature = "sandbox")]
 use super::transport::connect_http_endpoint;
 use super::transport::{MAX_CALLER_STATE_BYTES, MAX_RESPONSE_SIZE, MIN_PROVING_RESPONSE_CAP};
@@ -495,7 +495,7 @@ mod tests {
     use super::*;
     use crate::rpc::support::*;
 
-    use crate::rpc::publisher_rpc::attach_read_carrier;
+    use crate::rpc::publisher::attach_read_carrier;
     use crate::rpc::transport::connect_http;
     use crate::rpc::MidnightPublisherRpc;
     use crate::submit_error::SubmitError;

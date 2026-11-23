@@ -7,7 +7,7 @@ use subxt::ext::codec::DecodeAll as _;
 use subxt::ext::subxt_rpcs::{rpc_params, Error as RawRpcError};
 use subxt::utils::H256;
 
-use super::publisher_rpc::{recall, remember, MidnightPublisherRpc};
+use super::publisher::{recall, remember, MidnightPublisherRpc};
 use super::statics::{TxApplied, TxPartialSuccess};
 use crate::types::{BlockHash, LedgerTxHash};
 
