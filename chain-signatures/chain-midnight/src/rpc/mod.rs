@@ -11,7 +11,7 @@ mod submit;
 mod transport;
 
 #[cfg(test)]
-pub(crate) mod support;
+mod support;
 
 #[cfg(feature = "sandbox")]
 pub use reads::probe_network_id;

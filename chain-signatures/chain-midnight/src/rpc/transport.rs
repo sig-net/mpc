@@ -23,7 +23,7 @@ pub(super) const MAX_RESPONSE_SIZE: u32 = 32 * 1024 * 1024;
 
 /// Generous bound on the JSON around the hex state in a `midnight_contractState`
 /// response.
-pub(super) const RESPONSE_ENVELOPE_BYTES: usize = 1024;
+const RESPONSE_ENVELOPE_BYTES: usize = 1024;
 
 /// Smallest RPC node response cap that fits every admissible state: the hex doubles
 /// the bytes, plus the envelope. A size refusal under a cap at least this large

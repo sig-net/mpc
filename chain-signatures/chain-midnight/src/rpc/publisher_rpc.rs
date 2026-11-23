@@ -23,19 +23,19 @@ const LEDGER_PARAMETERS_ENTRY: &str = "MidnightRuntimeApi_get_ledger_parameters"
 
 /// Finalized reads and transaction submission for the Midnight publisher.
 ///
-/// Fields and helpers are `pub(super)`: the `SubmitChain` impl in `submit.rs`
-/// drives this state directly, and nothing outside `rpc/` sees either type.
+/// Only `rpc` and `legacy` are `pub(super)`: the `SubmitChain` impl in
+/// `submit.rs` drives them, and nothing outside `rpc/` sees either type.
 pub(crate) struct MidnightPublisherRpc {
     pub(super) rpc: RpcClient,
     pub(super) legacy: LegacyRpcMethods<SubstrateConfig>,
-    pub(super) genesis_hash: H256,
+    genesis_hash: H256,
     /// One subxt client per runtime version met, each with the metadata read at a
     /// block of that runtime.
-    pub(super) clients: std::sync::Mutex<
+    clients: std::sync::Mutex<
         std::collections::HashMap<RuntimeVersionKey, OnlineClient<SubstrateConfig>>,
     >,
-    pub(super) blocks: std::sync::Mutex<BlockMemo>,
-    pub(super) network_id: NetworkId,
+    blocks: std::sync::Mutex<BlockMemo>,
+    network_id: NetworkId,
 }
 
 /// `(spec_version, transaction_version)`.
@@ -78,6 +78,20 @@ pub(super) fn recall<T: Clone>(
 }
 
 impl MidnightPublisherRpc {
+    /// A publisher over an explicit transport, for tests that drive its reads
+    /// without dialing `connect`.
+    #[cfg(test)]
+    pub(super) fn with_transport(transport: RpcClient) -> Self {
+        Self {
+            rpc: transport.clone(),
+            legacy: LegacyRpcMethods::<SubstrateConfig>::new(transport),
+            genesis_hash: H256([0x11; 32]),
+            clients: Default::default(),
+            blocks: Default::default(),
+            network_id: NetworkId::Undeployed,
+        }
+    }
+
     pub async fn connect(config: &MidnightConfig) -> anyhow::Result<Self> {
         tokio::time::timeout(config.rpc.connect_timeout, async {
             let rpc = connect_http(config)?;
@@ -249,7 +263,7 @@ pub(crate) fn read_verdict(error: &anyhow::Error) -> RpcFailure {
 /// field preserves the typed cause beyond the carrier's render.
 #[derive(Debug, thiserror::Error)]
 #[error("a publisher read failed")]
-pub(super) struct ReadFailed(#[source] anyhow::Error);
+struct ReadFailed(#[source] anyhow::Error);
 
 pub(super) fn attach_read_carrier(error: anyhow::Error) -> anyhow::Error {
     anyhow::Error::new(read_verdict(&error)).context(ReadFailed(error))
@@ -311,18 +325,6 @@ mod tests {
     use std::time::Duration;
     use subxt::ext::codec::{DecodeAll as _, Encode as _};
 
-    /// A publisher over an explicit transport, for tests that drive its reads.
-    fn publisher_rpc(transport: RpcClient) -> MidnightPublisherRpc {
-        MidnightPublisherRpc {
-            rpc: transport.clone(),
-            legacy: LegacyRpcMethods::<SubstrateConfig>::new(transport),
-            genesis_hash: H256([0x11; 32]),
-            clients: Default::default(),
-            blocks: Default::default(),
-            network_id: NetworkId::Undeployed,
-        }
-    }
-
     #[tokio::test]
     async fn real_publish_read_statuses_follow_the_read_partition() {
         // Every read's own wrapper against a real transport: the carrier must
@@ -335,7 +337,7 @@ mod tests {
         ] {
             let (address, _calls, server) = http_status_server(status, reason).await;
             let transport = connect_http(&http_config(address)).expect("build request-only client");
-            let rpc = publisher_rpc(transport);
+            let rpc = MidnightPublisherRpc::with_transport(transport);
             let responder = test_address();
             let at_hash = test_at_hash();
 
@@ -378,7 +380,7 @@ mod tests {
     #[tokio::test]
     async fn client_cap_size_refusal_terminates_the_publish_read() {
         let (transport, _calls) = stub_rpc(Canned::ClientTooLarge);
-        let rpc = publisher_rpc(transport);
+        let rpc = MidnightPublisherRpc::with_transport(transport);
 
         let error = PinnedReads::contract_state(&rpc, &test_address(), &test_at_hash())
             .await
@@ -407,7 +409,7 @@ mod tests {
                 "Response is too big",
                 data,
             ));
-            let rpc = publisher_rpc(transport);
+            let rpc = MidnightPublisherRpc::with_transport(transport);
 
             let error = PinnedReads::contract_state(&rpc, &test_address(), &test_at_hash())
                 .await
@@ -567,14 +569,7 @@ mod tests {
             })
             .unwrap();
         let _handle = server.start(module);
-        let rpc = MidnightPublisherRpc {
-            rpc: transport.clone(),
-            legacy: LegacyRpcMethods::<SubstrateConfig>::new(transport),
-            genesis_hash: H256([0x11; 32]),
-            clients: Default::default(),
-            blocks: Default::default(),
-            network_id: NetworkId::Undeployed,
-        };
+        let rpc = MidnightPublisherRpc::with_transport(transport);
 
         let submit = rpc.client_at(None).await.unwrap();
         assert_eq!(submit.runtime_version().spec_version, 2);
@@ -699,14 +694,7 @@ mod tests {
             })
             .unwrap();
         let handle = server.start(module);
-        let rpc = MidnightPublisherRpc {
-            rpc: transport.clone(),
-            legacy: LegacyRpcMethods::<SubstrateConfig>::new(transport),
-            genesis_hash: H256([0x11; 32]),
-            clients: Default::default(),
-            blocks: Default::default(),
-            network_id: NetworkId::Undeployed,
-        };
+        let rpc = MidnightPublisherRpc::with_transport(transport);
         (rpc, handle, log)
     }
 
@@ -839,14 +827,7 @@ mod tests {
             })
             .unwrap();
         let handle = server.start(module);
-        let rpc = MidnightPublisherRpc {
-            rpc: transport.clone(),
-            legacy: LegacyRpcMethods::<SubstrateConfig>::new(transport),
-            genesis_hash: H256([0x11; 32]),
-            clients: Default::default(),
-            blocks: Default::default(),
-            network_id: NetworkId::Undeployed,
-        };
+        let rpc = MidnightPublisherRpc::with_transport(transport);
         (rpc, handle, reads)
     }
 

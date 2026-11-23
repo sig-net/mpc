@@ -17,9 +17,10 @@ use subxt::utils::H256;
 use subxt::SubstrateConfig;
 
 use super::publisher_rpc::read_verdict;
-use super::transport::{
-    connect_http_endpoint, MAX_CALLER_STATE_BYTES, MAX_RESPONSE_SIZE, MIN_PROVING_RESPONSE_CAP,
-};
+#[cfg(feature = "sandbox")]
+use super::transport::connect_http_endpoint;
+use super::transport::{MAX_CALLER_STATE_BYTES, MAX_RESPONSE_SIZE, MIN_PROVING_RESPONSE_CAP};
+#[cfg(feature = "sandbox")]
 use crate::config::RpcConfig;
 use crate::types::{BlockHash, MidnightAddress, NetworkId};
 
@@ -76,7 +77,7 @@ pub(crate) fn is_oversized_contract_state(err: &anyhow::Error) -> bool {
     err.chain()
         .any(|cause| cause.is::<OversizedContractState>())
 }
-pub(super) fn decode_network_id(answer: &[u8]) -> anyhow::Result<NetworkId> {
+fn decode_network_id(answer: &[u8]) -> anyhow::Result<NetworkId> {
     let mut payload = answer;
     let reported = String::decode_all(&mut payload)
         .context("midnight runtime returned a malformed network id")?;
@@ -291,8 +292,8 @@ pub(super) fn unwrap_runtime_api_result(answer: &[u8]) -> anyhow::Result<Option<
 
 /// The one-shot reads over an explicit transport, so offline tests can drive them.
 pub(super) struct Reads {
-    pub(super) rpc: RpcClient,
-    pub(super) legacy: LegacyRpcMethods<SubstrateConfig>,
+    rpc: RpcClient,
+    legacy: LegacyRpcMethods<SubstrateConfig>,
     pub(super) request_timeout: Duration,
     pub(super) retry: RetryConfig,
 }

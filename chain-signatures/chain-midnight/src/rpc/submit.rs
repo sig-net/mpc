@@ -181,13 +181,10 @@ mod tests {
     use crate::native::SubmitChain as _;
     use crate::rpc::reads::rejected_http_status;
     use crate::rpc::transport::connect_http;
-    use crate::types::NetworkId;
     use http::StatusCode;
-    use subxt::backend::legacy::LegacyRpcMethods;
     use subxt::ext::codec::{Decode as _, Encode as _};
     use subxt::ext::frame_metadata::{RuntimeMetadata, RuntimeMetadataPrefixed};
     use subxt::ext::subxt_rpcs::UserError;
-    use subxt::SubstrateConfig;
 
     #[test]
     fn a_submit_reply_is_a_refusal_only_when_the_node_answered_one() {
@@ -234,14 +231,7 @@ mod tests {
             })
             .unwrap();
         let _handle = server.start(module);
-        let rpc = MidnightPublisherRpc {
-            rpc: transport.clone(),
-            legacy: LegacyRpcMethods::<SubstrateConfig>::new(transport),
-            genesis_hash: H256([0x11; 32]),
-            clients: Default::default(),
-            blocks: Default::default(),
-            network_id: NetworkId::Undeployed,
-        };
+        let rpc = MidnightPublisherRpc::with_transport(transport);
 
         match rpc.submit(&[0x00]).await {
             Err(SubmitRefusal::Unsent(_)) => {}
@@ -304,14 +294,7 @@ mod tests {
             })
             .unwrap();
         let _handle = server.start(module);
-        let rpc = MidnightPublisherRpc {
-            rpc: transport.clone(),
-            legacy: LegacyRpcMethods::<SubstrateConfig>::new(transport),
-            genesis_hash: H256([0x11; 32]),
-            clients: Default::default(),
-            blocks: Default::default(),
-            network_id: NetworkId::Undeployed,
-        };
+        let rpc = MidnightPublisherRpc::with_transport(transport);
 
         match rpc.submit(&[0x00]).await {
             Err(SubmitRefusal::Mismatch(_)) => {}
@@ -335,14 +318,7 @@ mod tests {
             let (address, _calls, server) = http_status_server(status, reason).await;
             let config = http_config(address);
             let transport = connect_http(&config).unwrap();
-            let rpc = MidnightPublisherRpc {
-                rpc: transport.clone(),
-                legacy: LegacyRpcMethods::<SubstrateConfig>::new(transport),
-                genesis_hash: H256([0x11; 32]),
-                clients: Default::default(),
-                blocks: Default::default(),
-                network_id: NetworkId::Undeployed,
-            };
+            let rpc = MidnightPublisherRpc::with_transport(transport);
 
             let error = match rpc.submit(&[0x00]).await {
                 Err(SubmitRefusal::Unsent(error)) => error,
