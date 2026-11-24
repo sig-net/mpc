@@ -3,6 +3,11 @@
 //! Stream and state disagree at their peril: a checkpoint event the indexer no longer
 //! serves, or an event the replayed state cannot absorb, restarts the replay from the
 //! first event — only the reservations of in-flight submits survive a restart.
+//
+// TODO: `Synced`'s fields are `pub(super)`, so this module and `super::wallet` enforce
+// its invariants procedurally across apply/follow/subscribe_once; no single module can
+// enforce them locally. Split ownership (reservations, checkpoint IO, pricing, replay
+// flags) before adding state here.
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
