@@ -17,6 +17,12 @@ The node uses Redis for protocol artifacts (triples, presignatures), checkpoints
 
 The `ConnectionManager` feature must be enabled on the `redis` dependency; deadpool-redis did not enable it.
 
+## Checkpoint traffic isolation
+
+Checkpoint storage uses its own `redis_pool::Pool` (and therefore its own multiplexed `ConnectionManager`), separate from the pool used for triples, presignatures and the Midnight DUST checkpoint. This applies both in the node (`StorageHandles::new` in `chain-signatures/node/src/cli/mod.rs`) and in the benchmark harness (`SimulatedParticipant::checkpoint_pool`).
+
+Rationale: checkpoints are roughly 30 MB per GET/SET, while artifact commands are small but latency-sensitive and frequent. With a single multiplexed connection, a large checkpoint transfer occupies the shared socket and head-of-line blocks artifact traffic. Splitting the pools gives checkpoint traffic its own socket so the two streams no longer contend for the same connection, at the cost of one extra multiplexed TCP connection per node/participant. Key layout, Lua scripts, command sequences and timeouts are unchanged; only the connection used for checkpoint commands differs. The benchmark harness mirrors this split so its measurements reflect production behavior.
+
 ## Behavior differences and tradeoffs
 
 - There is no per-checkout liveness check. A dead connection is detected by the *real* command, which fails once and triggers a best-effort single-attempt reconnect; later commands await the new connection. The existing retries around `ProtocolStorage::connect()` only cover checkout, as before.

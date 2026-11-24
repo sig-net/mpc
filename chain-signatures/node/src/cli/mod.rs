@@ -734,11 +734,16 @@ impl StorageHandles {
         storage_options: &storage::Options,
     ) -> anyhow::Result<Self> {
         let keystore = Keystore::init(storage_options, account_id).await?;
+        // Checkpoint payloads (~30 MB GET/SET) share a socket with artifact
+        // commands when they use the artifact pool. Give checkpoints their own
+        // multiplexed connection so large writes/reads cannot head-of-line block
+        // triple, presignature and Midnight DUST traffic.
+        let checkpoint_pool = redis_pool(storage_options.redis_url.clone())?;
         let redis_pool = redis_pool(storage_options.redis_url.clone())?;
         let triple_storage = TriplePair::storage(&redis_pool, account_id);
         let presignature_storage = Presignature::storage(&redis_pool, account_id);
         let backlog = Backlog::persisted(CheckpointStorage::Redis(
-            redis_pool.clone(),
+            checkpoint_pool,
             account_id.clone(),
         ));
         let midnight_dust = Arc::new(MidnightDustStorage::new(redis_pool, account_id));

@@ -205,7 +205,7 @@ impl RedisHarness {
         let storages: Vec<_> = self
             .participants
             .iter()
-            .map(|p| CheckpointStorage::Redis(p.pool.clone(), p.account_id.clone()))
+            .map(|p| CheckpointStorage::Redis(p.checkpoint_pool.clone(), p.account_id.clone()))
             .collect();
         futures::future::try_join_all(storages.iter().map(|s| s.persist(&checkpoint))).await?;
 
@@ -1419,8 +1419,12 @@ impl RedisHarness {
             .map(|contender_idx| {
                 // Independent handles intentionally force a synthetic same-key take race.
                 let contender = Participant::from(contender_idx as u32);
-                let p_contender =
-                    SimulatedParticipant::new(&owner.pool, &owner.account_id, contender);
+                let p_contender = SimulatedParticipant::new(
+                    &owner.pool,
+                    &owner.checkpoint_pool,
+                    &owner.account_id,
+                    contender,
+                );
                 let ids = target_ids.clone();
                 tokio::spawn(p_contender.race_take_conflicted(
                     gate.barrier(),

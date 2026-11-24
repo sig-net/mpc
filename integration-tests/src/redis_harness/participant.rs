@@ -75,19 +75,26 @@ pub struct SimulatedParticipant {
     pub participant: Participant,
     pub account_id: AccountId,
     pub pool: Pool,
+    pub checkpoint_pool: Pool,
     pub triples: TripleStorage,
     pub presignatures: PresignatureStorage,
 }
 
 impl SimulatedParticipant {
     /// Create a new participant with independent in-memory storage handles.
-    pub fn new(pool: &Pool, account_id: &AccountId, participant: Participant) -> Self {
+    pub fn new(
+        pool: &Pool,
+        checkpoint_pool: &Pool,
+        account_id: &AccountId,
+        participant: Participant,
+    ) -> Self {
         let triples = TriplePair::ready_storage(pool, account_id, participant);
         let presignatures = Presignature::ready_storage(pool, account_id, participant);
         Self {
             participant,
             account_id: account_id.clone(),
             pool: pool.clone(),
+            checkpoint_pool: checkpoint_pool.clone(),
             triples,
             presignatures,
         }

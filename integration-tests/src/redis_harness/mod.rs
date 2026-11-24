@@ -78,7 +78,19 @@ impl RedisHarness {
                 config.max_pool_size,
                 config.pool_timeout,
             )?;
-            participants.push(SimulatedParticipant::new(&pool, &account_id, participant));
+            // Checkpoint GET/SET traffic uses a separate multiplexed connection
+            // from artifact commands, matching the production node.
+            let checkpoint_pool = RedisDiagnosticsClient::build_pool(
+                &redis_url,
+                config.max_pool_size,
+                config.pool_timeout,
+            )?;
+            participants.push(SimulatedParticipant::new(
+                &pool,
+                &checkpoint_pool,
+                &account_id,
+                participant,
+            ));
         }
 
         Ok(Self {
