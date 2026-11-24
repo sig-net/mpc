@@ -13,7 +13,7 @@ use midnight_storage::DefaultDB;
 /// start, a forget or a replay from the first event is kept at once.
 pub const CHECKPOINT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(300);
 /// How long loading or keeping a checkpoint may take.
-pub const CHECKPOINT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+pub(super) const CHECKPOINT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 const CHECKPOINT_MAGIC: &[u8; 16] = b"mpc-dust-ckpt-v1";
 
 /// Where the funding wallet keeps a checkpoint of its replay across restarts. The
@@ -30,14 +30,14 @@ pub trait DustCheckpointStore: Send + Sync {
 /// event at `applied`, which `super::sync::event_hash` checks.
 #[derive(Clone)]
 pub struct Checkpoint {
-    pub owner: [u8; 32],
-    pub applied: u64,
-    pub event_hash: [u8; 32],
-    pub local: DustLocalState<DefaultDB>,
+    pub(super) owner: [u8; 32],
+    pub(super) applied: u64,
+    pub(super) event_hash: [u8; 32],
+    pub(super) local: DustLocalState<DefaultDB>,
 }
 
 impl Checkpoint {
-    pub fn encode(&self) -> Vec<u8> {
+    pub(super) fn encode(&self) -> Vec<u8> {
         let mut bytes = Vec::new();
         bytes.extend_from_slice(CHECKPOINT_MAGIC);
         bytes.extend_from_slice(&self.owner);
@@ -48,7 +48,7 @@ impl Checkpoint {
         bytes
     }
 
-    pub fn decode(bytes: &[u8]) -> anyhow::Result<Self> {
+    pub(super) fn decode(bytes: &[u8]) -> anyhow::Result<Self> {
         let rest = bytes
             .strip_prefix(CHECKPOINT_MAGIC.as_slice())
             .context("not a DUST checkpoint of this format")?;

@@ -70,30 +70,30 @@ pub fn is_ledger_8_event(raw: &[u8]) -> bool {
 struct Restarted;
 
 pub struct Synced {
-    pub local: DustLocalState<DefaultDB>,
+    pub(super) local: DustLocalState<DefaultDB>,
     /// The id of the newest event replayed, `None` before the first.
-    pub applied: Option<u64>,
+    pub(super) applied: Option<u64>,
     /// The hash of event `applied`, as the indexer served it.
-    pub applied_hash: Option<[u8; 32]>,
+    pub(super) applied_hash: Option<[u8; 32]>,
     /// The newest event id the indexer has reported.
-    pub max_id: u64,
+    pub(super) max_id: u64,
     /// The newest event id the indexer named when asked apart from the subscription.
-    pub named: u64,
+    pub(super) named: u64,
     /// Whether a subscription is currently delivering.
-    pub connected: bool,
+    pub(super) connected: bool,
     /// The event a restored checkpoint expects the next subscription to start with.
-    pub resume: Option<(u64, [u8; 32])>,
+    pub(super) resume: Option<(u64, [u8; 32])>,
     /// Whether this state descends from a checkpoint rather than the first event.
-    pub restored: bool,
+    pub(super) restored: bool,
     /// A failed submit asked for the replay to start over from the latest checkpoint.
-    pub reload: bool,
+    pub(super) reload: bool,
     /// A wait for the replay asked for the live subscription to be replaced.
-    pub resubscribe: bool,
-    pub reservations: Vec<Reservation>,
+    pub(super) resubscribe: bool,
+    pub(super) reservations: Vec<Reservation>,
 }
 
 impl Synced {
-    pub fn fresh() -> Self {
+    pub(super) fn fresh() -> Self {
         Self {
             local: DustLocalState::new(INITIAL_PARAMETERS.dust),
             applied: None,
@@ -110,69 +110,69 @@ impl Synced {
     }
 
     /// Back to the first event, keeping the reservations of submits in flight.
-    pub fn restart(&mut self) {
+    pub(super) fn restart(&mut self) {
         let reservations = std::mem::take(&mut self.reservations);
         *self = Self::fresh();
         self.reservations = reservations;
     }
 
     /// Live, caught up, and not about to start over after a failed submit.
-    pub fn is_ready(&self) -> bool {
+    pub(super) fn is_ready(&self) -> bool {
         self.connected && self.is_caught_up() && !self.reload
     }
 
     /// Replayed up to the newest event the indexer reported or named, live or not.
-    pub fn is_caught_up(&self) -> bool {
+    pub(super) fn is_caught_up(&self) -> bool {
         self.applied.is_some_and(|applied| applied >= self.newest())
     }
 
     /// The newest event id the indexer has reported or named.
-    pub fn newest(&self) -> u64 {
+    pub(super) fn newest(&self) -> u64 {
         self.max_id.max(self.named)
     }
 }
 
 pub struct Shared {
-    pub key: DustSecretKey,
-    pub owner: [u8; 32],
-    pub state: Mutex<Synced>,
-    pub progress: watch::Sender<()>,
-    pub snapshots: Mutex<Snapshots>,
+    pub(super) key: DustSecretKey,
+    pub(super) owner: [u8; 32],
+    pub(super) state: Mutex<Synced>,
+    pub(super) progress: watch::Sender<()>,
+    pub(super) snapshots: Mutex<Snapshots>,
     /// Wakes the subscription to act on `Synced::reload` or `Synced::resubscribe`.
-    pub wake: tokio::sync::Notify,
-    pub store: Option<Arc<dyn DustCheckpointStore>>,
+    pub(super) wake: tokio::sync::Notify,
+    pub(super) store: Option<Arc<dyn DustCheckpointStore>>,
     /// Where each replay restart from the first event is reported, by cause.
-    pub telemetry: Arc<dyn PublisherTelemetry>,
+    pub(super) telemetry: Arc<dyn PublisherTelemetry>,
     /// Held while a checkpoint is kept and while a forgotten one is cleared, so a clear
     /// is sent only once any save that started before its forget has ended, as the
     /// intent builder's flow lock ordered its snapshot saves and clears.
-    pub storing: tokio::sync::Mutex<()>,
+    pub(super) storing: tokio::sync::Mutex<()>,
 }
 
 /// The latest checkpoint and the strikes against it, which outlive any one replay, as
 /// the intent builder's wallet snapshots did.
 #[derive(Default)]
-pub struct Snapshots {
+pub(super) struct Snapshots {
     /// The newest checkpoint kept or restored, in memory even when the store refused it.
-    pub latest: Option<Checkpoint>,
+    pub(super) latest: Option<Checkpoint>,
     /// When a checkpoint was last kept, and of which event: the intent builder's
     /// `kept_at`. Only keeping a checkpoint sets it; a forget or a replay started over
     /// from the first event clears it, and a reload leaves it.
-    pub kept: Option<(Instant, u64)>,
+    pub(super) kept: Option<(Instant, u64)>,
     /// `StateConflict` submits of a restored wallet since the last `landed` report;
     /// a failure of another class does not clear them — the forgetting strike and
     /// a replay started over from the first event do.
-    pub strikes: u32,
+    pub(super) strikes: u32,
     /// The first stuck failure since the last landing or drop; other classes
     /// neither start nor reset it — they are no recovery.
-    pub stuck_since: Option<Instant>,
+    pub(super) stuck_since: Option<Instant>,
     /// The stored checkpoint is being cleared; nothing is kept until it is.
-    pub forget: bool,
+    pub(super) forget: bool,
 }
 
 impl Snapshots {
     /// Discards the checkpoint and its verdicts; `forget` clears the stored one.
-    pub fn discard(&mut self) {
+    pub(super) fn discard(&mut self) {
         self.latest = None;
         self.kept = None;
         self.strikes = 0;
@@ -182,20 +182,20 @@ impl Snapshots {
 }
 
 impl Shared {
-    pub fn snapshots(&self) -> std::sync::MutexGuard<'_, Snapshots> {
+    pub(super) fn snapshots(&self) -> std::sync::MutexGuard<'_, Snapshots> {
         self.snapshots
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     /// Never panics on a poisoned lock: nothing inside it is left half-written.
-    pub fn state(&self) -> std::sync::MutexGuard<'_, Synced> {
+    pub(super) fn state(&self) -> std::sync::MutexGuard<'_, Synced> {
         self.state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
-    pub fn replay_restarted(&self, cause: &str) {
+    pub(super) fn replay_restarted(&self, cause: &str) {
         self.telemetry.funding_wallet_replay_restarted(cause);
     }
 }
@@ -219,7 +219,7 @@ enum Ended {
 /// the replayed state can no longer absorb what the indexer sends, backing off while
 /// that keeps happening before the replay catches up, or while the indexer refuses to
 /// open a subscription at all.
-pub async fn follow(shared: Arc<Shared>, source: Arc<dyn DustEventSource>) {
+pub(super) async fn follow(shared: Arc<Shared>, source: Arc<dyn DustEventSource>) {
     if let Some(store) = &shared.store {
         restore(&shared, store.as_ref()).await;
     }
@@ -417,7 +417,7 @@ pub fn start_over(shared: &Shared, cause: &str) {
 }
 
 /// Clears the stored checkpoint a forget dropped from memory.
-pub async fn clear(store: &dyn DustCheckpointStore) {
+pub(super) async fn clear(store: &dyn DustCheckpointStore) {
     match tokio::time::timeout(CHECKPOINT_TIMEOUT, store.clear()).await {
         Ok(Ok(())) => {}
         Ok(Err(error)) => tracing::warn!(
@@ -596,6 +596,6 @@ pub fn apply(shared: &Shared, batch: Vec<anyhow::Result<DustEventUpdate>>) -> an
     failure.map_or(Ok(()), Err)
 }
 
-pub fn now() -> Timestamp {
+pub(super) fn now() -> Timestamp {
     Timestamp::from_secs(mpc_utils::time::current_unix_timestamp())
 }

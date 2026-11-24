@@ -95,21 +95,21 @@ pub trait FeePayer: Send + Sync {
 
 /// One fee payment, not yet proven.
 pub struct FeePlan {
-    pub tx: UnprovenTx,
-    pub spent: Vec<DustNullifier>,
-    pub fee: u128,
+    pub(crate) tx: UnprovenTx,
+    pub(crate) spent: Vec<DustNullifier>,
+    pub(crate) fee: u128,
     /// The spendable DUST it was planned from, in SPECK.
-    pub available: u128,
+    pub(crate) available: u128,
 }
 
 pub struct Reservation {
-    pub spent: Vec<DustNullifier>,
-    pub until: Timestamp,
+    pub(super) spent: Vec<DustNullifier>,
+    pub(super) until: Timestamp,
 }
 
 /// The funding wallet, kept in sync in the background for as long as it lives.
 pub struct FundingWallet {
-    pub shared: Arc<Shared>,
+    pub(super) shared: Arc<Shared>,
     source: Arc<dyn DustEventSource>,
     _sync: AbortOnDrop,
 }
