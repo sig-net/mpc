@@ -3,7 +3,7 @@
 use crate::config::MidnightConfig;
 use crate::emissions::ContractCallEmissions;
 use crate::reader::Node;
-use crate::rpc::{BlockRef, MidnightRpc};
+use crate::rpc::reader::{BlockRef, MidnightRpc};
 use crate::state::decode_contract_state;
 use crate::types::{BlockHash, LedgerTxHash, MidnightAddress};
 

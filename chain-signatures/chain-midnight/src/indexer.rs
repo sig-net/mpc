@@ -12,7 +12,8 @@ use crate::reader::{
     resolve_verified_record, signet_field_node_by_path, unpack_notification_v1, Resolved,
 };
 use crate::records::SignBidirectionalEventNotification;
-use crate::rpc::{is_oversized_contract_state, BlockRef};
+use crate::rpc::reader::BlockRef;
+use crate::rpc::reads::is_oversized_contract_state;
 use crate::source::{BlockEmissions, ChainSource, ContractState, LiveSource};
 use crate::types::BlockHash;
 use crate::types::MidnightAddress;
@@ -1071,7 +1072,7 @@ mod tests {
         ) -> anyhow::Result<ContractState> {
             let key = (*address, *at_hash);
             if self.oversized_states.contains(&key) {
-                return Err(crate::rpc::oversized_contract_state(
+                return Err(crate::rpc::reads::oversized_contract_state(
                     "fixture oversized contract state",
                 ));
             }

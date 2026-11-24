@@ -33,7 +33,8 @@ use tokio::time::Instant;
 use crate::funding::{dust_deficit, FeePayer, SealedTx, UnprovenTx};
 use crate::intent::{IntentRequest, RespondCircuit, Submitted};
 use crate::publisher::IntentClient;
-use crate::rpc::{Landing, PinnedReads, SubmitRefusal};
+use crate::rpc::publisher::PinnedReads;
+use crate::rpc::submit::{Landing, SubmitRefusal};
 use crate::submit_error::SubmitError;
 use crate::types::{BlockHash, LedgerTxHash, NetworkId};
 
@@ -2270,7 +2271,7 @@ mod live {
     use crate::config::{MidnightConfig, PublisherConfig};
     use crate::dust_feed::IndexerDustEvents;
     use crate::funding::{dust_secret_key, parse_seed, FundingWallet};
-    use crate::rpc::MidnightPublisherRpc;
+    use crate::rpc::publisher::MidnightPublisherRpc;
     use crate::types::MidnightAddress;
     use minocrab_publisher::{Attestation, EcdsaSignature};
     use mpc_chain_integration_core::NoopPublisherTelemetry;
