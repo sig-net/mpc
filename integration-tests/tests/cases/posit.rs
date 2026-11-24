@@ -71,16 +71,6 @@ async fn test_generation_posits_check_storage_only_on_propose() -> anyhow::Resul
         PositRejectReason::InvalidRequest,
     )];
     let start = || PositAction::Start(vec![node0, node1]);
-    // ACCEPT and REJECT repeat after the START, as late replies.
-    let non_propose_actions = || {
-        vec![
-            PositAction::Accept,
-            PositAction::RejectWithReason(PositRejectReason::AlreadyGenerating),
-            start(),
-            PositAction::Accept,
-            PositAction::RejectWithReason(PositRejectReason::AlreadyGenerating),
-        ]
-    };
 
     // Triple: a PROPOSE for an unknown id is accepted and opens an entry.
     let triple_id = 1;
@@ -99,20 +89,22 @@ async fn test_generation_posits_check_storage_only_on_propose() -> anyhow::Resul
         .process_posit_for_test(triple_id, node1, PositAction::Propose, timeout, limits)
         .await;
     assert_eq!(drain_posit_replies(&mut outbox), already_stored);
-    // The other actions draw no reply. The START consumes the entry, but
-    // generation start refuses the stored id.
-    for action in non_propose_actions() {
+    // Late replies (ACCEPT and REJECT) draw no reply.
+    for action in [
+        PositAction::Accept,
+        PositAction::RejectWithReason(PositRejectReason::AlreadyGenerating),
+    ] {
         triple_spawner
             .process_posit_for_test(triple_id, node1, action, timeout, limits)
             .await;
     }
     assert_eq!(drain_posit_replies(&mut outbox), vec![]);
-    assert_eq!(triple_spawner.len_ongoing(), 0);
-    // A START without an entry is refused.
+    // A START cannot restart generation of a stored artifact; without an entry it is refused.
     triple_spawner
         .process_posit_for_test(triple_id, node1, start(), timeout, limits)
         .await;
     assert_eq!(drain_posit_replies(&mut outbox), no_entry);
+    assert_eq!(triple_spawner.len_ongoing(), 0);
 
     // Presignature: same steps. The PROPOSE also needs the triple pair held.
     let pair_id = 7;
@@ -151,17 +143,22 @@ async fn test_generation_posits_check_storage_only_on_propose() -> anyhow::Resul
         )
         .await;
     assert_eq!(drain_posit_replies(&mut outbox), already_stored);
-    for action in non_propose_actions() {
+    // Late replies (ACCEPT and REJECT) draw no reply.
+    for action in [
+        PositAction::Accept,
+        PositAction::RejectWithReason(PositRejectReason::AlreadyGenerating),
+    ] {
         presignature_spawner
             .process_posit_for_test(presignature_id, node1, action, timeout, limits)
             .await;
     }
     assert_eq!(drain_posit_replies(&mut outbox), vec![]);
-    assert_eq!(presignature_spawner.len_ongoing(), 0);
+    // A START cannot restart generation of a stored artifact; without an entry it is refused.
     presignature_spawner
         .process_posit_for_test(presignature_id, node1, start(), timeout, limits)
         .await;
     assert_eq!(drain_posit_replies(&mut outbox), no_entry);
+    assert_eq!(presignature_spawner.len_ongoing(), 0);
 
     Ok(())
 }
