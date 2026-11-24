@@ -723,7 +723,7 @@ pub struct InjectedFailures {
 #[cfg(test)]
 fn take_injected_failure(remaining: &std::sync::atomic::AtomicUsize) -> bool {
     remaining
-        .fetch_update(
+        .try_update(
             std::sync::atomic::Ordering::SeqCst,
             std::sync::atomic::Ordering::SeqCst,
             |remaining| remaining.checked_sub(1),
