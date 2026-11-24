@@ -14,7 +14,7 @@ Current `mpc-node` capabilities and settings ownership for every
   includes contracts/programs, target networks, and checkpoint cadence.
 - **L — local operational configuration:** process connectivity, credentials,
   enablement, storage, resources, and timing policy.
-- **†:** **D** value currently supplied per node through CLI/env.
+- After **D/L**, **· CLI/env** or **· constant** gives today's source.
 
 ## Consumer paths
 
@@ -36,14 +36,14 @@ Current `mpc-node` capabilities and settings ownership for every
 
 | Chain | Source events | Response publisher | Target preparation | Target watcher | Network-wide settings | Local settings |
 |---|---|---|---|---|---|---|
-| **NEAR** | **Test-only plain:** `mpc_chain_near::run` → sign queue, outside C1. **Production: unsupported.** | **Always:** `NearClient` → C4; currently serves the test-only source. | **Unsupported:** C2 rejects. | **Unsupported.** | **S:** `near:mainnet`; no checkpoints. **D:** `mpc_contract_id`†. | **L:** RPC, account ID/keys. |
-| **Ethereum** | **Optional plain:** `EthereumIndexer` → C1. | **Optional:** `EthClient` → C4; batches responses; shares `EthConfig` with indexing. | **Supported:** unsigned validation and `sign_and_hash_ethereum` → C2. | **Optional:** `ExecutionWatcher` inside `EthereumIndexer` → C1/C3; watches every source's Ethereum targets. | **S:** `eip155:1` target identity and signing semantics. **D:** `contract_address`†, `EthNetwork`/EIP-155 chain ID†, checkpoints every 20 blocks. | **L:** execution RPC, response key, enablement, RPC/gas/publisher/indexer tuning. |
-| **Solana** | **Optional plain + bidirectional:** `SolanaIndexer` → C1. | **Optional plain + bidirectional:** `SolanaClient` → C4. | **Unsupported:** C2 rejects. | **Unsupported.** | **S:** fixed mainnet identity; Borsh responses. **D:** `program_address`†, checkpoints every 1200 slots. | **L:** RPC, payer key, enablement, polling/retry/gating. |
+| **NEAR** | **Test-only plain:** `mpc_chain_near::run` → sign queue, outside C1. **Production: unsupported.** | **Always:** `NearClient` → C4; currently serves the test-only source. | **Unsupported:** C2 rejects. | **Unsupported.** | **S:** `near:mainnet`; no checkpoints. **D · CLI/env:** `mpc_contract_id`. | **L · CLI/env:** RPC, account ID/keys. |
+| **Ethereum** | **Optional plain:** `EthereumIndexer` → C1. | **Optional:** `EthClient` → C4; batches responses; shares `EthConfig` with indexing. | **Supported:** unsigned validation and `sign_and_hash_ethereum` → C2. | **Optional:** `ExecutionWatcher` inside `EthereumIndexer` → C1/C3; watches every source's Ethereum targets. | **S:** `eip155:1` target identity and signing semantics. **D · CLI/env:** `contract_address`, `EthNetwork`/EIP-155 chain ID. **D · constant:** checkpoints every 20 blocks. | **L · CLI/env:** execution RPC, response key, enablement. **L · constant:** RPC/gas/publisher/indexer tuning. |
+| **Solana** | **Optional plain + bidirectional:** `SolanaIndexer` → C1. | **Optional plain + bidirectional:** `SolanaClient` → C4. | **Unsupported:** C2 rejects. | **Unsupported.** | **S:** fixed mainnet identity; Borsh responses. **D · CLI/env:** `program_address`. **D · constant:** checkpoints every 1200 slots. | **L · CLI/env:** RPC, payer key, enablement. **L · constant:** polling/retry/gating. |
 | **Bitcoin** | **Unsupported:** no indexer/wiring. | **Unsupported:** no registration. | **Unsupported:** C2 rejects. | **Unsupported.** | **S:** identity and `ChainConfig` defaults only; no runtime capability implied. **D:** none. | **L:** none; no chain config. |
-| **Hydration** | **Optional plain + bidirectional:** `HydrationIndexer` → C1. | **Optional plain + bidirectional:** `HydrationClient` → C4. | **Unsupported:** C2 rejects. | **Unsupported.** | **S:** `polkadot:2034`; Borsh responses. **D:** checkpoints every 240 blocks; no separate network/contract setting. | **L:** WebSocket RPC, signer URI, enablement. RPC implicitly selects the network. |
-| **Canton** | **Optional bidirectional only:** `CantonIndexer` → C1. | **Optional bidirectional only:** `CantonClient` → C4; rejects plain `Sign`. | **Unsupported:** C2 rejects. | **Unsupported.** | **S:** synthetic `canton:global`; ABI responses. **D:** `signer_contract_id`†, `signer_template_id`†, checkpoints every 50 offsets. | **L:** HTTP/WS APIs, OIDC credentials, ledger user, `party_id`, enablement. |
-| **Midnight** | **Optional bidirectional only:** `MidnightIndexer` → C1 after the root key is available. | **Optional bidirectional only:** `RecoveringMidnightPublisher`/`MidnightPublisher` → C4; rejects plain `Sign`. | **Unsupported:** C2 rejects. | **Unsupported.** | **S:** `midnight:mainnet`; Fab responses, attestation hashing, `Unviable`. **D:** `central_address`†, `responder_address`†, checkpoints every 120 blocks. | **L:** node/indexer URLs, funding seed, DUST store, output storage, artifacts, timing/retry policy. |
-| **Tron** | **Unsupported:** no source indexer; response hashing rejects Tron sources. | **Unsupported:** no registration. | **Supported:** raw validation, SHA-256 txID, owner/expiry checks → C2. | **Optional target-only:** `TronWatcher` → C1/C3; watches every source's Tron targets. | **S:** `tron:mainnet` target identity and transaction/expiry semantics; no checkpoints. **D:** no separate network setting. | **L:** endpoint, API key, watcher enablement, polling/timeout/retry. Endpoint implicitly selects the network. |
+| **Hydration** | **Optional plain + bidirectional:** `HydrationIndexer` → C1. | **Optional plain + bidirectional:** `HydrationClient` → C4. | **Unsupported:** C2 rejects. | **Unsupported.** | **S:** `polkadot:2034`; Borsh responses. **D · constant:** checkpoints every 240 blocks; no separate network/contract setting. | **L · CLI/env:** WebSocket RPC, signer URI, enablement. RPC implicitly selects the network. |
+| **Canton** | **Optional bidirectional only:** `CantonIndexer` → C1. | **Optional bidirectional only:** `CantonClient` → C4; rejects plain `Sign`. | **Unsupported:** C2 rejects. | **Unsupported.** | **S:** synthetic `canton:global`; ABI responses. **D · CLI/env:** `signer_contract_id`, `signer_template_id`. **D · constant:** checkpoints every 50 offsets. | **L · CLI/env:** HTTP/WS APIs, OIDC credentials, ledger user, `party_id`, enablement. |
+| **Midnight** | **Optional bidirectional only:** `MidnightIndexer` → C1 after the root key is available. | **Optional bidirectional only:** `RecoveringMidnightPublisher`/`MidnightPublisher` → C4; rejects plain `Sign`. | **Unsupported:** C2 rejects. | **Unsupported.** | **S:** `midnight:mainnet`; Fab responses, attestation hashing, `Unviable`. **D · CLI/env:** `central_address`, `responder_address`. **D · constant:** checkpoints every 120 blocks. | **L · CLI/env:** node/indexer URLs, funding seed, DUST/output storage. **L · constant:** production artifact paths, timing/retry policy. |
+| **Tron** | **Unsupported:** no source indexer; response hashing rejects Tron sources. | **Unsupported:** no registration. | **Supported:** raw validation, SHA-256 txID, owner/expiry checks → C2. | **Optional target-only:** `TronWatcher` → C1/C3; watches every source's Tron targets. | **S:** `tron:mainnet` target identity and transaction/expiry semantics; no checkpoints. **D:** no separate network setting. | **L · CLI/env:** endpoint, API key, watcher enablement, polling. **L · constant:** timeout/retry policy. Endpoint implicitly selects the network. |
 
 - Ethereum, Solana, Hydration, Canton, and Midnight share one optional config
   between source indexing and publishing; the roles cannot be enabled separately.
@@ -55,14 +55,15 @@ Current `mpc-node` capabilities and settings ownership for every
 
 ## Current ambiguities
 
-- **D values use local inputs:** Ethereum contract, Solana program, Midnight
-  central/responder addresses, Canton signer identifiers, and NEAR MPC contract.
-  Nodes can select different request universes or response destinations.
-  Canton `party_id` remains node-local.
+- **D · CLI/env values can diverge:** Ethereum contract, Solana program,
+  Midnight central/responder addresses, Canton signer identifiers, and NEAR MPC
+  contract. Nodes can select different request universes or response
+  destinations. Canton `party_id` remains node-local.
 - **`ChainConfig` mixes categories:** response encoding, target support, and
-  `Unviable` support are **S**; `checkpoint_interval` is **D**; finality,
-  observation, response, and stall timings act as **L** supervision, monitoring,
-  and failover policy despite encoding network-derived facts.
+  `Unviable` support are **S**; `checkpoint_interval` is **D · constant**;
+  finality, observation, response, and stall timings are **L · constant**
+  supervision, monitoring, and failover policy despite encoding network-derived
+  facts.
 - **Ethereum has two network identities:** CAIP-2 is always `eip155:1`, while
   `EthNetwork` selects Mainnet, Sepolia, or Anvil. Admission separately compares
   the transaction's EIP-155 chain ID with the configured network. That choice is
