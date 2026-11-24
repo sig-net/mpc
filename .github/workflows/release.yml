@@ -1,0 +1,113 @@
+name: Release Automation and Tag Validation
+
+on:
+  push:
+    branches:
+      - develop
+      - testnet
+      - mainnet
+    tags:
+      - '[0-9]+.[0-9]+.[0-9]+*'
+
+permissions:
+  contents: write
+  pull-requests: read
+
+jobs:
+  validate-tag:
+    name: Validate Release Tag
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Verify Tag Format and Workspace Version Match
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          echo "Validating tag: $TAG"
+
+          # 1. Bare semver format validation (e.g. 1.23.0, no 'v' prefix)
+          if ! [[ "$TAG" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::Tag '$TAG' does not follow bare semver format (expected 'X.Y.Z', without 'v' prefix)."
+            exit 1
+          fi
+
+          # 2. Match Cargo.toml workspace version
+          CARGO_VER=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "mpc-node") | .version')
+          if [ "$TAG" != "$CARGO_VER" ]; then
+            echo "::error::Tag '$TAG' does not match Cargo.toml workspace package version '$CARGO_VER'."
+            exit 1
+          fi
+          echo "✅ Tag $TAG correctly matches Cargo.toml version $CARGO_VER."
+
+  release-on-merge:
+    name: Auto Tag and Create GitHub Release
+    if: github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/testnet' || github.ref == 'refs/heads/mainnet'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
+
+      - name: Check if commit is a release or hotfix
+        id: check_release
+        env:
+          COMMIT_MSG: ${{ github.event.head_commit.message }}
+        run: |
+          TITLE=$(echo "$COMMIT_MSG" | head -n 1)
+          echo "Head commit title: $TITLE"
+
+          IS_RELEASE=false
+          if [[ "$TITLE" =~ ^chore(\(release\))?:\ release\ [0-9]+\.[0-9]+\.[0-9]+ ]] || [[ "$TITLE" =~ ^fix(\(hotfix\))?:\ hotfix\ [0-9]+\.[0-9]+\.[0-9]+ ]]; then
+            IS_RELEASE=true
+          fi
+
+          VERSION=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "mpc-node") | .version')
+          echo "Workspace version: $VERSION"
+          echo "is_release=$IS_RELEASE" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Tag and Publish GitHub Release
+        if: steps.check_release.outputs.is_release == 'true'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.check_release.outputs.version }}
+        run: |
+          # 1. Tag commit if tag does not already exist
+          if git rev-parse "$TAG" >/dev/null 2>&1; then
+            echo "Tag $TAG already exists, skipping tag creation."
+          else
+            echo "Creating and pushing tag $TAG at commit ${{ github.sha }}..."
+            git tag -a "$TAG" -m "Release $TAG" "${{ github.sha }}"
+            git push origin "$TAG"
+          fi
+
+          # 2. Check if GitHub release already exists
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG already exists on GitHub."
+          else
+            echo "Finding PR associated with commit ${{ github.sha }}..."
+            PR_NUM=$(gh api "repos/${{ github.repository }}/commits/${{ github.sha }}/pulls" --jq '.[0].number' || true)
+
+            NOTES_FILE=$(mktemp)
+            if [ -n "$PR_NUM" ] && [ "$PR_NUM" != "null" ]; then
+              gh pr view "$PR_NUM" --json body --jq .body | \
+                sed -e '/^## Checklist/,$d' -e '/^- \[ \] /d' -e 's/^- \[[xX]\] /- /' > "$NOTES_FILE"
+            fi
+
+            # Find previous release tag for release notes range
+            PREV_TAG=$(git tag --sort=-v:refname --no-contains "${{ github.sha }}" | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | head -n 1 || true)
+
+            GEN_NOTES_ARGS=""
+            if [ -n "$PREV_TAG" ]; then
+              GEN_NOTES_ARGS="--notes-start-tag $PREV_TAG"
+            fi
+
+            echo "Publishing GitHub release $TAG..."
+            if [ -s "$NOTES_FILE" ]; then
+              gh release create "$TAG" --verify-tag --title "$TAG" --generate-notes $GEN_NOTES_ARGS --notes-file "$NOTES_FILE"
+            else
+              gh release create "$TAG" --verify-tag --title "$TAG" --generate-notes $GEN_NOTES_ARGS
+            fi
+            rm -f "$NOTES_FILE"
+          fi

@@ -41,7 +41,16 @@ Code moves downstream only.
 
 We use [semantic versioning](https://semver.org/). The version is `version` under `[workspace.package]` in the root `Cargo.toml`. Tags are the bare version, e.g. `1.21.0`.
 
-Every tag has a GitHub release. Its notes are the PR description up to the Checklist, followed by the list of PRs merged since the previous version A.B.C, which GitHub generates. Right after the PR merges:
+Every tag has a GitHub release. Its notes are the PR description up to the Checklist, followed by the list of PRs merged since the previous version A.B.C, which GitHub generates.
+
+When a release PR (`chore: release X.Y.Z`) or hotfix PR (`fix: hotfix X.Y.Z`) is merged, the **Release Automation workflow** (`.github/workflows/release.yml`) automatically:
+1. Tags the squashed commit with the bare semver tag `X.Y.Z`.
+2. Generates the release notes from the PR description and merged commits since the previous release.
+3. Publishes the GitHub release.
+
+All pushed tags are validated in CI to ensure they adhere to bare semver format (without a `v` prefix) and match the workspace `Cargo.toml` package version.
+
+If manual intervention or fallback is required right after the PR merges:
 
 ```sh
 git tag X.Y.Z <commit> && git push origin X.Y.Z
@@ -82,40 +91,48 @@ Every second Tuesday is a **release day**. On it, in this order:
 
 ### Step 1: Promote to mainnet
 
-1. Push a `promote/X.Y.Z-mainnet` branch at the `testnet` commit that finished the soak:
+1. Promote using the `just` recipe:
+   ```sh
+   just promote-mainnet X.Y.Z
+   ```
+   Or perform the steps manually:
    ```sh
    git fetch origin
    git switch -c promote/X.Y.Z-mainnet origin/testnet
    git push origin promote/X.Y.Z-mainnet
-   ```
-2. Open a PR from `promote/X.Y.Z-mainnet` to `mainnet` and merge it with a merge commit:
-   ```sh
    gh pr create --base mainnet --title "chore: release X.Y.Z to mainnet" --body "Promotes X.Y.Z to mainnet after N days on testnet with no open regression issue. Release notes: https://github.com/sig-net/mpc/releases/tag/X.Y.Z"
    ```
    Never promote from `develop` or open the PR from `testnet` directly, so `mainnet` gets exactly what was soaked.
+2. Merge the promotion PR with a merge commit.
 
 ### Step 2: Cut the release
 
-1. Bump the version, run `cargo check` to update `Cargo.lock`, and open a PR against `develop` from the [release template](../.github/PULL_REQUEST_TEMPLATE/release.md):
+1. Cut the release branch and open the PR against `develop` using `just`:
+   ```sh
+   just release-cut X.Y.Z
+   ```
+   Or manually bump the version in `Cargo.toml`, run `cargo check` to update `Cargo.lock`, and open the PR:
    ```sh
    gh pr create --base develop --title "chore: release X.Y.Z" --body-file .github/PULL_REQUEST_TEMPLATE/release.md
    ```
-2. Complete the template and merge. The squash commit on `develop` is the **release commit**; the PR page shows its SHA.
-3. Tag the release commit and publish the GitHub release, see [Versioning](#versioning).
+2. Complete the template checklist and merge via the merge queue. The squash commit on `develop` is the **release commit**.
+3. CI automatically tags the commit and publishes the GitHub release (see [Versioning](#versioning)).
 
 ### Step 3: Promote to testnet
 
-1. Push a `promote/X.Y.Z` branch at the tag. Commits merged to `develop` after the release commit wait for the next release:
+1. Promote using the `just` recipe:
    ```sh
-   git fetch origin
+   just promote-testnet X.Y.Z
+   ```
+   Or perform the steps manually:
+   ```sh
+   git fetch origin --tags
    git switch -c promote/X.Y.Z X.Y.Z
    git push origin promote/X.Y.Z
-   ```
-2. Open a PR from `promote/X.Y.Z` to `testnet` and merge it with a merge commit:
-   ```sh
    gh pr create --base testnet --title "chore: release X.Y.Z to testnet" --body "Promotes X.Y.Z to testnet. Release notes: https://github.com/sig-net/mpc/releases/tag/X.Y.Z"
    ```
    Don't open it from `develop`: the PR would pick up anything merged to `develop` while it is open.
+2. Merge the promotion PR with a merge commit.
 
 ### Step 4: Soak
 
@@ -161,7 +178,7 @@ For example, `testnet` has 1.21.0:
    gh pr create --base testnet --title "fix: hotfix 1.21.1 to testnet" --body-file .github/PULL_REQUEST_TEMPLATE/hotfix.md
    ```
 5. Complete the template and merge it with a merge commit.
-6. Tag the merge commit and publish the GitHub release, see [Versioning](#versioning).
+6. CI automatically tags the merge commit and publishes the GitHub release (or use the fallback in [Versioning](#versioning)).
 
 If `mainnet` has the same bug and it cannot wait for the next release day, hotfix it too, as below.
 

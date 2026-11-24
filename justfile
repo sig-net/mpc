@@ -185,3 +185,36 @@ test-compat: (setup "")
 # Usage: just bench-redis [args] (e.g. just bench-redis, or just bench-redis "--rounds 2 --items 50" for quick CI)
 bench-redis args="":
     cargo run --release -p integration-tests --bin redis-bench -- {{args}}
+
+# Cut a release branch, update Cargo.toml & Cargo.lock, and open a PR against develop
+# Usage: just release-cut <version> (e.g. just release-cut 1.24.0)
+release-cut version:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    git fetch origin develop
+    git switch -c "release/{{version}}" origin/develop
+    sed -i.bak 's/^version = ".*"/version = "{{version}}"/' Cargo.toml && rm -f Cargo.toml.bak
+    cargo check --workspace
+    git commit -am "chore: release {{version}}"
+    git push -u origin "release/{{version}}"
+    gh pr create --base develop --title "chore: release {{version}}" --body-file .github/PULL_REQUEST_TEMPLATE/release.md
+
+# Promote a release tag to testnet
+# Usage: just promote-testnet <version> (e.g. just promote-testnet 1.23.0)
+promote-testnet version:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    git fetch origin --tags
+    git switch -c "promote/{{version}}" "{{version}}"
+    git push -u origin "promote/{{version}}"
+    gh pr create --base testnet --title "chore: release {{version}} to testnet" --body "Promotes {{version}} to testnet. Release notes: https://github.com/sig-net/mpc/releases/tag/{{version}}"
+
+# Promote soaked testnet release to mainnet
+# Usage: just promote-mainnet <version> (e.g. just promote-mainnet 1.23.0)
+promote-mainnet version:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    git fetch origin testnet
+    git switch -c "promote/{{version}}-mainnet" origin/testnet
+    git push -u origin "promote/{{version}}-mainnet"
+    gh pr create --base mainnet --title "chore: release {{version}} to mainnet" --body "Promotes {{version}} to mainnet after soak on testnet with no open regression issue. Release notes: https://github.com/sig-net/mpc/releases/tag/{{version}}"

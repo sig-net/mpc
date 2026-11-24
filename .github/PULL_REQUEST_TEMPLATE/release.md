@@ -28,4 +28,4 @@
 - [ ] The description and diff of every PR merged since A.B.C reviewed, and every breaking change listed above, including ones a PR's own section left out: `git log A.B.C..origin/develop --format=%s | grep -o '#[0-9]*)$' | tr -d ')'`
 - [ ] If Prod Compatibility Tests failed on this PR, Node–Node above says why
 
-<!-- After merging: tag, publish the release and promote to testnet, see doc/releasing.md. -->
+<!-- After merging: CI automatically tags and creates the release, then promote to testnet: `just promote-testnet X.Y.Z` (see doc/releasing.md). -->

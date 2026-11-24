@@ -31,4 +31,4 @@ Hotfix for A.B.C on `testnet|mainnet`.
   - [ ] restarts, because the node binary or the contract changed
   - [ ] continues, because only CI, tests, tooling or docs changed
 
-<!-- After merging: tag and publish the release, then hotfix the other branch if it has the bug, see doc/releasing.md. -->
+<!-- After merging: CI automatically tags and publishes the release (or use the fallback in doc/releasing.md), then hotfix the other branch if it has the bug. -->
