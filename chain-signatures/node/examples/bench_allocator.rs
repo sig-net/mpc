@@ -46,6 +46,46 @@ fn get_peak_rss_mb() -> f64 {
     0.0
 }
 
+fn get_current_rss_mb() -> f64 {
+    #[cfg(target_os = "linux")]
+    {
+        if let Ok(statm) = std::fs::read_to_string("/proc/self/statm") {
+            let mut parts = statm.split_whitespace();
+            if let (Some(_virt), Some(rss)) = (parts.next(), parts.next()) {
+                if let Ok(pages) = rss.parse::<u64>() {
+                    let page_size = unsafe {
+                        let sz = libc::sysconf(libc::_SC_PAGESIZE);
+                        if sz > 0 {
+                            sz as u64
+                        } else {
+                            4096u64
+                        }
+                    };
+                    return (pages * page_size) as f64 / (1024.0 * 1024.0);
+                }
+            }
+        }
+    }
+    #[cfg(target_os = "macos")]
+    #[allow(deprecated)]
+    unsafe {
+        let mut info = std::mem::zeroed::<libc::mach_task_basic_info>();
+        let mut count = (std::mem::size_of::<libc::mach_task_basic_info>()
+            / std::mem::size_of::<libc::natural_t>())
+            as libc::mach_msg_type_number_t;
+        if libc::task_info(
+            libc::mach_task_self(),
+            libc::MACH_TASK_BASIC_INFO,
+            &mut info as *mut _ as *mut libc::integer_t,
+            &mut count,
+        ) == libc::KERN_SUCCESS
+        {
+            return info.resident_size as f64 / (1024.0 * 1024.0);
+        }
+    }
+    get_peak_rss_mb()
+}
+
 #[derive(Clone)]
 #[allow(dead_code)]
 struct MessagePayload {
@@ -90,6 +130,7 @@ async fn main() {
 
     println!("Total cross-thread messages: {TOTAL_MESSAGES} ({NUM_TASKS} channels x {MESSAGES_PER_TASK} msgs)");
 
+    let initial_rss = get_current_rss_mb();
     let counter = Arc::new(AtomicUsize::new(0));
     let bytes_counter = Arc::new(AtomicUsize::new(0));
 
@@ -146,6 +187,13 @@ async fn main() {
     let throughput_msgs = total_msgs as f64 / elapsed.as_secs_f64();
     let throughput_mb = total_mb / elapsed.as_secs_f64();
     let peak_rss = get_peak_rss_mb();
+    let immediate_rss = get_current_rss_mb();
+
+    // Sleep for 2.0s to allow allocator active decay (1000ms configured on jemalloc) to purge dirty pages
+    tokio::time::sleep(std::time::Duration::from_millis(2000)).await;
+    let post_decay_rss = get_current_rss_mb();
+    let purged_mb = (immediate_rss - post_decay_rss).max(0.0);
+    let retained_vs_init = post_decay_rss - initial_rss;
 
     println!("------------------------------------------------------------");
     println!("Elapsed time:       {:.3}s", elapsed.as_secs_f64());
@@ -154,6 +202,13 @@ async fn main() {
         "Bandwidth:          {:.2} MB/sec ({:.2} MB total)",
         throughput_mb, total_mb
     );
-    println!("Peak RSS:           {:.2} MB", peak_rss);
+    println!("Initial RSS:        {:.2} MB", initial_rss);
+    println!("Peak RSS (high-wm): {:.2} MB", peak_rss);
+    println!("Immediate RSS:      {:.2} MB", immediate_rss);
+    println!("Post-decay RSS:     {:.2} MB (after 2s idle)", post_decay_rss);
+    println!(
+        "Purged back to OS:  {:.2} MB (retained above init: {:.2} MB)",
+        purged_mb, retained_vs_init
+    );
     println!("============================================================");
 }
