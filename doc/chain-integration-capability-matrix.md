@@ -8,10 +8,11 @@ Current `mpc-node` capabilities and settings ownership for every
 
 ## Settings
 
-- **S — static protocol semantics:** chain identity and deterministic admission,
-  derivation, signing, or response behavior.
+- **S — static protocol semantics:** [chain identity](account-derivation.md#chain-identification)
+  and deterministic admission, derivation, signing, or response behavior.
 - **D — deployment-profile value:** nodes in one deployment must agree;
-  includes contracts/programs, target networks, and checkpoint cadence.
+  includes contracts/programs, target networks, and [checkpoint
+  cadence](checkpoints.md#1-background).
 - **L — local operational configuration:** process connectivity, credentials,
   enablement, storage, resources, and timing policy.
 - After **D/L**, **· CLI/env** or **· constant** gives today's source.
@@ -47,6 +48,12 @@ Current `mpc-node` capabilities and settings ownership for every
 
 ## Matrix
 
+- [Plain sign requests](glossary.md#plain-sign-request), [bidirectional
+  requests](glossary.md#bidirectional-request), and
+  [`Unviable`](bidirectional-calls.md#2-vocabulary) use the protocol definitions.
+- [Bidirectional-calls §8](bidirectional-calls.md#8-implementation-status)
+  records current source/target role support.
+
 | Chain | Source events | Response publisher | Target preparation | Target watcher | Network-wide settings | Local settings |
 |---|---|---|---|---|---|---|
 | **NEAR** | **Test-only plain:** `mpc_chain_near::run` → sign queue, outside C1. **Production: unsupported.** | **Always:** `NearClient` → C4; currently serves the test-only source. | **Unsupported:** C2 rejects. | **Unsupported.** | **S:** `near:mainnet`; no checkpoints. **D · CLI/env:** `mpc_contract_id`. | **L · CLI/env:** NEAR node parameters. |
@@ -73,11 +80,13 @@ Current `mpc-node` capabilities and settings ownership for every
   contract. Nodes can select different request universes or response
   destinations. Canton `party_id` remains node-local.
 - **`ChainConfig` mixes categories:** response encoding, target support, and
-  `Unviable` support are **S**; `checkpoint_interval` is **D · constant**;
+  `Unviable` support are **S**; [`checkpoint_interval`](checkpoints.md#7-implementation-status)
+  is **D · constant**;
   finality, observation, response, and stall timings are **L · constant**
   supervision, monitoring, and failover policy despite encoding network-derived
   facts.
-- **Ethereum has two network identities:** CAIP-2 is always `eip155:1`, while
+- **Ethereum has two network identities:** [CAIP-2](account-derivation.md#chain-identification)
+  is always `eip155:1`, while
   `EthNetwork` selects Mainnet, Sepolia, or Anvil. Admission separately compares
   the transaction's EIP-155 chain ID with the configured network. That choice is
   propagated to every source; without Ethereum config, the check is skipped.
