@@ -40,9 +40,11 @@ use tokio::time::Instant;
 use crate::dust_feed::{DustEventSource, DustEventUpdate};
 use crate::submit_error::SubmitError;
 
-pub(crate) mod keys;
+mod checkpoint;
+mod keys;
 
-use keys::owner_of;
+pub use checkpoint::{Checkpoint, DustCheckpointStore, CHECKPOINT_INTERVAL, CHECKPOINT_TIMEOUT};
+pub use keys::{dust_secret_key, owner_of, parse_seed};
 
 /// A proven respond transaction, sealed: what the fee is paid for.
 pub(crate) type SealedTx = minocrab_publisher::intent::SealedTx<DefaultDB>;
@@ -64,12 +66,6 @@ const LEDGER_8_EVENT_HEADER: &[u8] = b"midnight:event[v9]:";
 const MAX_REFUSED_DELAY: Duration = Duration::from_secs(60);
 /// The longest backoff between replays that keep restarting from the first event.
 const MAX_RESTART_DELAY: Duration = Duration::from_secs(600);
-/// The least time between two checkpoints a caught-up replay keeps; the first after a
-/// start, a forget or a replay from the first event is kept at once.
-const CHECKPOINT_INTERVAL: Duration = Duration::from_secs(300);
-/// How long loading or keeping a checkpoint may take.
-const CHECKPOINT_TIMEOUT: Duration = Duration::from_secs(30);
-const CHECKPOINT_MAGIC: &[u8; 16] = b"mpc-dust-ckpt-v1";
 /// How long a resumed subscription may stay silent before the checkpoint is dropped:
 /// the indexer serves the checkpoint's own event first, from what it has stored.
 const RESUME_TIMEOUT: Duration = Duration::from_secs(60);
@@ -147,56 +143,6 @@ pub(crate) struct FeePlan {
 struct Reservation {
     spent: Vec<DustNullifier>,
     until: Timestamp,
-}
-
-/// Where the funding wallet keeps a checkpoint of its replay across restarts. The
-/// checkpoint holds the replayed DUST state, never the secret key.
-#[async_trait::async_trait]
-pub trait DustCheckpointStore: Send + Sync {
-    async fn load(&self) -> anyhow::Result<Option<Vec<u8>>>;
-    async fn save(&self, checkpoint: &[u8]) -> anyhow::Result<()>;
-    async fn clear(&self) -> anyhow::Result<()>;
-}
-
-/// The replayed state after event `applied`, for the key whose public key hashes to
-/// `owner`. A restart resumes from it only when the indexer still serves the same
-/// event at `applied`, which `event_hash` checks.
-#[derive(Clone)]
-pub(crate) struct Checkpoint {
-    pub(crate) owner: [u8; 32],
-    pub(crate) applied: u64,
-    pub(crate) event_hash: [u8; 32],
-    pub(crate) local: DustLocalState<DefaultDB>,
-}
-
-impl Checkpoint {
-    pub(crate) fn encode(&self) -> Vec<u8> {
-        let mut bytes = Vec::new();
-        bytes.extend_from_slice(CHECKPOINT_MAGIC);
-        bytes.extend_from_slice(&self.owner);
-        bytes.extend_from_slice(&self.applied.to_le_bytes());
-        bytes.extend_from_slice(&self.event_hash);
-        midnight_serialize::tagged_serialize(&self.local, &mut bytes)
-            .expect("serializing into a Vec cannot fail");
-        bytes
-    }
-
-    pub(crate) fn decode(bytes: &[u8]) -> anyhow::Result<Self> {
-        let rest = bytes
-            .strip_prefix(CHECKPOINT_MAGIC.as_slice())
-            .context("not a DUST checkpoint of this format")?;
-        anyhow::ensure!(rest.len() >= 72, "the DUST checkpoint is truncated");
-        let (owner, rest) = rest.split_at(32);
-        let (applied, rest) = rest.split_at(8);
-        let (event_hash, mut state) = rest.split_at(32);
-        Ok(Self {
-            owner: owner.try_into().expect("split at 32"),
-            applied: u64::from_le_bytes(applied.try_into().expect("split at 8")),
-            event_hash: event_hash.try_into().expect("split at 32"),
-            local: midnight_serialize::tagged_deserialize(&mut state)
-                .context("the checkpointed DUST state did not decode")?,
-        })
-    }
 }
 
 pub(crate) fn event_hash(raw: &[u8]) -> [u8; 32] {
@@ -1205,8 +1151,8 @@ fn fee_transaction(
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use super::*;
     use super::keys::{dust_secret_key, parse_seed};
+    use super::*;
     use crate::dust_feed::Indexed;
     use async_trait::async_trait;
     use futures_util::stream::BoxStream;
@@ -1221,10 +1167,9 @@ pub(crate) mod tests {
     /// Every DUST event of a local undeployed chain whose seed-0404… wallet was
     /// funded, registered and then paid three fees; see fixtures/README.md.
     fn fixture_updates() -> Vec<DustEventUpdate> {
-        let events: Vec<serde_json::Value> = serde_json::from_str(
-            include_str!("../../fixtures/dust-events-undeployed.json"),
-        )
-        .unwrap();
+        let events: Vec<serde_json::Value> =
+            serde_json::from_str(include_str!("../../fixtures/dust-events-undeployed.json"))
+                .unwrap();
         events
             .iter()
             .map(|event| DustEventUpdate {
@@ -4557,8 +4502,8 @@ pub(crate) mod tests {
 
 #[cfg(test)]
 mod live {
-    use super::*;
     use super::keys::dust_secret_key;
+    use super::*;
     use crate::dust_feed::IndexerDustEvents;
     use mpc_chain_integration_core::NoopPublisherTelemetry;
 

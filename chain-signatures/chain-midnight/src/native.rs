@@ -2269,8 +2269,7 @@ mod live {
     use super::*;
     use crate::config::{MidnightConfig, PublisherConfig};
     use crate::dust_feed::IndexerDustEvents;
-    use crate::funding::keys::{dust_secret_key, parse_seed};
-    use crate::funding::FundingWallet;
+    use crate::funding::{dust_secret_key, parse_seed, FundingWallet};
     use crate::rpc::MidnightPublisherRpc;
     use crate::types::MidnightAddress;
     use minocrab_publisher::{Attestation, EcdsaSignature};
