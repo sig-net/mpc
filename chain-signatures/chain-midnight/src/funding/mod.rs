@@ -40,6 +40,10 @@ use tokio::time::Instant;
 use crate::dust_feed::{DustEventSource, DustEventUpdate};
 use crate::submit_error::SubmitError;
 
+mod keys;
+
+pub(crate) use keys::{dust_secret_key, owner_of, parse_seed};
+
 /// A proven respond transaction, sealed: what the fee is paid for.
 pub(crate) type SealedTx = minocrab_publisher::intent::SealedTx<DefaultDB>;
 /// The fee-paying transaction, before its DUST spend proof.
@@ -81,54 +85,6 @@ const RESTORE_STUCK_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 /// the indexer names a newer event before it is replaced: a connection can stall
 /// without closing.
 const STALL_GRACE: Duration = Duration::from_secs(5);
-
-/// The DUST key of account 0 at index 0, derived the way the Midnight wallet SDK
-/// derives it from the same seed: BIP-32 `m/44'/2400'/0'/2/0`, then the ledger's
-/// `DustSecretKey::derive_secret_key` over that private key.
-pub(crate) fn dust_secret_key(seed: &[u8]) -> anyhow::Result<DustSecretKey> {
-    let path: bip32::DerivationPath = "m/44'/2400'/0'/2/0"
-        .parse()
-        .expect("the DUST role path is a valid derivation path");
-    let role = path
-        .iter()
-        .try_fold(master_key(seed)?, |key, child| key.derive_child(child))
-        .map_err(|error| anyhow::anyhow!("deriving the funding wallet's DUST role key: {error}"))?;
-    Ok(DustSecretKey::derive_secret_key(&role.to_bytes()))
-}
-
-/// The BIP-32 master key. `bip32::XPrv::new` takes only 16, 32 or 64 byte seeds, but
-/// BIP-32, the wallet SDK and the seed check allow any length from 16 to 64.
-fn master_key(seed: &[u8]) -> anyhow::Result<bip32::XPrv> {
-    use hmac::Mac as _;
-    let mut mac = hmac::Hmac::<sha2::Sha512>::new_from_slice(b"Bitcoin seed")
-        .expect("HMAC takes a key of any length");
-    mac.update(seed);
-    let digest = mac.finalize().into_bytes();
-    let (key, chain_code) = digest.split_at(32);
-    let mut key_bytes = [0u8; 33];
-    key_bytes[1..].copy_from_slice(key);
-    bip32::XPrv::try_from(bip32::ExtendedKey {
-        prefix: bip32::Prefix::XPRV,
-        attrs: bip32::ExtendedKeyAttrs {
-            depth: 0,
-            parent_fingerprint: [0; 4],
-            child_number: bip32::ChildNumber::default(),
-            chain_code: chain_code.try_into().expect("HMAC-SHA512 is 64 bytes"),
-        },
-        key_bytes,
-    })
-    .map_err(|error| anyhow::anyhow!("deriving the funding wallet's master key: {error}"))
-}
-
-/// Hex seed bytes, with or without `0x`: the format the configuration validates.
-pub(crate) fn parse_seed(seed: &str) -> anyhow::Result<Vec<u8>> {
-    let trimmed = seed.trim();
-    let bare = trimmed
-        .strip_prefix("0x")
-        .or_else(|| trimmed.strip_prefix("0X"))
-        .unwrap_or(trimmed);
-    hex::decode(bare).context("the funding seed is not hex")
-}
 
 /// What the publisher needs from the wallet. A trait so the publish path can be
 /// driven without an indexer.
@@ -241,15 +197,6 @@ impl Checkpoint {
                 .context("the checkpointed DUST state did not decode")?,
         })
     }
-}
-
-/// Which funding key a checkpoint belongs to: the hash of its public key.
-pub(crate) fn owner_of(key: &DustSecretKey) -> [u8; 32] {
-    let public = midnight_ledger_v9::dust::DustPublicKey::from(key.clone());
-    let mut bytes = Vec::new();
-    midnight_serialize::tagged_serialize(&public, &mut bytes)
-        .expect("serializing into a Vec cannot fail");
-    sha2::Sha256::digest(&bytes).into()
 }
 
 pub(crate) fn event_hash(raw: &[u8]) -> [u8; 32] {
@@ -1273,8 +1220,10 @@ pub(crate) mod tests {
     /// Every DUST event of a local undeployed chain whose seed-0404… wallet was
     /// funded, registered and then paid three fees; see fixtures/README.md.
     fn fixture_updates() -> Vec<DustEventUpdate> {
-        let events: Vec<serde_json::Value> =
-            serde_json::from_str(include_str!("../fixtures/dust-events-undeployed.json")).unwrap();
+        let events: Vec<serde_json::Value> = serde_json::from_str(
+            include_str!("../../fixtures/dust-events-undeployed.json"),
+        )
+        .unwrap();
         events
             .iter()
             .map(|event| DustEventUpdate {
@@ -1289,7 +1238,7 @@ pub(crate) mod tests {
     /// fixtures/README.md.
     fn ledger_8_updates() -> Vec<DustEventUpdate> {
         let events: Vec<serde_json::Value> = serde_json::from_str(include_str!(
-            "../fixtures/dust-events-preview-ledger-8.json"
+            "../../fixtures/dust-events-preview-ledger-8.json"
         ))
         .unwrap();
         events
