@@ -30,7 +30,7 @@ pub(crate) static PUBLISH_REFUSALS: LazyLock<CounterVec> = LazyLock::new(|| {
 /// Counts restarts, not drops: reported whenever one of the four causes below
 /// restarts the replay from the first event, including when the wallet never
 /// held a checkpoint; first-event replays by other paths report nothing. Only
-/// Midnight's wallet (`chain-midnight/src/funding.rs`) reports these today.
+/// Midnight's wallet (`chain-midnight/src/funding/`) reports these today.
 pub(crate) static FUNDING_WALLET_REPLAY_RESTARTS: LazyLock<CounterVec> = LazyLock::new(|| {
     try_create_counter_vec_with_node_account_id(
         "multichain_funding_wallet_replay_restarts",
