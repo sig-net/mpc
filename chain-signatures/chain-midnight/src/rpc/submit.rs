@@ -7,7 +7,7 @@ use subxt::ext::codec::DecodeAll as _;
 use subxt::ext::subxt_rpcs::{rpc_params, Error as RawRpcError};
 use subxt::utils::H256;
 
-use super::publisher::{recall, remember, MidnightPublisherRpc};
+use super::publisher::{recall, remember, MidnightPublisherRpc, PinnedReads};
 use super::statics::{TxApplied, TxPartialSuccess};
 use crate::types::{BlockHash, LedgerTxHash};
 
@@ -33,6 +33,28 @@ pub enum SubmitRefusal {
     /// The call is not in the node's runtime metadata: this node cannot carry
     /// the transaction, whatever its state.
     Mismatch(anyhow::Error),
+}
+
+/// What the submit path needs from the node, beyond the pinned reads. Read
+/// errors carry a read-partition verdict carrier like [`PinnedReads`]' do,
+/// `submit` classifies its own refusals, and `landing`'s `Ok(None)` wraps a
+/// verdict-less miss.
+#[async_trait::async_trait]
+pub trait SubmitChain: PinnedReads {
+    async fn block_number(&self, at: &BlockHash) -> anyhow::Result<u64>;
+    async fn block_hash_at(&self, number: u64) -> anyhow::Result<Option<BlockHash>>;
+    /// The block's `Timestamp::Now`, in whole seconds.
+    async fn block_time(
+        &self,
+        at: &BlockHash,
+    ) -> anyhow::Result<midnight_base_crypto::time::Timestamp>;
+    async fn submit(&self, transaction: &[u8]) -> Result<(), SubmitRefusal>;
+    /// The status the block reports for the ledger transaction `tx_hash`, if it holds it.
+    async fn landing(
+        &self,
+        at: &BlockHash,
+        tx_hash: LedgerTxHash,
+    ) -> anyhow::Result<Option<Landing>>;
 }
 
 /// The pool's "already imported" answer: the transaction is in it.
@@ -62,7 +84,7 @@ fn classify_submit_reply(
 }
 
 #[async_trait::async_trait]
-impl crate::native::SubmitChain for MidnightPublisherRpc {
+impl SubmitChain for MidnightPublisherRpc {
     async fn block_number(&self, at: &BlockHash) -> anyhow::Result<u64> {
         let header = self.header(H256::from(*at)).await?;
         Ok(u64::from(header.number))
@@ -178,7 +200,6 @@ mod tests {
     use mpc_chain_integration_core::utils::retry::{is_provider_throttled, is_retryable};
     use serde_json::json;
 
-    use crate::native::SubmitChain as _;
     use crate::rpc::reads::rejected_http_status;
     use crate::rpc::transport::connect_http;
     use http::StatusCode;
@@ -216,8 +237,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_submit_whose_runtime_cannot_be_read_is_never_sent() {
-        use crate::native::SubmitChain as _;
-
         let server = ServerBuilder::default().build("127.0.0.1:0").await.unwrap();
         let transport = connect_http(&http_config(server.local_addr().unwrap())).unwrap();
         let submits = Arc::new(AtomicUsize::new(0));

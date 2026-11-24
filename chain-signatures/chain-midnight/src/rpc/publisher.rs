@@ -288,6 +288,7 @@ mod tests {
 
     use crate::rpc::reads::is_oversized_contract_state;
     use crate::rpc::submit::Landing;
+    use crate::rpc::submit::SubmitChain as _;
     use crate::rpc::support::captured_applied_status_record;
     use crate::types::LedgerTxHash;
     use http::StatusCode;
@@ -673,8 +674,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_missing_block_time_names_the_block_hash_in_full() {
-        use crate::native::SubmitChain as _;
-
         let block = BlockHash::from_0x_hex(&hash_of_byte(0x43)).unwrap();
         let (rpc, _handle, _log) = captured_landing_node(Vec::new(), None).await;
         let err = rpc
@@ -688,8 +687,6 @@ mod tests {
 
     #[tokio::test]
     async fn the_publisher_reads_a_landing_and_the_block_time_from_a_captured_block() {
-        use crate::native::SubmitChain as _;
-
         let applied = LedgerTxHash::from_bytes(crate::test_utils::hex_32(
             "ba41ac43f2cfa97e32357877b85210a7f2105f4930b60515e19aa9ec00bb0f5d",
         ));
@@ -734,8 +731,6 @@ mod tests {
     /// are each read once.
     #[tokio::test]
     async fn the_publisher_reads_a_block_header_and_runtime_once() {
-        use crate::native::SubmitChain as _;
-
         let applied = LedgerTxHash::from_bytes(crate::test_utils::hex_32(
             "ba41ac43f2cfa97e32357877b85210a7f2105f4930b60515e19aa9ec00bb0f5d",
         ));
@@ -808,8 +803,6 @@ mod tests {
     /// 17th evicts the oldest, which is then read again.
     #[tokio::test]
     async fn the_publisher_keeps_the_last_sixteen_headers() {
-        use crate::native::SubmitChain as _;
-
         let (rpc, _handle, reads) = numbered_header_node().await;
         for byte in 1u8..=17 {
             assert_eq!(

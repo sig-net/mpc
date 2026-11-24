@@ -33,8 +33,7 @@ use tokio::time::Instant;
 use crate::funding::{dust_deficit, FeePayer, SealedTx, UnprovenTx};
 use crate::intent::{IntentRequest, RespondCircuit, Submitted};
 use crate::publisher::IntentClient;
-use crate::rpc::publisher::PinnedReads;
-use crate::rpc::submit::{Landing, SubmitRefusal};
+use crate::rpc::submit::{Landing, SubmitChain, SubmitRefusal};
 use crate::submit_error::SubmitError;
 use crate::types::{BlockHash, LedgerTxHash, NetworkId};
 
@@ -54,22 +53,6 @@ const LANDING_POLL: Duration = Duration::from_secs(2);
 /// shedding load is not asked again at a fixed pace.
 const RESEND_DELAY: Duration = Duration::from_secs(6);
 const MAX_RESEND_DELAY: Duration = Duration::from_secs(60);
-
-/// What the submit path needs from the node, beyond the pinned reads.
-#[async_trait]
-pub(crate) trait SubmitChain: PinnedReads {
-    async fn block_number(&self, at: &BlockHash) -> anyhow::Result<u64>;
-    async fn block_hash_at(&self, number: u64) -> anyhow::Result<Option<BlockHash>>;
-    /// The block's `Timestamp::Now`, in whole seconds.
-    async fn block_time(&self, at: &BlockHash) -> anyhow::Result<Timestamp>;
-    async fn submit(&self, transaction: &[u8]) -> Result<(), SubmitRefusal>;
-    /// The status the block reports for the ledger transaction `tx_hash`, if it holds it.
-    async fn landing(
-        &self,
-        at: &BlockHash,
-        tx_hash: LedgerTxHash,
-    ) -> anyhow::Result<Option<Landing>>;
-}
 
 /// What a submit spent before it asked the wallet to pay, for its log line.
 struct SubmitTimings {
@@ -684,6 +667,7 @@ mod tests {
     use crate::emissions::{emissions_of_call, Emission, EmissionKind, MISC_PAYLOAD_LEN};
     use crate::funding::tests::{base, funded_key, replayed};
     use crate::funding::{plan_fee, FeePlan};
+    use crate::rpc::publisher::PinnedReads;
     use crate::test_utils::rejected_http;
     use minocrab_publisher::{Attestation, EcdsaSignature};
 
@@ -2271,7 +2255,7 @@ mod live {
     use crate::config::{MidnightConfig, PublisherConfig};
     use crate::dust_feed::IndexerDustEvents;
     use crate::funding::{dust_secret_key, parse_seed, FundingWallet};
-    use crate::rpc::publisher::MidnightPublisherRpc;
+    use crate::rpc::publisher::{MidnightPublisherRpc, PinnedReads};
     use crate::types::MidnightAddress;
     use minocrab_publisher::{Attestation, EcdsaSignature};
     use mpc_chain_integration_core::NoopPublisherTelemetry;
