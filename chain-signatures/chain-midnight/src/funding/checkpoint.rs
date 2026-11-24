@@ -27,7 +27,7 @@ pub trait DustCheckpointStore: Send + Sync {
 
 /// The replayed state after event `applied`, for the key whose public key hashes to
 /// `owner`. A restart resumes from it only when the indexer still serves the same
-/// event at `applied`, which `super::event_hash` checks.
+/// event at `applied`, which `super::sync::event_hash` checks.
 #[derive(Clone)]
 pub struct Checkpoint {
     pub owner: [u8; 32],
