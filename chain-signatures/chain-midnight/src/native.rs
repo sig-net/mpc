@@ -433,7 +433,6 @@ impl<W: FeePayer, C: SubmitChain + 'static> NativeIntentClient<W, C> {
             WatchEnd::TerminalRead(error) => Err(node(error)),
         }
     }
-
 }
 
 #[async_trait]
@@ -613,7 +612,7 @@ mod tests {
     use crate::landing_watch::LANDING_POLL;
     use crate::rpc::publisher::PinnedReads;
     use crate::rpc::submit::Landing;
-    use crate::test_utils::rejected_http;
+    use crate::test_utils::{rejected_http, EventRecorder, RecordedFields};
     use minocrab_publisher::{Attestation, EcdsaSignature};
 
     /// The responder's initial state with the package's verifier keys
@@ -1798,6 +1797,55 @@ mod tests {
             client.wallet.released.lock().unwrap().is_empty(),
             "the guaranteed segment spent the DUST; the replay ends the reservation"
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_settle_log_names_which_landing_the_watch_ended_in() {
+        let recorder = EventRecorder::default();
+        // Keep a second scoped dispatch registered so callsites first reached by a
+        // parallel test register against the live dispatches, not that thread's default.
+        let _registration_guard = tracing::subscriber::set_default(tracing_subscriber::registry());
+        let subscriber = tracing_subscriber::layer::SubscriberExt::with(
+            tracing_subscriber::registry(),
+            recorder.clone(),
+        );
+        let _subscriber_guard = tracing::subscriber::set_default(subscriber);
+        for landing in [Landing::Applied, Landing::PartialSuccess] {
+            let client = client_over(
+                managed_dir(|_, bytes| bytes),
+                ScriptedChain::new(10, 20, Some((12, landing))),
+            );
+            assert_eq!(
+                client
+                    .post(
+                        b"tx",
+                        LedgerTxHash::from_bytes(TX_HASH),
+                        &spent(),
+                        10,
+                        Timestamp::from_secs(5000),
+                        deadline(),
+                    )
+                    .await
+                    .unwrap(),
+                LedgerTxHash::from_bytes(TX_HASH)
+            );
+        }
+        let settles: Vec<RecordedFields> = recorder
+            .snapshot()
+            .into_iter()
+            .filter(|fields| fields.contains_key("settled"))
+            .collect();
+        assert_eq!(settles.len(), 2, "{settles:?}");
+        for (fields, outcome) in [
+            (&settles[0], "Landed(Applied)"),
+            (&settles[1], "Landed(PartialSuccess)"),
+        ] {
+            assert_eq!(
+                fields.get("outcome").map(String::as_str),
+                Some(outcome),
+                "{fields:?}"
+            );
+        }
     }
 
     #[test]
