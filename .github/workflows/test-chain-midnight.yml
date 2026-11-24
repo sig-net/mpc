@@ -129,11 +129,8 @@ jobs:
             chain-signatures/midnight-devtools/devtools/real-stack/managed/erc20-vault
           key: ${{ steps.real-stack-contracts.outputs.cache-primary-key }}
 
-      - name: Install Rust (1.95.0)
-        uses: dtolnay/rust-toolchain@035fceb3c12fb0c6a9461b52775e16473133e591 # 1.95.0
-        with:
-          toolchain: 1.95.0
-          targets: wasm32-unknown-unknown
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@035fceb3c12fb0c6a9461b52775e16473133e591
 
       - name: Install system OpenSSL
         run: |
