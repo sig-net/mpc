@@ -61,7 +61,7 @@ pub fn parse_seed(seed: &str) -> anyhow::Result<Vec<u8>> {
 
 /// Which funding key a checkpoint belongs to: the hash of the key's public key,
 /// matching `Checkpoint::owner` in `super::checkpoint`.
-pub fn owner_of(key: &DustSecretKey) -> [u8; 32] {
+pub(crate) fn owner_of(key: &DustSecretKey) -> [u8; 32] {
     let public = DustPublicKey::from(key.clone());
     let mut bytes = Vec::new();
     midnight_serialize::tagged_serialize(&public, &mut bytes)

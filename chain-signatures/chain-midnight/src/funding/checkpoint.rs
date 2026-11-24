@@ -8,12 +8,13 @@
 use anyhow::Context as _;
 use midnight_ledger_v9::dust::DustLocalState;
 use midnight_storage::DefaultDB;
+use std::time::Duration;
 
 /// The least time between two checkpoints a caught-up replay keeps; the first after a
 /// start, a forget or a replay from the first event is kept at once.
-pub const CHECKPOINT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(300);
+pub(crate) const CHECKPOINT_INTERVAL: Duration = Duration::from_secs(300);
 /// How long loading or keeping a checkpoint may take.
-pub(super) const CHECKPOINT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+pub(super) const CHECKPOINT_TIMEOUT: Duration = Duration::from_secs(30);
 const CHECKPOINT_MAGIC: &[u8; 16] = b"mpc-dust-ckpt-v1";
 
 /// Where the funding wallet keeps a checkpoint of its replay across restarts. The
@@ -29,7 +30,7 @@ pub trait DustCheckpointStore: Send + Sync {
 /// `owner`. A restart resumes from it only when the indexer still serves the same
 /// event at `applied`, which `super::sync::event_hash` checks.
 #[derive(Clone)]
-pub struct Checkpoint {
+pub(crate) struct Checkpoint {
     pub(super) owner: [u8; 32],
     pub(super) applied: u64,
     pub(super) event_hash: [u8; 32],

@@ -27,7 +27,7 @@ use crate::dust_feed::{DustEventSource, DustEventUpdate};
 /// Events applied per replay; a batch only bounds how long the state lock is held.
 const REPLAY_BATCH: usize = 512;
 /// Backoff between subscription attempts.
-pub const RESUBSCRIBE_DELAY: Duration = Duration::from_secs(2);
+pub(crate) const RESUBSCRIBE_DELAY: Duration = Duration::from_secs(2);
 /// The header of a ledger event as ledger 8 serialized it.
 const LEDGER_8_EVENT_HEADER: &[u8] = b"midnight:event[v9]:";
 /// The longest backoff between subscriptions the indexer keeps refusing to open.
@@ -36,21 +36,21 @@ const MAX_REFUSED_DELAY: Duration = Duration::from_secs(60);
 const MAX_RESTART_DELAY: Duration = Duration::from_secs(600);
 /// How long a resumed subscription may stay silent before the checkpoint is dropped:
 /// the indexer serves the checkpoint's own event first, from what it has stored.
-pub const RESUME_TIMEOUT: Duration = Duration::from_secs(60);
+pub(crate) const RESUME_TIMEOUT: Duration = Duration::from_secs(60);
 /// Strikes — submits a restored wallet's state was implicated in, with none landing
 /// in between — before its checkpoint is dropped: the intent builder's snapshot
 /// strikes did. Above one, because a healthy wallet is also refused at times, and its
 /// spends also expire unlanded.
-pub const RESTORE_STRIKES: u32 = 3;
+pub(crate) const RESTORE_STRIKES: u32 = 3;
 /// The sustained-failure window of `stuck`; the drop happens once, after which
 /// nothing is restored to drop again.
-pub const RESTORE_STUCK_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+pub(crate) const RESTORE_STUCK_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 /// How long a live subscription that holds itself caught up may apply nothing while
 /// the indexer names a newer event before it is replaced: a connection can stall
 /// without closing.
-pub const STALL_GRACE: Duration = Duration::from_secs(5);
+pub(crate) const STALL_GRACE: Duration = Duration::from_secs(5);
 
-pub fn event_hash(raw: &[u8]) -> [u8; 32] {
+pub(crate) fn event_hash(raw: &[u8]) -> [u8; 32] {
     sha2::Sha256::digest(raw).into()
 }
 
@@ -60,7 +60,7 @@ pub fn event_hash(raw: &[u8]) -> [u8; 32] {
 /// this ledger's replay, and the wallet SDK's `skipLedgerV8DustHistory` starts after
 /// them too. That holds for this one upgrade: an event of any other version this
 /// ledger cannot read fails the replay.
-pub fn is_ledger_8_event(raw: &[u8]) -> bool {
+pub(crate) fn is_ledger_8_event(raw: &[u8]) -> bool {
     raw.starts_with(LEDGER_8_EVENT_HEADER)
 }
 
@@ -69,7 +69,7 @@ pub fn is_ledger_8_event(raw: &[u8]) -> bool {
 #[error("restarting the DUST replay from the first event")]
 struct Restarted;
 
-pub struct Synced {
+pub(crate) struct Synced {
     pub(super) local: DustLocalState<DefaultDB>,
     /// The id of the newest event replayed, `None` before the first.
     pub(super) applied: Option<u64>,
@@ -132,7 +132,7 @@ impl Synced {
     }
 }
 
-pub struct Shared {
+pub(crate) struct Shared {
     pub(super) key: DustSecretKey,
     pub(super) owner: [u8; 32],
     pub(super) state: Mutex<Synced>,
@@ -315,7 +315,7 @@ async fn restore(shared: &Shared, store: &dyn DustCheckpointStore) {
 
 /// Replaces the replayed state with `checkpoint`'s, keeping the reservations of
 /// submits in flight; the next subscription starts at its event and checks it.
-pub fn resume_from(shared: &Shared, checkpoint: Checkpoint) {
+pub(crate) fn resume_from(shared: &Shared, checkpoint: Checkpoint) {
     let mut state = shared.state();
     state.restart();
     state.local = checkpoint.local;
@@ -404,7 +404,7 @@ async fn subscribe_once(shared: Arc<Shared>, source: Arc<dyn DustEventSource>) -
 
 /// Drops the replayed state and the latest checkpoint it may have come from, so the
 /// next subscription replays from the first event.
-pub fn start_over(shared: &Shared, cause: &str) {
+pub(crate) fn start_over(shared: &Shared, cause: &str) {
     shared.replay_restarted(cause);
     shared.state().restart();
     let mut snapshots = shared.snapshots();
@@ -459,7 +459,7 @@ fn reload(shared: &Shared) {
 /// only costs the next node start its resume. As the intent builder kept no snapshot of
 /// a child it was retiring, nothing is kept while a failed submit's reload or forget is
 /// pending.
-pub async fn keep_checkpoint(shared: &Shared) {
+pub(crate) async fn keep_checkpoint(shared: &Shared) {
     // From before the checks below until the save has ended: a forget decided
     // meanwhile clears the store after this save, never before it. Only a forget's
     // clear holds it otherwise, and the replay does not wait for one.
@@ -527,7 +527,10 @@ pub async fn keep_checkpoint(shared: &Shared) {
 /// cannot absorb means the stream and the state disagree about history, so the state
 /// restarts from the first event; so does a restored checkpoint whose event the
 /// indexer no longer serves.
-pub fn apply(shared: &Shared, batch: Vec<anyhow::Result<DustEventUpdate>>) -> anyhow::Result<()> {
+pub(crate) fn apply(
+    shared: &Shared,
+    batch: Vec<anyhow::Result<DustEventUpdate>>,
+) -> anyhow::Result<()> {
     let mut updates = Vec::with_capacity(batch.len());
     let mut failure = None;
     for update in batch {

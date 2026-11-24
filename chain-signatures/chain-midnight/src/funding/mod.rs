@@ -27,13 +27,13 @@ pub use wallet::{dust_deficit, FeePayer, FundingWallet, SealedTx, UnprovenTx};
 
 // Re-exported for the unit tests, which glob `super::*`.
 #[cfg(test)]
-pub use checkpoint::{Checkpoint, CHECKPOINT_INTERVAL};
+pub(crate) use checkpoint::{Checkpoint, CHECKPOINT_INTERVAL};
 #[cfg(test)]
-pub use keys::owner_of;
+pub(crate) use keys::owner_of;
 #[cfg(test)]
-pub use sync::{
+pub(crate) use sync::{
     apply, event_hash, is_ledger_8_event, keep_checkpoint, resume_from, start_over, Shared, Synced,
     RESTORE_STRIKES, RESTORE_STUCK_TIMEOUT, RESUBSCRIBE_DELAY, RESUME_TIMEOUT, STALL_GRACE,
 };
 #[cfg(test)]
-pub use wallet::{plan_fee, FeePlan, Reservation};
+pub(crate) use wallet::{plan_fee, FeePlan, Reservation};

@@ -94,7 +94,7 @@ pub trait FeePayer: Send + Sync {
 }
 
 /// One fee payment, not yet proven.
-pub struct FeePlan {
+pub(crate) struct FeePlan {
     pub(crate) tx: UnprovenTx,
     pub(crate) spent: Vec<DustNullifier>,
     pub(crate) fee: u128,
@@ -102,7 +102,7 @@ pub struct FeePlan {
     pub(crate) available: u128,
 }
 
-pub struct Reservation {
+pub(crate) struct Reservation {
     pub(super) spent: Vec<DustNullifier>,
     pub(super) until: Timestamp,
 }
@@ -414,7 +414,7 @@ impl FundingWallet {
 /// the previous pass's fee transaction attached, mock-proven, which the ledger
 /// documents as accurate for fees once no contract call is left unproven.
 #[allow(clippy::too_many_arguments)]
-pub fn plan_fee(
+pub(crate) fn plan_fee(
     key: &DustSecretKey,
     local: &DustLocalState<DefaultDB>,
     reserved: &[DustNullifier],
