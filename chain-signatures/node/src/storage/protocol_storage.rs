@@ -446,23 +446,22 @@ impl<A: ProtocolArtifact> ProtocolStorage<A, Ready> {
             local artifact_key = KEYS[1]
             local mine_key = KEYS[2]
 
-            if redis.call("SCARD", mine_key) < 1 then
-                return nil
-            end
-
             -- Build exclusion lookup from caller-supplied IDs
             local excluded = {}
             for i = 1, #ARGV do
                 excluded[ARGV[i]] = true
             end
 
-            -- Find the first available member not excluded and having non-empty holders
+            -- Find the first available member not excluded and having non-empty holders.
+            -- A single SMEMBERS replaces SCARD + SMEMBERS per candidate: an absent or
+            -- empty set yields an empty list, so behavior is unchanged.
             local members = redis.call("SMEMBERS", mine_key)
             for _, id in ipairs(members) do
                 if not excluded[id] then
                     local holders_key = artifact_key .. ':holders:' .. id
-                    if redis.call("SCARD", holders_key) > 0 then
-                        return {id, redis.call("SMEMBERS", holders_key)}
+                    local holders = redis.call("SMEMBERS", holders_key)
+                    if #holders > 0 then
+                        return {id, holders}
                     end
                 end
             end
