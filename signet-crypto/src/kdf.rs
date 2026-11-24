@@ -59,9 +59,13 @@ impl std::fmt::Display for KeyPurpose<'_> {
     }
 }
 
-/// The path that holds a chain's attestation key below key version 2. `None` on
-/// chains that are not bidirectional sources.
-const fn reserved_path(chain: Chain) -> Option<&'static str> {
+/// The path that holds `chain`'s attestation key at `key_version`, which no request
+/// may name. Only below key version 2, where the attestation key is a plain key;
+/// `None` on chains that are not bidirectional sources.
+pub const fn reserved_path(key_version: KeyVersion, chain: Chain) -> Option<&'static str> {
+    if key_version >= 2 {
+        return None;
+    }
     match chain {
         Chain::Solana => Some("solana response key"),
         Chain::Hydration => Some("hydration response key"),
@@ -69,12 +73,6 @@ const fn reserved_path(chain: Chain) -> Option<&'static str> {
         Chain::Midnight => Some("midnight response key"),
         _ => None,
     }
-}
-
-/// Whether `path` holds `chain`'s attestation key at `key_version`, so no request
-/// may name it. Only below key version 2, where the attestation key is a plain key.
-pub fn is_reserved_path(key_version: KeyVersion, chain: Chain, path: &str) -> bool {
-    key_version < 2 && reserved_path(chain) == Some(path)
 }
 
 /// The epsilon of the key for `purpose` on `chain` at `key_version`.
@@ -124,7 +122,7 @@ fn legacy_derivation_path(
             Err(refused("predates bidirectional signing"))
         }
         KeyPurpose::Plain { path, .. } | KeyPurpose::Bidirectional { path, .. }
-            if is_reserved_path(key_version, chain, path) =>
+            if reserved_path(key_version, chain) == Some(path) =>
         {
             Err(refused("the path holds the attestation key"))
         }
@@ -132,7 +130,7 @@ fn legacy_derivation_path(
             Ok(format(chain, sender, path))
         }
         // The attestation key is a plain key under the reserved path.
-        KeyPurpose::Attestation { sender } => reserved_path(chain)
+        KeyPurpose::Attestation { sender } => reserved_path(key_version, chain)
             .map(|path| format(chain, sender, path))
             .ok_or_else(|| refused("the chain has no attestation key")),
         KeyPurpose::System { path } => Ok(format(chain, SYSTEM_SENDER, path)),
@@ -676,20 +674,18 @@ mod tests {
 
     #[test]
     fn reserved_paths_are_reserved_below_key_version_2() {
-        assert!(is_reserved_path(0, Chain::Solana, "solana response key"));
-        assert!(is_reserved_path(
-            1,
-            Chain::Midnight,
-            "midnight response key"
-        ));
-        assert!(!is_reserved_path(2, Chain::Solana, "solana response key"));
-        assert!(!is_reserved_path(
-            1,
-            Chain::Solana,
-            "hydration response key"
-        ));
-        assert!(!is_reserved_path(1, Chain::Ethereum, "solana response key"));
-        assert!(!is_reserved_path(1, Chain::Solana, "path"));
+        assert_eq!(reserved_path(0, Chain::Solana), Some("solana response key"));
+        assert_eq!(
+            reserved_path(1, Chain::Hydration),
+            Some("hydration response key")
+        );
+        assert_eq!(reserved_path(1, Chain::Canton), Some("canton response key"));
+        assert_eq!(
+            reserved_path(1, Chain::Midnight),
+            Some("midnight response key")
+        );
+        assert_eq!(reserved_path(2, Chain::Solana), None);
+        assert_eq!(reserved_path(1, Chain::Ethereum), None);
     }
 
     /// A key version is not served until `LATEST_MPC_KEY_VERSION` reaches it.

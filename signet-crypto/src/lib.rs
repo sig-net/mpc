@@ -11,7 +11,7 @@
 mod kdf;
 
 pub use kdf::{
-    derive_epsilon, derive_key, is_reserved_path, reconstruct_signature, x_coordinate, DeriveError,
+    derive_epsilon, derive_key, reconstruct_signature, reserved_path, x_coordinate, DeriveError,
     KeyPurpose,
 };
 pub use signet_primitives::{PublicKey, ScalarExt};

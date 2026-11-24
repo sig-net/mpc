@@ -46,11 +46,8 @@ pub(crate) fn published_failure(
 /// own response, which is signed with it.
 pub(crate) fn claims_attestation_key(request: &IndexedSignRequest) -> bool {
     !matches!(request.kind, SignKind::RespondBidirectional(_))
-        && mpc_crypto::kdf::is_reserved_path(
-            request.args.key_version,
-            request.chain,
-            &request.args.path,
-        )
+        && mpc_crypto::kdf::reserved_path(request.args.key_version, request.chain)
+            == Some(request.args.path.as_str())
 }
 
 /// The key tweak and payload a genuine published Midnight response for `tx` is signed with.
@@ -227,7 +224,11 @@ impl CompletedTx {
                 entropy,
                 epsilon,
                 payload,
-                path: String::new(),
+                // Below key version 2 the path stays the reserved one, as checkpoint
+                // digests cover it; the key comes from the purpose either way.
+                path: mpc_crypto::kdf::reserved_path(self.tx.key_version, source_chain)
+                    .unwrap_or_default()
+                    .to_string(),
                 key_version: self.tx.key_version,
             },
             source_chain,
@@ -367,28 +368,36 @@ mod tests {
         })
     }
 
-    /// A response is signed with the requester's attestation key and names no path.
+    /// A response is signed with the requester's attestation key. Below key version 2 it
+    /// names the reserved path, which checkpoint digests of pending responses cover.
     #[test]
     fn a_response_is_signed_with_the_attestation_key() {
-        for chain in [
-            Chain::Solana,
-            Chain::Hydration,
-            Chain::Canton,
-            Chain::Midnight,
+        for (chain, reserved) in [
+            (Chain::Solana, "solana response key"),
+            (Chain::Hydration, "hydration response key"),
+            (Chain::Canton, "canton response key"),
+            (Chain::Midnight, "midnight response key"),
         ] {
-            let tx = sample_bidirectional_tx(chain, [0x32; 32]);
-            let sender = tx.sender_string().unwrap();
-            let request = CompletedTx::new(tx, None, None, 456, [0; 32])
-                .create_sign_request_from_serialized_output(vec![1; 32])
+            for key_version in 1..=mpc_primitives::LATEST_MPC_KEY_VERSION {
+                let mut tx = (*sample_bidirectional_tx(chain, [0x32; 32])).clone();
+                tx.key_version = key_version;
+                let sender = tx.sender_string().unwrap();
+                let request = CompletedTx::new(Arc::new(tx), None, None, 456, [0; 32])
+                    .create_sign_request_from_serialized_output(vec![1; 32])
+                    .unwrap();
+                let attestation = mpc_crypto::derive_epsilon(
+                    key_version,
+                    chain,
+                    mpc_crypto::KeyPurpose::Attestation { sender: &sender },
+                )
                 .unwrap();
-            let attestation = mpc_crypto::derive_epsilon(
-                mpc_primitives::LATEST_MPC_KEY_VERSION,
-                chain,
-                mpc_crypto::KeyPurpose::Attestation { sender: &sender },
-            )
-            .unwrap();
-            assert_eq!(request.args.epsilon, attestation, "{chain:?}");
-            assert_eq!(request.args.path, "", "{chain:?}");
+                assert_eq!(
+                    request.args.epsilon, attestation,
+                    "{chain:?} v{key_version}"
+                );
+                let path = if key_version < 2 { reserved } else { "" };
+                assert_eq!(request.args.path, path, "{chain:?} v{key_version}");
+            }
         }
     }
 
@@ -778,7 +787,12 @@ mod tests {
 
         assert_eq!(request.chain, Chain::Midnight);
         assert_eq!(request.args.payload, expected_payload);
-        assert_eq!(request.args.path, "");
+        let path = if request.args.key_version < 2 {
+            "midnight response key"
+        } else {
+            ""
+        };
+        assert_eq!(request.args.path, path);
     }
 
     #[tokio::test]
@@ -798,7 +812,12 @@ mod tests {
         assert_eq!(response.attestation, Some(metadata));
         assert!(response.output.is_empty());
         assert_eq!(response.origin_indexed_at, Some(100));
-        assert_eq!(request.args.path, "");
+        let path = if request.args.key_version < 2 {
+            "midnight response key"
+        } else {
+            ""
+        };
+        assert_eq!(request.args.path, path);
         assert_eq!(
             request.args.payload,
             Scalar::from_bytes(

@@ -19,7 +19,7 @@ use sha3::Sha3_256;
 // `signet-crypto` kernel; re-exported here so node paths (`mpc_crypto::kdf::…`,
 // `mpc_crypto::…`) keep resolving unchanged.
 pub use signet_crypto::{
-    derive_epsilon, derive_key, is_reserved_path, reconstruct_signature, x_coordinate, DeriveError,
+    derive_epsilon, derive_key, reconstruct_signature, reserved_path, x_coordinate, DeriveError,
     KeyPurpose,
 };
 
