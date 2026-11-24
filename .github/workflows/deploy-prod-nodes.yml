@@ -27,6 +27,13 @@ jobs:
         id: timestamp
         run: echo "timestamp=$(date -u +'%Y-%m-%dT%H:%M:%SZ')" >> "$GITHUB_OUTPUT"
 
+      - name: Get application version
+        id: version
+        run: |
+          VERSION=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "mpc-node") | .version')
+          test -n "$VERSION"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
       - name: Login to GCP Artifact Registry Mainnet
         if: github.event.inputs.network == 'mainnet'
         run: echo "$GOOGLE_CREDENTIALS" | docker login -u _json_key --password-stdin https://europe-west1-docker.pkg.dev
@@ -49,4 +56,8 @@ jobs:
           build-args: |
             GIT_COMMIT_HASH=${{ github.sha }}
             BUILD_TIMESTAMP=${{ steps.timestamp.outputs.timestamp }}
-          tags: "europe-west1-docker.pkg.dev/near-cs-${{ github.event.inputs.network }}/multichain-public/multichain-${{ github.event.inputs.network }}:latest,europe-west1-docker.pkg.dev/near-cs-${{ github.event.inputs.network }}/multichain-public/multichain-${{ github.event.inputs.network }}:${{ env.TAG }}"
+          tags: |
+            europe-west1-docker.pkg.dev/near-cs-${{ github.event.inputs.network }}/multichain-public/multichain-${{ github.event.inputs.network }}:latest
+            europe-west1-docker.pkg.dev/near-cs-${{ github.event.inputs.network }}/multichain-public/multichain-${{ github.event.inputs.network }}:${{ steps.version.outputs.version }}
+            europe-west1-docker.pkg.dev/near-cs-${{ github.event.inputs.network }}/multichain-public/multichain-${{ github.event.inputs.network }}:${{ steps.version.outputs.version }}-${{ env.TAG }}
+            europe-west1-docker.pkg.dev/near-cs-${{ github.event.inputs.network }}/multichain-public/multichain-${{ github.event.inputs.network }}:${{ env.TAG }}
