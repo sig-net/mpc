@@ -205,7 +205,7 @@ impl PublisherConfig {
 fn validate_funding_seed(value: &str) -> anyhow::Result<()> {
     // The parse error is dropped: it may quote a character of the seed.
     anyhow::ensure!(
-        crate::funding::parse_seed(value).is_ok_and(|seed| (16..=64).contains(&seed.len())),
+        crate::funding::keys::parse_seed(value).is_ok_and(|seed| (16..=64).contains(&seed.len())),
         "midnight config: publisher.funding_seed must be 16 to 64 bytes of hex"
     );
     Ok(())

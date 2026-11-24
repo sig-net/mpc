@@ -40,9 +40,9 @@ use tokio::time::Instant;
 use crate::dust_feed::{DustEventSource, DustEventUpdate};
 use crate::submit_error::SubmitError;
 
-mod keys;
+pub(crate) mod keys;
 
-pub(crate) use keys::{dust_secret_key, owner_of, parse_seed};
+use keys::owner_of;
 
 /// A proven respond transaction, sealed: what the fee is paid for.
 pub(crate) type SealedTx = minocrab_publisher::intent::SealedTx<DefaultDB>;
@@ -1206,6 +1206,7 @@ fn fee_transaction(
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use super::keys::{dust_secret_key, parse_seed};
     use crate::dust_feed::Indexed;
     use async_trait::async_trait;
     use futures_util::stream::BoxStream;
@@ -4557,6 +4558,7 @@ pub(crate) mod tests {
 #[cfg(test)]
 mod live {
     use super::*;
+    use super::keys::dust_secret_key;
     use crate::dust_feed::IndexerDustEvents;
     use mpc_chain_integration_core::NoopPublisherTelemetry;
 
