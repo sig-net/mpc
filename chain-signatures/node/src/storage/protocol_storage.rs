@@ -759,10 +759,13 @@ impl<A: ProtocolArtifact, Phase> ProtocolStorage<A, Phase> {
                 owner_shares[value] = true
             end
 
-            -- find all shares that the owner no longer tracks
+            -- find all shares that the owner no longer tracks.
+            -- the owner lookup is built during this single our_shares scan.
             local outdated = {}
             local our_shares = redis.call("SMEMBERS", owner_key)
+            local our_shares_check = {}
             for _, id in ipairs(our_shares) do
+                our_shares_check[id] = 1
                 if not owner_shares[id] then
                     table.insert(outdated, id)
                 end
@@ -789,11 +792,6 @@ impl<A: ProtocolArtifact, Phase> ProtocolStorage<A, Phase> {
                 for _, oid in ipairs(outdated) do
                     redis.call("DEL", artifact_key .. ':holders:' .. oid)
                 end
-            end
-
-            local our_shares_check = {}
-            for _, id in ipairs(our_shares) do
-                our_shares_check[id] = 1
             end
 
             -- find shares that were shared with us but not found in our storage
