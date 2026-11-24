@@ -64,10 +64,18 @@ else
     # Legacy tags released prior to rust-toolchain.toml (<= 1.23.0) were built with Rust 1.95.0.
     toolchain_flag=""
     if [[ ! -f rust-toolchain.toml && ! -f rust-toolchain ]]; then
-      if command -v rustup >/dev/null 2>&1 && ! rustup toolchain list 2>/dev/null | grep -q "^1.95.0"; then
-        rustup toolchain install 1.95.0 --profile minimal >/dev/null 2>&1 || true
+      if command -v rustup >/dev/null 2>&1; then
+        if ! rustup toolchain list 2>/dev/null | grep -q "^1.95.0"; then
+          echo "Installing Rust 1.95.0 toolchain for legacy tag $tag compatibility..."
+          if ! rustup toolchain install 1.95.0 --profile minimal; then
+            echo "::error::Failed to install Rust 1.95.0 toolchain required for legacy tag $tag"
+            exit 1
+          fi
+        fi
+        toolchain_flag="+1.95.0"
+      else
+        echo "::warning::rustup not found; building legacy tag $tag with default cargo toolchain"
       fi
-      toolchain_flag="+1.95.0"
     fi
     CARGO_TARGET_DIR="$target_dir" env -u RUSTFLAGS cargo ${toolchain_flag} build -p mpc-node --release --locked --features test-feature
   )
