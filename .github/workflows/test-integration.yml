@@ -247,6 +247,8 @@ jobs:
           cache-dependency-path: chain-signatures/contract-eth/package-lock.json
       - name: Install Foundry (anvil)
         uses: foundry-rs/foundry-toolchain@908c540300062bd5a7e473851cdb4282204cee09 # v1
+        with:
+          version: v1.10.0
 
       - name: Clippy (integration-gated code)
         run: just lint-eth

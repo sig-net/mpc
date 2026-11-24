@@ -525,7 +525,7 @@ impl EthereumSandbox {
 
         let container = start_container_with_network_retry(
             || {
-                GenericImage::new("ghcr.io/foundry-rs/foundry", "nightly")
+                GenericImage::new("ghcr.io/foundry-rs/foundry", "v1.10.0")
                     .with_exposed_port(Self::RPC_PORT.tcp())
                     .with_network(&spawner.network)
                     .with_cmd(vec![command.clone()])
