@@ -618,17 +618,21 @@ impl<A: ProtocolArtifact> ProtocolStorage<A, Ready> {
             for i = 3, #ARGV do
                 local id = ARGV[i]
                 -- Skip if not owned by me (defense against malicious/buggy peer responses)
-                if redis.call('SISMEMBER', owner_key, id) == 0 then
-                    -- noop: not our artifact
-                else
+                if redis.call('SISMEMBER', owner_key, id) ~= 0 then
                     local holders_key = artifact_key .. ':holders:' .. id
-                    if redis.call('EXISTS', holders_key) == 0 then
+                    -- SCARD is 0 both when the holders key is absent and when
+                    -- the set is empty, so it replaces EXISTS here. SREM
+                    -- returns 1 only if the peer was actually a member, so
+                    -- subtracting it from the pre-removal count gives the
+                    -- post-removal count without a second SCARD.
+                    local count = redis.call('SCARD', holders_key)
+                    if count == 0 then
                         redis.call('HDEL', artifact_key, id)
                         redis.call('SREM', owner_key, id)
                         table.insert(removed, id)
                     else
-                        redis.call('SREM', holders_key, peer)
-                        local count = redis.call('SCARD', holders_key)
+                        local removed_peer = redis.call('SREM', holders_key, peer)
+                        count = count - removed_peer
                         if count < threshold then
                             redis.call('HDEL', artifact_key, id)
                             redis.call('DEL', holders_key)
