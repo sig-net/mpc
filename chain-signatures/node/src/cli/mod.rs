@@ -34,7 +34,6 @@ pub use args::{
 
 use anyhow::Context as _;
 use clap::Parser;
-use deadpool_redis::{Hook, Runtime};
 use enum_map::EnumMap;
 use mpc_chain_canton::{CantonClient, CantonConfig, CantonIndexer};
 use mpc_chain_ethereum::{publisher, EthConfig, EthereumIndexer};
@@ -722,18 +721,11 @@ struct StorageHandles {
 const REDIS_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// A Redis pool whose waits, connects and commands all fail after [`REDIS_TIMEOUT`].
-fn redis_pool(url: Url) -> anyhow::Result<deadpool_redis::Pool> {
-    Ok(deadpool_redis::Config::from_url(url)
-        .builder()?
-        .runtime(Runtime::Tokio1)
+fn redis_pool(url: Url) -> anyhow::Result<storage::redis_pool::Pool> {
+    Ok(storage::redis_pool::Config::from_url(url)?
         .wait_timeout(Some(REDIS_TIMEOUT))
-        .create_timeout(Some(REDIS_TIMEOUT))
-        .recycle_timeout(Some(REDIS_TIMEOUT))
-        .post_create(Hook::sync_fn(|conn, _| {
-            conn.set_response_timeout(REDIS_TIMEOUT);
-            Ok(())
-        }))
-        .build()?)
+        .timeout(Some(REDIS_TIMEOUT))
+        .build())
 }
 
 impl StorageHandles {

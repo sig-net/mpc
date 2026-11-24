@@ -1,6 +1,6 @@
+use crate::storage::redis_pool::{Connection, Pool};
 use backon::{ExponentialBuilder, Retryable};
 use cait_sith::protocol::Participant;
-use deadpool_redis::{Connection, Pool};
 use near_sdk::AccountId;
 use redis::{AsyncCommands, FromRedisValue, ToRedisArgs};
 use std::collections::{HashMap, HashSet};
@@ -711,7 +711,7 @@ impl<A: ProtocolArtifact, Phase> ProtocolStorage<A, Phase> {
         let mut attempt = 0;
         let op = || self.redis_pool.get();
         op.retry(&Self::connect_backoff())
-            .notify(move |err: &deadpool_redis::PoolError, sleep: Duration| {
+            .notify(move |err: &redis::RedisError, sleep: Duration| {
                 attempt += 1;
                 tracing::warn!(attempt, ?err, retry_in = ?sleep, "failed to connect to redis");
             })
@@ -1068,7 +1068,7 @@ impl<A: ProtocolArtifact, Phase> ProtocolStorage<A, Phase> {
 
     #[cfg(feature = "test-feature")]
     pub async fn fetch_holders(&self, id: A::Id) -> Vec<Participant> {
-        use deadpool_redis::redis::AsyncCommands;
+        use redis::AsyncCommands;
         let mut conn = self.redis_pool.get().await.unwrap();
         let holders_key = format!("{}:holders:{}", self.artifact_key, id);
         let members: Vec<u32> = conn.smembers(&holders_key).await.unwrap();
@@ -1079,7 +1079,7 @@ impl<A: ProtocolArtifact, Phase> ProtocolStorage<A, Phase> {
 
     #[cfg(feature = "test-feature")]
     pub async fn fetch_participants(&self, id: A::Id) -> Vec<Participant> {
-        use deadpool_redis::redis::AsyncCommands;
+        use redis::AsyncCommands;
         let mut conn = self.redis_pool.get().await.unwrap();
         let artifact: A = conn.hget(&self.artifact_key, id).await.unwrap();
         let mut participants = artifact.participants().to_vec();
@@ -1091,7 +1091,6 @@ impl<A: ProtocolArtifact, Phase> ProtocolStorage<A, Phase> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use deadpool_redis::Runtime;
     use redis::{RedisResult, RedisWrite, Value};
     use std::time::Duration;
 
@@ -1148,9 +1147,7 @@ mod tests {
     /// fails and every Redis-touching call takes its error path.
     fn unreachable_storage() -> ProtocolStorage<FakeArtifact> {
         // Port 1 is privileged and unused: connections are refused immediately.
-        let pool = deadpool_redis::Config::from_url("redis://127.0.0.1:1/")
-            .create_pool(Some(Runtime::Tokio1))
-            .unwrap();
+        let pool = Pool::new("redis://127.0.0.1:1/", None, None).unwrap();
         ProtocolStorage::<FakeArtifact>::ready(
             &pool,
             &"node.near".parse().unwrap(),

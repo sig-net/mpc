@@ -602,10 +602,7 @@ mod tests {
         );
 
         let redis_url = spawn_mock_redis().await;
-        let redis_cfg = deadpool_redis::Config::from_url(redis_url);
-        let pool = redis_cfg
-            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-            .unwrap();
+        let pool = crate::storage::redis_pool::Pool::new(redis_url, None, None).unwrap();
         let (sync_report_tx, sync_report_rx) = SyncTask::sync_report_channel();
         let (mesh_tx, mesh_rx) = tokio::sync::watch::channel(MeshState::default());
 

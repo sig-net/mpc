@@ -1,8 +1,8 @@
 use cait_sith::protocol::Participant;
-use deadpool_redis::redis::AsyncCommands;
 use integration_tests::mpc_fixture::{MpcFixtureBuilder, MpcFixtureNode};
 use mpc_node::protocol::message::SignedMessage;
 use mpc_node::protocol::sync::SyncUpdate;
+use redis::AsyncCommands;
 use test_log::test;
 
 use std::time::Duration;

@@ -1,7 +1,7 @@
 //! The Midnight funding wallet's DUST replay checkpoint, in this node's Redis namespace.
 
+use crate::storage::redis_pool::Pool;
 use anyhow::Context;
-use deadpool_redis::Pool;
 use mpc_chain_midnight::DustCheckpointStore;
 use near_account_id::AccountId;
 use redis::AsyncCommands;
@@ -61,14 +61,11 @@ impl DustCheckpointStore for MidnightDustStorage {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use deadpool_redis::Runtime;
 
     #[tokio::test]
     async fn an_unreachable_redis_is_an_error() {
         // Port 1 is privileged and unused: connections are refused immediately.
-        let pool = deadpool_redis::Config::from_url("redis://127.0.0.1:1/")
-            .create_pool(Some(Runtime::Tokio1))
-            .unwrap();
+        let pool = Pool::new("redis://127.0.0.1:1/", None, None).unwrap();
         let storage = MidnightDustStorage::new(pool, &"node.near".parse().unwrap());
 
         assert!(storage.load().await.is_err());

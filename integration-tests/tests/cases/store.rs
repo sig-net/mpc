@@ -429,7 +429,7 @@ async fn test_legacy_checkpoint_keeps_its_digest() -> anyhow::Result<()> {
 
 #[test(tokio::test)]
 async fn test_pending_checkpoint_persistence() -> anyhow::Result<()> {
-    use deadpool_redis::redis;
+    use redis;
 
     let spawner = ClusterSpawner::default()
         .network("test-pending-checkpoint-persistence")
@@ -591,7 +591,7 @@ async fn test_clear_clears_pending_reservations() -> anyhow::Result<()> {
 
 #[test(tokio::test)]
 async fn test_clear_removes_more_artifacts_than_one_unpack_allows() -> anyhow::Result<()> {
-    use deadpool_redis::redis;
+    use redis;
 
     let spawner = ClusterSpawner::default()
         .network("test-clear-many")

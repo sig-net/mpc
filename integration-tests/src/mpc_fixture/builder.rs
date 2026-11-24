@@ -12,7 +12,6 @@ use crate::mpc_fixture::mock_stream::MockStream;
 use crate::mpc_fixture::{fixture_tasks, MpcFixture, MpcFixtureNode};
 
 use cait_sith::protocol::Participant;
-use deadpool_redis::Pool as RedisPool;
 use mpc_contract::config::ProtocolConfig;
 use mpc_contract::primitives::{
     CandidateInfo, CandidatesView as CandidatesById, ParticipantInfo,
@@ -33,6 +32,7 @@ use mpc_node::protocol::sync::SyncTask;
 use mpc_node::protocol::{self, MessageChannel, MpcSignProtocol, ProtocolState};
 use mpc_node::rpc::{ContractStateWatcher, RpcChannel};
 use mpc_node::storage::keystore::{Keystore, MemoryKeystore};
+use mpc_node::storage::redis_pool::Pool as RedisPool;
 use mpc_node::storage::triple_storage::TriplePair;
 use mpc_node::stream::StreamContext;
 use mpc_primitives::Chain;

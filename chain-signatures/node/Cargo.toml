@@ -22,7 +22,7 @@ http.workspace = true
 lru = "0.18"
 mime = "0.3.17"
 prometheus = "0.14.0"
-redis = "0.27.2"
+redis = { version = "0.27.2", features = ["connection-manager", "tokio-comp"] }
 sysinfo.workspace = true
 tracing-stackdriver = "0.10.0"
 tracing-opentelemetry = "0.30.0"

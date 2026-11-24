@@ -433,7 +433,7 @@ pub(crate) mod tests {
     use crate::protocol::presignature::Presignature;
     use crate::protocol::sync::SyncReportReceiver;
     use crate::rpc::RpcAction;
-    use deadpool_redis::Runtime;
+    use crate::storage::redis_pool::Pool;
 
     /// A posit-phase harness; the unused channel ends are held alive so sends
     /// keep working. The redis pool is lazy and never actually connected.
@@ -460,8 +460,7 @@ pub(crate) mod tests {
             is_running: true,
         };
 
-        let redis_cfg = deadpool_redis::Config::from_url("redis://127.0.0.1/");
-        let pool = redis_cfg.create_pool(Some(Runtime::Tokio1)).unwrap();
+        let pool = Pool::new("redis://127.0.0.1/", None, None).unwrap();
         let presignatures = Presignature::ready_storage(&pool, &account_id, me);
         let (_inbox, outbox, msg_channel) = MessageChannel::new();
         let (rpc_tx, _rpc_rx) = mpsc::channel(1);

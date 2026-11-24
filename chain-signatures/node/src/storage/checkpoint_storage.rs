@@ -2,8 +2,8 @@ use crate::protocol::Chain;
 
 use crate::backlog::Checkpoint;
 use crate::sign_bidirectional::{BidirectionalProgress, SignStatus};
+use crate::storage::redis_pool::Pool;
 use anyhow::Context;
-use deadpool_redis::Pool;
 use mpc_primitives::SignId;
 use near_account_id::AccountId;
 use redis::AsyncCommands;

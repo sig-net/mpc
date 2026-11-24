@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use anyhow::Context as _;
 use cait_sith::protocol::Participant;
-use deadpool_redis::Pool;
+use mpc_node::storage::redis_pool::Pool;
 use near_account_id::AccountId;
 
 use crate::cluster::spawner::ClusterSpawner;

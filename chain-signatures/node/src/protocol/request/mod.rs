@@ -709,8 +709,8 @@ mod tests {
     use crate::protocol::contract::primitives::{ParticipantInfo, Participants};
     use crate::protocol::presignature::Presignature;
 
+    use crate::storage::redis_pool::Pool;
     use cait_sith::protocol::Participant;
-    use deadpool_redis::Runtime;
     use tokio::sync::Notify;
 
     struct SpawnerSetup {
@@ -838,8 +838,7 @@ mod tests {
             is_running: true,
         };
 
-        let redis_cfg = deadpool_redis::Config::from_url("redis://127.0.0.1/");
-        let pool = redis_cfg.create_pool(Some(Runtime::Tokio1)).unwrap();
+        let pool = Pool::new("redis://127.0.0.1/", None, None).unwrap();
         let presignatures = Presignature::storage(&pool, &account_id);
         let (_inbox, _outbox, msg_channel) = MessageChannel::new();
         let (rpc_tx, _rpc_rx) = mpsc::channel(1);

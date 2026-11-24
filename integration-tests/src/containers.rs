@@ -22,8 +22,6 @@ use borsh::{BorshDeserialize, BorshSerialize};
 use cait_sith::protocol::Participant;
 use cait_sith::triples::{TriplePub, TripleShare};
 use cait_sith::FullSignature;
-use deadpool_redis::redis;
-use deadpool_redis::{Config as RedisPoolConfig, Pool as RedisPool, Runtime as RedisRuntime};
 use elliptic_curve::rand_core::OsRng;
 use k256::elliptic_curve::sec1::ToEncodedPoint as _;
 use k256::Secp256k1;
@@ -31,9 +29,11 @@ use mpc_chain_solana::SolConfig;
 use mpc_contract::primitives::Participants;
 use mpc_node::protocol::presignature::Presignature;
 use mpc_node::protocol::triple::Triple;
+use mpc_node::storage::redis_pool::Pool as RedisPool;
 use mpc_node::storage::triple_storage::TriplePair;
 use mpc_primitives::Chain;
 use near_account_id::AccountId;
+use redis;
 use reqwest::Client;
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -392,10 +392,8 @@ impl Redis {
 
     /// Wait for the Redis container to be reachable via the host port.
     async fn wait_for_host_port_readiness(internal_address: &Url) {
-        let cfg = RedisPoolConfig::from_url(internal_address.clone());
-        let pool = cfg
-            .create_pool(Some(RedisRuntime::Tokio1))
-            .expect("valid redis pool config");
+        let pool =
+            RedisPool::new(internal_address.clone(), None, None).expect("valid redis pool config");
 
         let ping = || async {
             let mut conn = pool.get().await.map_err(anyhow::Error::from)?;
@@ -422,8 +420,7 @@ impl Redis {
     }
 
     pub fn pool(&self) -> RedisPool {
-        let redis_cfg = RedisPoolConfig::from_url(self.internal_address.clone());
-        redis_cfg.create_pool(Some(RedisRuntime::Tokio1)).unwrap()
+        RedisPool::new(self.internal_address.clone(), None, None).unwrap()
     }
 
     pub fn triple_storage(

@@ -7,14 +7,14 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 async fn wait_for_blocked_ping(
-    probe: &mut deadpool_redis::Connection,
+    probe: &mut mpc_node::storage::redis_pool::Connection,
     on_block: impl FnOnce(),
 ) -> anyhow::Result<Duration> {
     tokio::time::timeout(Duration::from_secs(3), async {
         let mut on_block = Some(on_block);
         loop {
             let start = Instant::now();
-            let cmd = deadpool_redis::redis::cmd("PING");
+            let cmd = redis::cmd("PING");
             let ping = cmd.query_async::<()>(&mut *probe);
             tokio::pin!(ping);
             tokio::select! {
@@ -151,7 +151,7 @@ async fn blocking_spike_delays_other_connections_for_requested_duration() -> any
     anonymous_url.set_password(None).unwrap();
     let anonymous_pool = RedisDiagnosticsClient::build_pool(anonymous_url.as_str(), Some(1), None)?;
     let mut anonymous = anonymous_pool.get().await?;
-    assert!(deadpool_redis::redis::cmd("PING")
+    assert!(redis::cmd("PING")
         .query_async::<()>(&mut anonymous)
         .await
         .is_err());

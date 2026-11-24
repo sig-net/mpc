@@ -3,8 +3,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::Context as _;
-use deadpool_redis::redis::{cmd, Value};
-use deadpool_redis::{Config as RedisPoolConfig, Hook, Pool, Runtime as RedisRuntime, Status};
+use mpc_node::storage::redis_pool::{Config as RedisPoolConfig, Pool, Status};
+use redis::{cmd, Value};
 use tokio::sync::Barrier;
 use tokio_util::task::AbortOnDropHandle;
 
@@ -56,25 +56,13 @@ impl RedisDiagnosticsClient {
         max_pool_size: Option<usize>,
         timeout: Option<Duration>,
     ) -> anyhow::Result<Pool> {
-        let parsed_url = url::Url::parse(redis_url).context("invalid redis url")?;
-        let mut builder = RedisPoolConfig::from_url(parsed_url)
-            .builder()?
-            .runtime(RedisRuntime::Tokio1);
+        let mut builder = RedisPoolConfig::from_url(redis_url).context("invalid redis url")?;
 
         if let Some(size) = max_pool_size {
             builder = builder.max_size(size);
         }
-        if let Some(to) = timeout {
-            builder = builder
-                .wait_timeout(Some(to))
-                .create_timeout(Some(to))
-                .recycle_timeout(Some(to))
-                .post_create(Hook::sync_fn(move |conn, _| {
-                    conn.set_response_timeout(to);
-                    Ok(())
-                }));
-        }
-        Ok(builder.build()?)
+        builder = builder.wait_timeout(timeout).timeout(timeout);
+        Ok(builder.build())
     }
 
     pub fn pool(&self) -> &Pool {

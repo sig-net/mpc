@@ -1,4 +1,4 @@
-use deadpool_redis::Pool;
+use crate::storage::redis_pool::Pool;
 use near_sdk::AccountId;
 use redis::{FromRedisValue, RedisError, RedisWrite, ToRedisArgs};
 use serde::{Deserialize, Serialize};

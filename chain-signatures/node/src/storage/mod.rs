@@ -3,6 +3,7 @@ pub mod keystore;
 pub mod midnight_dust_storage;
 pub mod presignature_storage;
 pub mod protocol_storage;
+pub mod redis_pool;
 pub mod triple_storage;
 
 use cait_sith::protocol::Participant;

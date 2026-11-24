@@ -1,5 +1,4 @@
 use cait_sith::protocol::Participant;
-use deadpool_redis::redis::AsyncCommands;
 use integration_tests::mpc_fixture::fixture_interface::MpcFixtureNode;
 use integration_tests::mpc_fixture::fixture_tasks::MessageFilter;
 use integration_tests::mpc_fixture::message_collector::MessageCounter;
@@ -12,6 +11,7 @@ use mpc_node::storage::protocol_storage::{ProtocolArtifact, ProtocolStorage};
 use mpc_node::storage::triple_storage::TriplePair;
 use mpc_node::types::SignCommand;
 use mpc_primitives::Chain;
+use redis::AsyncCommands;
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::sync::Arc;
