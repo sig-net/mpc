@@ -14,6 +14,9 @@ rustflags = [
   "-C", "link-arg=dynamic_lookup",
 ]
 
+[env]
+JEMALLOC_SYS_WITH_MALLOC_CONF = "dirty_decay_ms:1000,muzzy_decay_ms:1000"
+
 [alias]
 build-node = "build -p mpc-node --release"
 build-test = "build -p integration-tests --tests"

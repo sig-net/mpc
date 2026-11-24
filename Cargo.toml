@@ -56,6 +56,7 @@ k256 = { version = "0.13.1", features = [
     "arithmetic",
     "expose-field",
 ] }
+libc = "0.2"
 mockito = "1.7.0"
 prost-types = "0.14.4"
 rand = "0.8.5"
@@ -75,6 +76,7 @@ sysinfo = { version = "0.32.0" }
 tempfile = "3.27.0"
 test-log = { version = "0.2.12", features = ["log", "trace"] }
 thiserror = "1"
+tikv-jemallocator = "0.7.0"
 tokio = { version = "1.45.1", features = ["full"] }
 tokio-tungstenite = { version = "0.29", features = ["rustls-tls-webpki-roots"] }
 tokio-util = { version = "0.7.16", default-features = false }
