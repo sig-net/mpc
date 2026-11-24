@@ -416,7 +416,7 @@ impl<A: ProtocolArtifact> ProtocolStorage<A, Ready> {
             Ok((mut artifact, holders)) => {
                 let holders = holders.into_iter().map(Participant::from).collect();
                 artifact.set_holders(holders);
-                tracing::info!(id, ?elapsed, "took artifact");
+                tracing::debug!(id, ?elapsed, "took artifact");
                 Some(ArtifactTaken::new(artifact, self.clone()))
             }
             Err(err) => {
@@ -581,7 +581,7 @@ impl<A: ProtocolArtifact> ProtocolStorage<A, Ready> {
             Ok((mut artifact, holders)) => {
                 let holders = holders.into_iter().map(Participant::from).collect();
                 artifact.set_holders(holders);
-                tracing::info!(id, ?elapsed, "committed reservation, took artifact");
+                tracing::debug!(id, ?elapsed, "committed reservation, took artifact");
                 Some(ArtifactTaken::new(artifact, self.clone()))
             }
             Err(err) => {
