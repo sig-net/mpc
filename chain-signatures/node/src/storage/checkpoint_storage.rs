@@ -11,6 +11,7 @@ use tokio::sync::RwLock;
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
+use std::sync::LazyLock;
 
 #[derive(Clone, Debug)]
 pub enum CheckpointStorage {
@@ -256,7 +257,9 @@ impl CheckpointStorage {
                 //   - If identical, it is an idempotent no-op.
                 // - If new, write `height -> body` to pending and `digest -> height` to index.
                 // Returns the pending count unless conflicting.
-                const PERSIST: &str = r#"
+                static PERSIST: LazyLock<redis::Script> = LazyLock::new(|| {
+                    redis::Script::new(
+                        r#"
                     local existing = redis.call('HGET', KEYS[1], ARGV[1])
                     if existing then
                         if redis.call('HGET', KEYS[2], ARGV[3]) ~= ARGV[1] then
@@ -267,8 +270,10 @@ impl CheckpointStorage {
                         redis.call('HSET', KEYS[2], ARGV[3], ARGV[1])
                     end
                     return redis.call('HLEN', KEYS[1])
-                "#;
-                let count: i64 = redis::Script::new(PERSIST)
+                "#,
+                    )
+                });
+                let count: i64 = PERSIST
                     .key(self.pending_checkpoint_key(checkpoint.chain))
                     .key(self.pending_digest_key(checkpoint.chain))
                     .arg(checkpoint.block_height)
@@ -360,7 +365,9 @@ impl CheckpointStorage {
                 // 3. If absent from pending:
                 //    - Returns `{ false, remaining_count, latest_body }` so caller can verify
                 //      if the checkpoint was already promoted.
-                const PROMOTE: &str = r#"
+                static PROMOTE: LazyLock<redis::Script> = LazyLock::new(|| {
+                    redis::Script::new(
+                        r#"
                     local height = redis.call('HGET', KEYS[2], ARGV[1])
                     local pending = height and redis.call('HGET', KEYS[1], height)
                     if pending then
@@ -376,16 +383,17 @@ impl CheckpointStorage {
                         return { true, redis.call('HLEN', KEYS[1]), false }
                     end
                     return { false, redis.call('HLEN', KEYS[1]), redis.call('GET', KEYS[3]) }
-                "#;
-                let (promoted, remaining, maybe_latest): (bool, usize, Option<Vec<u8>>) =
-                    redis::Script::new(PROMOTE)
-                        .key(self.pending_checkpoint_key(chain))
-                        .key(self.pending_digest_key(chain))
-                        .key(self.checkpoint_key(chain))
-                        .arg(hex::encode(digest))
-                        .invoke_async(&mut conn)
-                        .await
-                        .context("failed to promote pending checkpoint")?;
+                "#,
+                    )
+                });
+                let (promoted, remaining, maybe_latest): (bool, usize, Option<Vec<u8>>) = PROMOTE
+                    .key(self.pending_checkpoint_key(chain))
+                    .key(self.pending_digest_key(chain))
+                    .key(self.checkpoint_key(chain))
+                    .arg(hex::encode(digest))
+                    .invoke_async(&mut conn)
+                    .await
+                    .context("failed to promote pending checkpoint")?;
 
                 if promoted {
                     return Ok(Some(remaining));
@@ -441,12 +449,16 @@ impl CheckpointStorage {
                 let mut conn = pool.get().await.context("failed to get redis connection")?;
                 // Atomically replaces the canonical latest checkpoint with the consensus
                 // checkpoint and wipes both pending storage hashes, clearing diverged history.
-                const RESET: &str = r#"
+                static RESET: LazyLock<redis::Script> = LazyLock::new(|| {
+                    redis::Script::new(
+                        r#"
                     redis.call('SET', KEYS[1], ARGV[1])
                     redis.call('DEL', KEYS[2])
                     redis.call('DEL', KEYS[3])
-                "#;
-                let _: () = redis::Script::new(RESET)
+                "#,
+                    )
+                });
+                let _: () = RESET
                     .key(self.checkpoint_key(checkpoint.chain))
                     .key(self.pending_checkpoint_key(checkpoint.chain))
                     .key(self.pending_digest_key(checkpoint.chain))
@@ -503,7 +515,9 @@ impl CheckpointStorage {
                 // walking the entire list of pending entries in Lua via `HGETALL` is effectively O(1).
                 // This linear scan is instantaneous (< 1 microsecond) and avoids the operational complexity
                 // and dual-write maintenance of an auxiliary Redis Sorted Set (ZSET).
-                const LATEST: &str = r#"
+                static LATEST: LazyLock<redis::Script> = LazyLock::new(|| {
+                    redis::Script::new(
+                        r#"
                     local entries = redis.call('HGETALL', KEYS[1])
                     local max_height = -1
                     local newest_body = nil
@@ -518,8 +532,10 @@ impl CheckpointStorage {
                         return newest_body
                     end
                     return redis.call('GET', KEYS[2])
-                "#;
-                let body: Option<Vec<u8>> = redis::Script::new(LATEST)
+                "#,
+                    )
+                });
+                let body: Option<Vec<u8>> = LATEST
                     .key(self.pending_checkpoint_key(chain))
                     .key(self.checkpoint_key(chain))
                     .invoke_async(&mut conn)
@@ -597,15 +613,19 @@ impl CheckpointStorage {
                 // Resolves a checkpoint by digest across pending and latest storage:
                 // - Checks the digest index (`KEYS[2]`); if present in pending, returns `{ true, pending_body }`.
                 // - Otherwise returns `{ false, latest_body }` for latest checkpoint comparison.
-                const FIND: &str = r#"
+                static FIND: LazyLock<redis::Script> = LazyLock::new(|| {
+                    redis::Script::new(
+                        r#"
                     local height = redis.call('HGET', KEYS[2], ARGV[1])
                     local pending = height and redis.call('HGET', KEYS[1], height)
                     if pending then
                         return { true, pending }
                     end
                     return { false, redis.call('GET', KEYS[3]) }
-                "#;
-                let (is_pending, maybe_body): (bool, Option<Vec<u8>>) = redis::Script::new(FIND)
+                "#,
+                    )
+                });
+                let (is_pending, maybe_body): (bool, Option<Vec<u8>>) = FIND
                     .key(self.pending_checkpoint_key(chain))
                     .key(self.pending_digest_key(chain))
                     .key(self.checkpoint_key(chain))

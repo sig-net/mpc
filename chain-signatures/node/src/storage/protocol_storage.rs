@@ -5,6 +5,7 @@ use near_sdk::AccountId;
 use redis::{AsyncCommands, FromRedisValue, ToRedisArgs};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::sync::LazyLock;
 use std::{
     fmt,
     time::{Duration, Instant},
@@ -365,7 +366,9 @@ impl<A: ProtocolArtifact> ProtocolStorage<A, Ready> {
     }
 
     pub async fn take(&self, id: A::Id, owner: Participant) -> Option<ArtifactTaken<A>> {
-        const SCRIPT: &str = r#"
+        static SCRIPT: LazyLock<redis::Script> = LazyLock::new(|| {
+            redis::Script::new(
+                r#"
             local artifact_key = KEYS[1]
             local owner_key = KEYS[2]
             local artifact_id = ARGV[1]
@@ -386,7 +389,9 @@ impl<A: ProtocolArtifact> ProtocolStorage<A, Ready> {
             redis.call("DEL", holders_key)
 
             return {artifact, holders}
-        "#;
+        "#,
+            )
+        });
 
         let start = Instant::now();
         let mine = owner == self.me();
@@ -400,7 +405,7 @@ impl<A: ProtocolArtifact> ProtocolStorage<A, Ready> {
             self.reserved.write().await.using.remove(&id);
             return None;
         };
-        let result: Result<(A, Vec<u32>), _> = redis::Script::new(SCRIPT)
+        let result: Result<(A, Vec<u32>), _> = SCRIPT
             .key(&self.artifact_key)
             .key(owner_key(&self.owner_keys, owner))
             .arg(id)
@@ -442,7 +447,9 @@ impl<A: ProtocolArtifact> ProtocolStorage<A, Ready> {
     ///
     /// For Redis, this is a read-only operation.
     pub async fn peek_mine(&self, local_excluded: &[A::Id]) -> Option<ArtifactReservation<A>> {
-        const SCRIPT: &str = r#"
+        static SCRIPT: LazyLock<redis::Script> = LazyLock::new(|| {
+            redis::Script::new(
+                r#"
             local artifact_key = KEYS[1]
             local mine_key = KEYS[2]
 
@@ -467,7 +474,9 @@ impl<A: ProtocolArtifact> ProtocolStorage<A, Ready> {
                 end
             end
             return nil
-        "#;
+        "#,
+            )
+        });
 
         let me = self.me();
 
@@ -485,7 +494,7 @@ impl<A: ProtocolArtifact> ProtocolStorage<A, Ready> {
 
         let start = Instant::now();
         let mut conn = self.connect().await?;
-        let result: Result<Option<(A::Id, Vec<u32>)>, _> = redis::Script::new(SCRIPT)
+        let result: Result<Option<(A::Id, Vec<u32>)>, _> = SCRIPT
             .key(&self.artifact_key)
             .key(owner_key(&self.owner_keys, me))
             .arg(excluded.as_slice())
@@ -528,7 +537,9 @@ impl<A: ProtocolArtifact> ProtocolStorage<A, Ready> {
     /// Transitions an artifact from `pending` to `using` and takes it from Redis.
     /// Returns `None` on a Redis failure.
     pub(crate) async fn commit_reserved(&self, id: A::Id) -> Option<ArtifactTaken<A>> {
-        const SCRIPT: &str = r#"
+        static SCRIPT: LazyLock<redis::Script> = LazyLock::new(|| {
+            redis::Script::new(
+                r#"
             local artifact_key = KEYS[1]
             local owner_key = KEYS[2]
             local artifact_id = ARGV[1]
@@ -548,7 +559,9 @@ impl<A: ProtocolArtifact> ProtocolStorage<A, Ready> {
             redis.call("DEL", holders_key)
 
             return {artifact, holders}
-        "#;
+        "#,
+            )
+        });
 
         // Atomically transition from pending to using in memory.
         // The guard must be released before invoking Redis: failure paths
@@ -565,7 +578,7 @@ impl<A: ProtocolArtifact> ProtocolStorage<A, Ready> {
             self.reserved.write().await.using.remove(&id);
             return None;
         };
-        let result: Result<(A, Vec<u32>), _> = redis::Script::new(SCRIPT)
+        let result: Result<(A, Vec<u32>), _> = SCRIPT
             .key(&self.artifact_key)
             .key(owner_key(&self.owner_keys, self.me()))
             .arg(id)
@@ -608,7 +621,9 @@ impl<A: ProtocolArtifact> ProtocolStorage<A, Ready> {
 
         // Lua script expects: KEYS[1]=artifact_key, KEYS[2]=owner_key,
         // ARGV[1]=peer, ARGV[2]=threshold, ARGV[3...]=ids
-        const SCRIPT: &str = r#"
+        static SCRIPT: LazyLock<redis::Script> = LazyLock::new(|| {
+            redis::Script::new(
+                r#"
             local artifact_key = KEYS[1]
             local owner_key = KEYS[2]
             local peer = ARGV[1]
@@ -641,13 +656,15 @@ impl<A: ProtocolArtifact> ProtocolStorage<A, Ready> {
                 end
             end
             return {removed, updated}
-        "#;
+        "#,
+            )
+        });
 
         let Some(mut conn) = self.connect().await else {
             return Err(StorageError::ConnectionFailed);
         };
         type SyncResult<Id> = Result<(Vec<Id>, Vec<Id>), redis::RedisError>;
-        let result: SyncResult<A::Id> = redis::Script::new(SCRIPT)
+        let result: SyncResult<A::Id> = SCRIPT
             .key(&self.artifact_key)
             .key(owner_key(&self.owner_keys, self.me()))
             .arg(Into::<u32>::into(peer))
@@ -749,7 +766,9 @@ impl<A: ProtocolArtifact, Phase> ProtocolStorage<A, Phase> {
         owner: Participant,
         owner_shares: &[A::Id],
     ) -> Result<RemoveOutdatedResult<A::Id>, StorageError> {
-        const SCRIPT: &str = r#"
+        static SCRIPT: LazyLock<redis::Script> = LazyLock::new(|| {
+            redis::Script::new(
+                r#"
             local artifact_key = KEYS[1]
             local owner_key = KEYS[2]
 
@@ -815,14 +834,16 @@ impl<A: ProtocolArtifact, Phase> ProtocolStorage<A, Phase> {
 
             -- return both outdated and not_found
             return {outdated, not_found}
-        "#;
+        "#,
+            )
+        });
 
         let start = Instant::now();
         let Some(mut conn) = self.connect().await else {
             return Err(StorageError::ConnectionFailed);
         };
         type RemoveOutdatedScriptResult<T> = Result<(Vec<T>, Vec<T>), redis::RedisError>;
-        let result: RemoveOutdatedScriptResult<A::Id> = redis::Script::new(SCRIPT)
+        let result: RemoveOutdatedScriptResult<A::Id> = SCRIPT
             .key(&self.artifact_key)
             .key(owner_key(&self.owner_keys, owner))
             // NOTE: this encodes each entry of owner_shares as a separate ARGV[index] entry.
@@ -859,7 +880,9 @@ impl<A: ProtocolArtifact, Phase> ProtocolStorage<A, Phase> {
     /// persisted as a dedicated Redis set for later holder-tracking.
     /// Private: callers must use `create_slot()` + `ArtifactSlot::insert()`.
     async fn insert(&self, artifact: A, owner: Participant) -> bool {
-        const SCRIPT: &str = r#"
+        static SCRIPT: LazyLock<redis::Script> = LazyLock::new(|| {
+            redis::Script::new(
+                r#"
             local artifact_key = KEYS[1]
             local owner_keys = KEYS[2]
             local owner_key = KEYS[3]
@@ -877,7 +900,9 @@ impl<A: ProtocolArtifact, Phase> ProtocolStorage<A, Phase> {
             if num_holders > 0 then
                 redis.call("SADD", holders_key, unpack(ARGV, 4, 3 + num_holders))
             end
-        "#;
+        "#,
+            )
+        });
 
         let start = Instant::now();
         let id = artifact.id();
@@ -893,7 +918,7 @@ impl<A: ProtocolArtifact, Phase> ProtocolStorage<A, Phase> {
             tracing::warn!(id, "failed to insert artifact: connection failed");
             return false;
         };
-        let outcome = redis::Script::new(SCRIPT)
+        let outcome = SCRIPT
             .key(&self.artifact_key)
             .key(&self.owner_keys)
             .key(owner_key(&self.owner_keys, owner))
@@ -1008,7 +1033,9 @@ impl<A: ProtocolArtifact, Phase> ProtocolStorage<A, Phase> {
     /// Clear all artifact storage, including used, reserved, and owned keys.
     /// Return true if successful, false otherwise.
     pub async fn clear(&self) -> bool {
-        const SCRIPT: &str = r#"
+        static SCRIPT: LazyLock<redis::Script> = LazyLock::new(|| {
+            redis::Script::new(
+                r#"
             local artifact_key = KEYS[2]
             local owner_keys = redis.call("SMEMBERS", KEYS[1])
             local artifact_ids = redis.call("HKEYS", artifact_key)
@@ -1023,13 +1050,15 @@ impl<A: ProtocolArtifact, Phase> ProtocolStorage<A, Phase> {
             for _, id in ipairs(artifact_ids) do
                 redis.call("DEL", artifact_key .. ':holders:' .. id)
             end
-        "#;
+        "#,
+            )
+        });
 
         let start = Instant::now();
         let Some(mut conn) = self.connect().await else {
             return false;
         };
-        let outcome: Option<()> = redis::Script::new(SCRIPT)
+        let outcome: Option<()> = SCRIPT
             .key(&self.owner_keys)
             .key(&self.artifact_key)
             .invoke_async(&mut conn)
