@@ -10,19 +10,16 @@ role, not to the chain itself.
 ## Settings
 
 - **S — static protocol semantics:** [chain identity](account-derivation.md#chain-identification)
-  and deterministic admission, derivation, signing, or response behavior.
-- **D — deployment-profile value:** every node in one deployment uses the same
-  value; includes contracts/programs, target networks, and [checkpoint
-  cadence](checkpoints.md#1-background).
-- **L — local operational configuration:** process connectivity, credentials,
-  enablement, storage, resources, and timing policy.
-- After **D/L**, **· CLI/env** or **· constant** gives today's source;
-  **D · CLI/env** is per-node delivery, not independent ownership.
-- `mpc-node start --help` lists operator parameters; cells name their owners instead.
-- `ChainConfig`: **S** response/target/`Unviable` semantics;
-  **D · constant** [`checkpoint_interval`](checkpoints.md#7-implementation-status)
-  and finality/observation/response expectations; **L · constant**
+  and deterministic request/response rules, including target and `Unviable`
+  support.
+- **D — deployment-wide values:** values shared by every node, including
+  contracts/programs, execution networks, [`checkpoint_interval`](checkpoints.md#7-implementation-status),
+  and finality/observation/response expectations.
+- **L — local operations:** endpoints, credentials, enablement, storage, and
   stall/feed-stall budgets.
+
+Suffixes show the current source: **· CLI/env** or **· constant**. For **D**,
+CLI/env is a delivery mechanism, not independent ownership.
 
 ## Consumer paths
 
