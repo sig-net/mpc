@@ -15,6 +15,7 @@ use mpc_chain_integration_core::utils::retry::{retry_rpc, RetryConfig, RpcFailur
 use mpc_chain_integration_core::{ChainPublisher, PublishAction, PublisherTelemetry};
 use mpc_primitives::{Chain, SignKind};
 use std::{sync::Arc, time::Duration};
+use url::Url;
 
 // Constants for Canton JSON Ledger API RPC retry behavior.
 const CANTON_RPC_TIMEOUT: Duration = Duration::from_secs(5);
@@ -124,7 +125,7 @@ impl CantonClient {
     }
 
     fn json_api_endpoint(&self, path: &str) -> String {
-        format!("{}{}", self.config.json_api_url, path)
+        endpoint(&self.config.json_api_url, path)
     }
 
     pub async fn auth_post(&self, path: &str) -> anyhow::Result<reqwest::RequestBuilder> {
@@ -274,9 +275,9 @@ impl CantonClient {
                     let in_flight = code.as_deref() == Some("SUBMISSION_ALREADY_IN_FLIGHT");
                     let message = format!("{context} failed: {status} {body}");
                     let failure = if in_flight {
-                        RpcFailure::with_verdict(status, false, message)
+                        RpcFailure::retryable_with_status(status, message)
                     } else {
-                        RpcFailure::with_status(status, message)
+                        RpcFailure::send_status(status, message)
                     };
                     return Err(anyhow::Error::new(failure));
                 }
@@ -318,7 +319,7 @@ async fn check_response(
         let text = resp.text().await.unwrap_or_default();
         // typed carrier: classification reads the status, not the hex-laden body
         // TODO: fold reads into the same code-aware classification as the submit path
-        let failure = RpcFailure::with_status(status, format!("{context} failed: {status} {text}"));
+        let failure = RpcFailure::read_status(status, format!("{context} failed: {status} {text}"));
         return Err(anyhow::Error::new(failure));
     }
     Ok(resp)
@@ -423,6 +424,12 @@ impl ChainPublisher for CantonClient {
     }
 }
 
+/// `base` plus `path`, which brings its own leading slash. A host-only `Url` renders
+/// with a trailing slash, so it is trimmed first.
+pub(crate) fn endpoint(base: &Url, path: &str) -> String {
+    format!("{}{path}", base.as_str().trim_end_matches('/'))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -445,10 +452,10 @@ mod tests {
 
     fn mock_canton_config(url: &str) -> CantonConfig {
         CantonConfig {
-            json_api_url: url.to_string(),
-            json_api_ws_url: url.replace("http", "ws"),
+            json_api_url: url.parse().unwrap(),
+            json_api_ws_url: url.replace("http", "ws").parse().unwrap(),
             auth: CantonAuthConfig {
-                token_url: format!("{url}/token"),
+                token_url: format!("{url}/token").parse().unwrap(),
                 client_id: "test-client".to_string(),
                 client_secret: "test-secret".to_string(),
                 audience: "test-audience".to_string(),
@@ -1130,13 +1137,38 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn terminal_4xx_fails_fast_and_hex_bodies_do_not_engage_the_gate() {
+    async fn read_statuses_follow_the_read_partition_and_hex_bodies_do_not_engage_the_gate() {
+        // 409 is a cheap-retry LB quirk on reads; the send table terminalizes it
         let mut server = setup_mock_server_with_auth().await;
-        let mock = server
+        let conflict = server
             .mock("GET", "/v2/state/ledger-end")
             .with_status(409)
             // hex ids in the body must not read as status codes
             .with_body("conflict over party 0xa429f and command c402e58")
+            .expect(3) // 1 attempt + 2 retries
+            .create_async()
+            .await;
+
+        let gate = SharedBackoff::new();
+        let client = CantonClient::new(
+            &mock_canton_config(&server.url()),
+            Arc::new(NoopPublisherTelemetry),
+            gate.clone(),
+        )
+        .await
+        .unwrap()
+        .with_retry_strategy(fast_retry_strategy());
+
+        let err = client.fetch_ledger_end().await.unwrap_err();
+        assert!(is_retryable(&err), "read 409 must retry: {err:#}");
+        assert_eq!(gate.remaining(), Duration::ZERO);
+        conflict.assert_async().await;
+
+        // classic client errors stay terminal reads
+        let mut server = setup_mock_server_with_auth().await;
+        let not_found = server
+            .mock("GET", "/v2/state/ledger-end")
+            .with_status(404)
             .expect(1)
             .create_async()
             .await;
@@ -1152,13 +1184,8 @@ mod tests {
         .with_retry_strategy(fast_retry_strategy());
 
         let err = client.fetch_ledger_end().await.unwrap_err();
-
-        // Check_response wraps the response in RpcFailure with the typed status:
-        // 409 is terminal, so the retry loop stops after the single attempt
-        assert!(!is_retryable(&err), "409 must classify as terminal");
-
-        // The gate should not have engaged because the 409 response is terminal and not a throttle.
+        assert!(!is_retryable(&err), "read 404 must fail fast: {err:#}");
         assert_eq!(gate.remaining(), Duration::ZERO);
-        mock.assert_async().await;
+        not_found.assert_async().await;
     }
 }

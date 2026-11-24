@@ -443,6 +443,9 @@ impl<T: ChainTelemetry> HydrationIndexer<T> {
         }
 
         // Bidirectional request
+        // TODO: decode the block's timestamp inherent (one
+        // chain_getBlock) so §4.3's expiry bound anchors for Hydration
+        // sources too.
         if ev.pallet_name() == PALLET_SIGNET
             && ev.variant_name() == EVENT_SIGN_BIDIRECTIONAL_REQUESTED
         {
@@ -536,7 +539,7 @@ impl<T: ChainTelemetry> ChainIndexer for HydrationIndexer<T> {
             .context("failed to send hydration catchup completed event")?;
 
         let ws_url: &str = self.config.rpc_ws_url.as_str();
-        tracing::info!("connecting to hydration rpc at {ws_url}");
+        tracing::info!("connecting to hydration rpc");
         let (hydration_api, legacy_rpc) = self.connect_rpc(ws_url).await?;
 
         // `subscribe_finalized` returns a private subxt stream alias, so it is

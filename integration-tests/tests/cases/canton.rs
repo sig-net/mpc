@@ -244,10 +244,10 @@ async fn run_canton_eth_bidirectional_flow_case(case: EvmType2AnvilCase) -> Resu
 async fn test_canton_rejects_unauthenticated_requests() -> Result<()> {
     let sandbox = integration_tests::canton::CantonSandbox::run().await?;
     let http = reqwest::Client::new();
-    let url = format!("{}/v2/state/ledger-end", sandbox.json_api_url);
+    let url = sandbox.json_api_url.join("v2/state/ledger-end")?;
 
     // No Authorization header at all.
-    let status = http.get(&url).send().await?.status();
+    let status = http.get(url.clone()).send().await?.status();
     assert_eq!(
         status, 401,
         "missing OAuth bearer token should be rejected, got {status}"
@@ -255,7 +255,7 @@ async fn test_canton_rejects_unauthenticated_requests() -> Result<()> {
 
     // Malformed Bearer token.
     let status = http
-        .get(&url)
+        .get(url.clone())
         .bearer_auth("not-a-valid-token")
         .send()
         .await?
@@ -283,9 +283,9 @@ async fn test_canton_rejects_token_signed_by_untrusted_jwks_key() -> Result<()> 
     // Canton should reject it because the token signature does not match the
     // configured OAuth/JWKS issuer key.
     let http = reqwest::Client::new();
-    let url = format!("{}/v2/state/ledger-end", sandbox.json_api_url);
+    let url = sandbox.json_api_url.join("v2/state/ledger-end")?;
     let status = http
-        .get(&url)
+        .get(url.clone())
         .bearer_auth(&rogue_token)
         .send()
         .await?

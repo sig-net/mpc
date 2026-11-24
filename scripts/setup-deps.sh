@@ -13,13 +13,13 @@
 
 set -u
 
-RUST_VERSION="1.93.0"
+RUST_VERSION="1.95.0"
 WASM_TARGET="wasm32-unknown-unknown"
 REDIS_IMAGE="redis:7.4.2"
 SOLANA_VERSION="2.3.9"
 ANCHOR_VERSION="0.30.1"
 CANTON_SDK="3.5.1"
-COMPACT_RC="0.33.0-rc.2"
+COMPACTC_VERSION="0.36.0"
 
 MODE="${1:-}"
 SCOPE="${2:-}"
@@ -85,7 +85,7 @@ check_extended() {
     if have anchor && anchor --version 2>/dev/null | grep -q "$ANCHOR_VERSION"; then ok "anchor $(anchor --version)"; else miss "anchor ${ANCHOR_VERSION}"; hint "cargo install --git https://github.com/coral-xyz/anchor avm --locked && avm install ${ANCHOR_VERSION}"; fi
     if java -version 2>&1 | grep -q "21"; then ok "java 21"; else miss "java 21 (temurin)"; fi
     if have dpm; then ok "dpm $(dpm --version 2>/dev/null | head -n 1)"; else miss "dpm (Canton SDK ${CANTON_SDK})"; hint "curl -fsSL https://get.digitalasset.com/install/install.sh | sh && dpm install ${CANTON_SDK}"; fi
-    if have compact; then ok "compact"; else miss "compact launcher 0.5.1 + compactc ${COMPACT_RC}"; hint "see .github/workflows/test-chain-midnight.yml (Linux pins)"; fi
+    if have compact; then ok "compact"; else miss "compact launcher 0.5.3 + compactc ${COMPACTC_VERSION}"; hint "see .github/workflows/test-chain-midnight.yml (Linux pins)"; fi
 }
 
 apt_install() {
@@ -221,14 +221,14 @@ ensure_extended() {
         note_path_dir "$HOME/.dpm/bin"
     fi
     if [ "$OS" = "Linux" ] && ! have compact; then
-        curl --proto '=https' --tlsv1.2 -LsSf --retry 4 -o /tmp/compact-installer.sh https://github.com/midnightntwrk/compact/releases/download/compact-v0.5.1/compact-installer.sh
+        curl --proto '=https' --tlsv1.2 -LsSf --retry 4 -o /tmp/compact-installer.sh https://github.com/midnightntwrk/compact/releases/download/compact-v0.5.3/compact-installer.sh
         sh /tmp/compact-installer.sh
-        RC_DIR="$HOME/.compact/versions/${COMPACT_RC}/x86_64-unknown-linux-musl"
-        mkdir -p "$RC_DIR"
-        curl -fsSL --retry 4 -o /tmp/compactc-rc.zip "https://github.com/LFDT-Minokawa/compact/releases/download/compactc-v${COMPACT_RC}/compactc_v${COMPACT_RC}_x86_64-unknown-linux-musl.zip"
-        unzip -qo /tmp/compactc-rc.zip -d "$RC_DIR"
-        chmod +x "$RC_DIR"/*
-        compact update "$COMPACT_RC" || ln -sfn "$RC_DIR"/* "$HOME/.compact/bin/"
+        COMPACTC_DIR="$HOME/.compact/versions/${COMPACTC_VERSION}/x86_64-unknown-linux-musl"
+        mkdir -p "$COMPACTC_DIR"
+        curl -fsSL --retry 4 -o /tmp/compactc.zip "https://github.com/LFDT-Minokawa/compact/releases/download/compactc-v${COMPACTC_VERSION}/compactc_v${COMPACTC_VERSION}_x86_64-unknown-linux-musl.zip"
+        unzip -qo /tmp/compactc.zip -d "$COMPACTC_DIR"
+        chmod +x "$COMPACTC_DIR"/*
+        compact update "$COMPACTC_VERSION" || ln -sfn "$COMPACTC_DIR"/* "$HOME/.compact/bin/"
         note_path_dir "$HOME/.local/bin"
         note_path_dir "$HOME/.compact/bin"
     fi

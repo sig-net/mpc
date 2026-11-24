@@ -1,0 +1,353 @@
+import { ChargedState, ContractState, type StateValue } from "@midnight-ntwrk/compact-runtime";
+import {
+  createUnprovenCallTx,
+  type CallTxOptionsWithPrivateStateId,
+} from "@midnight-ntwrk/midnight-js/contracts";
+import {
+  FailFallible,
+  SucceedEntirely,
+  LedgerTransaction,
+  SerializedContractState,
+  type FinalizedTxRead,
+} from "@midnight-ntwrk/midnight-js/types";
+import { Transaction, type UnprovenTransaction } from "@midnightntwrk/ledger-v9";
+import { bytesToHex, hexToBytes } from "@sig-net/midnight";
+import { ledger, type ProvableCircuits } from "./managed/caller/contract/index.js";
+import { applicationOrder, placementOf, type CallPlacement } from "./placement.js";
+import {
+  CALLER_PRIVATE_STATE_ID,
+  callerCompiledContract,
+  type CallerCircuitId,
+  type CallerContract,
+  type CallerProviders,
+} from "./providers.js";
+import type { CallerPrivateState } from "./witnesses.js";
+
+/** The circuits' shared request shape. */
+export interface IsEvenCall {
+  evmNonce: bigint;
+  to: Uint8Array;
+  argWord: Uint8Array;
+}
+
+/**
+ * Transaction shapes that place singleton notifications in guaranteed and fallible
+ * transcripts. Calls from the same transaction touch the same two contracts, so the
+ * ledger's causality check requires a guaranteed intent to precede every fallible one.
+ */
+export enum PlacementScenario {
+  /** One call whose whole transcript, singleton call included, is fallible. */
+  FallibleOnly = "fallibleOnly",
+  /** One guaranteed call that notifies twice. */
+  GuaranteedTranscriptPair = "guaranteedTranscriptPair",
+  /** One fallible call that notifies twice. */
+  FallibleTranscriptPair = "fallibleTranscriptPair",
+  /** A guaranteed intent followed by a fallible intent. */
+  GuaranteedThenFallibleSegments = "guaranteedThenFallibleSegments",
+  /** Two fallible intents, the second call's in the lower segment. */
+  FallibleSegmentPair = "fallibleSegmentPair",
+  /** A guaranteed intent followed by a fallible intent that fails when applied. */
+  PartialSuccess = "partialSuccess",
+  /** A fallible intent that commits followed by a fallible intent that fails when applied. */
+  FallibleThenFailing = "fallibleThenFailing",
+  /**
+   * A fallible call proven before the same request is filed by another transaction, so it
+   * fails when applied after that one.
+   */
+  RolledBackReplay = "rolledBackReplay",
+}
+
+export interface PlacementOutcome {
+  status: typeof SucceedEntirely | typeof FailFallible;
+  /** Request ids in the order of the scenario's calls. */
+  requests: string[];
+  /** Notifications in the order the ledger applies them. */
+  notifications: string[];
+  /** Requests present in the caller's ledger after the transaction. */
+  committed: string[];
+  placement: CallPlacement[];
+  /** The indexer's per-segment results, `transactionResult.segments`. */
+  segments: [number, string][];
+  blockHeight: number;
+  txHash: string;
+}
+
+export interface PlacementContext {
+  providers: CallerProviders;
+  callerAddress: string;
+  signetAddress: string;
+  schema: Uint8Array;
+  /** Submits a bumpGate call transaction. */
+  bumpGate: () => Promise<unknown>;
+}
+
+export type CircuitArgs<K extends CallerCircuitId> =
+  Parameters<ProvableCircuits<CallerPrivateState>[K]> extends [unknown, ...infer Args]
+    ? Args
+    : never;
+
+export interface BuiltCall {
+  tx: UnprovenTransaction;
+  segment: number;
+  requests: string[];
+  /** The caller's state once this call applies. */
+  nextState: StateValue;
+}
+
+const normalizeAddress = (address: string) => address.replace(/^0x/i, "").toLowerCase();
+
+export async function buildCall<K extends CallerCircuitId>(
+  context: PlacementContext,
+  circuitId: K,
+  args: CircuitArgs<K>,
+): Promise<BuiltCall> {
+  // `args` is typed from the generated circuit; the options type's conditional argument
+  // member cannot be resolved for a generic circuit id.
+  const options = {
+    compiledContract: callerCompiledContract,
+    contractAddress: context.callerAddress,
+    circuitId,
+    privateStateId: CALLER_PRIVATE_STATE_ID,
+    args,
+  } as unknown as CallTxOptionsWithPrivateStateId<CallerContract, K>;
+  const built = await createUnprovenCallTx(context.providers, options);
+  const tx = built.private.unprovenTx.deserialize({ v9: Transaction });
+  const segments = [...(tx.intents?.keys() ?? [])];
+  const [segment] = segments;
+  if (segments.length !== 1 || segment === undefined) {
+    throw new Error(`${circuitId} built ${segments.length} intents, expected one`);
+  }
+  const result: unknown = built.private.result;
+  const requests = Array.isArray(result) ? result : [result];
+  return {
+    tx,
+    segment,
+    requests: requests.map((requestId) => bytesToHex(requestId as Uint8Array)),
+    nextState: built.public.nextContractState,
+  };
+}
+
+/**
+ * `context` reading the caller as it stands once `earlier` applies. A transcript's declared
+ * gas is costed against the state it was built on, and its state writes cost more once
+ * another call in the same transaction has written the same map first, so a call the
+ * ledger applies after `earlier` and must commit is built on this view (as midnight-js
+ * does for calls in one scoped transaction); built on the shared pre-state it can run out
+ * of gas.
+ */
+export function afterCall(context: PlacementContext, earlier: BuiltCall): PlacementContext {
+  const reads = context.providers.publicDataProvider;
+  const caller = normalizeAddress(context.callerAddress);
+  const queryZSwapAndContractState: typeof reads.queryZSwapAndContractState = async (
+    address,
+    config,
+  ) => {
+    const states = await reads.queryZSwapAndContractState(address, config);
+    if (states === null || normalizeAddress(address) !== caller) return states;
+    const contract = states.contractState.deserialize({ v9: ContractState });
+    contract.data = new ChargedState(earlier.nextState);
+    return {
+      ...states,
+      contractState: SerializedContractState.fromBytes("v9", contract.serialize()),
+    };
+  };
+  // The provider is a class instance: forward everything else to it, bound to it.
+  const publicDataProvider = new Proxy(reads, {
+    get(target, property) {
+      if (property === "queryZSwapAndContractState") return queryZSwapAndContractState;
+      const value: unknown = Reflect.get(target, property);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+  return { ...context, providers: { ...context.providers, publicDataProvider } };
+}
+
+// midnight-js randomizes each intent's segment; rebuild both calls until the first lands in
+// the lower segment.
+export async function buildOrdered(
+  buildLower: () => Promise<BuiltCall>,
+  buildHigher: (lower: BuiltCall) => Promise<BuiltCall>,
+): Promise<[BuiltCall, BuiltCall]> {
+  for (let attempt = 0; attempt < 32; attempt += 1) {
+    const lower = await buildLower();
+    const higher = await buildHigher(lower);
+    if (lower.segment < higher.segment) return [lower, higher];
+  }
+  throw new Error("could not order the two intents' segments");
+}
+
+function expectPhases(
+  placement: readonly CallPlacement[],
+  phases: ReadonlyMap<number, "guaranteed" | "fallible">,
+): void {
+  for (const [segment, phase] of phases) {
+    const calls = placement.filter((call) => call.segment === segment);
+    const wholly = (call: CallPlacement) =>
+      phase === "guaranteed"
+        ? call.guaranteed && !call.fallible
+        : call.fallible && !call.guaranteed;
+    if (calls.length === 0 || !calls.every(wholly)) {
+      throw new Error(`segment ${segment} is not wholly ${phase}: ${JSON.stringify(calls)}`);
+    }
+  }
+}
+
+async function committedRequests(context: PlacementContext, requests: string[]): Promise<string[]> {
+  const state = await context.providers.publicDataProvider.queryContractState(
+    context.callerAddress,
+  );
+  if (!state) throw new Error(`no caller state found at ${context.callerAddress}`);
+  const map = ledger(state.contractState.deserialize({ v9: ContractState }).data).requests;
+  return requests.filter((requestId) => map.member(hexToBytes(requestId)));
+}
+
+export async function currentGate(context: PlacementContext): Promise<bigint> {
+  const state = await context.providers.publicDataProvider.queryContractState(
+    context.callerAddress,
+  );
+  if (!state) throw new Error(`no caller state found at ${context.callerAddress}`);
+  return ledger(state.contractState.deserialize({ v9: ContractState }).data).gate;
+}
+
+/** The indexer's per-segment results for a finalized transaction, segment id first. */
+export function segmentsOf(finalized: FinalizedTxRead): [number, string][] {
+  return [...(finalized.segmentStatusMap ?? new Map<number, unknown>())].map(
+    ([segment, status]) => [segment, String(status)],
+  );
+}
+
+export async function submitBuilt(
+  context: PlacementContext,
+  tx: UnprovenTransaction,
+  beforeBalancing: () => Promise<unknown>,
+): Promise<FinalizedTxRead> {
+  const proven = await context.providers.proofProvider.proveTx(
+    LedgerTransaction.seal("v9", "Unproven", tx),
+  );
+  await beforeBalancing();
+  const balanced = await context.providers.walletProvider.balanceTx(proven);
+  const txId = await context.providers.midnightProvider.submitTx(balanced);
+  return context.providers.publicDataProvider.watchForTxData(txId);
+}
+
+/**
+ * Builds, checks and submits one placement scenario.
+ *
+ * @throws When the built transaction's placement or the ledger outcome differs from the
+ *   scenario, so a changed partitioner cannot silently weaken the test.
+ */
+export async function submitPlacement(
+  context: PlacementContext,
+  scenario: PlacementScenario,
+  calls: readonly IsEvenCall[],
+): Promise<PlacementOutcome> {
+  const [first, second] = calls;
+  if (first === undefined) throw new Error(`${scenario} needs a call`);
+  const placed = (call: IsEvenCall, fallible: boolean, on = context) =>
+    buildCall(on, "submitPlacedRequest", [call, context.schema, fallible]);
+
+  let parts: BuiltCall[];
+  let phases: Map<number, "guaranteed" | "fallible">;
+  let beforeBalancing = () => Promise.resolve();
+  if (scenario === PlacementScenario.FallibleOnly) {
+    const call = await placed(first, true);
+    parts = [call];
+    phases = new Map([[call.segment, "fallible"]]);
+  } else if (scenario === PlacementScenario.RolledBackReplay) {
+    const replay = await placed(first, true);
+    parts = [replay];
+    phases = new Map([[replay.segment, "fallible"]]);
+    beforeBalancing = async () => {
+      const original = await placed(first, false);
+      const landed = await submitBuilt(context, original.tx, () => Promise.resolve());
+      if (landed.status !== SucceedEntirely) {
+        throw new Error(`the replayed request finalized as ${landed.status}`);
+      }
+    };
+  } else if (second === undefined) {
+    throw new Error(`${scenario} needs two calls`);
+  } else if (
+    scenario === PlacementScenario.GuaranteedTranscriptPair ||
+    scenario === PlacementScenario.FallibleTranscriptPair
+  ) {
+    const fallible = scenario === PlacementScenario.FallibleTranscriptPair;
+    const call = await buildCall(context, "submitPlacedRequestPair", [
+      first,
+      second,
+      context.schema,
+      fallible,
+    ]);
+    parts = [call];
+    phases = new Map([[call.segment, fallible ? "fallible" : "guaranteed"]]);
+  } else if (scenario === PlacementScenario.FallibleSegmentPair) {
+    const [lower, higher] = await buildOrdered(
+      () => placed(second, true),
+      (lower) => placed(first, true, afterCall(context, lower)),
+    );
+    parts = [higher, lower];
+    phases = new Map([
+      [lower.segment, "fallible"],
+      [higher.segment, "fallible"],
+    ]);
+  } else {
+    let buildHigher = (lower: BuiltCall) => placed(second, true, afterCall(context, lower));
+    const failing =
+      scenario === PlacementScenario.PartialSuccess ||
+      scenario === PlacementScenario.FallibleThenFailing;
+    if (failing) {
+      const gate = await currentGate(context);
+      buildHigher = () => buildCall(context, "submitGatedRequest", [second, context.schema, gate]);
+      beforeBalancing = async () => {
+        await context.bumpGate();
+      };
+    }
+    const lowerPhase =
+      scenario === PlacementScenario.FallibleThenFailing ? "fallible" : "guaranteed";
+    const [lower, higher] = await buildOrdered(
+      () => placed(first, lowerPhase === "fallible"),
+      buildHigher,
+    );
+    parts = [lower, higher];
+    phases = new Map([
+      [lower.segment, lowerPhase],
+      [higher.segment, "fallible"],
+    ]);
+  }
+
+  const [head, ...rest] = parts;
+  if (head === undefined) throw new Error(`${scenario} built no calls`);
+  const tx = rest.reduce((merged, part) => merged.merge(part.tx), head.tx);
+  const placement = placementOf(tx);
+  expectPhases(placement, phases);
+  const requests = parts.flatMap((part) => part.requests);
+  const signet = normalizeAddress(context.signetAddress);
+  const notifications = applicationOrder(
+    placement.filter((call) => normalizeAddress(call.address) === signet),
+  );
+  if ([...notifications].sort().join() !== [...requests].sort().join()) {
+    throw new Error(
+      `${scenario} notified [${notifications.join()}] but filed [${requests.join()}]`,
+    );
+  }
+
+  const finalized = await submitBuilt(context, tx, beforeBalancing);
+  const status =
+    scenario === PlacementScenario.PartialSuccess ||
+    scenario === PlacementScenario.FallibleThenFailing ||
+    scenario === PlacementScenario.RolledBackReplay
+      ? FailFallible
+      : SucceedEntirely;
+  if (finalized.status !== status) {
+    throw new Error(`${scenario} finalized as ${finalized.status}, expected ${status}`);
+  }
+  return {
+    status,
+    requests,
+    notifications,
+    committed: await committedRequests(context, requests),
+    placement,
+    segments: segmentsOf(finalized),
+    blockHeight: finalized.blockHeight,
+    txHash: String(finalized.txHash),
+  };
+}

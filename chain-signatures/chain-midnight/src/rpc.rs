@@ -1,4 +1,4 @@
-//! Midnight node RPC: the read transport everything in the read path goes through.
+//! Midnight node RPC: the transport every read and the publisher's submissions go through.
 
 use std::time::Duration;
 
@@ -11,7 +11,7 @@ use jsonrpsee::types::error::{INVALID_PARAMS_CODE, OVERSIZED_RESPONSE_CODE};
 use mpc_chain_integration_core::utils::retry::{
     exhausted, http_status_read_retryable, is_retryable, RetryConfig,
 };
-use subxt::backend::legacy::rpc_methods::NumberOrHex;
+use subxt::backend::legacy::rpc_methods::{BlockDetails, NumberOrHex};
 use subxt::backend::legacy::LegacyRpcMethods;
 use subxt::backend::rpc::{RawRpcFuture, RawRpcSubscription, RawValue, RpcClient, RpcClientT};
 use subxt::client::OnlineClient;
@@ -32,25 +32,57 @@ const LEDGER_PARAMETERS_ENTRY: &str = "MidnightRuntimeApi_get_ledger_parameters"
 /// The connected runtime is the canonical owner of the wallet network identity.
 const NETWORK_ID_ENTRY: &str = "MidnightRuntimeApi_get_network_id";
 
-pub(crate) const STATE_TOO_LARGE: &str = "midnight contract state exceeds the rpc response cap";
+/// Largest caller contract state the protocol admits, in decoded bytes. Every node
+/// applies the same limit, so admission does not depend on any node's RPC cap. The
+/// node serves the state as hex inside JSON, so the response is a little over twice
+/// this; the limit must sit below half the RPC node's response cap (15 MiB by
+/// default) and well below half of [`MAX_RESPONSE_SIZE`].
+const MAX_CALLER_STATE_BYTES: usize = 7 * 1024 * 1024;
+
+/// The client's own response cap. A constant rather than a config field: a response
+/// the client refuses is over 16 MiB of state, so over [`MAX_CALLER_STATE_BYTES`],
+/// and that verdict is only safe if every node refuses at the same size.
+const MAX_RESPONSE_SIZE: u32 = 32 * 1024 * 1024;
+
+/// Generous bound on the JSON around the hex state in a `midnight_contractState`
+/// response.
+const RESPONSE_ENVELOPE_BYTES: usize = 1024;
+
+/// Smallest RPC node response cap that fits every admissible state: the hex doubles
+/// the bytes, plus the envelope. A size refusal under a cap at least this large
+/// proves the state is over the limit.
+const MIN_PROVING_RESPONSE_CAP: usize = 2 * MAX_CALLER_STATE_BYTES + RESPONSE_ENVELOPE_BYTES;
+
+// The client's own refusal proves excess only if the client admits every proving cap.
+const _: () = assert!(MIN_PROVING_RESPONSE_CAP <= MAX_RESPONSE_SIZE as usize);
+
+const STATE_TOO_LARGE: &str = "midnight contract state exceeds the protocol limit";
 
 #[derive(Debug)]
-struct OversizedContractState(RawRpcError);
+struct OversizedContractState {
+    detail: String,
+    source: Option<RawRpcError>,
+}
 
 impl std::fmt::Display for OversizedContractState {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(formatter, "{STATE_TOO_LARGE}: {}", self.0)
+        write!(formatter, "{STATE_TOO_LARGE}: {}", self.detail)
     }
 }
 
 impl std::error::Error for OversizedContractState {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        Some(&self.0)
+        self.source
+            .as_ref()
+            .map(|source| source as &(dyn std::error::Error + 'static))
     }
 }
 
-pub(crate) fn oversized_contract_state(source: RawRpcError) -> anyhow::Error {
-    anyhow::Error::new(OversizedContractState(source))
+pub(crate) fn oversized_contract_state(detail: impl Into<String>) -> anyhow::Error {
+    anyhow::Error::new(OversizedContractState {
+        detail: detail.into(),
+        source: None,
+    })
 }
 
 pub(crate) fn is_oversized_contract_state(err: &anyhow::Error) -> bool {
@@ -75,16 +107,29 @@ impl ToRpcParams for Params {
 struct HttpRpcClient {
     node_url: String,
     config: RpcConfig,
+    max_response_size: u32,
     /// The client plus a generation, so concurrent failures replace it once.
     current: std::sync::RwLock<(u64, HttpClient)>,
 }
 
 impl HttpRpcClient {
     fn new(node_url: &str, config: &RpcConfig) -> anyhow::Result<Self> {
+        Self::with_response_cap(node_url, config, MAX_RESPONSE_SIZE)
+    }
+
+    fn with_response_cap(
+        node_url: &str,
+        config: &RpcConfig,
+        max_response_size: u32,
+    ) -> anyhow::Result<Self> {
         Ok(Self {
-            current: std::sync::RwLock::new((0, build_http_client(node_url, config)?)),
+            current: std::sync::RwLock::new((
+                0,
+                build_http_client(node_url, config, max_response_size)?,
+            )),
             node_url: node_url.to_owned(),
             config: config.clone(),
+            max_response_size,
         })
     }
 
@@ -102,7 +147,7 @@ impl HttpRpcClient {
         if self.current().0 != failed {
             return;
         }
-        let client = match build_http_client(&self.node_url, &self.config) {
+        let client = match build_http_client(&self.node_url, &self.config, self.max_response_size) {
             Ok(client) => client,
             Err(error) => {
                 tracing::warn!(
@@ -129,9 +174,13 @@ impl HttpRpcClient {
     }
 }
 
-fn build_http_client(node_url: &str, config: &RpcConfig) -> anyhow::Result<HttpClient> {
+fn build_http_client(
+    node_url: &str,
+    config: &RpcConfig,
+    max_response_size: u32,
+) -> anyhow::Result<HttpClient> {
     HttpClientBuilder::default()
-        .max_response_size(config.max_response_size)
+        .max_response_size(max_response_size)
         .request_timeout(config.request_timeout)
         .build(node_url)
         .context("failed to build the midnight HTTP RPC client")
@@ -184,6 +233,19 @@ struct SendMnTransaction {
 impl subxt::blocks::StaticExtrinsic for SendMnTransaction {
     const PALLET: &'static str = "Midnight";
     const CALL: &'static str = "send_mn_transaction";
+}
+
+/// The substrate timestamp inherent (`Timestamp::set`), present in the
+/// captured Midnight runtime metadata (node 2.0.0-rc.4 fixture).
+#[derive(DecodeAsType)]
+#[decode_as_type(crate_path = "subxt::ext::scale_decode")]
+struct TimestampSet {
+    now: u64,
+}
+
+impl subxt::blocks::StaticExtrinsic for TimestampSet {
+    const PALLET: &'static str = "Timestamp";
+    const CALL: &'static str = "set";
 }
 
 #[derive(DecodeAsType)]
@@ -287,7 +349,7 @@ fn parse_block_hash(at_block_hash_0x: &str) -> anyhow::Result<H256> {
 }
 
 fn connect_http(config: &MidnightConfig) -> anyhow::Result<RpcClient> {
-    connect_http_endpoint(&config.node_url, &config.rpc)
+    connect_http_endpoint(config.node_url.as_str(), &config.rpc)
 }
 
 fn connect_http_endpoint(node_url: &str, config: &RpcConfig) -> anyhow::Result<RpcClient> {
@@ -373,46 +435,37 @@ impl MidnightRpc {
         &self,
         block_ref: &BlockRef,
         singleton: &[u8; 32],
+        responder: &[u8; 32],
     ) -> anyhow::Result<Option<BlockEmissions>> {
         let hash = parse_block_hash(&block_ref.hash)?;
-        let block = retry_read(
-            self.reads.request_timeout,
-            self.reads.retry,
-            "midnight_block",
-            || async {
-                self.client
-                    .blocks()
-                    .at(hash)
-                    .await
-                    .map_err(anyhow::Error::new)
-                    .context("failed to fetch a midnight block")
-            },
+        let block = self
+            .reads
+            .block(hash)
+            .await?
+            .with_context(|| format!("midnight node has no block {}", block_ref.hash))?
+            .block;
+        let header = block.header;
+        let extrinsics = subxt::ext::subxt_core::blocks::decode_from::<SubstrateConfig>(
+            block.extrinsics.into_iter().map(|bytes| bytes.0).collect(),
+            self.client.metadata(),
         )
-        .await?;
-        let extrinsics = retry_read(
-            self.reads.request_timeout,
-            self.reads.retry,
-            "midnight_block_body",
-            || async {
-                block
-                    .extrinsics()
-                    .await
-                    .map_err(anyhow::Error::new)
-                    .context("failed to fetch a midnight block body")
-            },
-        )
-        .await?;
+        .map_err(anyhow::Error::new)
+        .context("failed to decode a midnight block body")?;
+        let height = u64::from(header.number);
 
         let mut candidates = Vec::new();
         for found in extrinsics.find::<SendMnTransaction>() {
             let found = found.map_err(|err| {
                 BlockHold::new(
                     "emission-schema-hold",
-                    u64::from(block.number()),
+                    height,
                     anyhow::Error::new(err).context("send_mn_transaction did not match metadata"),
                 )
             })?;
-            if memchr::memmem::find(&found.value.midnight_tx, singleton).is_some() {
+            let tx = &found.value.midnight_tx;
+            if memchr::memmem::find(tx, singleton).is_some()
+                || memchr::memmem::find(tx, responder).is_some()
+            {
                 candidates.push(found);
             }
         }
@@ -420,27 +473,44 @@ impl MidnightRpc {
             return Ok(None);
         }
 
-        let height = u64::from(block.number());
+        // One timestamp inherent per block by substrate protocol; §4.3's
+        // admission bound anchors on it, so a traffic block without a
+        // decodable one holds instead of emitting without a time.
+        // Arg corruption fails `decode_from` first (subxt eagerly decodes
+        // call data); the decode arm is metadata drift — the payload decodes
+        // per the node's metadata but not as `TimestampSet`.
+        let block_time_ms = extrinsics
+            .find::<TimestampSet>()
+            .next()
+            .transpose()
+            .map_err(|err| anyhow::Error::new(err).context("timestamp set did not match metadata"))
+            .and_then(|found| {
+                found.ok_or_else(|| anyhow::anyhow!("block carries no timestamp inherent"))
+            })
+            .map_err(|cause| BlockHold::new("block-time-hold", height, cause))?
+            .value
+            .now;
+        let block_events = retry_read(
+            self.reads.request_timeout,
+            self.reads.retry,
+            "midnight_block_events",
+            || async {
+                self.client
+                    .events()
+                    .at(hash)
+                    .await
+                    .map_err(anyhow::Error::new)
+                    .context("failed to fetch midnight block events")
+            },
+        )
+        .await?;
         let mut decoded_candidates = Vec::with_capacity(candidates.len());
-        let mut scale_system_events = None;
         for found in candidates {
-            let events = retry_read(
-                self.reads.request_timeout,
-                self.reads.retry,
-                "midnight_block_events",
-                || async {
-                    found
-                        .details
-                        .events()
-                        .await
-                        .map_err(anyhow::Error::new)
-                        .context("failed to fetch midnight block events")
-                },
-            )
-            .await?;
-            scale_system_events
-                .get_or_insert_with(|| events.all_events_in_block().bytes().to_vec());
-
+            let events = subxt::blocks::ExtrinsicEvents::new(
+                found.details.hash(),
+                found.details.index(),
+                block_events.clone(),
+            );
             let applied = applied_status(&events)
                 .map_err(|err| BlockHold::new("emission-schema-hold", height, err))?;
             let Some((ledger_tx_hash, status)) = applied else {
@@ -457,7 +527,7 @@ impl MidnightRpc {
             let tx = decode_applied_transaction(&found.value.midnight_tx, ledger_tx_hash).map_err(
                 |err| {
                     BlockHold::new(
-                        "singleton-tx-undecodable",
+                        "contract-tx-undecodable",
                         height,
                         err.context(format!(
                             "candidate extrinsic {} ledger transaction {}",
@@ -467,93 +537,194 @@ impl MidnightRpc {
                     )
                 },
             )?;
-            let schema_hold = |err: anyhow::Error| {
-                BlockHold::new(
-                    "emission-schema-hold",
-                    height,
-                    err.context(format!(
-                        "candidate extrinsic {} transaction {} singleton emissions",
-                        found.details.index(),
-                        hex::encode(ledger_tx_hash)
-                    )),
-                )
-            };
-            let calls = match status {
-                AppliedStatus::Applied => emissions_in(&tx, singleton).map_err(schema_hold)?,
-                AppliedStatus::PartialSuccess => {
-                    let (calls, skipped) =
-                        partial_success_emissions_in(&tx, singleton).map_err(schema_hold)?;
-                    for skipped in skipped {
-                        tracing::warn!(
-                            reason = "partial-success-fallible-skipped",
-                            tx_hash = %hex::encode(ledger_tx_hash),
-                            height,
-                            block_hash = %block_ref.hash,
-                            extrinsic_index = found.details.index(),
-                            call_index = skipped.call_index,
-                            physical_segment = skipped.physical_segment,
-                            error = %format_args!("{:#}", skipped.reason),
-                            "midnight fallible singleton phase skipped in a partial success"
-                        );
+            let decode = |contract: &[u8; 32]| {
+                let schema_hold = |err: anyhow::Error| {
+                    BlockHold::new(
+                        "emission-schema-hold",
+                        height,
+                        err.context(format!(
+                            "candidate extrinsic {} transaction {} emissions of contract {}",
+                            found.details.index(),
+                            hex::encode(ledger_tx_hash),
+                            hex::encode(contract)
+                        )),
+                    )
+                };
+                anyhow::Ok(match status {
+                    AppliedStatus::Applied => emissions_in(&tx, contract).map_err(schema_hold)?,
+                    AppliedStatus::PartialSuccess => {
+                        let (calls, skipped) =
+                            partial_success_emissions_in(&tx, contract).map_err(schema_hold)?;
+                        for skipped in skipped {
+                            tracing::warn!(
+                                reason = "partial-success-fallible-skipped",
+                                tx_hash = %hex::encode(ledger_tx_hash),
+                                height,
+                                block_hash = %block_ref.hash,
+                                extrinsic_index = found.details.index(),
+                                contract = %hex::encode(contract),
+                                call_index = skipped.call_index,
+                                physical_segment = skipped.physical_segment,
+                                error = %format_args!("{:#}", skipped.reason),
+                                "midnight fallible protocol contract phase skipped in a partial success"
+                            );
+                        }
+                        calls
                     }
-                    calls
-                }
+                })
             };
             decoded_candidates.push(CandidateTransactionEmissions {
                 ledger_tx_hash,
                 extrinsic_index: found.details.index(),
                 partial_success: status == AppliedStatus::PartialSuccess,
-                calls,
+                singleton_calls: decode(singleton)?,
+                responder_calls: decode(responder)?,
             });
         }
 
         Ok(Some(BlockEmissions {
+            block_time_ms,
             proof_seed: BlockProofSeed {
                 reported_genesis_hash: *self.client.genesis_hash().as_fixed_bytes(),
                 reported_block_number: height,
-                reported_block_hash: *block.hash().as_fixed_bytes(),
+                reported_block_hash: *hash.as_fixed_bytes(),
                 singleton_address: *singleton,
-                scale_header: block.header().encode(),
+                responder_address: *responder,
+                scale_header: header.encode(),
                 scale_body: extrinsics
                     .iter()
                     .map(|extrinsic| extrinsic.bytes().to_vec())
                     .collect(),
-                scale_system_events: scale_system_events
-                    .expect("a prefiltered candidate always fetched block events"),
+                scale_system_events: block_events.bytes().to_vec(),
             },
             candidates: decoded_candidates,
         }))
     }
 }
 
-/// Finalized request-only reads for the Midnight publisher.
+/// Finalized reads and transaction submission for the Midnight publisher.
 pub(crate) struct MidnightPublisherRpc {
     rpc: RpcClient,
     legacy: LegacyRpcMethods<SubstrateConfig>,
+    genesis_hash: H256,
+    /// One subxt client per runtime version met, each with the metadata read at a
+    /// block of that runtime.
+    clients: std::sync::Mutex<
+        std::collections::HashMap<RuntimeVersionKey, OnlineClient<SubstrateConfig>>,
+    >,
     network_id: String,
 }
 
+/// `(spec_version, transaction_version)`.
+type RuntimeVersionKey = (u32, u32);
+
 impl MidnightPublisherRpc {
     pub async fn connect(config: &MidnightConfig) -> anyhow::Result<Self> {
-        let (rpc, legacy, network_id) = tokio::time::timeout(config.rpc.connect_timeout, async {
+        tokio::time::timeout(config.rpc.connect_timeout, async {
             let rpc = connect_http(config)?;
             let legacy = LegacyRpcMethods::<SubstrateConfig>::new(rpc.clone());
             let network_id = network_id(&legacy).await?;
-            anyhow::Ok((rpc, legacy, network_id))
+            let genesis_hash = legacy
+                .genesis_hash()
+                .await
+                .context("failed to fetch the midnight genesis hash")?;
+            let publisher = Self {
+                rpc,
+                legacy,
+                genesis_hash,
+                clients: Default::default(),
+                network_id,
+            };
+            publisher
+                .client_at(None)
+                .await
+                .context("failed to initialise the midnight subxt client")?;
+            anyhow::Ok(publisher)
         })
         .await
-        .context("timed out fetching the midnight network id")??;
-
-        Ok(Self {
-            rpc,
-            legacy,
-            network_id,
-        })
+        .context("timed out connecting the midnight publisher to the node")?
     }
 
     pub fn network_id(&self) -> &str {
         &self.network_id
     }
+
+    /// The subxt client for the runtime in `at`'s state, or the best block's when
+    /// `None`: the runtime the node's pool validates a submit against. Version and
+    /// metadata are read at the same block, so an upgrade not yet finalized cannot
+    /// pair new metadata with an old version or the reverse.
+    async fn client_at(&self, at: Option<H256>) -> anyhow::Result<OnlineClient<SubstrateConfig>> {
+        let at = match at {
+            Some(at) => at,
+            None => self
+                .legacy
+                .chain_get_block_hash(None)
+                .await
+                .context("failed to fetch the midnight best block")?
+                .context("midnight node has no best block")?,
+        };
+        let version = self
+            .legacy
+            .state_get_runtime_version(Some(at))
+            .await
+            .context("failed to fetch the midnight runtime version")?;
+        let key = (version.spec_version, version.transaction_version);
+        if let Some(client) = self.clients().get(&key) {
+            return Ok(client.clone());
+        }
+        let metadata = metadata_at(&self.rpc, at).await?;
+        let client = OnlineClient::<SubstrateConfig>::from_rpc_client_with(
+            self.genesis_hash,
+            subxt::client::RuntimeVersion {
+                spec_version: key.0,
+                transaction_version: key.1,
+            },
+            metadata,
+            self.rpc.clone(),
+        )
+        .context("failed to build the midnight subxt client")?;
+        Ok(self.clients().entry(key).or_insert(client).clone())
+    }
+
+    /// The subxt client for the runtime that executed block `hash`: its parent's.
+    async fn client_for_block(&self, hash: H256) -> anyhow::Result<OnlineClient<SubstrateConfig>> {
+        let header = self
+            .legacy
+            .chain_get_header(Some(hash))
+            .await
+            .context("failed to fetch a midnight block header")?
+            .with_context(|| format!("midnight node has no header for {}", hex_0x(hash)))?;
+        self.client_at(Some(header.parent_hash)).await
+    }
+
+    fn clients(
+        &self,
+    ) -> std::sync::MutexGuard<
+        '_,
+        std::collections::HashMap<RuntimeVersionKey, OnlineClient<SubstrateConfig>>,
+    > {
+        self.clients
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
+
+/// The newest metadata version subxt reads that the runtime in `at`'s state serves,
+/// tried the way `OnlineClient::from_rpc_client` tries them.
+async fn metadata_at(rpc: &RpcClient, at: H256) -> anyhow::Result<subxt::Metadata> {
+    use subxt::backend::BackendExt as _;
+
+    let backend =
+        subxt::backend::legacy::LegacyBackend::<SubstrateConfig>::builder().build(rpc.clone());
+    for version in subxt::metadata::types::SUPPORTED_METADATA_VERSIONS {
+        if let Ok(metadata) = backend.metadata_at_version(version, at).await {
+            return Ok(metadata);
+        }
+    }
+    backend
+        .legacy_metadata(at)
+        .await
+        .context("failed to fetch the midnight runtime metadata")
 }
 
 /// Finalized reads used by the publisher and its in-process tests. Every read is
@@ -599,6 +770,161 @@ impl PinnedReads for MidnightPublisherRpc {
             .context("failed to fetch midnight ledger parameters")?;
         unwrap_runtime_api_result(&answer)?
             .with_context(|| format!("midnight node has no ledger parameters at {at_hash_0x}"))
+    }
+}
+
+/// Where a submitted ledger transaction ended up.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Landing {
+    Applied,
+    /// Applied but for a fallible segment; readers still read its guaranteed events.
+    PartialSuccess,
+    /// A finalized block is past the transaction's TTL, so it can no longer land.
+    Expired,
+}
+
+/// Why `author_submitExtrinsic` did not take a transaction.
+#[derive(Debug)]
+pub(crate) enum SubmitRefusal {
+    /// The node answered with a refusal: nothing entered its pool.
+    Refused(String),
+    /// No answer arrived; the transaction may be in the pool.
+    Unanswered(anyhow::Error),
+    /// The transaction was never sent: the node's runtime could not be read, or
+    /// the call does not match its metadata.
+    Unsent(anyhow::Error),
+}
+
+/// The pool's "already imported" answer: the transaction is in it.
+const ALREADY_IMPORTED: i32 = 1013;
+
+/// A JSON-RPC error is the node's own refusal, so nothing entered its pool; a
+/// transport failure leaves the transaction possibly in it.
+fn classify_submit_reply(
+    reply: Result<serde_json::Value, RawRpcError>,
+) -> Result<(), SubmitRefusal> {
+    match reply {
+        Ok(_) => Ok(()),
+        Err(RawRpcError::User(reply)) if reply.code == ALREADY_IMPORTED => Ok(()),
+        Err(RawRpcError::User(reply)) => Err(SubmitRefusal::Refused(format!(
+            "{}: {}{}",
+            reply.code,
+            reply.message,
+            reply
+                .data
+                .map(|data| format!(" ({})", data.get()))
+                .unwrap_or_default()
+        ))),
+        Err(error) => Err(SubmitRefusal::Unanswered(
+            anyhow::Error::new(error).context("author_submitExtrinsic failed"),
+        )),
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::native::SubmitChain for MidnightPublisherRpc {
+    async fn block_number(&self, at_hash_0x: &str) -> anyhow::Result<u64> {
+        let header = self
+            .legacy
+            .chain_get_header(Some(parse_block_hash(at_hash_0x)?))
+            .await
+            .context("failed to fetch a midnight block header")?
+            .with_context(|| format!("midnight node has no header for {at_hash_0x}"))?;
+        Ok(u64::from(header.number))
+    }
+
+    async fn block_hash_at(&self, number: u64) -> anyhow::Result<Option<String>> {
+        Ok(self
+            .legacy
+            .chain_get_block_hash(Some(NumberOrHex::Number(number)))
+            .await
+            .context("failed to fetch a midnight block hash by number")?
+            .map(hex_0x))
+    }
+
+    async fn block_time(
+        &self,
+        at_hash_0x: &str,
+    ) -> anyhow::Result<midnight_base_crypto::time::Timestamp> {
+        let at = parse_block_hash(at_hash_0x)?;
+        let key = self
+            .client_for_block(at)
+            .await?
+            .storage()
+            .address_bytes(&subxt::dynamic::storage(
+                "Timestamp",
+                "Now",
+                Vec::<subxt::dynamic::Value>::new(),
+            ))
+            .context("the midnight runtime has no Timestamp::Now")?;
+        let raw = self
+            .legacy
+            .state_get_storage(&key, Some(at))
+            .await
+            .context("failed to fetch the midnight block time")?
+            .with_context(|| format!("midnight node has no block time at {at_hash_0x}"))?;
+        let millis =
+            u64::decode_all(&mut &raw[..]).context("the midnight block time is not a u64")?;
+        Ok(midnight_base_crypto::time::Timestamp::from_secs(
+            millis / 1000,
+        ))
+    }
+
+    async fn submit(&self, transaction: &[u8]) -> Result<(), SubmitRefusal> {
+        let client = self
+            .client_at(None)
+            .await
+            .map_err(|error| SubmitRefusal::Unsent(error.context("reading the node's runtime")))?;
+        let extrinsic = client
+            .tx()
+            .create_unsigned(&subxt::dynamic::tx(
+                "Midnight",
+                "send_mn_transaction",
+                vec![subxt::dynamic::Value::from_bytes(transaction)],
+            ))
+            .map_err(|error| {
+                SubmitRefusal::Unsent(anyhow::anyhow!(
+                    "send_mn_transaction did not match metadata: {error}"
+                ))
+            })?;
+        let encoded = format!("0x{}", hex::encode(extrinsic.encoded()));
+        classify_submit_reply(
+            self.rpc
+                .request::<serde_json::Value>("author_submitExtrinsic", rpc_params![encoded])
+                .await,
+        )
+    }
+
+    async fn landing(
+        &self,
+        at_hash_0x: &str,
+        tx_hash: [u8; 32],
+    ) -> anyhow::Result<Option<Landing>> {
+        let at = parse_block_hash(at_hash_0x)?;
+        let events = self
+            .client_for_block(at)
+            .await?
+            .blocks()
+            .at(at)
+            .await
+            .context("failed to fetch a midnight block")?
+            .events()
+            .await
+            .context("failed to fetch midnight block events")?;
+        for event in events.iter() {
+            let event = event.context("Midnight block events did not match metadata")?;
+            if let Some(TxApplied(details)) = event.as_event::<TxApplied>()? {
+                if details.tx_hash == tx_hash {
+                    return Ok(Some(Landing::Applied));
+                }
+            }
+            if let Some(TxPartialSuccess(details)) = event.as_event::<TxPartialSuccess>()? {
+                if details.tx_hash == tx_hash {
+                    return Ok(Some(Landing::PartialSuccess));
+                }
+            }
+        }
+        Ok(None)
     }
 }
 
@@ -650,7 +976,19 @@ async fn publisher_contract_state(
 
     match classify_contract_state_reply(response)? {
         ContractStateReply::State(state) => Ok(state),
-        ContractStateReply::TooLarge(err) | ContractStateReply::Other(err) => {
+        // Not an admission verdict, so the marker type stays out of the chain. The
+        // detail names the cap that refused, the rpc node's or the client's.
+        ContractStateReply::TooLarge(OversizedContractState { detail, source }) => {
+            let cause = match source {
+                Some(source) => anyhow::Error::new(source).context(detail),
+                None => anyhow::anyhow!(detail),
+            };
+            Err(cause.context(
+                "the responder's state was refused for its size; it is exempt from \
+                 the admission limit, so the refusing cap is too small for it",
+            ))
+        }
+        ContractStateReply::Other(err) => {
             Err(anyhow::Error::new(err).context("midnight_contractState failed"))
         }
     }
@@ -662,9 +1000,9 @@ async fn publisher_contract_state(
 enum ContractStateReply {
     /// The state bytes, or `None` when the contract is not present at that block.
     State(Option<Vec<u8>>),
-    /// State beyond the rpc response cap, reachable because our cap sits above the
-    /// server's: definitive, since retrying cannot shrink a contract's state.
-    TooLarge(RawRpcError),
+    /// State over [`MAX_CALLER_STATE_BYTES`]: definitive, since retrying cannot
+    /// shrink a contract's state.
+    TooLarge(OversizedContractState),
     /// Anything else; the transport's own policy decides.
     Other(RawRpcError),
 }
@@ -683,11 +1021,83 @@ fn classify_contract_state_reply(
         {
             ContractStateReply::State(None)
         }
+        // The client refuses a response over MAX_RESPONSE_SIZE before it sees the
+        // bytes; that is over 16 MiB of state, so over the limit on every node.
+        Err(err) if is_response_too_large(&err) => {
+            ContractStateReply::TooLarge(OversizedContractState {
+                detail: format!("response over the client cap of {MAX_RESPONSE_SIZE} bytes"),
+                source: Some(err),
+            })
+        }
+        // The RPC node refused the response for its size. Under a cap that fits every
+        // admissible state the state is over the limit on every node; under a
+        // smaller cap the verdict would be that node's configuration, so the block
+        // is held like any other read failure.
         Err(RawRpcError::User(reply)) if reply.code == OVERSIZED_RESPONSE_CODE => {
-            ContractStateReply::TooLarge(RawRpcError::User(reply))
+            match server_response_cap(&reply) {
+                Some(cap) if cap >= MIN_PROVING_RESPONSE_CAP => {
+                    ContractStateReply::TooLarge(OversizedContractState {
+                        detail: format!("response over the rpc node's cap of {cap} bytes"),
+                        source: Some(RawRpcError::User(reply)),
+                    })
+                }
+                cap => {
+                    if let Some(count) = mpc_utils::throttle::check("midnight:rpc-cap-refusal") {
+                        tracing::warn!(
+                            count,
+                            ?cap,
+                            min_cap = MIN_PROVING_RESPONSE_CAP,
+                            "the midnight rpc node's response cap refused a contract state"
+                        );
+                    }
+                    ContractStateReply::Other(RawRpcError::User(reply))
+                }
+            }
         }
         Err(err) => ContractStateReply::Other(err),
     })
+}
+
+/// The cap a jsonrpsee server names in its oversized-response error, whose data is
+/// the string `Exceeded max limit of <bytes>` (jsonrpsee-core 0.24.10,
+/// `server/method_response.rs`).
+fn server_response_cap(reply: &UserError) -> Option<usize> {
+    let data: String = serde_json::from_str(reply.data.as_ref()?.get()).ok()?;
+    data.strip_prefix("Exceeded max limit of ")?.parse().ok()
+}
+
+/// The indexer's limit on a caller state it did receive. The publisher reads the
+/// responder through the same classifier and is not bound by it.
+fn admit_caller_state(state: Option<Vec<u8>>) -> anyhow::Result<Option<Vec<u8>>> {
+    match state {
+        Some(state) if state.len() > MAX_CALLER_STATE_BYTES => Err(oversized_contract_state(
+            format!("{} bytes, limit {MAX_CALLER_STATE_BYTES}", state.len()),
+        )),
+        state => Ok(state),
+    }
+}
+
+/// Whether the jsonrpsee HTTP transport refused the response body for its size:
+/// up front on a `Content-Length` over the cap, or while streaming a body without
+/// one.
+fn is_response_too_large(error: &RawRpcError) -> bool {
+    use jsonrpsee::core::http_helpers::HttpError;
+
+    let RawRpcError::Client(client_error) = error else {
+        return false;
+    };
+    let Some(JsonrpseeClientError::Transport(transport_error)) =
+        client_error.downcast_ref::<JsonrpseeClientError>()
+    else {
+        return false;
+    };
+    match transport_error.downcast_ref::<jsonrpsee::http_client::transport::Error>() {
+        Some(jsonrpsee::http_client::transport::Error::Http(HttpError::TooLarge)) => true,
+        Some(jsonrpsee::http_client::transport::Error::Http(HttpError::Stream(stream))) => {
+            stream.is::<http_body_util::LengthLimitError>()
+        }
+        _ => false,
+    }
 }
 
 /// The bare payload of the ledger-parameters `Result<Vec<u8>, _>` runtime-API answer
@@ -837,6 +1247,23 @@ impl Reads {
         .await
     }
 
+    /// Header and body in one call: `chain_getBlock` carries the header.
+    async fn block(&self, hash: H256) -> anyhow::Result<Option<BlockDetails<SubstrateConfig>>> {
+        retry_read(
+            self.request_timeout,
+            self.retry,
+            "midnight_block",
+            || async {
+                self.legacy
+                    .chain_get_block(Some(hash))
+                    .await
+                    .map_err(anyhow::Error::new)
+                    .context("failed to fetch a midnight block")
+            },
+        )
+        .await
+    }
+
     async fn block_hash_at(&self, number: u64) -> anyhow::Result<Option<H256>> {
         retry_read(
             self.request_timeout,
@@ -872,8 +1299,8 @@ impl Reads {
                     .await;
 
                 match classify_contract_state_reply(response)? {
-                    ContractStateReply::State(state) => Ok(state),
-                    ContractStateReply::TooLarge(err) => Err(oversized_contract_state(err)),
+                    ContractStateReply::State(state) => admit_caller_state(state),
+                    ContractStateReply::TooLarge(err) => Err(anyhow::Error::new(err)),
                     ContractStateReply::Other(err) => {
                         Err(anyhow::Error::new(err).context("midnight_contractState failed"))
                     }
@@ -899,6 +1326,17 @@ mod tests {
     use subxt::ext::scale_decode::DecodeAsType;
     use subxt::ext::subxt_rpcs::UserError;
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+    /// The `Timestamp::set` moment the synthetic test body carries, unix ms.
+    const FIXTURE_BLOCK_TIME_MS: u64 = 1_700_000_000_000;
+
+    /// The timestamp extrinsic the synthetic test body carries.
+    enum FixtureTimestamp {
+        Set,
+        /// Trailing garbage inside the call payload: framing valid, decode not.
+        Corrupted,
+        Absent,
+    }
 
     #[derive(DecodeAsType)]
     #[decode_as_type(crate_path = "subxt::ext::scale_decode")]
@@ -1036,13 +1474,38 @@ mod tests {
         read_fallible_transaction(
             events,
             include_bytes!("../fixtures/fallible-deposit-tx-432.mn"),
+            FixtureTimestamp::Set,
         )
         .await
     }
 
+    /// The vault capture's singleton.
+    const CAPTURE_SINGLETON: &str =
+        "4daa9701226222a9db302dfb6f347f48c947278a4dc93812a79494f4086a0172";
+    /// A responder no captured transaction calls.
+    const ABSENT_RESPONDER: [u8; 32] = [0xcd; 32];
+
     async fn read_fallible_transaction(
         events: Vec<u8>,
         transaction: &[u8],
+        timestamp: FixtureTimestamp,
+    ) -> anyhow::Result<Option<BlockEmissions>> {
+        read_fallible_transaction_as(
+            events,
+            transaction,
+            crate::test_utils::hex_32(CAPTURE_SINGLETON),
+            ABSENT_RESPONDER,
+            timestamp,
+        )
+        .await
+    }
+
+    async fn read_fallible_transaction_as(
+        events: Vec<u8>,
+        transaction: &[u8],
+        singleton: [u8; 32],
+        responder: [u8; 32],
+        timestamp: FixtureTimestamp,
     ) -> anyhow::Result<Option<BlockEmissions>> {
         let metadata = subxt::Metadata::decode_all(
             &mut &include_bytes!("../fixtures/fallible-block-432-metadata.scale")[..],
@@ -1077,6 +1540,26 @@ mod tests {
         // unrelated calls, so status association is exercised by Subxt itself.
         let mut body = vec![format!("0x{}", hex::encode(filler.encoded())); 4];
         body.push(format!("0x{}", hex::encode(candidate.encoded())));
+        let set_call = client.tx().create_unsigned(&subxt::dynamic::tx(
+            "Timestamp",
+            "set",
+            vec![subxt::dynamic::Value::from(FIXTURE_BLOCK_TIME_MS)],
+        ))?;
+        match timestamp {
+            FixtureTimestamp::Set => {
+                body.push(format!("0x{}", hex::encode(set_call.encoded())));
+            }
+            FixtureTimestamp::Corrupted => {
+                let encoded = set_call.encoded();
+                let (prefix, payload) = encoded.split_first().expect("encoded extrinsic");
+                assert!(payload.len() < 62, "single-byte compact prefix");
+                let mut corrupted = vec![prefix + 4];
+                corrupted.extend_from_slice(payload);
+                corrupted.push(0x00);
+                body.push(format!("0x{}", hex::encode(corrupted)));
+            }
+            FixtureTimestamp::Absent => {}
+        }
         let header = json!({
             "parentHash": hash_of_byte(0x42),
             "number": "0x1b0",
@@ -1084,12 +1567,8 @@ mod tests {
             "extrinsicsRoot": hash_of_byte(0x45),
             "digest": { "logs": [] }
         });
+        // No chain_getHeader: the block read takes the header from chain_getBlock.
         let mut module = RpcModule::new(());
-        let response_header = header.clone();
-        module.register_method("chain_getHeader", move |params, _, _| {
-            assert_eq!(params.parse::<Vec<String>>().unwrap(), [hash_of_byte(0x43)]);
-            response_header.clone()
-        })?;
         module.register_method("chain_getBlock", move |params, _, _| {
             assert_eq!(params.parse::<Vec<String>>().unwrap(), [hash_of_byte(0x43)]);
             json!({ "block": { "header": header, "extrinsics": body }, "justifications": null })
@@ -1119,12 +1598,9 @@ mod tests {
             hash: hash_of_byte(0x43),
             parent_hash: hash_of_byte(0x42),
         };
-        let singleton = crate::test_utils::hex_32(
-            "4daa9701226222a9db302dfb6f347f48c947278a4dc93812a79494f4086a0172",
-        );
         let result = tokio::time::timeout(
             Duration::from_secs(5),
-            rpc.block_emissions(&block, &singleton),
+            rpc.block_emissions(&block, &singleton, &responder),
         )
         .await;
         handle.stop()?;
@@ -1141,8 +1617,9 @@ mod tests {
             .expect("block contains a singleton candidate");
         assert_eq!(block.proof_seed.reported_block_number, 432);
         assert_eq!(block.proof_seed.reported_block_hash, [0x43; 32]);
-        assert_eq!(block.proof_seed.scale_body.len(), 5);
+        assert_eq!(block.proof_seed.scale_body.len(), 6);
         assert_eq!(block.proof_seed.scale_system_events, events);
+        assert_eq!(block.block_time_ms, FIXTURE_BLOCK_TIME_MS);
         assert_eq!(block.candidates.len(), 1);
         let candidate = &block.candidates[0];
         assert_eq!(candidate.extrinsic_index, 4);
@@ -1152,8 +1629,9 @@ mod tests {
                 "ba41ac43f2cfa97e32357877b85210a7f2105f4930b60515e19aa9ec00bb0f5d"
             )
         );
-        assert_eq!(candidate.calls.len(), 1);
-        let call = &candidate.calls[0];
+        assert_eq!(candidate.singleton_calls.len(), 1);
+        assert!(candidate.responder_calls.is_empty());
+        let call = &candidate.singleton_calls[0];
         assert_eq!(call.call_index, 1);
         assert_eq!(call.physical_segment, 49592);
         assert_eq!(call.phase, crate::emissions::TranscriptPhase::Fallible);
@@ -1168,6 +1646,72 @@ mod tests {
                 "ee3385dda706877d30e802a0df57c228310016889104b8fb361c830a58d1e500"
             )
         );
+    }
+
+    #[tokio::test]
+    async fn block_reader_finds_calls_by_the_responder_address_too() {
+        // The decoder keys on the address alone, so the captured call stands in for a
+        // responder call when the responder is configured at its address.
+        let block = read_fallible_transaction_as(
+            include_bytes!("../fixtures/fallible-block-432-events.scale").to_vec(),
+            include_bytes!("../fixtures/fallible-deposit-tx-432.mn"),
+            [0xab; 32],
+            crate::test_utils::hex_32(CAPTURE_SINGLETON),
+            FixtureTimestamp::Set,
+        )
+        .await
+        .expect("read captured fallible transaction")
+        .expect("block contains a responder candidate");
+        assert_eq!(
+            block.proof_seed.responder_address,
+            crate::test_utils::hex_32(CAPTURE_SINGLETON)
+        );
+        let [candidate] = block.candidates.as_slice() else {
+            panic!("expected one candidate: {:?}", block.candidates);
+        };
+        assert!(candidate.singleton_calls.is_empty());
+        let [call] = candidate.responder_calls.as_slice() else {
+            panic!(
+                "expected one responder call: {:?}",
+                candidate.responder_calls
+            );
+        };
+        assert_eq!((call.call_index, call.physical_segment), (1, 49592));
+    }
+
+    #[tokio::test]
+    async fn a_traffic_block_without_a_timestamp_inherent_holds() {
+        let events = include_bytes!("../fixtures/fallible-block-432-events.scale").to_vec();
+        let transaction = include_bytes!("../fixtures/fallible-deposit-tx-432.mn");
+        let err = read_fallible_transaction(events, transaction, FixtureTimestamp::Absent)
+            .await
+            .expect_err("a traffic block must carry its timestamp inherent");
+        let hold = err.downcast_ref::<BlockHold>().expect("typed block hold");
+        assert_eq!(hold.reason, "block-time-hold");
+        assert_eq!(hold.height, 432);
+        assert!(
+            format!("{:#}", hold.cause).contains("block carries no timestamp inherent"),
+            "unexpected cause: {:#}",
+            hold.cause
+        );
+    }
+
+    #[tokio::test]
+    async fn corrupted_timestamp_arguments_fail_the_body_fetch() {
+        // subxt eagerly decodes call data at the body fetch, so arg
+        // corruption never reaches the reader — the fetch fails and the
+        // supervised run restarts.
+        let events = include_bytes!("../fixtures/fallible-block-432-events.scale").to_vec();
+        let transaction = include_bytes!("../fixtures/fallible-deposit-tx-432.mn");
+        let err = read_fallible_transaction(events, transaction, FixtureTimestamp::Corrupted)
+            .await
+            .expect_err("a traffic block must carry a decodable timestamp");
+        assert!(
+            err.downcast_ref::<BlockHold>().is_none(),
+            "arg corruption is a fetch failure, not a hold: {err:#}"
+        );
+        assert!(format!("{err:#}").contains("failed to decode a midnight block body"));
+        assert!(format!("{err:#}").contains("bytes were left"));
     }
 
     fn captured_applied_status_record() -> Vec<u8> {
@@ -1190,6 +1734,7 @@ mod tests {
             context::QueryContext,
             cost_model::INITIAL_COST_MODEL,
             ops::Op,
+            result_mode::ResultModeVerify,
             state::{ChargedState, StateValue},
         };
         use midnight_storage::{arena::Sp, storage::Array};
@@ -1203,15 +1748,18 @@ mod tests {
             original.address,
         );
         let mut transcript = original.fallible_transcript.as_deref().unwrap().clone();
+        // Unbounded: the capture's declared deletions exceed what ledger 9.1.0.1 prices for
+        // its writes, and 9.1.0.1 refuses `noop 0` as not normalized, so neither declared gas
+        // bound applies to this fixture any longer.
         let before = context
-            .run_transcript(&transcript, &INITIAL_COST_MODEL)
+            .query::<ResultModeVerify>(&Vec::from(&transcript.program), None, &INITIAL_COST_MODEL)
             .unwrap();
         let mut program = Vec::from(&transcript.program);
         program.push(Op::Noop { n: 0 });
         transcript.program = program.into();
         let after = context
-            .run_transcript(&transcript, &INITIAL_COST_MODEL)
-            .expect("zero noop executes within the original declared gas");
+            .query::<ResultModeVerify>(&Vec::from(&transcript.program), None, &INITIAL_COST_MODEL)
+            .expect("zero noop executes");
         assert_eq!(before.events, after.events);
         assert_eq!(before.context.effects, after.context.effects);
 
@@ -1223,8 +1771,8 @@ mod tests {
         modified.fallible_transcript = Some(Sp::new(transcript));
         let binding = intent.binding_commitment.clone().into();
         assert_eq!(
-            original.public_inputs(binding),
-            modified.public_inputs(binding),
+            original.public_inputs(binding).unwrap(),
+            modified.public_inputs(binding).unwrap(),
             "fallible Noop(0) leaves the existing contract proof inputs unchanged"
         );
         let mut actions = Vec::from(&intent.actions);
@@ -1246,13 +1794,17 @@ mod tests {
         // This reader fixture does not reseal the outer intent or pay changed fees.
         // Its matching status is synthetic; the assertions above establish the
         // contract-proof inputs and VM behavior, not acceptance by a live node.
-        let block = read_fallible_transaction(encode_status_records(&[applied]), &bytes)
-            .await
-            .expect("a harmless noop must not hold block processing")
-            .unwrap();
+        let block = read_fallible_transaction(
+            encode_status_records(&[applied]),
+            &bytes,
+            FixtureTimestamp::Set,
+        )
+        .await
+        .expect("a harmless noop must not hold block processing")
+        .unwrap();
         assert_eq!(block.candidates.len(), 1);
         assert_eq!(block.candidates[0].ledger_tx_hash, hash);
-        let calls = &block.candidates[0].calls;
+        let calls = &block.candidates[0].singleton_calls;
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].call_index, 1);
         assert_eq!(calls[0].physical_segment, segment);
@@ -1320,13 +1872,17 @@ mod tests {
 
         // Modified program and matching status are synthetic. This exercises the
         // production reader, not proof validity, gas admission or node acceptance.
-        let block = read_fallible_transaction(encode_status_records(&[applied]), &bytes)
-            .await
-            .expect("checkpoints must not hide the captured event")
-            .unwrap();
+        let block = read_fallible_transaction(
+            encode_status_records(&[applied]),
+            &bytes,
+            FixtureTimestamp::Set,
+        )
+        .await
+        .expect("checkpoints must not hide the captured event")
+        .unwrap();
         assert_eq!(block.candidates.len(), 1);
         assert_eq!(block.candidates[0].ledger_tx_hash, hash);
-        assert_eq!(block.candidates[0].calls, expected);
+        assert_eq!(block.candidates[0].singleton_calls, expected);
     }
 
     /// The captured fallible deposit with its singleton call's fallible transcript edited,
@@ -1387,13 +1943,17 @@ mod tests {
             recorder.clone(),
         );
         let subscriber_guard = tracing::subscriber::set_default(subscriber);
-        let block = read_fallible_transaction(encode_status_records(&[partial]), &bytes)
-            .await
-            .expect("a fallible effects mismatch in a partial success does not hold")
-            .unwrap();
+        let block = read_fallible_transaction(
+            encode_status_records(&[partial]),
+            &bytes,
+            FixtureTimestamp::Set,
+        )
+        .await
+        .expect("a fallible effects mismatch in a partial success does not hold")
+        .unwrap();
         drop(subscriber_guard);
         assert_eq!(block.candidates.len(), 1);
-        assert!(block.candidates[0].calls.is_empty());
+        assert!(block.candidates[0].singleton_calls.is_empty());
         let skipped = recorder
             .snapshot()
             .into_iter()
@@ -1408,9 +1968,13 @@ mod tests {
         assert_eq!(skipped.get("call_index").map(String::as_str), Some("1"));
         assert!(skipped["error"].contains("declared effects differ"));
 
-        let err = read_fallible_transaction(encode_status_records(&[applied]), &bytes)
-            .await
-            .expect_err("the same phase of a fully applied transaction holds");
+        let err = read_fallible_transaction(
+            encode_status_records(&[applied]),
+            &bytes,
+            FixtureTimestamp::Set,
+        )
+        .await
+        .expect_err("the same phase of a fully applied transaction holds");
         let hold = err.downcast_ref::<BlockHold>().expect("typed block hold");
         assert_eq!(hold.reason, "emission-schema-hold");
     }
@@ -1424,9 +1988,13 @@ mod tests {
         });
 
         for status in [partial, applied] {
-            let err = read_fallible_transaction(encode_status_records(&[status]), &bytes)
-                .await
-                .expect_err("an unsupported fallible program holds");
+            let err = read_fallible_transaction(
+                encode_status_records(&[status]),
+                &bytes,
+                FixtureTimestamp::Set,
+            )
+            .await
+            .expect_err("an unsupported fallible program holds");
             let hold = err.downcast_ref::<BlockHold>().expect("typed block hold");
             assert_eq!(hold.reason, "emission-schema-hold");
         }
@@ -1477,7 +2045,7 @@ mod tests {
             .expect_err("a different transaction's status must hold the block");
         let hold = err.downcast_ref::<BlockHold>().expect("typed block hold");
         assert_eq!(hold.height, 432);
-        assert_eq!(hold.reason, "singleton-tx-undecodable");
+        assert_eq!(hold.reason, "contract-tx-undecodable");
         assert!(format!("{:#}", hold.cause).contains("hash does not match"));
     }
 
@@ -1546,7 +2114,9 @@ mod tests {
     #[ignore = "capture tool: MIDNIGHT_NODE_URL, MIDNIGHT_CAPTURE_BLOCK, MIDNIGHT_CAPTURE_SINGLETON, MIDNIGHT_CAPTURE_OUT_DIR"]
     async fn capture_block_fixtures() {
         let node_url = std::env::var("MIDNIGHT_NODE_URL")
-            .expect("MIDNIGHT_NODE_URL must name the capture node HTTP endpoint");
+            .expect("MIDNIGHT_NODE_URL must name the capture node HTTP endpoint")
+            .parse()
+            .expect("MIDNIGHT_NODE_URL must be a URL");
         let height = std::env::var("MIDNIGHT_CAPTURE_BLOCK")
             .expect("MIDNIGHT_CAPTURE_BLOCK must name one capture height")
             .parse::<u64>()
@@ -1569,6 +2139,8 @@ mod tests {
         let config = crate::config::MidnightConfig {
             node_url,
             central_address: crate::config::MidnightAddress::from_bytes(singleton),
+            // Unread: the capture reads only the singleton's calls.
+            responder_address: crate::config::MidnightAddress::from_bytes([0; 32]),
             publisher: Default::default(),
             rpc: Default::default(),
             indexer: Default::default(),
@@ -1666,8 +2238,9 @@ mod tests {
 
     fn http_config(address: SocketAddr) -> crate::config::MidnightConfig {
         crate::config::MidnightConfig {
-            node_url: format!("http://{address}"),
+            node_url: format!("http://{address}").parse().unwrap(),
             central_address: crate::config::MidnightAddress::from_bytes([0xab; 32]),
+            responder_address: crate::config::MidnightAddress::from_bytes([0xcd; 32]),
             publisher: Default::default(),
             rpc: Default::default(),
             indexer: Default::default(),
@@ -1979,8 +2552,8 @@ mod tests {
             })
             .expect("register parked method");
         module
-            .register_method("large", |_, _, _| "x".repeat(4096))
-            .expect("register large method");
+            .register_method("midnight_contractState", |_, _, _| "ab".repeat(4096))
+            .expect("register state method");
         let _handle = server.start(module);
 
         let mut timeout_config = http_config(address);
@@ -1998,20 +2571,249 @@ mod tests {
             "unexpected timeout error: {timeout_error}"
         );
 
-        let mut capped_config = http_config(address);
-        capped_config.rpc.max_response_size = 128;
-        let capped_rpc = connect_http(&capped_config).expect("build capped transport");
-        let capped_error = capped_rpc
-            .request::<String>("large", rpc_params![])
+        // A response over the client cap is the real jsonrpsee refusal, classified as
+        // a definitive oversized state and not retried.
+        let capped_config = http_config(address);
+        let capped_rpc = RpcClient::new(
+            HttpRpcClient::with_response_cap(
+                capped_config.node_url.as_str(),
+                &capped_config.rpc,
+                128,
+            )
+            .expect("build capped transport"),
+        );
+        let reads = Reads::new(capped_rpc, READ_TIMEOUT, attempts(2));
+        let capped_error = reads
+            .contract_state(ADDRESS, AT_HASH)
             .await
             .expect_err("oversized response must be refused");
-        let capped_detail = format!("{capped_error:#}").to_ascii_lowercase();
         assert!(
-            capped_detail.contains("too big")
-                || capped_detail.contains("too large")
-                || capped_detail.contains("limit"),
+            is_oversized_contract_state(&capped_error),
             "unexpected response cap error: {capped_error:#}"
         );
+    }
+
+    /// A real jsonrpsee server refuses a response over its cap. Under a cap that
+    /// fits every admissible state that proves the state is over the limit; under
+    /// a smaller cap it is the node's configuration, so the read is retried.
+    #[tokio::test]
+    async fn server_response_cap_refusal_is_a_drop_only_under_an_admissible_cap() {
+        for (server_cap, state_bytes, expected_drop, expected_attempts) in [
+            (15 * 1024 * 1024, 8 * 1024 * 1024, true, 1),
+            (64 * 1024, 100 * 1024, false, 3),
+        ] {
+            let server = ServerBuilder::default()
+                .max_response_body_size(server_cap)
+                .build("127.0.0.1:0")
+                .await
+                .expect("bind HTTP rpc server");
+            let address = server.local_addr().expect("HTTP rpc server address");
+            let mut module = RpcModule::new(());
+            module
+                .register_method("midnight_contractState", move |_, _, _| {
+                    "ab".repeat(state_bytes)
+                })
+                .expect("register state method");
+            let _handle = server.start(module);
+
+            let config = http_config(address);
+            let calls = Arc::new(AtomicUsize::new(0));
+            let counted = CountingRpc {
+                inner: connect_http(&config).expect("build transport"),
+                calls: calls.clone(),
+            };
+            let reads = Reads::new(RpcClient::new(counted), READ_TIMEOUT, attempts(2));
+            let err = reads
+                .contract_state(ADDRESS, AT_HASH)
+                .await
+                .expect_err("the server refuses the response");
+            assert_eq!(
+                is_oversized_contract_state(&err),
+                expected_drop,
+                "cap {server_cap}: {err:#}"
+            );
+            assert_eq!(
+                calls.load(Ordering::SeqCst),
+                expected_attempts,
+                "cap {server_cap}"
+            );
+        }
+    }
+
+    /// A state both caps let through is still bounded by the decoded length.
+    #[tokio::test]
+    async fn a_state_over_the_limit_but_under_both_caps_is_a_drop() {
+        let server = ServerBuilder::default()
+            .max_response_body_size(MAX_RESPONSE_SIZE)
+            .build("127.0.0.1:0")
+            .await
+            .expect("bind HTTP rpc server");
+        let address = server.local_addr().expect("HTTP rpc server address");
+        let mut module = RpcModule::new(());
+        module
+            .register_method("midnight_contractState", |_, _, _| {
+                "ab".repeat(MAX_CALLER_STATE_BYTES + 1)
+            })
+            .expect("register state method");
+        let _handle = server.start(module);
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let counted = CountingRpc {
+            inner: connect_http(&http_config(address)).expect("build transport"),
+            calls: calls.clone(),
+        };
+        let reads = Reads::new(RpcClient::new(counted), READ_TIMEOUT, attempts(2));
+        let err = reads
+            .contract_state(ADDRESS, AT_HASH)
+            .await
+            .expect_err("one byte over the limit");
+        assert!(is_oversized_contract_state(&err), "{err:#}");
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "a drop is not retried");
+    }
+
+    /// The publisher reads the responder through the same classifier, but a
+    /// size refusal there is a read failure, never an admission drop.
+    #[tokio::test]
+    async fn a_size_refusal_on_the_publisher_read_is_not_an_admission_drop() {
+        let server = ServerBuilder::default()
+            .max_response_body_size(15 * 1024 * 1024)
+            .build("127.0.0.1:0")
+            .await
+            .expect("bind HTTP rpc server");
+        let address = server.local_addr().expect("HTTP rpc server address");
+        let mut module = RpcModule::new(());
+        module
+            .register_method("midnight_contractState", |_, _, _| {
+                "ab".repeat(8 * 1024 * 1024)
+            })
+            .expect("register state method");
+        let _handle = server.start(module);
+
+        let rpc = connect_http(&http_config(address)).expect("build transport");
+        let err = publisher_contract_state(&rpc, ADDRESS, AT_HASH)
+            .await
+            .expect_err("the server refuses the response");
+        assert!(!is_oversized_contract_state(&err), "{err:#}");
+        let rendered = format!("{err:#}");
+        assert!(
+            rendered.contains("exempt from the admission limit"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("rpc node's cap of 15728640 bytes"),
+            "{rendered}"
+        );
+    }
+
+    /// A body without `Content-Length` overflows the client cap while streaming,
+    /// a different jsonrpsee error from the up-front refusal; both are drops.
+    #[tokio::test]
+    async fn chunked_response_over_the_client_cap_is_a_drop() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind raw HTTP server");
+        let address = listener.local_addr().expect("raw HTTP server address");
+        let server = tokio::spawn(async move {
+            loop {
+                let (mut stream, _) = listener.accept().await.expect("accept HTTP request");
+                read_http_request(&mut stream).await;
+                let body = format!(
+                    r#"{{"jsonrpc":"2.0","id":0,"result":"{}"}}"#,
+                    "ab".repeat(4096)
+                );
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                     Transfer-Encoding: chunked\r\nConnection: close\r\n\r\n\
+                     {:x}\r\n{body}\r\n0\r\n\r\n",
+                    body.len()
+                );
+                stream
+                    .write_all(response.as_bytes())
+                    .await
+                    .expect("write chunked response");
+            }
+        });
+
+        let config = http_config(address);
+        let rpc = RpcClient::new(
+            HttpRpcClient::with_response_cap(config.node_url.as_str(), &config.rpc, 128)
+                .expect("build capped transport"),
+        );
+        let reads = Reads::new(rpc, READ_TIMEOUT, attempts(2));
+        let err = reads
+            .contract_state(ADDRESS, AT_HASH)
+            .await
+            .expect_err("the streamed body overflows the client cap");
+        assert!(
+            is_oversized_contract_state(&err),
+            "unexpected streaming cap error: {err:#}"
+        );
+        server.abort();
+    }
+
+    /// Reads one HTTP request to its end, so closing the socket after the reply
+    /// sends FIN rather than an RST that could discard the reply.
+    async fn read_http_request(stream: &mut tokio::net::TcpStream) {
+        let mut request = Vec::new();
+        let mut byte = [0; 1];
+        while !request.ends_with(b"\r\n\r\n") {
+            stream
+                .read_exact(&mut byte)
+                .await
+                .expect("read HTTP header");
+            request.push(byte[0]);
+        }
+        let head = String::from_utf8_lossy(&request).to_ascii_lowercase();
+        let body_len: usize = head
+            .lines()
+            .find_map(|line| line.strip_prefix("content-length:"))
+            .map_or(0, |value| value.trim().parse().expect("content-length"));
+        let mut body = vec![0; body_len];
+        stream.read_exact(&mut body).await.expect("read HTTP body");
+    }
+
+    /// Counts requests through a real transport, for attempt assertions.
+    #[derive(Clone)]
+    struct CountingRpc {
+        inner: RpcClient,
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl RpcClientT for CountingRpc {
+        fn request_raw<'a>(
+            &'a self,
+            method: &'a str,
+            params: Option<Box<RawValue>>,
+        ) -> RawRpcFuture<'a, Box<RawValue>> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async move { self.inner.request_raw(method, params).await })
+        }
+
+        fn subscribe_raw<'a>(
+            &'a self,
+            _sub: &'a str,
+            _params: Option<Box<RawValue>>,
+            _unsub: &'a str,
+        ) -> RawRpcFuture<'a, RawRpcSubscription> {
+            Box::pin(async { panic!("these tests never subscribe") })
+        }
+    }
+
+    #[test]
+    fn contract_state_limit_is_on_the_decoded_length() {
+        let at_limit = vec![0xab; MAX_CALLER_STATE_BYTES];
+        assert_eq!(
+            admit_caller_state(Some(at_limit.clone()))
+                .expect("a state at the limit is admitted")
+                .map(|state| state.len()),
+            Some(MAX_CALLER_STATE_BYTES)
+        );
+        assert_eq!(admit_caller_state(None).expect("absence is a value"), None);
+
+        let mut over = at_limit;
+        over.push(0xcd);
+        let err = admit_caller_state(Some(over)).expect_err("one byte over is too large");
+        assert!(is_oversized_contract_state(&err));
     }
 
     fn hash_of_byte(byte: u8) -> String {
@@ -2032,8 +2834,9 @@ mod tests {
             std::future::pending::<()>().await;
         });
         let mut config = crate::config::MidnightConfig {
-            node_url: format!("http://{address}"),
+            node_url: format!("http://{address}").parse().unwrap(),
             central_address: crate::config::MidnightAddress::from_bytes([0xab; 32]),
+            responder_address: crate::config::MidnightAddress::from_bytes([0xcd; 32]),
             publisher: Default::default(),
             rpc: Default::default(),
             indexer: Default::default(),
@@ -2063,6 +2866,7 @@ mod tests {
         User(i32, &'static str),
         UserWithData(i32, &'static str, &'static str),
         ClientErr,
+        ClientTooLarge,
     }
 
     impl Canned {
@@ -2084,6 +2888,13 @@ mod tests {
                 Self::ClientErr => RawRpcError::Client(Box::new(JsonrpseeClientError::Transport(
                     "connection reset by peer".into(),
                 ))),
+                Self::ClientTooLarge => {
+                    RawRpcError::Client(Box::new(JsonrpseeClientError::Transport(Box::new(
+                        jsonrpsee::http_client::transport::Error::Http(
+                            jsonrpsee::core::http_helpers::HttpError::TooLarge,
+                        ),
+                    ))))
+                }
             }
         }
     }
@@ -2191,17 +3002,38 @@ mod tests {
                 false,
                 3,
             ),
+            // a refusal that does not name its cap is held
             (
                 Canned::UserWithData(
                     OVERSIZED_RESPONSE_CODE,
                     "state exceeds the response limit",
                     DATA,
                 ),
+                false,
+                3,
+            ),
+            (Canned::UserWithData(12345, STATE_TOO_LARGE, DATA), false, 3),
+            // the cap the refusal names decides: admissible cap proves the size
+            (
+                Canned::UserWithData(
+                    OVERSIZED_RESPONSE_CODE,
+                    "Response is too big",
+                    r#""Exceeded max limit of 15728640""#,
+                ),
                 true,
                 1,
             ),
-            (Canned::UserWithData(12345, STATE_TOO_LARGE, DATA), false, 3),
+            (
+                Canned::UserWithData(
+                    OVERSIZED_RESPONSE_CODE,
+                    "Response is too big",
+                    r#""Exceeded max limit of 65536""#,
+                ),
+                false,
+                3,
+            ),
             (Canned::ClientErr, false, 3),
+            (Canned::ClientTooLarge, true, 1),
         ] {
             let (reads, calls) = stub_reads(reply, attempts(2));
             let err = reads
@@ -2220,7 +3052,7 @@ mod tests {
                     assert_eq!(user.message, message);
                     assert_eq!(user.data.as_deref().map(RawValue::get), Some(data));
                 }
-                (Canned::ClientErr, RawRpcError::Client(_)) => {}
+                (Canned::ClientErr | Canned::ClientTooLarge, RawRpcError::Client(_)) => {}
                 _ => panic!("unexpected structured cause: {cause:?}"),
             }
             assert_eq!(
@@ -2275,6 +3107,300 @@ mod tests {
             err.to_string()
                 .contains("runtime api Ok payload is not a SCALE Vec<u8>"),
             "the decoder boundary must identify the malformed payload: {err:#}"
+        );
+    }
+
+    /// Block `0x0b` is the best block and the first under spec 2, so its parent
+    /// `0x0a` still runs spec 1 and `0x0c`'s parent is `0x0b`. Each runtime's
+    /// metadata must be read at a block of that runtime, once.
+    #[tokio::test]
+    async fn the_publisher_reads_each_runtime_at_a_block_of_that_runtime() {
+        let raw_metadata = include_bytes!("../fixtures/fallible-block-432-metadata.scale");
+        let opaque = format!("0x{}", hex::encode(raw_metadata.to_vec().encode()));
+        let metadata_reads = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let server = ServerBuilder::default().build("127.0.0.1:0").await.unwrap();
+        let config = http_config(server.local_addr().unwrap());
+        let transport = connect_http(&config).unwrap();
+        let mut module = RpcModule::new(());
+        module
+            .register_method("chain_getBlockHash", |params, _, _| {
+                let asked = params.parse::<Vec<Option<u64>>>().unwrap_or_default();
+                assert!(asked.iter().all(Option::is_none), "{asked:?}");
+                hash_of_byte(0x0b)
+            })
+            .unwrap();
+        module
+            .register_method("chain_getHeader", |params, _, _| {
+                let [hash] = params.parse::<[String; 1]>().unwrap();
+                let parent = match hash.as_str() {
+                    hash if hash == hash_of_byte(0x0b) => hash_of_byte(0x0a),
+                    hash if hash == hash_of_byte(0x0c) => hash_of_byte(0x0b),
+                    other => panic!("no header for {other}"),
+                };
+                json!({
+                    "parentHash": parent,
+                    "number": "0x2a",
+                    "stateRoot": hash_of_byte(0x66),
+                    "extrinsicsRoot": hash_of_byte(0x77),
+                    "digest": { "logs": [] }
+                })
+            })
+            .unwrap();
+        module
+            .register_method("state_getRuntimeVersion", |params, _, _| {
+                let [hash] = params.parse::<[String; 1]>().unwrap();
+                let spec = if hash == hash_of_byte(0x0a) { 1 } else { 2 };
+                json!({
+                    "specName": "midnight",
+                    "implName": "midnight",
+                    "authoringVersion": 1,
+                    "specVersion": spec,
+                    "implVersion": 0,
+                    "apis": [],
+                    "transactionVersion": spec,
+                    "stateVersion": 1
+                })
+            })
+            .unwrap();
+        let reads = metadata_reads.clone();
+        module
+            .register_method("state_call", move |params, _, _| {
+                let (method, _data, at) = params.parse::<(String, String, String)>().unwrap();
+                match method.as_str() {
+                    "Metadata_metadata_at_version" => "0x00".to_string(),
+                    "Metadata_metadata" => {
+                        reads.lock().unwrap().push(at);
+                        opaque.clone()
+                    }
+                    other => panic!("unexpected runtime call {other}"),
+                }
+            })
+            .unwrap();
+        let _handle = server.start(module);
+        let rpc = MidnightPublisherRpc {
+            rpc: transport.clone(),
+            legacy: LegacyRpcMethods::<SubstrateConfig>::new(transport),
+            genesis_hash: H256([0x11; 32]),
+            clients: Default::default(),
+            network_id: "undeployed".to_string(),
+        };
+
+        let submit = rpc.client_at(None).await.unwrap();
+        assert_eq!(submit.runtime_version().spec_version, 2);
+        let upgrade_block = rpc.client_for_block(H256([0x0b; 32])).await.unwrap();
+        assert_eq!(upgrade_block.runtime_version().spec_version, 1);
+        let after = rpc.client_for_block(H256([0x0c; 32])).await.unwrap();
+        assert_eq!(after.runtime_version().spec_version, 2);
+        assert_eq!(after.runtime_version().transaction_version, 2);
+
+        assert_eq!(
+            *metadata_reads.lock().unwrap(),
+            [hash_of_byte(0x0b), hash_of_byte(0x0a)],
+            "each runtime's metadata is read once, at a block running it"
+        );
+    }
+
+    #[test]
+    fn a_submit_reply_is_a_refusal_only_when_the_node_answered_one() {
+        let user = |code: i32, message: &str| {
+            Err(RawRpcError::User(UserError {
+                code,
+                message: message.to_string(),
+                data: Some(serde_json::value::to_raw_value("root not in arena").unwrap()),
+            }))
+        };
+        assert!(classify_submit_reply(Ok(serde_json::json!("0x00"))).is_ok());
+        assert!(
+            classify_submit_reply(user(ALREADY_IMPORTED, "Transaction Already Imported")).is_ok(),
+            "an already-imported transaction is in the pool"
+        );
+        match classify_submit_reply(user(1002, "Verification Error")) {
+            Err(SubmitRefusal::Refused(reason)) => {
+                assert_eq!(reason, "1002: Verification Error (\"root not in arena\")")
+            }
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+        assert!(matches!(
+            classify_submit_reply(Err(RawRpcError::Client(Box::new(std::io::Error::other(
+                "connection reset"
+            ))))),
+            Err(SubmitRefusal::Unanswered(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_submit_whose_runtime_cannot_be_read_is_never_sent() {
+        use crate::native::SubmitChain as _;
+
+        let server = ServerBuilder::default().build("127.0.0.1:0").await.unwrap();
+        let transport = connect_http(&http_config(server.local_addr().unwrap())).unwrap();
+        let submits = Arc::new(AtomicUsize::new(0));
+        let counted = submits.clone();
+        // No chain_getBlockHash, so the node cannot name the runtime to build against.
+        let mut module = RpcModule::new(());
+        module
+            .register_method("author_submitExtrinsic", move |_, _, _| {
+                counted.fetch_add(1, Ordering::SeqCst);
+                hash_of_byte(0x01)
+            })
+            .unwrap();
+        let _handle = server.start(module);
+        let rpc = MidnightPublisherRpc {
+            rpc: transport.clone(),
+            legacy: LegacyRpcMethods::<SubstrateConfig>::new(transport),
+            genesis_hash: H256([0x11; 32]),
+            clients: Default::default(),
+            network_id: "undeployed".to_string(),
+        };
+
+        match rpc.submit(&[0x00]).await {
+            Err(SubmitRefusal::Unsent(_)) => {}
+            other => panic!("expected an unsent submit, got {other:?}"),
+        }
+        assert_eq!(submits.load(Ordering::SeqCst), 0);
+    }
+
+    /// Serves the captured block 432 as `0x43`, whose parent `0x42` runs the
+    /// captured runtime, with `events` as its `System::Events` and
+    /// `Timestamp::Now` at `millis`.
+    async fn captured_landing_node(
+        events: Vec<u8>,
+        millis: u64,
+    ) -> (MidnightPublisherRpc, jsonrpsee::server::ServerHandle) {
+        let raw_metadata = include_bytes!("../fixtures/fallible-block-432-metadata.scale");
+        let metadata = subxt::Metadata::decode_all(&mut &raw_metadata[..]).unwrap();
+        let opaque = format!("0x{}", hex::encode(raw_metadata.to_vec().encode()));
+        let server = ServerBuilder::default().build("127.0.0.1:0").await.unwrap();
+        let transport = connect_http(&http_config(server.local_addr().unwrap())).unwrap();
+        let keys = OnlineClient::<SubstrateConfig>::from_rpc_client_with(
+            H256([0x11; 32]),
+            subxt::client::RuntimeVersion {
+                spec_version: 1,
+                transaction_version: 1,
+            },
+            metadata,
+            transport.clone(),
+        )
+        .unwrap();
+        let storage_key = |pallet: &str, entry: &str| {
+            let key = keys
+                .storage()
+                .address_bytes(&subxt::dynamic::storage(
+                    pallet,
+                    entry,
+                    Vec::<subxt::dynamic::Value>::new(),
+                ))
+                .unwrap();
+            format!("0x{}", hex::encode(key))
+        };
+        let events_key = storage_key("System", "Events");
+        let now_key = storage_key("Timestamp", "Now");
+        let mut module = RpcModule::new(());
+        module
+            .register_method("chain_getHeader", |params, _, _| {
+                let [hash] = params.parse::<[String; 1]>().unwrap();
+                assert_eq!(hash, hash_of_byte(0x43));
+                json!({
+                    "parentHash": hash_of_byte(0x42),
+                    "number": "0x1b0",
+                    "stateRoot": hash_of_byte(0x44),
+                    "extrinsicsRoot": hash_of_byte(0x45),
+                    "digest": { "logs": [] }
+                })
+            })
+            .unwrap();
+        module
+            .register_method("state_getRuntimeVersion", |params, _, _| {
+                let [hash] = params.parse::<[String; 1]>().unwrap();
+                assert_eq!(
+                    hash,
+                    hash_of_byte(0x42),
+                    "block 0x43 ran its parent's runtime"
+                );
+                json!({
+                    "specName": "midnight",
+                    "implName": "midnight",
+                    "authoringVersion": 1,
+                    "specVersion": 1,
+                    "implVersion": 0,
+                    "apis": [],
+                    "transactionVersion": 1,
+                    "stateVersion": 1
+                })
+            })
+            .unwrap();
+        module
+            .register_method("state_call", move |params, _, _| {
+                let (method, _data, _at) = params.parse::<(String, String, String)>().unwrap();
+                match method.as_str() {
+                    "Metadata_metadata_at_version" => "0x00".to_string(),
+                    "Metadata_metadata" => opaque.clone(),
+                    other => panic!("unexpected runtime call {other}"),
+                }
+            })
+            .unwrap();
+        module
+            .register_method("state_getStorage", move |params, _, _| {
+                let (key, at) = params.parse::<(String, String)>().unwrap();
+                assert_eq!(at, hash_of_byte(0x43));
+                if key == events_key {
+                    format!("0x{}", hex::encode(&events))
+                } else if key == now_key {
+                    format!("0x{}", hex::encode(millis.encode()))
+                } else {
+                    panic!("unexpected storage key {key}")
+                }
+            })
+            .unwrap();
+        let handle = server.start(module);
+        let rpc = MidnightPublisherRpc {
+            rpc: transport.clone(),
+            legacy: LegacyRpcMethods::<SubstrateConfig>::new(transport),
+            genesis_hash: H256([0x11; 32]),
+            clients: Default::default(),
+            network_id: "undeployed".to_string(),
+        };
+        (rpc, handle)
+    }
+
+    #[tokio::test]
+    async fn the_publisher_reads_a_landing_and_the_block_time_from_a_captured_block() {
+        use crate::native::SubmitChain as _;
+
+        let applied = crate::test_utils::hex_32(
+            "ba41ac43f2cfa97e32357877b85210a7f2105f4930b60515e19aa9ec00bb0f5d",
+        );
+        let mut other = applied;
+        other[0] ^= 1;
+        let block = hash_of_byte(0x43);
+
+        let (rpc, _handle) = captured_landing_node(
+            include_bytes!("../fixtures/fallible-block-432-events.scale").to_vec(),
+            1_761_400_000_999,
+        )
+        .await;
+        assert_eq!(
+            rpc.landing(&block, applied).await.unwrap(),
+            Some(Landing::Applied)
+        );
+        assert_eq!(rpc.landing(&block, other).await.unwrap(), None);
+        assert_eq!(
+            rpc.block_time(&block).await.unwrap(),
+            midnight_base_crypto::time::Timestamp::from_secs(1_761_400_000),
+            "Timestamp::Now is milliseconds"
+        );
+
+        let mut partial = captured_applied_status_record();
+        partial[6] = 7; // TxPartialSuccess in the captured metadata.
+        let (rpc, _handle) = captured_landing_node(encode_status_records(&[partial]), 0).await;
+        assert_eq!(
+            rpc.landing(&block, applied).await.unwrap(),
+            Some(Landing::PartialSuccess)
+        );
+        assert_eq!(
+            rpc.landing(&block, other).await.unwrap(),
+            None,
+            "another transaction's partial success is not this one landing"
         );
     }
 }

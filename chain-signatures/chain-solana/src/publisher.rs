@@ -31,24 +31,21 @@ enum Verdict {
 }
 
 impl Verdict {
-    fn carrier(self, message: String) -> Option<RpcFailure> {
+    fn carrier(self, message: String) -> RpcFailure {
         match self {
-            Verdict::Terminal => Some(RpcFailure::terminal(message)),
-            Verdict::Retryable => Some(RpcFailure::retryable(message)),
-            Verdict::Status(status) => Some(RpcFailure::with_status(status, message)),
+            Verdict::Terminal => RpcFailure::terminal(message),
+            Verdict::Retryable => RpcFailure::retryable(message),
+            Verdict::Status(status) => RpcFailure::send_status(status, message),
         }
     }
 }
 
-/// Publish verdict for an anchor error: program rejections and signer
-/// failures are terminal; HTTP-statused transport errors carry their status
-/// for the core classifier; the rest carry a retryable verdict.
-fn publish_error(e: AnchorClientError) -> anyhow::Error {
+// TODO: transitional boundary helper — disappears once `ChainPublisher`
+// returns a typed verdict enum.
+fn classify_publish(e: AnchorClientError) -> anyhow::Error {
     let verdict = verdict(&e);
     let err = anyhow::Error::new(e);
-    verdict
-        .carrier(format!("{err:#}"))
-        .map_or(err, anyhow::Error::new)
+    anyhow::Error::new(verdict.carrier(format!("{err:#}")))
 }
 
 /// Determine the verdict for an anchor error.
@@ -153,7 +150,7 @@ impl ChainPublisher for SolanaClient {
         let program = self
             .client
             .program(self.program_id)
-            .map_err(publish_error)?;
+            .map_err(classify_publish)?;
 
         let sign_id = action.request.id;
         let request_ids = vec![action.request.id.request_id];
@@ -184,7 +181,7 @@ impl ChainPublisher for SolanaClient {
                     })
                     .send()
                     .await
-                    .map_err(publish_error)
+                    .map_err(classify_publish)
                     .inspect_err(|err| {
                         tracing::error!(
                             sign_id = ?action.request.id,
@@ -223,7 +220,7 @@ impl ChainPublisher for SolanaClient {
                     })
                     .send()
                     .await
-                    .map_err(publish_error)
+                    .map_err(classify_publish)
                     .inspect_err(|err| {
                         tracing::error!(
                             ?sign_id,
@@ -257,7 +254,7 @@ mod tests {
 
     /// Wrap a `ClientErrorKind` into an `anyhow::Error` using the anchor error wrapper.
     fn anchor_wrapped(kind: ClientErrorKind) -> anyhow::Error {
-        publish_error(AnchorClientError::SolanaClientError(Box::new(
+        classify_publish(AnchorClientError::SolanaClientError(Box::new(
             SolanaClientError::from(kind),
         )))
     }
@@ -372,7 +369,7 @@ mod tests {
 
     #[test]
     fn signer_errors_are_terminal() {
-        let err = publish_error(AnchorClientError::SignerError(
+        let err = classify_publish(AnchorClientError::SignerError(
             anchor_client::SignerError::KeypairPubkeyMismatch,
         ));
         assert!(!is_retryable(&err));
@@ -393,7 +390,7 @@ mod tests {
             AnchorClientError::AnchorError(anchor_lang::error::Error::from(program_error)),
         ];
         for e in errs {
-            let err = publish_error(e);
+            let err = classify_publish(e);
             assert!(!is_retryable(&err), "{err:#}");
         }
     }

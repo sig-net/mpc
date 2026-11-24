@@ -36,3 +36,15 @@ pub static BIDIRECTIONAL_EXTRACTION_FAILURES: LazyLock<CounterVec> = LazyLock::n
     )
     .unwrap()
 });
+
+/// Tron expiry scans deferred by a solidity-oracle failure while
+/// `/wallet` paths stay green: without it, "nothing expires" is
+/// indistinguishable from "oracle down".
+pub static TRON_EXPIRY_SCAN_DEFERRED: LazyLock<CounterVec> = LazyLock::new(|| {
+    try_create_counter_vec_with_node_account_id(
+        "multichain_tron_expiry_scan_deferred",
+        "Tron expiry scans deferred by a solidity head-fetch failure, at most one per poll tick; probe errors uncounted",
+        &[],
+    )
+    .unwrap()
+});

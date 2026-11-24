@@ -21,7 +21,7 @@ curl -LsSf https://get.nexte.st/latest/mac | tar zxf - -C ~/.cargo/bin
 ```bash
 rustup target add wasm32-unknown-unknown
 # The contract build runs under the pinned toolchain, so add the target there too:
-rustup target add wasm32-unknown-unknown --toolchain 1.93.0
+rustup target add wasm32-unknown-unknown --toolchain 1.95.0
 ```
 
 3. Install [just](https://just.systems/man/en/packages.html):
@@ -68,27 +68,30 @@ just to test_basic_action.           # run specific test
 
 The available profiles and their concurrency settings are defined in [`.config/nextest.toml`](../.config/nextest.toml).
 
-### Midnight real-stack test
+### Midnight real-stack tests
 
-The Midnight real-stack test exercises the complete Midnight → Ethereum → Midnight response lifecycle. It starts a real Midnight node, indexer, proof server, Anvil, and MPC cluster, so it is ignored by default and must be selected explicitly.
+The Midnight real-stack tests exercise the complete Midnight → Ethereum → Midnight response lifecycle: API conformance, notifications placed in guaranteed and fallible transcripts, and the example vault's flows. Each starts a real Midnight node, indexer, proof server, Anvil, and MPC cluster, so they are ignored by default and must be selected explicitly.
 
 In addition to the prerequisites above, it requires:
 
 - Docker
 - [Node.js](https://nodejs.org/) 22.13 or newer
 - [cargo-near](https://github.com/near/cargo-near)
-- Compact launcher 0.5.1 with `compactc` 0.33.0-rc.2 available as `compact`; see the [Midnight CI workflow](../.github/workflows/test-chain-midnight.yml) for the pinned Linux installation
+- Compact launcher 0.5.3 with `compactc` 0.36.0 available as `compact`; see the [Midnight CI workflow](../.github/workflows/test-chain-midnight.yml) for the pinned Linux installation
 
-From the repository root, prepare the TypeScript publisher and test caller,
-then build the MPC contract and host node and run the ignored test:
+From the repository root, prepare the Midnight devtools and the test caller and vault contracts,
+then build the MPC contract and host node and run the ignored tests:
 
 ```bash
 just build midnight
 just setup
-just test-midnight
+just test-midnight                   # all four tests
+just test-midnight <test>            # one test from cases::midnight_stream
 ```
 
-The test requires the host `mpc-node` binary. Midnight node, indexer, proof-server, and fixture-driver logs are written under `target/tmp_*/midnight`.
+The tests require the host `mpc-node` binary. Midnight node, indexer, proof-server, and fixture-driver logs are written under `target/tmp_*/midnight`.
+
+To run them against a deployed network such as Preview instead of a local node and indexer, set `MPC_MIDNIGHT_E2E_NODE_URL`, `MPC_MIDNIGHT_E2E_INDEXER_URL` and `MPC_MIDNIGHT_E2E_INDEXER_WS_URL` to its node RPC and indexer GraphQL endpoints, and `MPC_MIDNIGHT_E2E_DEPLOYER_SEED`, `MPC_MIDNIGHT_E2E_INVOKER_SEED` and `MPC_MIDNIGHT_E2E_PUBLISHER_SEEDS` (comma-separated, one per MPC node) to wallets there that already hold NIGHT registered for DUST. The proof server stays local, and every run deploys fresh contracts.
 
 ## Logging and Tracing
 

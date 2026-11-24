@@ -1,7 +1,12 @@
 # MPC docs
 
+[Glossary](glossary.md): the terms used across these docs and the code types behind them.
+
+How to write and update these docs: [Documentation conventions](../CONTRIBUTING.md#documentation).
+
 ## Protocol
 
+- [System model](system-model.md): what the protocol docs assume about nodes, faults, the network and the chains.
 - [Protocol properties](protocol-properties.md): safety, liveness and efficiency properties of the coordination layer, and how the code enforces them.
 - [Posit state machine](posit-state-machine.md): the per-request signing state machine, rounds and timeouts, as implemented.
 - [Bidirectional calls](bidirectional-calls.md): entities, API and properties of a call signed for a target chain whose outcome is reported back to the source chain.
@@ -14,6 +19,10 @@
 
 - [Account derivation](account-derivation.md): how per-chain accounts and keys are derived from the root key.
 - [Delta derivation](delta-derivation.md): requirements for the per-request re-randomization scalar and its inputs, in particular the chain entropy.
+
+## Chains
+
+- [Midnight publisher](midnight-publisher.md): how the node builds, proves, pays for and posts its Midnight responses, and which events the reader supports.
 
 ## Operations
 

@@ -17,7 +17,7 @@ use anyhow::{Context, Result};
 use mpc_chain_ethereum::abi::ChainSignatures;
 use mpc_chain_ethereum::utils::test::deploy_chain_signatures;
 pub use mpc_chain_ethereum::utils::test::submit_sign_request;
-use mpc_chain_ethereum::{EthConfig, PublisherConfig};
+use mpc_chain_ethereum::{EthConfig, IndexerConfig, PublisherConfig};
 use std::time::{Duration, Instant};
 
 pub type AnvilWalletProvider = FillProvider<
@@ -69,16 +69,17 @@ impl EthTestEnv {
             account_sk: signer.clone(),
             execution_rpc_http_url: endpoint.parse()?,
             contract_address,
-            network: "anvil".to_string(),
-            refresh_finalized_interval: 1000,
-            optimistic_requests: false,
+            network: mpc_chain_ethereum::EthNetwork::Anvil,
             rpc: Default::default(),
             gas: Default::default(),
             publisher: PublisherConfig {
                 batch_flush_interval: Duration::from_millis(100), // faster flush for tests
                 ..Default::default()
             },
-            indexer: Default::default(),
+            indexer: IndexerConfig {
+                refresh_interval: Duration::from_millis(100), // faster head polling for tests
+                ..Default::default()
+            },
         };
 
         Ok(Self {

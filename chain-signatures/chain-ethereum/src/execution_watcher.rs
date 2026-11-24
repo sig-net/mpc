@@ -17,7 +17,9 @@ use alloy::network::TransactionResponse;
 use alloy::primitives::{Address, B256};
 use alloy::rpc::types::{Block, BlockId, BlockTransactions, TransactionReceipt};
 use futures_util::{stream, StreamExt};
-use mpc_chain_integration_core::{ChainTelemetry, ExtractionFailureKind, StateManager};
+use mpc_chain_integration_core::{
+    unexecutable_outcome, ChainTelemetry, ExtractionFailureKind, StateManager, WatchedExecution,
+};
 use mpc_primitives::{
     BidirectionalTx, BidirectionalTxId, Chain, ChainConfig as _, ChainEvent, ExecutionOutcome,
     SignId,
@@ -37,7 +39,7 @@ pub(crate) struct WatcherGateState {
 }
 
 /// A pending execution watcher entry from the state manager.
-type WatcherEntry = (BidirectionalTxId, (SignId, Arc<BidirectionalTx>));
+type WatcherEntry = (BidirectionalTxId, WatchedExecution);
 
 /// Per-watcher receipt resolution result.
 type WatcherReceipt = (
@@ -141,12 +143,18 @@ impl<'a, S: StateManager, T: ChainTelemetry> ExecutionWatcher<'a, S, T> {
 
         let block_number = block.header.number;
         tracing::info!(
-            watchers_count = watchers.len(),
+            flat_ids = watchers.len(),
             block_number,
             "collect_execution_confirmations checking watchers"
         );
 
         let (new_watchers, retry) = self.schedule_watcher_gates(&watchers);
+
+        // Ethereum ids hash the signed tx: one member per flat id.
+        let watchers: Vec<WatcherEntry> = watchers
+            .into_iter()
+            .flat_map(|(tx_id, members)| members.into_iter().map(move |member| (tx_id, member)))
+            .collect();
 
         // Extract hashes from the block
         let block_tx_hashes: HashSet<_> = match &block.transactions {
@@ -217,7 +225,7 @@ impl<'a, S: StateManager, T: ChainTelemetry> ExecutionWatcher<'a, S, T> {
     /// (retried every block).
     fn schedule_watcher_gates(
         &self,
-        watchers: &HashMap<BidirectionalTxId, (SignId, Arc<BidirectionalTx>)>,
+        watchers: &HashMap<BidirectionalTxId, Vec<WatchedExecution>>,
     ) -> (HashSet<BidirectionalTxId>, HashSet<BidirectionalTxId>) {
         let mut gate = self.lock_watcher_gate();
         gate.retry.retain(|id| watchers.contains_key(id));
@@ -453,16 +461,12 @@ impl<'a, S: StateManager, T: ChainTelemetry> ExecutionWatcher<'a, S, T> {
         watchers: Vec<WatcherEntry>,
         block_number: u64,
     ) -> Vec<WatcherReceipt> {
-        stream::iter(
-            watchers
-                .into_iter()
-                .map(|(tx_id, (sign_id, pending_tx))| async move {
-                    let result = self
-                        .backfill_execution_confirmation(tx_id, sign_id, &pending_tx, block_number)
-                        .await;
-                    (tx_id, sign_id, pending_tx, result)
-                }),
-        )
+        stream::iter(watchers.into_iter().map(|(tx_id, member)| async move {
+            let result = self
+                .backfill_execution_confirmation(tx_id, member.sign_id, &member.tx, block_number)
+                .await;
+            (tx_id, member.sign_id, member.tx, result)
+        }))
         .buffer_unordered(self.config.max_concurrent_watcher_rpcs)
         .collect()
         .await
@@ -505,7 +509,12 @@ impl<'a, S: StateManager, T: ChainTelemetry> ExecutionWatcher<'a, S, T> {
         // A watched hash in this final block proves its nonce is taken, receipt or not.
         let consumed_slots: HashMap<_, _> = mined
             .iter()
-            .map(|(_, (_, tx))| ((Address::from(tx.from_address), tx.nonce), Arc::clone(tx)))
+            .map(|(_, member)| {
+                (
+                    (Address::from(member.tx.from_address), member.tx.nonce),
+                    Arc::clone(&member.tx),
+                )
+            })
             .collect();
         let mut failed = HashSet::new();
 
@@ -542,7 +551,8 @@ impl<'a, S: StateManager, T: ChainTelemetry> ExecutionWatcher<'a, S, T> {
     ) -> (Vec<ChainEvent>, Vec<WatcherEntry>) {
         let mut events = Vec::new();
         let mut remaining = Vec::new();
-        for (tx_id, (sign_id, tx)) in unmined {
+        for (tx_id, member) in unmined {
+            let tx = &member.tx;
             // A watched taker is another request, but with equal bytes it also executed this one
             // (M3); answering that needs matching by bytes, not tx id, so no verdict yet.
             let displaced = consumed_slots
@@ -551,25 +561,20 @@ impl<'a, S: StateManager, T: ChainTelemetry> ExecutionWatcher<'a, S, T> {
                     consuming.serialized_transaction != tx.serialized_transaction
                 });
             if !displaced {
-                remaining.push((tx_id, (sign_id, tx)));
+                remaining.push((tx_id, member));
                 continue;
             }
             tracing::info!(
                 ?tx_id,
-                ?sign_id,
+                sign_id = ?member.sign_id,
                 nonce = tx.nonce,
                 replacement_block = block_number,
                 "transaction replaced by a watched sibling tx"
             );
-            // Other source chains cannot encode Unviable yet; their applications refund on Failed.
-            let result = if tx.source_chain == Chain::Midnight {
-                ExecutionOutcome::Unviable
-            } else {
-                ExecutionOutcome::Failed
-            };
+            let result = unexecutable_outcome(tx.source_chain);
             events.push(ChainEvent::ExecutionConfirmed {
                 tx_id,
-                sign_id,
+                sign_id: member.sign_id,
                 source_chain: tx.source_chain,
                 block_height: block_number,
                 result,
@@ -630,7 +635,7 @@ impl<'a, S: StateManager, T: ChainTelemetry> ExecutionWatcher<'a, S, T> {
     ) {
         let unique_senders: HashSet<_> = gated
             .iter()
-            .map(|(_, (_, tx))| Address::from(tx.from_address))
+            .map(|(_, member)| Address::from(member.tx.from_address))
             .collect();
 
         // Failed senders are skipped: their watchers stay pending and are
@@ -647,7 +652,7 @@ impl<'a, S: StateManager, T: ChainTelemetry> ExecutionWatcher<'a, S, T> {
                     failed.extend(
                         gated
                             .iter()
-                            .filter(|(_, (_, tx))| Address::from(tx.from_address) == sender)
+                            .filter(|(_, member)| Address::from(member.tx.from_address) == sender)
                             .map(|(tx_id, _)| *tx_id),
                     );
                 }
@@ -657,10 +662,10 @@ impl<'a, S: StateManager, T: ChainTelemetry> ExecutionWatcher<'a, S, T> {
         // Keep ONLY watchers whose nonces were consumed
         let consumed_txs: Vec<_> = gated
             .into_iter()
-            .filter(|(_, (_, tx))| {
+            .filter(|(_, member)| {
                 nonces
-                    .get(&Address::from(tx.from_address))
-                    .is_some_and(|&current_nonce| tx.nonce < current_nonce)
+                    .get(&Address::from(member.tx.from_address))
+                    .is_some_and(|&current_nonce| member.tx.nonce < current_nonce)
             })
             .collect();
 
@@ -713,7 +718,7 @@ mod tests {
     use alloy::primitives::{address, b256, Address};
     use alloy::rpc::types::{Block, BlockTransactions};
     use mockito::{Matcher, Server};
-    use mpc_chain_integration_core::StateManager;
+    use mpc_chain_integration_core::{StateManager, WatchedExecution};
     use mpc_primitives::{
         BidirectionalTx, BidirectionalTxId, Chain, ChainEvent, ExecutionOutcome, SignId,
         LATEST_MPC_KEY_VERSION,
@@ -812,7 +817,7 @@ mod tests {
         let harness = test_utils::WatcherHarness::new(&server.url()).await;
         harness
             .state_manager
-            .watch_execution(Chain::Ethereum, sign_id, tx)
+            .watch_execution_as(Chain::Ethereum, sign_id, tx)
             .await;
 
         // Construct mock block at height 10 (triggers modulo 10 check)
@@ -898,7 +903,7 @@ mod tests {
 
         harness
             .state_manager
-            .watch_execution(
+            .watch_execution_as(
                 Chain::Ethereum,
                 SignId::new([0; 32]),
                 test_watcher_tx(tx_hash_0, from_address, 0),
@@ -906,7 +911,7 @@ mod tests {
             .await;
         harness
             .state_manager
-            .watch_execution(
+            .watch_execution_as(
                 Chain::Ethereum,
                 SignId::new([1; 32]),
                 test_watcher_tx(tx_hash_1, from_address, 1),
@@ -914,7 +919,7 @@ mod tests {
             .await;
         harness
             .state_manager
-            .watch_execution(
+            .watch_execution_as(
                 Chain::Ethereum,
                 SignId::new([2; 32]),
                 test_watcher_tx(tx_hash_2, from_address, 2),
@@ -993,7 +998,7 @@ mod tests {
         let harness = test_utils::WatcherHarness::new(&server.url()).await;
         harness
             .state_manager
-            .watch_execution(Chain::Ethereum, sign_id, tx)
+            .watch_execution_as(Chain::Ethereum, sign_id, tx)
             .await;
 
         // Block height 5 (NOT a modulo 10 block), but contains tx_hash in block.transactions
@@ -1067,7 +1072,7 @@ mod tests {
 
         harness
             .state_manager
-            .watch_execution(
+            .watch_execution_as(
                 Chain::Ethereum,
                 SignId::new([1; 32]),
                 test_watcher_tx(tx_hash_ok, from_address, 0),
@@ -1075,7 +1080,7 @@ mod tests {
             .await;
         harness
             .state_manager
-            .watch_execution(
+            .watch_execution_as(
                 Chain::Ethereum,
                 SignId::new([2; 32]),
                 test_watcher_tx(tx_hash_err, from_address, 0),
@@ -1150,7 +1155,7 @@ mod tests {
         let harness = test_utils::WatcherHarness::new(&server.url()).await;
         harness
             .state_manager
-            .watch_execution(Chain::Ethereum, SignId::new([3; 32]), tx)
+            .watch_execution_as(Chain::Ethereum, SignId::new([3; 32]), tx)
             .await;
 
         // Block height 10 triggers the throttled nonce check
@@ -1231,7 +1236,7 @@ mod tests {
         let harness = test_utils::WatcherHarness::new(&server.url()).await;
         harness
             .state_manager
-            .watch_execution(
+            .watch_execution_as(
                 Chain::Ethereum,
                 SignId::new([4; 32]),
                 Arc::new(BidirectionalTx {
@@ -1324,7 +1329,7 @@ mod tests {
         let harness = test_utils::WatcherHarness::new(&server.url()).await;
         harness
             .state_manager
-            .watch_execution(
+            .watch_execution_as(
                 Chain::Ethereum,
                 SignId::new([5; 32]),
                 Arc::new(BidirectionalTx {
@@ -1438,7 +1443,7 @@ mod tests {
         let harness = test_utils::WatcherHarness::new(&server.url()).await;
         harness
             .state_manager
-            .watch_execution(
+            .watch_execution_as(
                 Chain::Ethereum,
                 SignId::new([6; 32]),
                 Arc::new(BidirectionalTx {
@@ -1700,7 +1705,7 @@ mod tests {
                 Arc::make_mut(&mut tx).source_chain = source_chain;
                 harness
                     .state_manager
-                    .watch_execution(Chain::Ethereum, SignId::new([0xcc; 32]), tx)
+                    .watch_execution_as(Chain::Ethereum, SignId::new([0xcc; 32]), tx)
                     .await;
                 let mut block: Block = Block::default();
                 block.header.number = 5;
@@ -1821,7 +1826,13 @@ mod tests {
                 mpc_chain_integration_core::MockStateManager,
                 test_utils::CountingChainTelemetry,
             >::resolve_replaced_siblings(
-                vec![(BidirectionalTxId(tx_hash.0), (SignId::new([0xdd; 32]), tx))],
+                vec![(
+                    BidirectionalTxId(tx_hash.0),
+                    WatchedExecution {
+                        sign_id: SignId::new([0xdd; 32]),
+                        tx,
+                    },
+                )],
                 &std::collections::HashMap::from([((from_address, 7), consuming_tx)]),
                 5,
             );
@@ -1880,7 +1891,10 @@ mod tests {
             >::resolve_replaced_siblings(
                 vec![(
                     BidirectionalTxId(tx_hash.0),
-                    (SignId::new([0xdd; 32]), tx.clone()),
+                    WatchedExecution {
+                        sign_id: SignId::new([0xdd; 32]),
+                        tx: tx.clone(),
+                    },
                 )],
                 &consumed,
                 5,
@@ -1927,7 +1941,7 @@ mod tests {
                 tx_fields.serialized_transaction = hash.to_vec();
                 harness
                     .state_manager
-                    .watch_execution(Chain::Ethereum, SignId::new(hash.0), tx)
+                    .watch_execution_as(Chain::Ethereum, SignId::new(hash.0), tx)
                     .await;
             }
             let mut block: Block = Block::default();
@@ -2071,7 +2085,7 @@ mod tests {
                 tx_fields.serialized_transaction = hash.to_vec();
                 harness
                     .state_manager
-                    .watch_execution(Chain::Ethereum, SignId::new(hash.0), tx)
+                    .watch_execution_as(Chain::Ethereum, SignId::new(hash.0), tx)
             };
             let collect = |number: u64, mined: Vec<alloy::primitives::B256>| {
                 let mut block: Block = Block::default();
@@ -2221,7 +2235,7 @@ mod tests {
                 }
                 harness
                     .state_manager
-                    .watch_execution(Chain::Ethereum, SignId::new(hash.0), tx)
+                    .watch_execution_as(Chain::Ethereum, SignId::new(hash.0), tx)
                     .await;
             }
             let mut block: Block = Block::default();
@@ -2360,7 +2374,7 @@ mod tests {
         let harness = test_utils::WatcherHarness::new(&server.url()).await;
         harness
             .state_manager
-            .watch_execution(
+            .watch_execution_as(
                 Chain::Ethereum,
                 SignId::new([9; 32]),
                 empty_output_schema_tx(tx_hash, from_address),
@@ -2458,7 +2472,7 @@ mod tests {
         let harness = test_utils::WatcherHarness::new(&server.url()).await;
         harness
             .state_manager
-            .watch_execution(
+            .watch_execution_as(
                 Chain::Ethereum,
                 SignId::new([0xaa; 32]),
                 empty_output_schema_tx(tx_hash, from_address),
@@ -2621,7 +2635,7 @@ mod tests {
         let harness = test_utils::WatcherHarness::new(&server.url()).await;
         harness
             .state_manager
-            .watch_execution(
+            .watch_execution_as(
                 Chain::Ethereum,
                 SignId::new([0xbb; 32]),
                 empty_output_schema_tx(tx_hash, from_address),
@@ -2749,11 +2763,11 @@ mod tests {
 
             harness
                 .state_manager
-                .watch_execution(Chain::Ethereum, SignId::new([7; 32]), create_tx(tx_hash_a))
+                .watch_execution_as(Chain::Ethereum, SignId::new([7; 32]), create_tx(tx_hash_a))
                 .await;
             harness
                 .state_manager
-                .watch_execution(Chain::Ethereum, SignId::new([8; 32]), create_tx(tx_hash_b))
+                .watch_execution_as(Chain::Ethereum, SignId::new([8; 32]), create_tx(tx_hash_b))
                 .await;
 
             let mut block4: Block = Block::default();

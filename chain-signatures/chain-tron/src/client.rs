@@ -8,7 +8,7 @@ use url::Url;
 use mpc_chain_integration_core::utils::retry::{retry_rpc, RetryConfig, SharedBackoff};
 
 use crate::config::TronConfig;
-use crate::types::{BroadcastOutcome, NowBlock, TronLog, TronReceipt};
+use crate::types::{BroadcastOutcome, NowBlock, SolidifiedBlock, TronLog, TronReceipt};
 use mpc_tron_wire::{encoding::decode_bytes, parse_hex, TronAddress};
 
 /// Tron HTTP client for interacting with the Tron blockchain.
@@ -50,11 +50,45 @@ impl TronHttp {
                 let response: NowBlockResponse = self
                     .post_json("wallet/getnowblock", &serde_json::json!({}))
                     .await?;
-                Ok(NowBlock {
-                    block_id: response.block_id.parse().context("blockID")?,
-                    number: response.block_header.raw_data.number,
-                    timestamp: response.block_header.raw_data.timestamp,
-                })
+                response.into_now_block()
+            }
+        )
+    }
+
+    /// `POST /walletsolidity/getnowblock` — the solidified head as a
+    /// [`SolidifiedBlock`] with empty `txids` (the response carries no
+    /// transactions; the head only gates the expiry scan).
+    pub async fn get_now_block_solidity(&self) -> anyhow::Result<SolidifiedBlock> {
+        retry_rpc!(
+            self.request_timeout,
+            self.retry,
+            self.gate,
+            "get_now_block_solidity",
+            {
+                let response: SolidBlockResponse = self
+                    .post_json("walletsolidity/getnowblock", &serde_json::json!({}))
+                    .await?;
+                response.into_block().context("solidified head absent")
+            }
+        )
+    }
+
+    /// `POST /walletsolidity/getblockbynum` — one final block's
+    /// header and resident txIDs; `Ok(None)` means not solidified yet.
+    pub async fn get_block_solidity(&self, number: u64) -> anyhow::Result<Option<SolidifiedBlock>> {
+        retry_rpc!(
+            self.request_timeout,
+            self.retry,
+            self.gate,
+            "get_block_solidity",
+            {
+                let response: SolidBlockResponse = self
+                    .post_json(
+                        "walletsolidity/getblockbynum",
+                        &serde_json::json!({ "num": number }),
+                    )
+                    .await?;
+                Ok(response.into_block())
             }
         )
     }
@@ -98,7 +132,7 @@ impl TronHttp {
                         block_number: response.block_number,
                         block_timestamp: response.block_timestamp,
                         fee: response.fee,
-                        contract_ret: response.contract_ret,
+                        result: response.result,
                         res_message: response.res_message.as_deref().map(decode_hex_ascii),
                         receipt_result: response.receipt.result,
                         logs: response.log,
@@ -202,6 +236,61 @@ struct NowBlockRawData {
     timestamp: u64,
 }
 
+/// Response structure for `getblockbynum`/`getnowblock` on the
+/// solidity router; `{}` (not solidified) reads as an absent header.
+#[derive(Deserialize)]
+struct SolidBlockResponse {
+    #[serde(default, rename = "blockID")]
+    block_id: Option<String>,
+    #[serde(default)]
+    block_header: Option<NowBlockHeader>,
+    #[serde(default)]
+    transactions: Vec<SolidBlockTx>,
+}
+
+/// One resident transaction; only its hex `txID` is read.
+#[derive(Deserialize)]
+struct SolidBlockTx {
+    #[serde(rename = "txID", default)]
+    tx_id: Option<String>,
+}
+
+impl SolidBlockResponse {
+    fn into_block(self) -> Option<SolidifiedBlock> {
+        let raw = self.block_header?.raw_data;
+        // A malformed blockID reads as an unmatchable slice — the
+        // reference check defers.
+        let ref_slice = self
+            .block_id
+            .as_deref()
+            .and_then(|id| id.parse::<B256>().ok())
+            .map_or([0; 8], |id| id.0[8..16].try_into().expect("8 of 32 bytes"));
+
+        Some(SolidifiedBlock {
+            number: raw.number,
+            timestamp: raw.timestamp as i64,
+            ref_slice,
+            txids: self
+                .transactions
+                .iter()
+                .filter_map(|tx| tx.tx_id.as_deref())
+                .filter_map(|id| id.parse::<B256>().ok())
+                .map(|id| id.0)
+                .collect(),
+        })
+    }
+}
+
+impl NowBlockResponse {
+    fn into_now_block(self) -> anyhow::Result<NowBlock> {
+        Ok(NowBlock {
+            block_id: self.block_id.parse().context("blockID")?,
+            number: self.block_header.raw_data.number,
+            timestamp: self.block_header.raw_data.timestamp,
+        })
+    }
+}
+
 /// Response structure for `getaccount`; `{}` for unseen accounts.
 #[derive(Deserialize)]
 struct AccountResponse {
@@ -254,8 +343,8 @@ struct TransactionInfoResponse {
     block_timestamp: u64,
     #[serde(default)]
     fee: u64,
-    #[serde(default, rename = "contractRet")]
-    contract_ret: Option<String>,
+    #[serde(default)]
+    result: Option<String>,
     #[serde(default, rename = "resMessage")]
     res_message: Option<String>,
     #[serde(default)]
@@ -264,9 +353,9 @@ struct TransactionInfoResponse {
     log: Vec<TronLog>,
 }
 
-/// Receipt `result` classification; recorded Nile receipts carry the
-/// outcome here (no `contractRet` field) alongside usage counters the
-/// parser leaves unread (`energy_usage_total`, `net_fee`, …).
+/// `receipt.result` classification; success carries its verdict here alone
+/// (the top-level `code` is proto3-zero-omitted), failure alongside the
+/// top-level `FAILED`. Usage counters stay unread.
 #[derive(Deserialize, Default)]
 struct ReceiptUsage {
     #[serde(default)]
@@ -380,6 +469,73 @@ mod tests {
         assert_eq!(block.number, 3035019);
         assert_eq!(block.timestamp, 1730000000000);
         assert_eq!(block.block_id, block_hash);
+    }
+
+    #[tokio::test]
+    async fn solidity_head_parses_the_recorded_nile_body() {
+        let (mut server, client) = test_client(fast_retry()).await;
+        // Recorded 2026-10-30 off nile.trongrid.io
+        server
+            .mock("POST", "/walletsolidity/getnowblock")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(include_str!(
+                "../tests/fixtures/nile/nowblock-solidity.json"
+            ))
+            .create_async()
+            .await;
+
+        let block = client.get_now_block_solidity().await.unwrap();
+        assert_eq!(block.number, 72_266_582);
+        assert_eq!(block.timestamp, 1_793_335_731_000);
+    }
+
+    #[tokio::test]
+    async fn solidity_block_parses_the_recorded_nile_body() {
+        let (mut server, client) = test_client(fast_retry()).await;
+        // Recorded 2026-10-31 off api.nileex.io
+        server
+            .mock("POST", "/walletsolidity/getblockbynum")
+            .match_body(Matcher::PartialJson(
+                serde_json::json!({ "num": 71_896_096 }),
+            ))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(include_str!(
+                "../tests/fixtures/nile/solid-block-71896096.json"
+            ))
+            .create_async()
+            .await;
+
+        let block = client
+            .get_block_solidity(71_896_096)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(block.number, 71_896_096);
+        assert_eq!(block.timestamp, 1_792_220_499_000);
+        assert_eq!(block.txids.len(), 9);
+        assert_eq!(
+            block.txids[0],
+            "b4e8076ad07087c23b857a4649686954f235b57425bce5205295a5f5e9274e88"
+                .parse::<B256>()
+                .unwrap()
+                .0
+        );
+    }
+
+    #[tokio::test]
+    async fn solidity_block_absent_reads_as_none() {
+        let (mut server, client) = test_client(fast_retry()).await;
+        server
+            .mock("POST", "/walletsolidity/getblockbynum")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body("{}")
+            .create_async()
+            .await;
+
+        assert!(client.get_block_solidity(99).await.unwrap().is_none());
     }
 
     #[test]
@@ -573,7 +729,7 @@ mod tests {
         assert_eq!(receipt.block_number, 71896097);
         assert_eq!(receipt.fee, 472800);
         // Recorded receipts carry the outcome in receipt.result only.
-        assert_eq!(receipt.contract_ret, None);
+        assert_eq!(receipt.result, None);
         assert_eq!(receipt.receipt_result.as_deref(), Some("SUCCESS"));
         assert_eq!(receipt.res_message, None);
 

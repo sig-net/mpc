@@ -5,20 +5,30 @@ use redis::{FromRedisValue, RedisError, RedisWrite, ToRedisArgs};
 use cait_sith::protocol::Participant;
 
 use super::protocol_storage::{
-    ArtifactReservation, ArtifactSlot, ArtifactTaken, ArtifactTakenDropper, ProtocolStorage,
+    ArtifactReservation, ArtifactSlot, ArtifactTaken, ArtifactTakenDropper, Initializing,
+    ProtocolStorage, Ready,
 };
-use crate::protocol::presignature::{Presignature, PresignatureId};
+pub use crate::protocol::presignature::Presignature;
+use crate::protocol::presignature::PresignatureId;
 use crate::storage::protocol_storage::ProtocolArtifact;
 
-pub type PresignatureStorage = ProtocolStorage<Presignature>;
+pub type PresignatureStorage<Phase = Ready> = ProtocolStorage<Presignature, Phase>;
 pub type PresignatureSlot = ArtifactSlot<Presignature>;
 pub type PresignatureTaken = ArtifactTaken<Presignature>;
 pub type PresignatureTakenDropper = ArtifactTakenDropper<Presignature>;
 pub type PresignatureReservation = ArtifactReservation<Presignature>;
 
 impl Presignature {
-    pub fn storage(pool: &Pool, account_id: &AccountId) -> PresignatureStorage {
+    pub fn storage(pool: &Pool, account_id: &AccountId) -> PresignatureStorage<Initializing> {
         ProtocolStorage::new(pool, account_id, "presignatures")
+    }
+
+    pub fn ready_storage(
+        pool: &Pool,
+        account_id: &AccountId,
+        me: Participant,
+    ) -> PresignatureStorage {
+        ProtocolStorage::ready(pool, account_id, "presignatures", me)
     }
 }
 
@@ -74,7 +84,7 @@ impl FromRedisValue for Presignature {
 }
 
 #[cfg(feature = "test-feature")]
-impl ProtocolStorage<Presignature> {
+impl<Phase> ProtocolStorage<Presignature, Phase> {
     pub fn presignature_key(&self) -> &str {
         self.artifact_key()
     }

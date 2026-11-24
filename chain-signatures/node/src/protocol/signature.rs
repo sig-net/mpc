@@ -10,7 +10,6 @@ use cait_sith::protocol::{Action, InitializationError, Participant};
 use cait_sith::{FullSignature, PresignOutput};
 use chrono::Utc;
 use k256::Secp256k1;
-use mpc_contract::config::ProtocolConfig;
 use mpc_crypto::derive_key;
 use mpc_primitives::{IndexedSignRequest, SignId};
 use std::time::{Duration, Instant};
@@ -28,7 +27,7 @@ pub(crate) enum SignError {
 pub(crate) struct GenerateCtx {
     pub governance: GovernanceInfo,
     pub msg: MessageChannel,
-    pub cfg: ProtocolConfig,
+    pub signature_timeout: Duration,
     /// Only used to label the debug page.
     #[cfg_attr(not(feature = "debug-page"), allow(dead_code))]
     pub node_account_id: near_account_id::AccountId,
@@ -106,7 +105,7 @@ impl SignGenerator {
             proposer,
             sign_id,
             created: Instant::now(),
-            timeout: Duration::from_millis(ctx.cfg.signature.generation_timeout),
+            timeout: ctx.signature_timeout,
             inbox,
             msg: ctx.msg.clone(),
             #[cfg(feature = "debug-page")]

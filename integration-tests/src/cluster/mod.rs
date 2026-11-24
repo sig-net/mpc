@@ -400,10 +400,10 @@ impl Cluster {
             .await;
     }
 
-    /// Waits until every node owns `min_presignatures` presignatures.
+    /// Waits until every node owns `min_mine_presignatures` presignatures.
     pub async fn wait_stockpiled(&self) {
         self.wait()
-            .min_mine_presignatures(self.cfg.protocol.presignature.min_presignatures as usize)
+            .min_mine_presignatures(self.cfg.protocol.min_mine_presignatures as usize)
             .await
             .unwrap();
     }

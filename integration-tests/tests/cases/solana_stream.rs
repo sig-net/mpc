@@ -104,7 +104,10 @@ async fn next_sign_command(
 async fn spawn_supervised_stream(
     config: SolConfig,
     backlog: Backlog,
-) -> Result<(tokio::task::JoinHandle<()>, mpsc::Receiver<SignCommand>)> {
+) -> Result<(
+    tokio::task::JoinHandle<anyhow::Result<()>>,
+    mpsc::Receiver<SignCommand>,
+)> {
     let indexer = SolanaIndexer::new(
         config,
         backlog.clone(),
@@ -114,8 +117,11 @@ async fn spawn_supervised_stream(
     .context("failed to create SolanaIndexer")?;
 
     let (sign_tx, sign_rx) = mpsc::channel::<SignCommand>(16);
-    let (rpc_tx, _rpc_rx) = mpsc::channel::<RpcAction>(16);
+    let (rpc_tx, mut rpc_rx) = mpsc::channel::<RpcAction>(16);
     let rpc = RpcChannel { tx: rpc_tx };
+    // Checkpoint votes go out on this channel; drain it so a restart can
+    // resubmit the votes it recovers instead of failing on a closed channel.
+    tokio::spawn(async move { while rpc_rx.recv().await.is_some() {} });
 
     let account_id: AccountId = "test.near".parse().unwrap();
     let (contract_watcher, _contract_tx) = ContractStateWatcher::with_running(
@@ -154,7 +160,7 @@ async fn spawn_supervised_stream(
             ),
             NoopChainTelemetry,
         )
-        .await;
+        .await
     });
 
     Ok((run_handle, sign_rx))
@@ -170,7 +176,7 @@ async fn spawn_supervised_stream(
 #[test_log::test(tokio::test)]
 async fn test_solana_stream_parse_sign_event() -> Result<()> {
     let solana = solana_sandbox().await?;
-    let program_address = solana.program_keypair.pubkey().to_string();
+    let program_address = solana.program_keypair.pubkey();
     let config = solana.get_config(program_address);
     let mut indexer = run_solana_indexer(config).await?;
 
@@ -198,7 +204,7 @@ async fn test_solana_stream_parse_sign_event() -> Result<()> {
 #[test_log::test(tokio::test)]
 async fn test_solana_stream_emits_blocks() -> Result<()> {
     let solana = solana_sandbox().await?;
-    let program_address = solana.program_keypair.pubkey().to_string();
+    let program_address = solana.program_keypair.pubkey();
 
     let config = solana.get_config(program_address);
     let mut indexer = run_solana_indexer(config).await?;
@@ -232,10 +238,10 @@ async fn test_solana_stream_emits_blocks() -> Result<()> {
 #[test_log::test(tokio::test)]
 async fn test_solana_stream_catchup_linear() -> Result<()> {
     let solana = solana_sandbox().await?;
-    let program_address = solana.program_keypair.pubkey().to_string();
+    let program_address = solana.program_keypair.pubkey();
 
     // Create first client and process some events
-    let config = solana.get_config(program_address.clone());
+    let config = solana.get_config(program_address);
     let mut indexer1 = run_solana_indexer(config.clone()).await?;
 
     // Submit requests while client is running
@@ -331,7 +337,7 @@ async fn test_solana_stream_catchup_linear() -> Result<()> {
 #[test_log::test(tokio::test)]
 async fn test_solana_stream_parse_sign_bidirectional() -> Result<()> {
     let solana = solana_sandbox().await?;
-    let program_address = solana.program_keypair.pubkey().to_string();
+    let program_address = solana.program_keypair.pubkey();
     let config = solana.get_config(program_address);
     let mut indexer = run_solana_indexer(config).await?;
 
@@ -372,7 +378,7 @@ async fn test_solana_stream_parse_sign_bidirectional() -> Result<()> {
 #[test_log::test(tokio::test)]
 async fn test_solana_stream_concurrent_events() -> Result<()> {
     let solana = solana_sandbox().await?;
-    let program_address = solana.program_keypair.pubkey().to_string();
+    let program_address = solana.program_keypair.pubkey();
     let config = solana.get_config(program_address);
     let mut indexer = run_solana_indexer(config).await?;
 
@@ -425,9 +431,9 @@ async fn test_solana_stream_concurrent_events() -> Result<()> {
 #[test_log::test(tokio::test)]
 async fn test_solana_stream_checkpoint_persistence() -> Result<()> {
     let solana = solana_sandbox().await?;
-    let program_address = solana.program_keypair.pubkey().to_string();
+    let program_address = solana.program_keypair.pubkey();
     let (backlog, _, _) = test_dependencies();
-    let config = solana.get_config(program_address.clone());
+    let config = solana.get_config(program_address);
     let mut indexer1 = run_solana_indexer_with_backlog(config.clone(), backlog.clone()).await?;
     // Submit request and wait for a block marker
     solana
@@ -511,7 +517,7 @@ async fn test_solana_stream_checkpoint_persistence() -> Result<()> {
 #[test_log::test(tokio::test)]
 async fn test_solana_stream_republishes_pending_publish_after_checkpoint_recovery() -> Result<()> {
     let solana = solana_sandbox().await?;
-    let program_address = solana.program_keypair.pubkey().to_string();
+    let program_address = solana.program_keypair.pubkey();
     let config = solana.get_config(program_address);
 
     let storage = CheckpointStorage::in_memory();
@@ -587,7 +593,7 @@ async fn test_solana_stream_republishes_pending_publish_after_checkpoint_recover
             ),
             NoopChainTelemetry,
         )
-        .await;
+        .await
     });
 
     solana
@@ -636,7 +642,7 @@ async fn test_solana_stream_republishes_pending_publish_after_checkpoint_recover
 #[test_log::test(tokio::test)]
 async fn test_solana_respond_round_trip() -> Result<()> {
     let solana = solana_sandbox().await?;
-    let program_address = solana.program_keypair.pubkey().to_string();
+    let program_address = solana.program_keypair.pubkey();
     let config = solana.get_config(program_address);
     let mut indexer = run_solana_indexer(config.clone()).await?;
 
@@ -692,7 +698,7 @@ async fn test_solana_respond_round_trip() -> Result<()> {
 #[test_log::test(tokio::test)]
 async fn test_solana_respond_bidirectional_round_trip() -> Result<()> {
     let solana = solana_sandbox().await?;
-    let program_address = solana.program_keypair.pubkey().to_string();
+    let program_address = solana.program_keypair.pubkey();
     let config = solana.get_config(program_address);
     let mut indexer = run_solana_indexer(config.clone()).await?;
 
@@ -733,7 +739,7 @@ async fn test_solana_respond_bidirectional_round_trip() -> Result<()> {
 #[test_log::test(tokio::test)]
 async fn test_solana_stream_failed_tx_skipped() -> Result<()> {
     let solana = solana_sandbox().await?;
-    let program_address = solana.program_keypair.pubkey().to_string();
+    let program_address = solana.program_keypair.pubkey();
     let config = solana.get_config(program_address);
     let mut indexer = run_solana_indexer(config).await?;
 
@@ -779,7 +785,7 @@ async fn test_solana_stream_failed_tx_skipped() -> Result<()> {
 #[test_log::test(tokio::test)]
 async fn test_solana_stream_resumes_gap_free_after_outage() -> Result<()> {
     let mut solana = solana_sandbox().await?;
-    let program_address = solana.program_keypair.pubkey().to_string();
+    let program_address = solana.program_keypair.pubkey();
     let config = solana.get_config(program_address);
 
     let backlog = Backlog::new();
@@ -892,7 +898,7 @@ async fn test_solana_stream_resumes_gap_free_after_outage() -> Result<()> {
 #[test_log::test(tokio::test)]
 async fn test_solana_stream_backfills_requests_missed_during_downtime() -> Result<()> {
     let solana = solana_sandbox().await?;
-    let program_address = solana.program_keypair.pubkey().to_string();
+    let program_address = solana.program_keypair.pubkey();
     let config = solana.get_config(program_address);
 
     let backlog = Backlog::new();

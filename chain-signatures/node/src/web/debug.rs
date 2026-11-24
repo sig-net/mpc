@@ -103,7 +103,6 @@ pub(super) async fn page(Extension(web): Extension<Arc<AxumState>>) -> Html<Stri
     // read data that's also visible on /state
     // and create a title from it
     let title = match web.node.status() {
-        NodeStatus::Starting => "Node Starting".to_owned(),
         NodeStatus::Started => "Node Started".to_owned(),
         NodeStatus::Generating { .. } => "Node Generating Keys".to_owned(),
         NodeStatus::WaitingForConsensus { .. } => "Node Waiting For Consensus".to_owned(),

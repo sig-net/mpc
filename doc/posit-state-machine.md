@@ -74,6 +74,7 @@ Three things are held per node rather than kept per request: (i) the mesh's acti
 stateDiagram-v2
     state "<b>Waiting for participants</b><br/>1. round timeout starts ticking<br/>2. wait for t active peers<br/>3. determine role" as WaitingForParticipants
     state "<b>Reserving</b><br/>1. take one of the chain's 4 permits<br/>2. reserve a presignature with at least t active holders<br/>3. send PROPOSE to those active holders" as Reserving
+    state "<b>Sitting out</b><br/>1. release the permit<br/>2. wait for the round to end" as SittingOut
     state "Posit" as PositOut
 
     [*] --> WaitingForParticipants
@@ -82,7 +83,8 @@ stateDiagram-v2
     Reserving --> PositOut: PROPOSE sent
 
     WaitingForParticipants --> WaitingForParticipants: mesh channel closed
-    Reserving --> WaitingForParticipants: no permit or presignature
+    Reserving --> SittingOut: less than ROUND_TIMEOUT_FLOOR left
+    SittingOut --> WaitingForParticipants: round over
 
     classDef outside fill:#eef1f4,stroke:#9aa4b0,color:#48525e,stroke-dasharray:5 3
     class PositOut outside
@@ -94,11 +96,16 @@ mesh channel closes.
 
 The round timeout `round_timeout(r)` is already running while it waits, because
 it started when the round began. If the wait outlasts the round timeout, the
-states after it get no time at all: the proposer's permit wait and presignature
-fetch and the deliberator's wait for `PROPOSE` are each given the time left in the round, which
-is now zero, so they fail on the first poll and round `r` ends without a
+states after it get no time at all: the proposer's wait for a permit and a
+presignature, and the deliberator's wait for `PROPOSE`, fail on the first poll, and round `r` ends without a
 `PROPOSE` going out. The next round restarts the clock, so the cost is one wasted
 round, with a different proposer.
+
+A posit needs at least `ROUND_TIMEOUT_FLOOR`, the shortest round (§6), but
+permits are granted first come, first served, so under a backlog they reach
+proposers near the end of their round. A proposer that still lacks a permit or
+a presignature when only `ROUND_TIMEOUT_FLOOR` is left therefore sits out the
+rest of the round, so its next round starts with everyone else's.
 
 ## 3. Inside Posit
 
@@ -311,7 +318,7 @@ which is why agreeing on `r` is all the nodes need:
 with the round. The clock starts before `t` participants are known, and every
 state shares whatever is left of it.
 
-Round 0 gets 20s. Round 1 starts at a 2s floor and each later round grows 1.15x,
+Round 0 gets 20s. Round 1 starts at a 2s floor (`ROUND_TIMEOUT_FLOOR`) and each later round grows 1.15x,
 up to a 600s ceiling. Short early rounds rotate quickly past dead proposers;
 long later rounds outlast the skew between nodes that indexed the request at
 different times.
@@ -319,7 +326,8 @@ different times.
 | State | Time limit |
 |---|---|
 | Waiting for participants | none |
-| Reserving | round timeout |
+| Reserving | round timeout, less `ROUND_TIMEOUT_FLOOR` |
+| Sitting out | rest of the round timeout |
 | Waiting for Propose | round timeout |
 | Propose sent | round timeout |
 | Waiting for Start | round timeout, but at least `2 * ACCEPT_POSIT_TIMEOUT` |
@@ -381,13 +389,13 @@ Generations are agreed on by a simpler posit: no rounds, no rotating proposer.
 Each of the two pipelines runs its posits in one serial loop (`triple.rs`,
 `presignature.rs`) that handles incoming posit messages, a stockpile tick and an
 expiry tick. On the stockpile tick, the owner of the new artifact proposes at
-most one generation, while it owns fewer than `min_triples` or
-`min_presignatures`. The counts that decide this are read from storage on the
+most one generation, while it owns fewer than its floor: `min_mine_triple_pairs`
+triple pairs or `min_mine_presignatures` presignatures. The counts that decide this are read from storage on the
 expiry tick, and cached; the stockpile tick itself touches storage only when it
 proposes, so a node at its CPU quota is not starved of the loop by its own
 bookkeeping. The floor and cap are judged on counts up to one expiry tick old,
 so a node can overshoot its floor by at most one tick of proposals, bounded by
-`max_concurrent_introduction`. A triple is proposed to all active nodes. A
+`max_mine_generations`. A triple is proposed to all active nodes. A
 presignature uses a triple pair the owner holds, reserved in memory, and is
 proposed to the pair's active holders; its id is the pair's hash, so a retry of
 the same pair reuses the id.
@@ -404,11 +412,12 @@ the same pair reuses the id.
   from the owner of a live entry starts the generation; without one it is
   answered with a `REJECT`, which the owner, already generating, cannot act on.
 - **Checks.** Only a `PROPOSE` is answered after checks (already generating or
-  stored; for presignatures also the id and whether the pair is held), with a
-  `REJECT` if one fails. `START` relies on the generation-start refusal below.
+  stored; for presignatures also the id and whether the pair is held; then
+  load: more generations running or accepted than the network's cap allows, or more in
+  the pool than its floors need), with a `REJECT` if one fails. `START` relies on the generation-start refusal below.
   `ACCEPT` and `REJECT` are never answered.
 
 Every node listed in `START` must contribute. If one does not, the generation runs
-to its `generation_timeout` (contract config) and its inputs are consumed. A node
+to its generation timeout (a node constant) and its inputs are consumed. A node
 refuses to start a generation for an id that is already running or stored, and
 the pair is taken from storage atomically when the generation starts.

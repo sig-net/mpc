@@ -156,7 +156,6 @@ impl NodeConnection {
                         OtherNodeStatus::Resharing { .. }
                         | OtherNodeStatus::Generating { .. }
                         | OtherNodeStatus::Joining { .. }
-                        | OtherNodeStatus::Starting
                         | OtherNodeStatus::Started
                         | OtherNodeStatus::WaitingForConsensus { .. } => NodeStatus::Inactive,
                     };
