@@ -10,7 +10,6 @@ publish = false
 k256.workspace = true
 # TODO: replace anyhow with thiserror
 anyhow.workspace = true
-near-account-id.workspace = true
 near-sdk.workspace = true
 sha3.workspace = true
 

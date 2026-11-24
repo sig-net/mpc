@@ -54,6 +54,12 @@ impl From<SignError> for Error {
     }
 }
 
+impl From<mpc_crypto::DeriveError> for Error {
+    fn from(err: mpc_crypto::DeriveError) -> Self {
+        SignError::Derive(err).into()
+    }
+}
+
 impl From<RespondError> for Error {
     fn from(code: RespondError) -> Self {
         Self::simple(ErrorKind::Respond(code))

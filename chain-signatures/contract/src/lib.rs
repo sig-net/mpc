@@ -13,8 +13,8 @@ use errors::{
 use k256::elliptic_curve::sec1::ToEncodedPoint;
 use k256::Scalar;
 use mpc_crypto::{
-    derive_epsilon_near, derive_key, kdf::check_ec_signature, near_public_key_to_affine_point,
-    ScalarExt as _,
+    derive_epsilon, derive_key, kdf::check_ec_signature, near_public_key_to_affine_point,
+    KeyPurpose, ScalarExt as _,
 };
 use mpc_primitives::CheckpointDigest;
 use near_sdk::env::panic_str;
@@ -137,8 +137,14 @@ impl MpcContract {
         );
         let entropy = near_sdk::env::random_seed_array();
         env::log_str(&serde_json::to_string(&entropy).unwrap());
-        let epsilon = derive_epsilon_near(request.key_version, &predecessor, &path)
-            .map_err(|_| SignError::UnsupportedKeyVersion)?;
+        let epsilon = derive_epsilon(
+            request.key_version,
+            Chain::NEAR,
+            KeyPurpose::Plain {
+                sender: predecessor.as_str(),
+                path: &path,
+            },
+        )?;
 
         // lock the request such that it can't be submitted again until released either by erroring out
         // or by finishing the request when the signature is submitted.
@@ -173,8 +179,14 @@ impl MpcContract {
         predecessor: Option<AccountId>,
     ) -> Result<PublicKey, Error> {
         let predecessor = predecessor.unwrap_or_else(env::predecessor_account_id);
-        let epsilon = derive_epsilon_near(key_version, &predecessor, &path)
-            .map_err(|_| SignError::UnsupportedKeyVersion)?;
+        let epsilon = derive_epsilon(
+            key_version,
+            Chain::NEAR,
+            KeyPurpose::Plain {
+                sender: predecessor.as_str(),
+                path: &path,
+            },
+        )?;
         let derived_public_key =
             derive_key(near_public_key_to_affine_point(self.public_key()?), epsilon);
         let encoded_point = derived_public_key.to_encoded_point(false);

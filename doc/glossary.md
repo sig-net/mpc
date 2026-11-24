@@ -203,6 +203,15 @@ for a signature: (sign id, [presignature](#presignature) id). The sign id
 (`SignId`, `signet-primitives/src/crypto.rs`) wraps the [request
 id](#request-id), the same 32 bytes.
 
+## Key version
+
+Which MPC root key and derivation format a key uses. See
+[account-derivation.md](account-derivation.md#derivation-path-structure).
+Every request names its key version. The network signs only up to the latest
+key version (`LATEST_MPC_KEY_VERSION`, `signet-primitives/src/lib.rs`), which
+the [governance contract](#governance-contract) reports as
+`latest_key_version`.
+
 ## Mesh
 
 A node's connections to its peers, each `Offline` (no answer), `Inactive`
@@ -304,11 +313,15 @@ chain](#source-chain). See
 What a key signs: [plain sign requests](#plain-sign-request),
 [bidirectional requests](#bidirectional-request),
 [attestations](#attestation) or a [system account](#system-account)'s
-transactions. It applies from key version 2. See
+transactions. The signing API a request comes on sets it, never the
+request's fields. From [key version](#key-version) 2 the derivation path
+names the purpose, so keys of different purposes differ. See
 [account-derivation.md](account-derivation.md#derivation-path-structure).
 
 *Code today:* the latest key version is 1 (`LATEST_MPC_KEY_VERSION`,
-`signet-primitives/src/lib.rs`), so no key has a purpose.
+`signet-primitives/src/lib.rs`), whose derivation path names no purpose: a
+bidirectional key is the plain key, and the attestation key is a plain key
+under a reserved path.
 
 ## Request
 

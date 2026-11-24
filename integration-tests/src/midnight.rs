@@ -291,10 +291,12 @@ impl MidnightContext {
             "Midnight caller address must be 32 bytes, got {}",
             caller_bytes.len()
         );
-        let epsilon = mpc_crypto::derive_epsilon_midnight(
+        let epsilon = mpc_crypto::derive_epsilon(
             mpc_primitives::LATEST_MPC_KEY_VERSION,
-            &hex::encode(caller_bytes),
-            mpc_node::respond_bidirectional::MIDNIGHT_RESPOND_BIDIRECTIONAL_PATH,
+            mpc_primitives::Chain::Midnight,
+            mpc_crypto::KeyPurpose::Attestation {
+                sender: &hex::encode(caller_bytes),
+            },
         )?;
         let response_public_key = mpc_crypto::derive_key(root_public_key, epsilon);
         let response_public_key = format!(

@@ -7705,7 +7705,6 @@ dependencies = [
  "hkdf",
  "k256 0.13.4",
  "mpc-primitives",
- "near-account-id",
  "near-primitives",
  "near-sdk",
  "sha3 0.10.9",
@@ -11450,6 +11449,7 @@ dependencies = [
  "serde_json",
  "sha3 0.10.9",
  "signet-primitives",
+ "thiserror 1.0.69",
 ]
 
 [[package]]

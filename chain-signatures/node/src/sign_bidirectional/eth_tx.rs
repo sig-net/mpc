@@ -152,20 +152,26 @@ mod derive_tests {
     use alloy::primitives::Address;
     use k256::elliptic_curve::sec1::FromEncodedPoint;
     use k256::{AffinePoint, EncodedPoint};
-    use mpc_crypto::derive_epsilon_near;
+    use mpc_crypto::{derive_epsilon, KeyPurpose};
+    use mpc_primitives::Chain;
     use mpc_primitives::LEGACY_MPC_KEY_VERSION_0;
 
     #[test]
     fn derive_user_address_matches_golden() {
         let mpc_key = "045b4fa179e005361fd858f8a6f896d7afc23a53d3f95d6566a88cde954e7b2f1cb77c554705c35d4ffced67aeafbcda46d9d89d6f200c3a3d109f92872863b3dc";
-        let account_id = "dev-20250212213501-93636560094065.test.near"
-            .parse()
-            .unwrap();
+        let account_id = "dev-20250212213501-93636560094065.test.near";
         let mpc_pk = hex::decode(mpc_key).unwrap();
         let mpc_pk = EncodedPoint::from_bytes(mpc_pk).unwrap();
         let mpc_pk = AffinePoint::from_encoded_point(&mpc_pk).unwrap();
-        let derivation_epsilon =
-            derive_epsilon_near(LEGACY_MPC_KEY_VERSION_0, &account_id, "test").unwrap();
+        let derivation_epsilon = derive_epsilon(
+            LEGACY_MPC_KEY_VERSION_0,
+            Chain::NEAR,
+            KeyPurpose::Plain {
+                sender: account_id,
+                path: "test",
+            },
+        )
+        .unwrap();
         let expected: Address = "0x083c8776b5e447e91bae43b7883a92a9bdb66d1d"
             .parse()
             .unwrap();
