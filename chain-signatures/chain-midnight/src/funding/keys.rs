@@ -12,7 +12,7 @@ use sha2::Digest as _;
 /// The DUST key of account 0 at index 0, derived the way the Midnight wallet SDK
 /// derives it from the same seed: BIP-32 `m/44'/2400'/0'/2/0`, then the ledger's
 /// `DustSecretKey::derive_secret_key` over that private key.
-pub fn dust_secret_key(seed: &[u8]) -> anyhow::Result<DustSecretKey> {
+pub(crate) fn dust_secret_key(seed: &[u8]) -> anyhow::Result<DustSecretKey> {
     let path: bip32::DerivationPath = "m/44'/2400'/0'/2/0"
         .parse()
         .expect("the DUST role path is a valid derivation path");
@@ -50,7 +50,7 @@ fn master_key(seed: &[u8]) -> anyhow::Result<bip32::XPrv> {
 
 /// Hex seed bytes, with or without `0x`, of any length — the length check is
 /// `crate::config::validate_funding_seed`'s.
-pub fn parse_seed(seed: &str) -> anyhow::Result<Vec<u8>> {
+pub(crate) fn parse_seed(seed: &str) -> anyhow::Result<Vec<u8>> {
     let trimmed = seed.trim();
     let bare = trimmed
         .strip_prefix("0x")

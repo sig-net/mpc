@@ -34,9 +34,9 @@ use crate::dust_feed::DustEventSource;
 use crate::submit_error::SubmitError;
 
 /// A proven respond transaction, sealed: what the fee is paid for.
-pub type SealedTx = minocrab_publisher::intent::SealedTx<DefaultDB>;
+pub(crate) type SealedTx = minocrab_publisher::intent::SealedTx<DefaultDB>;
 /// The fee-paying transaction, before its DUST spend proof.
-pub type UnprovenTx = minocrab_publisher::intent::PreimageTx<DefaultDB>;
+pub(crate) type UnprovenTx = minocrab_publisher::intent::PreimageTx<DefaultDB>;
 
 /// The fee is priced as the wallet SDK prices it: this many blocks of the largest
 /// price rise the ledger allows, so a transaction priced now still pays when it lands.
@@ -46,7 +46,7 @@ const FEE_PASSES: usize = 8;
 
 /// What the publisher needs from the wallet. A trait so the publish path can be
 /// driven without an indexer.
-pub trait FeePayer: Send + Sync {
+pub(crate) trait FeePayer: Send + Sync {
     /// Waits, until `deadline`, for the replayed state to catch up with the newest
     /// event the indexer has reported or named.
     fn ready_by(
@@ -108,7 +108,7 @@ pub(crate) struct Reservation {
 }
 
 /// The funding wallet, kept in sync in the background for as long as it lives.
-pub struct FundingWallet {
+pub(crate) struct FundingWallet {
     pub(super) shared: Arc<Shared>,
     source: Arc<dyn DustEventSource>,
     _sync: AbortOnDrop,
@@ -118,7 +118,7 @@ impl FundingWallet {
     /// Starts replaying at once, from the checkpoint in `checkpoints` when it has one
     /// for this key, so the first publish does not pay for the catch-up; `telemetry`
     /// hears of each replay the wallet later restarts from the first event.
-    pub fn start(
+    pub(crate) fn start(
         key: DustSecretKey,
         source: Arc<dyn DustEventSource>,
         checkpoints: Option<Arc<dyn DustCheckpointStore>>,
@@ -500,7 +500,7 @@ pub(crate) fn plan_fee(
 }
 
 /// How much DUST `tx` is short of paying `fee`, at the guaranteed segment.
-pub fn dust_deficit(tx: &SealedTx, fee: u128) -> Result<u128, SubmitError> {
+pub(crate) fn dust_deficit(tx: &SealedTx, fee: u128) -> Result<u128, SubmitError> {
     let balance = tx
         .balance(Some(fee))
         .map_err(|error| SubmitError::Internal(format!("balancing the fee: {error:?}")))?;

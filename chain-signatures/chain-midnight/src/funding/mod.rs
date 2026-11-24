@@ -21,9 +21,11 @@ mod live;
 #[cfg(test)]
 pub(crate) mod tests;
 
+// `pub(crate)` re-exports: `funding` is a private module, and only
+// `DustCheckpointStore` reaches the crate's public API (`lib.rs` re-export).
 pub use checkpoint::DustCheckpointStore;
-pub use keys::{dust_secret_key, parse_seed};
-pub use wallet::{dust_deficit, FeePayer, FundingWallet, SealedTx, UnprovenTx};
+pub(crate) use keys::{dust_secret_key, parse_seed};
+pub(crate) use wallet::{dust_deficit, FeePayer, FundingWallet, SealedTx, UnprovenTx};
 
 // Re-exported for the unit tests, which glob `super::*`.
 #[cfg(test)]
