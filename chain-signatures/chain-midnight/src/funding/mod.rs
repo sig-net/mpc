@@ -21,12 +21,19 @@ mod live;
 #[cfg(test)]
 pub(crate) mod tests;
 
-pub use checkpoint::{Checkpoint, DustCheckpointStore, CHECKPOINT_INTERVAL};
-pub use keys::{dust_secret_key, owner_of, parse_seed};
+pub use checkpoint::DustCheckpointStore;
+pub use keys::{dust_secret_key, parse_seed};
+pub use wallet::{dust_deficit, FeePayer, FundingWallet, SealedTx, UnprovenTx};
+
+// Re-exported for the unit tests, which glob `super::*`.
+#[cfg(test)]
+pub use checkpoint::{Checkpoint, CHECKPOINT_INTERVAL};
+#[cfg(test)]
+pub use keys::owner_of;
+#[cfg(test)]
 pub use sync::{
     apply, event_hash, is_ledger_8_event, keep_checkpoint, resume_from, start_over, Shared, Synced,
     RESTORE_STRIKES, RESTORE_STUCK_TIMEOUT, RESUBSCRIBE_DELAY, RESUME_TIMEOUT, STALL_GRACE,
 };
-pub use wallet::{
-    dust_deficit, plan_fee, FeePayer, FeePlan, FundingWallet, Reservation, SealedTx, UnprovenTx,
-};
+#[cfg(test)]
+pub use wallet::{plan_fee, FeePlan, Reservation};
