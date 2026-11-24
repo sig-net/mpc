@@ -22,7 +22,7 @@ How to write and update these docs: [Documentation conventions](../CONTRIBUTING.
 
 ## Chains
 
-- [Chain integration capability matrix](chain-integration-capability-matrix.md): current source and target roles, their consumers, and settings ownership for every chain.
+- [Chain integration capability matrix](chain-integration-capability-matrix.md): current source and target roles, their consumers, and settings ownership by chain integration.
 - [Midnight publisher](midnight-publisher.md): how the node builds, proves, pays for and posts its Midnight responses, and which events the reader supports.
 
 ## Operations
