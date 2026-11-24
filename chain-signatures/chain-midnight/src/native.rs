@@ -12,7 +12,6 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::Context as _;
 use async_trait::async_trait;
 use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode, BASE_URL};
 use midnight_base_crypto::hash::HashOutput;
@@ -32,8 +31,9 @@ use tokio::time::Instant;
 
 use crate::funding::{dust_deficit, FeePayer, SealedTx, UnprovenTx};
 use crate::intent::{IntentRequest, RespondCircuit, Submitted};
+use crate::landing_watch::{watch_landing, WatchEnd};
 use crate::publisher::IntentClient;
-use crate::rpc::submit::{Landing, SubmitChain, SubmitRefusal};
+use crate::rpc::submit::{SubmitChain, SubmitRefusal};
 use crate::submit_error::SubmitError;
 use crate::types::{BlockHash, LedgerTxHash, NetworkId};
 
@@ -47,7 +47,6 @@ const MIN_FEE_TTL: Duration = Duration::from_secs(30);
 const WORK_RESERVE: Duration = Duration::from_secs(120);
 /// How long past its TTL a landed transaction may take to finalize.
 const FINALITY_SLACK: Duration = Duration::from_secs(60);
-const LANDING_POLL: Duration = Duration::from_secs(2);
 /// How long after a submit went unanswered the transaction is first sent again. Each
 /// further unanswered attempt doubles the wait, up to `MAX_RESEND_DELAY`, so a node
 /// shedding load is not asked again at a fixed pace.
@@ -337,13 +336,17 @@ impl<W: FeePayer, C: SubmitChain + 'static> NativeIntentClient<W, C> {
         Ok(proven.seal(StdRng::from_entropy()))
     }
 
-    /// Posts a paid transaction and waits for it: the UTXOs it spends stay reserved
-    /// until it lands, the node refuses the first submit or it could not be sent, a
-    /// finalized block past its TTL does not hold it, or a minute past its TTL. An ambiguous outcome comes
-    /// no earlier than that minute, so the retry may plan the same UTXOs; if this
-    /// transaction landed after all, the node refuses that spend.
-    /// Only here does a failure strike the restored wallet: `post` runs once the
-    /// fee was planned, so a conflict raised before paying can never strike.
+    /// Posts a paid transaction and waits for it: the UTXOs it spends stay
+    /// reserved until it lands, the node refuses the first submit or it could
+    /// not be sent, a finalized block past its TTL does not hold it, or the
+    /// budget ends the wait, never before a minute past its TTL.
+    /// The deadline's ambiguous exit finds that reservation expired — the fee's
+    /// TTL leaves the budget that slack — so the retry may plan the same UTXOs,
+    /// and if this transaction landed after all, the node refuses that spend.
+    /// A read verdict ending the watch earlier holds the reservation: the
+    /// retry plans other UTXOs, or stops at a busy wallet until they expire.
+    /// Only here does a failure strike the restored wallet: `post` runs once
+    /// the fee was planned, so a conflict raised before paying can never strike.
     async fn post(
         &self,
         bytes: &[u8],
@@ -400,97 +403,37 @@ impl<W: FeePayer, C: SubmitChain + 'static> NativeIntentClient<W, C> {
                 tx_hash,
             )))
         });
-        let landing = self.await_landing(tx_hash, after, ttl, deadline).await;
+        let end = watch_landing(self.chain.as_ref(), tx_hash, after, ttl, deadline).await;
         tracing::info!(
             tx_hash = %tx_hash,
             ?submitted,
             settled = ?started.elapsed(),
-            outcome = ?landing,
+            outcome = ?end,
             "midnight: respond settled"
         );
-        match landing? {
+        match end {
             // The respond's only transcript and the DUST spends are guaranteed, which
             // a partial success commits and readers read; the reservation ends when
             // the replay sees the spends.
-            Landing::Applied | Landing::PartialSuccess => Ok(tx_hash),
-            Landing::Expired => {
+            WatchEnd::Landed(_) => Ok(tx_hash),
+            WatchEnd::Expired => {
                 self.wallet.release(spent);
                 // Expiry strikes with the refusal: after an unanswered first
                 // submit, `resend` only logs the node's refusal, so a stale spend
-                // surfaces here as `Landing::Expired`.
+                // surfaces here as `WatchEnd::Expired`.
                 self.wallet.struck();
                 Err(SubmitError::StateConflict(format!(
                     "transaction {tx_hash} expired without landing"
                 )))
             }
+            WatchEnd::Budget => Err(SubmitError::Ambiguous(format!(
+                "transaction {tx_hash} was not seen finalized within the submit budget; it may \
+                 still land, and a later publisher retry may post the response again"
+            ))),
+            WatchEnd::TerminalRead(error) => Err(node(error)),
         }
     }
 
-    /// Scans each finalized block after `after` for `tx_hash` until it lands, until a
-    /// finalized block is past `ttl` without it (`Landing::Expired`), or until
-    /// `deadline`, when the outcome is unknown.
-    async fn await_landing(
-        &self,
-        tx_hash: LedgerTxHash,
-        after: u64,
-        ttl: Timestamp,
-        deadline: Instant,
-    ) -> Result<Landing, SubmitError> {
-        let mut scanned = after;
-        // The head a scan last finished at: while it stands, no block is new and its
-        // time was already compared with the TTL.
-        let mut scanned_head: Option<BlockHash> = None;
-        loop {
-            let scan = async {
-                let head = self.chain.finalized_head().await?;
-                if scanned_head.as_ref() == Some(&head) {
-                    return anyhow::Ok(None);
-                }
-                let head_number = self.chain.block_number(&head).await?;
-                while scanned < head_number {
-                    let number = scanned + 1;
-                    let hash = if number == head_number {
-                        head
-                    } else {
-                        self.chain
-                            .block_hash_at(number)
-                            .await?
-                            .with_context(|| format!("the node has no finalized block {number}"))?
-                    };
-                    if let Some(landing) = self.chain.landing(&hash, tx_hash).await? {
-                        return Ok(Some(landing));
-                    }
-                    scanned = number;
-                }
-                if self.chain.block_time(&head).await? > ttl {
-                    return Ok(Some(Landing::Expired));
-                }
-                scanned_head = Some(head);
-                Ok(None)
-            };
-            match tokio::time::timeout_at(deadline, scan).await {
-                Ok(Ok(Some(landing))) => return Ok(landing),
-                Ok(Ok(None)) => {}
-                Ok(Err(error)) => {
-                    tracing::warn!(
-                        ?error,
-                        "midnight: watching for the respond transaction failed; retrying"
-                    );
-                }
-                Err(_) => break,
-            }
-            if tokio::time::timeout_at(deadline, tokio::time::sleep(LANDING_POLL))
-                .await
-                .is_err()
-            {
-                break;
-            }
-        }
-        Err(SubmitError::Ambiguous(format!(
-            "transaction {tx_hash} was not seen finalized within the submit budget; it may still \
-             land, and a later publisher retry may post the response again"
-        )))
-    }
 }
 
 #[async_trait]
@@ -667,7 +610,9 @@ mod tests {
     use crate::emissions::{emissions_of_call, Emission, EmissionKind, MISC_PAYLOAD_LEN};
     use crate::funding::tests::{base, funded_key, replayed};
     use crate::funding::{plan_fee, FeePlan};
+    use crate::landing_watch::LANDING_POLL;
     use crate::rpc::publisher::PinnedReads;
+    use crate::rpc::submit::Landing;
     use crate::test_utils::rejected_http;
     use minocrab_publisher::{Attestation, EcdsaSignature};
 

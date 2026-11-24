@@ -341,7 +341,7 @@ pub fn read_verdict(error: &anyhow::Error) -> RpcFailure {
 #[error("a publisher read failed")]
 struct ReadFailed(#[source] anyhow::Error);
 
-pub(super) fn attach_read_carrier(error: anyhow::Error) -> anyhow::Error {
+pub fn attach_read_carrier(error: anyhow::Error) -> anyhow::Error {
     anyhow::Error::new(read_verdict(&error)).context(ReadFailed(error))
 }
 

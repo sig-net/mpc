@@ -17,8 +17,6 @@ pub enum Landing {
     Applied,
     /// Applied but for a fallible segment; readers still read its guaranteed events.
     PartialSuccess,
-    /// A finalized block is past the transaction's TTL, so it can no longer land.
-    Expired,
 }
 
 /// Why `author_submitExtrinsic` did not take a transaction.
