@@ -404,10 +404,15 @@ impl<W: FeePayer, C: SubmitChain + 'static> NativeIntentClient<W, C> {
             )))
         });
         let end = watch_landing(self.chain.as_ref(), tx_hash, after, ttl, deadline).await;
+        let landed = match &end {
+            WatchEnd::Landed(landing) => Some(landing),
+            _ => None,
+        };
         tracing::info!(
             tx_hash = %tx_hash,
             ?submitted,
             settled = ?started.elapsed(),
+            ?landed,
             outcome = ?end,
             "midnight: respond settled"
         );
@@ -1830,16 +1835,43 @@ mod tests {
                 LedgerTxHash::from_bytes(TX_HASH)
             );
         }
+        // The budget exit logs the same event with no landing to name.
+        let client = client_over(
+            managed_dir(|_, bytes| bytes),
+            ScriptedChain::new(10, 12, None),
+        );
+        let error = client
+            .post(
+                b"tx",
+                LedgerTxHash::from_bytes(TX_HASH),
+                &spent(),
+                10,
+                Timestamp::from_secs(5000),
+                Instant::now() + Duration::from_secs(30),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(error, SubmitError::Ambiguous(_)), "{error}");
         let settles: Vec<RecordedFields> = recorder
             .snapshot()
             .into_iter()
             .filter(|fields| fields.contains_key("settled"))
             .collect();
-        assert_eq!(settles.len(), 2, "{settles:?}");
-        for (fields, outcome) in [
-            (&settles[0], "Landed(Applied)"),
-            (&settles[1], "Landed(PartialSuccess)"),
+        assert_eq!(settles.len(), 3, "{settles:?}");
+        for (fields, landed, outcome) in [
+            (&settles[0], "Some(Applied)", "Landed(Applied)"),
+            (
+                &settles[1],
+                "Some(PartialSuccess)",
+                "Landed(PartialSuccess)",
+            ),
+            (&settles[2], "None", "Budget"),
         ] {
+            assert_eq!(
+                fields.get("landed").map(String::as_str),
+                Some(landed),
+                "{fields:?}"
+            );
             assert_eq!(
                 fields.get("outcome").map(String::as_str),
                 Some(outcome),
