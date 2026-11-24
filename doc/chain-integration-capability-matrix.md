@@ -19,18 +19,30 @@ Current `mpc-node` capabilities and settings ownership for every
 
 ## Consumer paths
 
-- **C1 — source admission/supervision:** `spawn_indexers` → `run_supervised` →
-  `handle_chain_event` → `process_sign_request` or a published-response
-  processor.
+- **C1 — source admission/supervision:**
+  [`spawn_indexers`](../chain-signatures/node/src/cli/mod.rs) →
+  [`run_supervised`](../chain-signatures/node/src/stream/supervisor.rs) →
+  [`handle_chain_event`](../chain-signatures/node/src/stream/mod.rs) →
+  [`process_sign_request`](../chain-signatures/node/src/stream/ops.rs) or a
+  published-response processor.
 - **C2 — target admission/construction:** `process_sign_request` →
-  `SignBidirectionalEventExt::validate`; first-leg response →
-  `advance_bidirectional_to_execution` → `to_bidirectional_tx` /
-  `sign_and_hash_transaction` → execution watch.
-- **C3 — execution/final response:** watcher `ExecutionConfirmed` →
-  `process_execution_confirmed` → `answer_execution` →
-  `respond_bidirectional::CompletedTx` → final source-chain sign request → C4.
-- **C4 — publishing:** `ChainStack::publishers` →
-  `RpcExecutor::dispatch_loop` → `execute_publish` → `ChainPublisher`.
+  [`SignBidirectionalEventExt::validate`](../chain-signatures/node/src/sign_bidirectional/mod.rs);
+  first-leg response →
+  [`advance_bidirectional_to_execution`](../chain-signatures/node/src/stream/ops.rs) →
+  [`to_bidirectional_tx`](../chain-signatures/node/src/sign_bidirectional/mod.rs) /
+  [`sign_and_hash_transaction`](../chain-signatures/node/src/sign_bidirectional/signing.rs) →
+  execution watch.
+- **C3 — execution/final response:** watcher
+  [`ExecutionConfirmed`](../chain-signatures/primitives/src/events.rs) →
+  [`process_execution_confirmed`](../chain-signatures/node/src/stream/ops.rs) →
+  `answer_execution` →
+  [`respond_bidirectional::CompletedTx`](../chain-signatures/node/src/respond_bidirectional.rs) →
+  final source-chain sign request → C4.
+- **C4 — publishing:**
+  [`ChainStack::publishers`](../chain-signatures/node/src/cli/mod.rs) →
+  [`RpcExecutor::dispatch_loop`](../chain-signatures/node/src/rpc/mod.rs) →
+  `execute_publish` →
+  [`ChainPublisher`](../chain-signatures/chain-integration-core/src/publish.rs).
   Publish failover uses the same path.
 
 ## Matrix
