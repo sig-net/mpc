@@ -205,7 +205,10 @@ async fn main() {
     println!("Initial RSS:        {:.2} MB", initial_rss);
     println!("Peak RSS (high-wm): {:.2} MB", peak_rss);
     println!("Immediate RSS:      {:.2} MB", immediate_rss);
-    println!("Post-decay RSS:     {:.2} MB (after 2s idle)", post_decay_rss);
+    println!(
+        "Post-decay RSS:     {:.2} MB (after 2s idle)",
+        post_decay_rss
+    );
     println!(
         "Purged back to OS:  {:.2} MB (retained above init: {:.2} MB)",
         purged_mb, retained_vs_init
