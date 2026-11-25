@@ -75,7 +75,6 @@ mpc-chain-ethereum.workspace = true
 mpc-evm-common.workspace = true
 mpc-chain-solana.workspace = true
 mpc-chain-near.workspace = true
-mpc-chain-hydration.workspace = true
 mpc-chain-midnight.workspace = true
 mpc-chain-tron.workspace = true
 mpc-tron-wire.workspace = true

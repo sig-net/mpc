@@ -5,7 +5,7 @@ use mpc_primitives::{Chain, RequestKind};
 
 use super::{
     indexers::{BIDIRECTIONAL_EXTRACTION_FAILURES, LATEST_BLOCK_NUMBER, TRON_EXPIRY_SCAN_DEFERRED},
-    publishers::{FUNDING_WALLET_BALANCE, PUBLISH_REFUSALS},
+    publishers::{FUNDING_WALLET_BALANCE, FUNDING_WALLET_REPLAY_RESTARTS, PUBLISH_REFUSALS},
     requests::{record_indexing_step_reached, record_request_latency_since, SignRequestStep},
 };
 
@@ -44,6 +44,12 @@ impl PublisherTelemetry for NodeTelemetry {
     fn publish_refused(&self, code: &str) {
         PUBLISH_REFUSALS
             .with_label_values(&[self.chain.as_str(), code])
+            .inc();
+    }
+
+    fn funding_wallet_replay_restarted(&self, cause: &str) {
+        FUNDING_WALLET_REPLAY_RESTARTS
+            .with_label_values(&[self.chain.as_str(), cause])
             .inc();
     }
 }
@@ -116,6 +122,28 @@ mod tests {
                 .with_label_values(&[chain, "wallet_unfunded"])
                 .get(),
             2.0
+        );
+    }
+
+    #[test]
+    fn replay_restarts_are_labelled_by_chain_and_cause() {
+        let telemetry = NodeTelemetry::new(Chain::Midnight);
+        let chain = Chain::Midnight.as_str();
+
+        telemetry.funding_wallet_replay_restarted("strikes");
+        telemetry.funding_wallet_replay_restarted("resume_timeout");
+
+        assert_eq!(
+            FUNDING_WALLET_REPLAY_RESTARTS
+                .with_label_values(&[chain, "strikes"])
+                .get(),
+            1.0
+        );
+        assert_eq!(
+            FUNDING_WALLET_REPLAY_RESTARTS
+                .with_label_values(&[chain, "resume_timeout"])
+                .get(),
+            1.0
         );
     }
 }

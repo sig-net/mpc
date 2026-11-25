@@ -13,8 +13,8 @@ use errors::{
 use k256::elliptic_curve::sec1::ToEncodedPoint;
 use k256::Scalar;
 use mpc_crypto::{
-    derive_epsilon_near, derive_key, kdf::check_ec_signature, near_public_key_to_affine_point,
-    ScalarExt as _,
+    derive_epsilon, derive_key, kdf::check_ec_signature, near_public_key_to_affine_point,
+    KeyPurpose, ScalarExt as _,
 };
 use mpc_primitives::CheckpointDigest;
 use near_sdk::env::panic_str;
@@ -29,7 +29,7 @@ use primitives::{
     InternalSignRequest, Participants, PendingRequest, PkVotes, Read, ReshareProposal,
     ReshareVotes, SignPoll, SignRequest, StorageKey, ThresholdVotes, View, YieldIndex,
 };
-use signet_primitives::{Chain, SignId, Signature, LATEST_MPC_KEY_VERSION};
+use signet_primitives::{Chain, SignId, Signature};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use crate::config::ProtocolConfig;
@@ -86,7 +86,6 @@ impl Default for MpcContract {
 // User contract API
 #[near]
 impl MpcContract {
-    /// `key_version` must be less than or equal to the value at `latest_key_version`
     /// To avoid overloading the network with too many requests,
     /// we ask for a small deposit for each signature request.
     /// The fee changes based on how busy the network is.
@@ -137,8 +136,14 @@ impl MpcContract {
         );
         let entropy = near_sdk::env::random_seed_array();
         env::log_str(&serde_json::to_string(&entropy).unwrap());
-        let epsilon = derive_epsilon_near(request.key_version, &predecessor, &path)
-            .map_err(|_| SignError::UnsupportedKeyVersion)?;
+        let epsilon = derive_epsilon(
+            request.key_version,
+            Chain::NEAR,
+            KeyPurpose::Plain {
+                sender: predecessor.as_str(),
+                path: &path,
+            },
+        )?;
 
         // lock the request such that it can't be submitted again until released either by erroring out
         // or by finishing the request when the signature is submitted.
@@ -173,8 +178,14 @@ impl MpcContract {
         predecessor: Option<AccountId>,
     ) -> Result<PublicKey, Error> {
         let predecessor = predecessor.unwrap_or_else(env::predecessor_account_id);
-        let epsilon = derive_epsilon_near(key_version, &predecessor, &path)
-            .map_err(|_| SignError::UnsupportedKeyVersion)?;
+        let epsilon = derive_epsilon(
+            key_version,
+            Chain::NEAR,
+            KeyPurpose::Plain {
+                sender: predecessor.as_str(),
+                path: &path,
+            },
+        )?;
         let derived_public_key =
             derive_key(near_public_key_to_affine_point(self.public_key()?), epsilon);
         let encoded_point = derived_public_key.to_encoded_point(false);
@@ -182,13 +193,6 @@ impl MpcContract {
         let mut data: Vec<u8> = vec![near_sdk::CurveType::SECP256K1 as u8];
         data.extend(slice.to_vec());
         PublicKey::try_from(data).map_err(|_| PublicKeyError::DerivedKeyConversionFailed.into())
-    }
-
-    /// Key versions refer new versions of the root key that we may choose to generate on cohort changes
-    /// Older key versions will always work but newer key versions were never held by older signers
-    /// Newer key versions may also add new security features, like only existing within a secure enclave
-    pub const fn latest_key_version(&self) -> u32 {
-        LATEST_MPC_KEY_VERSION
     }
 
     /// This experimental function calculates the fee for a signature request.

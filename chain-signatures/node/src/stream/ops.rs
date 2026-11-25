@@ -92,15 +92,6 @@ pub(crate) async fn process_sign_request(
         SignKind::Sign => {}
     }
 
-    // The attestation key is derived from the requesting contract under a fixed
-    // path, so a request naming that path forges a response to itself. Here
-    // rather than in `validate`, which plain `sign` never reaches.
-    anyhow::ensure!(
-        !claims_attestation_key(&sign_request),
-        "rejecting sign request {:?} on the reserved attestation path",
-        sign_request.id
-    );
-
     let sign_id = sign_request.id;
     let (entry, is_new) = ctx.backlog.insert(sign_request).await;
     if !is_new {
@@ -898,7 +889,6 @@ pub(crate) async fn process_block_event<T: ChainTelemetry>(
 pub(crate) fn sender_string(sender: [u8; 32], source_chain: Chain) -> anyhow::Result<String> {
     match source_chain {
         Chain::Solana => Ok(Pubkey::new_from_array(sender).to_string()),
-        Chain::Hydration => Ok(mpc_chain_hydration::ss58_address_from_account32(sender)),
         _ => anyhow::bail!("Unsupported chain: {source_chain}"),
     }
 }

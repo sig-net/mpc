@@ -7,10 +7,8 @@ pub enum SignError {
     Timeout,
     #[error("Signature request has already been submitted. Please try again later.")]
     RequestCollision,
-    #[error(
-        "This key version is not supported. Call latest_key_version() to get the latest supported version."
-    )]
-    UnsupportedKeyVersion,
+    #[error(transparent)]
+    Derive(#[from] mpc_crypto::DeriveError),
     #[error("Too many pending requests. Please try again later.")]
     RequestLimitExceeded,
 }

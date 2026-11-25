@@ -11,14 +11,9 @@
 mod kdf;
 
 pub use kdf::{
-    derive_epsilon, derive_epsilon_bitcoin, derive_epsilon_canton, derive_epsilon_eth,
-    derive_epsilon_hydration, derive_epsilon_midnight, derive_epsilon_sol, derive_key,
-    reconstruct_signature, x_coordinate, DerivationParams, UnsupportedKeyVersion,
-    EPSILON_DERIVATION_PREFIX_V1, EPSILON_DERIVATION_PREFIX_V2,
+    derive_epsilon, derive_key, reconstruct_signature, reserved_path, x_coordinate, DeriveError,
+    KeyPurpose,
 };
 pub use signet_primitives::{PublicKey, ScalarExt};
 
 pub type KeyVersion = u32;
-pub type Address = String;
-pub type Path = String;
-pub type Purpose = String;

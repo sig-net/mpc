@@ -6,7 +6,7 @@
 
 use mpc_chain_integration_core::utils::retry::RpcFailure;
 
-use crate::rpc::rejected_http_status;
+use crate::rpc::reads::read_verdict;
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum SubmitError {
@@ -44,8 +44,7 @@ pub(crate) enum SubmitError {
     /// Proving outlasted the submit budget. Nothing was posted.
     #[error("[proving_timeout] {0}")]
     ProvingTimeout(String),
-    /// The node refused the transaction or it expired unlanded. The retry
-    /// rebuilds against fresh state.
+    /// The node refused the transaction, or the posted one expired unlanded.
     #[error("[state_conflict] {0}")]
     StateConflict(String),
     /// The transaction may still land.
@@ -54,7 +53,7 @@ pub(crate) enum SubmitError {
     #[error("[internal] {0}")]
     Internal(String),
     /// A read from the node failed. Counted as `internal`; the verdict reads
-    /// the typed HTTP status in its chain, never the render.
+    /// the typed signals in its chain, never the render.
     #[error("[internal] a node read or send failed")]
     Node {
         #[source]
@@ -91,24 +90,35 @@ impl SubmitError {
         )
     }
 
+    /// Whether sustained failures of this class implicate a restored wallet's
+    /// snapshot.
+    // Why these two: a checkpoint missing tree paths fails `internal` in
+    // `fee_transaction`; one emptied by a bad indexer event stays `unfunded` —
+    // neither produces a refusal to strike. Node errors stay out, so a standing
+    // throttle cannot drop a healthy checkpoint.
+    pub(crate) fn stuck_restored_state(&self) -> bool {
+        match self {
+            Self::WalletUnfunded(_) | Self::Internal(_) => true,
+            Self::BadRequest(_)
+            | Self::ContractMismatch(_)
+            | Self::DeployMismatch(_)
+            | Self::GateRefusal { .. }
+            | Self::WalletUnsynced(_)
+            | Self::WalletBusy(_)
+            | Self::ProvingTimeout(_)
+            | Self::StateConflict(_)
+            | Self::Ambiguous(_)
+            | Self::Node { .. } => false,
+        }
+    }
+
     /// As the publisher's error, the class's verdict riding as a carrier so the
     /// core's retry and throttle checks never read the message, whose event ids
     /// and amounts can include a standalone 429 or 402.
     pub(crate) fn into_publish_error(self) -> anyhow::Error {
         match self {
-            // The read partition, as midnight's other reads (#1469): a retry
-            // may land on a healthy LB backend, so only classic client errors
-            // (400, 401, 403, 404, 405) go to failover.
-            // A carrier already inside the source rides as-is (`from_chain`) —
-            // its verdict, status and retry_after win over the derivation.
             Self::Node { source } => {
-                let failure = match RpcFailure::from_chain(&source) {
-                    Some(failure) => failure,
-                    None => match rejected_http_status(&source) {
-                        Some(status) => RpcFailure::read_status(status, format!("{source:#}")),
-                        None => RpcFailure::retryable(format!("{source:#}")),
-                    },
-                };
+                let failure = read_verdict(&source);
                 anyhow::Error::new(failure).context(Self::Node { source })
             }
             Self::GateRefusal { source } => {
@@ -135,46 +145,82 @@ pub(crate) fn refusal_code(error: &anyhow::Error) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use jsonrpsee::core::client::Error as JsonrpseeClientError;
+    use crate::test_utils::rejected_http;
     use mpc_chain_integration_core::utils::retry::{is_provider_throttled, is_retryable};
-    use subxt::ext::subxt_rpcs::Error as RawRpcError;
 
     #[test]
-    fn every_class_is_counted_and_classified_under_its_code() {
-        let classes: [(fn() -> SubmitError, bool); 12] = [
-            (|| SubmitError::BadRequest("reason".to_string()), false),
+    fn every_class_is_counted_with_its_code_and_verdicts() {
+        type Class = (fn() -> SubmitError, bool, bool);
+        let classes: [Class; 12] = [
+            (
+                || SubmitError::BadRequest("reason".to_string()),
+                false,
+                false,
+            ),
             (
                 || SubmitError::ContractMismatch("reason".to_string()),
                 false,
+                false,
             ),
-            (|| SubmitError::DeployMismatch("reason".to_string()), true),
+            (
+                || SubmitError::DeployMismatch("reason".to_string()),
+                true,
+                false,
+            ),
             (
                 || SubmitError::GateRefusal {
                     source: anyhow::anyhow!("reason"),
                 },
                 false,
+                false,
             ),
-            (|| SubmitError::WalletUnsynced("reason".to_string()), true),
-            (|| SubmitError::WalletBusy("reason".to_string()), true),
-            (|| SubmitError::WalletUnfunded("reason".to_string()), true),
-            (|| SubmitError::ProvingTimeout("reason".to_string()), true),
-            (|| SubmitError::StateConflict("reason".to_string()), true),
-            (|| SubmitError::Ambiguous("reason".to_string()), true),
-            (|| SubmitError::Internal("reason".to_string()), true),
+            (
+                || SubmitError::WalletUnsynced("reason".to_string()),
+                true,
+                false,
+            ),
+            (
+                || SubmitError::WalletBusy("reason".to_string()),
+                true,
+                false,
+            ),
+            (
+                || SubmitError::WalletUnfunded("reason".to_string()),
+                true,
+                true,
+            ),
+            (
+                || SubmitError::ProvingTimeout("reason".to_string()),
+                true,
+                false,
+            ),
+            (
+                || SubmitError::StateConflict("reason".to_string()),
+                true,
+                false,
+            ),
+            (|| SubmitError::Ambiguous("reason".to_string()), true, false),
+            (|| SubmitError::Internal("reason".to_string()), true, true),
             (
                 || SubmitError::Node {
                     source: anyhow::anyhow!("reason"),
                 },
                 true,
+                false,
             ),
         ];
-        for (class, retryable) in classes {
+        for (class, retryable, stuck) in classes {
             let error = class();
             let code = error.code();
             assert!(
                 error.to_string().starts_with(&format!("[{code}]")),
                 "{} does not carry its code",
                 error
+            );
+            assert_eq!(
+                error.stuck_restored_state(),
+                stuck,
+                "{code}'s stuck verdict"
             );
             let error = error.into_publish_error().context("publishing");
             assert_eq!(refusal_code(&error), Some(code));
@@ -243,19 +289,9 @@ mod tests {
 
     #[test]
     fn node_statuses_classify_by_the_read_partition() {
-        fn rejected(status: u16) -> anyhow::Error {
-            anyhow::Error::new(RawRpcError::Client(Box::new(
-                JsonrpseeClientError::Transport(Box::new(
-                    jsonrpsee::http_client::transport::Error::Rejected {
-                        status_code: status,
-                    },
-                )),
-            )))
-        }
-
         // A real throttle: retryable, and the gate engages on the typed status.
         let throttled = SubmitError::Node {
-            source: rejected(429).context("reading the node's runtime"),
+            source: rejected_http(429).context("reading the node's runtime"),
         }
         .into_publish_error();
         assert!(is_retryable(&throttled), "{throttled:#}");
@@ -264,14 +300,14 @@ mod tests {
         // A shared provider's transient conflict retries, like midnight's other
         // reads — the send table would hand the publish to failover here.
         let conflict = SubmitError::Node {
-            source: rejected(409),
+            source: rejected_http(409),
         }
         .into_publish_error();
         assert!(is_retryable(&conflict), "{conflict:#}");
         assert!(!is_provider_throttled(&conflict), "{conflict:#}");
 
         let terminal = SubmitError::Node {
-            source: rejected(404),
+            source: rejected_http(404),
         }
         .into_publish_error();
         assert!(!is_retryable(&terminal), "{terminal:#}");

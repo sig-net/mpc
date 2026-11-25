@@ -22,7 +22,7 @@ use crate::funding::{dust_secret_key, parse_seed, DustCheckpointStore, FundingWa
 use crate::intent::{IntentRequest, RespondCircuit, Submitted};
 use crate::native::{NativeIntentClient, Provers};
 use crate::output_storage::{OutputStore, RecoveringOutputStore};
-use crate::rpc::{MidnightPublisherRpc, PinnedReads};
+use crate::rpc::publisher::{MidnightPublisherRpc, PinnedReads};
 use crate::submit_error::{refusal_code, SubmitError};
 use crate::types::{BlockHash, MidnightAddress};
 
@@ -109,6 +109,7 @@ impl MidnightPublisher {
                 config.publisher.indexer_ws_url.clone(),
             )),
             checkpoints,
+            telemetry.clone(),
         );
         let client = Arc::new(NativeIntentClient::new(
             rpc.clone(),

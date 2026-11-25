@@ -16,7 +16,6 @@ use mpc_chain_canton::{
     },
     parse_canton_signature,
 };
-use mpc_node::respond_bidirectional::CANTON_RESPOND_BIDIRECTIONAL_PATH;
 use mpc_node::sign_bidirectional::{derive_user_address, sign_and_hash_transaction};
 use mpc_node::util::NearPublicKeyExt;
 use mpc_primitives::{Chain, LATEST_MPC_KEY_VERSION};
@@ -127,10 +126,13 @@ async fn run_canton_eth_bidirectional_flow_case(case: EvmType2AnvilCase) -> Resu
 
     let mpc_signature = parse_canton_signature(&sig_payload.signature)?;
 
-    let sign_epsilon = mpc_crypto::derive_epsilon_canton(
+    let sign_epsilon = mpc_crypto::derive_epsilon(
         LATEST_MPC_KEY_VERSION,
-        &expected_event.sender,
-        &canton.requester_party,
+        mpc_primitives::Chain::Canton,
+        mpc_crypto::KeyPurpose::Bidirectional {
+            sender: &expected_event.sender,
+            path: &canton.requester_party,
+        },
     )?;
     let expected_sender_addr = derive_user_address(root_pk, sign_epsilon);
 
@@ -209,10 +211,12 @@ async fn run_canton_eth_bidirectional_flow_case(case: EvmType2AnvilCase) -> Resu
             &hex::decode(&respond_payload.serialized_output)?,
         );
 
-    let respond_epsilon = mpc_crypto::derive_epsilon_canton(
+    let respond_epsilon = mpc_crypto::derive_epsilon(
         LATEST_MPC_KEY_VERSION,
-        &expected_event.sender,
-        CANTON_RESPOND_BIDIRECTIONAL_PATH,
+        mpc_primitives::Chain::Canton,
+        mpc_crypto::KeyPurpose::Attestation {
+            sender: &expected_event.sender,
+        },
     )?;
     let respond_derived_pk = mpc_crypto::derive_key(root_pk, respond_epsilon);
 

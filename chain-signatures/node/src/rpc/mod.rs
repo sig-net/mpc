@@ -9,10 +9,10 @@ use crate::sign_bidirectional::{BidirectionalProgress, SignStatus};
 use crate::types::CheckpointWatcher;
 use enum_map::EnumMap;
 use std::collections::BTreeSet;
+use std::mem::DropGuard;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-pub use mpc_chain_hydration::HydrationClient;
 pub use near_governance::{CheckpointVoteOutcome, NearGovernanceClient};
 
 use cait_sith::protocol::Participant;
@@ -598,7 +598,11 @@ impl RpcExecutor {
                     let backlog = backlog.clone();
                     let in_flight = in_flight.clone();
                     tokio::spawn(async move {
-                        let _guard = InFlightGuard { in_flight, id: key };
+                        // Releases the `SignId` from the in-flight set however the publish ends,
+                        // including during a panic unwind, so the slot is freed for re-publish.
+                        let _guard = DropGuard::new((in_flight, key), |(in_flight, id)| {
+                            in_flight.remove(&id);
+                        });
                         execute_publish(publisher, backlog, action).await;
                     });
                 }
@@ -702,19 +706,6 @@ async fn update_contract_data(
                 true
             });
         }
-    }
-}
-
-/// Releases a `SignId` from the dispatch loop's in-flight set when dropped,
-/// including during a panic unwind, so the slot is always freed for re-publish.
-struct InFlightGuard {
-    in_flight: Arc<DashSet<(Chain, SignId, PublishKind)>>,
-    id: (Chain, SignId, PublishKind),
-}
-
-impl Drop for InFlightGuard {
-    fn drop(&mut self) {
-        self.in_flight.remove(&self.id);
     }
 }
 

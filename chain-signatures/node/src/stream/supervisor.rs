@@ -10,6 +10,7 @@ use crate::types::SignCommand;
 use mpc_chain_integration_core::utils::stream::chain_event_channel;
 use mpc_chain_integration_core::{ChainIndexer, ChainTelemetry};
 use mpc_primitives::{Chain, ChainConfig as _, ChainEvent, CheckpointDigest};
+use std::mem::DropGuard;
 use std::sync::Arc;
 use tokio::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
@@ -162,18 +163,6 @@ pub async fn run_supervised<I: ChainIndexer, T: ChainTelemetry>(
     .await
 }
 
-/// Clears `chain`'s caught-up flag however the supervisor ends, a panic included.
-struct ClearCaughtUp {
-    backlog: Backlog,
-    chain: Chain,
-}
-
-impl Drop for ClearCaughtUp {
-    fn drop(&mut self) {
-        self.backlog.set_caught_up(self.chain, false);
-    }
-}
-
 async fn run_supervised_with_watchdog<I: ChainIndexer, T: ChainTelemetry>(
     indexer: I,
     mut ctx: StreamContext,
@@ -182,10 +171,10 @@ async fn run_supervised_with_watchdog<I: ChainIndexer, T: ChainTelemetry>(
 ) -> anyhow::Result<()> {
     let chain = I::CHAIN;
     tracing::info!(%chain, "starting supervised chain indexer");
-    let _clear_caught_up = ClearCaughtUp {
-        backlog: ctx.backlog.clone(),
-        chain,
-    };
+    // Clears `chain`'s caught-up flag however the supervisor ends, a panic included.
+    let _clear_caught_up = DropGuard::new((ctx.backlog.clone(), chain), |(backlog, chain)| {
+        backlog.set_caught_up(chain, false)
+    });
 
     let my_account_id = ctx.contract_watcher.account_id().clone();
     let root_pk = ctx.contract_watcher.wait_public_key().await?;

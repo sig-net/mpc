@@ -112,10 +112,13 @@ impl CantonSignBidirectionalRequestedEvent {
 
         let request_id = self.request_id;
 
-        let epsilon = signet_crypto::derive_epsilon_canton(
+        let epsilon = signet_crypto::derive_epsilon(
             self.key_version,
-            &self.sender_string(),
-            &self.path,
+            Chain::Canton,
+            signet_crypto::KeyPurpose::Bidirectional {
+                sender: &self.sender_string(),
+                path: &self.path,
+            },
         )?;
 
         let target = Chain::from_caip2_chain_id(&self.caip2_id)?;

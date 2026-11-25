@@ -7,7 +7,6 @@ use crate::{Context, NodeConfig};
 
 use mpc_chain_canton::CantonConfig;
 use mpc_chain_ethereum::EthConfig;
-use mpc_chain_hydration::HydrationConfig;
 use mpc_chain_midnight::MidnightConfig;
 use mpc_chain_solana::SolConfig;
 use mpc_node::{logs, storage};
@@ -45,9 +44,6 @@ impl Args {
         if let Some(sol) = &cfg.sol {
             self.sol(sol);
         }
-        if let Some(hydration) = &cfg.hydration {
-            self.hydration(hydration);
-        }
         if let Some(canton) = &cfg.canton {
             self.canton(canton);
         }
@@ -70,11 +66,6 @@ impl Args {
         self.flag("--sol-account-sk", &sol.account_sk);
         self.flag("--sol-rpc-http-url", &sol.rpc_http_url);
         self.flag("--sol-program-address", sol.program_address);
-    }
-
-    fn hydration(&mut self, hydration: &HydrationConfig) {
-        self.flag("--hydration-rpc-ws-url", &hydration.rpc_ws_url);
-        self.flag("--hydration-signer-uri", &hydration.signer_uri);
     }
 
     fn canton(&mut self, canton: &CantonConfig) {
