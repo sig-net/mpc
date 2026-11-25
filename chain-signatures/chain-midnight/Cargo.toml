@@ -56,7 +56,8 @@ thiserror.workspace = true
 tokio.workspace = true
 # The indexer's GraphQL subscription is the only source of the DUST ledger events.
 tokio-tungstenite.workspace = true
-tokio-util.workspace = true
+# `AbortOnDropHandle` lives behind tokio-util's `rt` feature.
+tokio-util = { workspace = true, features = ["rt"] }
 webpki-roots = "0.26"
 tracing.workspace = true
 url.workspace = true

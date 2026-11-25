@@ -12,8 +12,8 @@ use minocrab_publisher::{Attestation, EcdsaSignature};
 use mpc_chain_integration_core::utils::retry::RpcFailure;
 use mpc_chain_integration_core::{ChainPublisher, PublishAction, PublisherTelemetry};
 use mpc_primitives::{Chain, SignKind, Signature};
-use mpc_utils::task::AbortOnDrop;
 use mpc_utils::time::current_unix_timestamp;
+use tokio_util::task::AbortOnDropHandle;
 
 use crate::attestation::validate_attestation_response;
 use crate::config::{MidnightConfig, PublisherConfig};
@@ -308,7 +308,7 @@ impl ChainPublisher for MidnightPublisher {
 /// each publish fails retryably instead of the chain going unpublished until a restart.
 pub struct RecoveringMidnightPublisher {
     ready: Arc<OnceLock<MidnightPublisher>>,
-    _connector: AbortOnDrop,
+    _connector: AbortOnDropHandle<()>,
 }
 
 impl RecoveringMidnightPublisher {
@@ -363,7 +363,7 @@ impl RecoveringMidnightPublisher {
         });
         Self {
             ready,
-            _connector: AbortOnDrop(connector),
+            _connector: AbortOnDropHandle::new(connector),
         }
     }
 }

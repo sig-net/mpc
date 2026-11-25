@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use google_cloud_storage::client::Storage;
 use mpc_primitives::AttestationMetadata;
-use mpc_utils::task::AbortOnDrop;
+use tokio_util::task::AbortOnDropHandle;
 
 use crate::config::OutputStorageConfig;
 use crate::types::{MidnightAddress, NetworkId};
@@ -24,7 +24,7 @@ pub(crate) trait OutputStore: Send + Sync {
 /// Keeps optional caching recoverable without making publishers wait for initialization.
 pub(crate) struct RecoveringOutputStore {
     ready: Arc<OnceLock<GcsOutputStore>>,
-    _initializer: AbortOnDrop,
+    _initializer: AbortOnDropHandle<()>,
 }
 
 impl RecoveringOutputStore {
@@ -84,7 +84,7 @@ impl RecoveringOutputStore {
         });
         Self {
             ready,
-            _initializer: AbortOnDrop(initializer),
+            _initializer: AbortOnDropHandle::new(initializer),
         }
     }
 }

@@ -20,10 +20,10 @@ use midnight_ledger_v9::events::Event;
 use midnight_ledger_v9::structure::INITIAL_PARAMETERS;
 use midnight_storage::DefaultDB;
 use mpc_chain_integration_core::PublisherTelemetry;
-use mpc_utils::task::AbortOnDrop;
 use sha2::Digest as _;
 use tokio::sync::watch;
 use tokio::time::Instant;
+use tokio_util::task::AbortOnDropHandle;
 
 use super::checkpoint::{Checkpoint, DustCheckpointStore, CHECKPOINT_INTERVAL, CHECKPOINT_TIMEOUT};
 use super::wallet::Reservation;
@@ -233,7 +233,7 @@ pub(super) async fn follow(shared: Arc<Shared>, source: Arc<dyn DustEventSource>
         // Its own task, so a panic below ends one subscription rather than the
         // wallet; held so that dropping the wallet aborts it too.
         let ended = Arc::new(Mutex::new(Ended::Dropped));
-        let mut attempt = AbortOnDrop(tokio::spawn({
+        let mut attempt = AbortOnDropHandle::new(tokio::spawn({
             let (shared, source) = (shared.clone(), source.clone());
             let ended = ended.clone();
             async move {
@@ -243,7 +243,7 @@ pub(super) async fn follow(shared: Arc<Shared>, source: Arc<dyn DustEventSource>
                     .unwrap_or_else(|poisoned| poisoned.into_inner()) = outcome;
             }
         }));
-        if let Err(error) = (&mut attempt.0).await {
+        if let Err(error) = (&mut attempt).await {
             tracing::error!(
                 ?error,
                 "midnight funding wallet: DUST event subscription panicked"
