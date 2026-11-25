@@ -40,7 +40,7 @@ Docker Desktop on macOS, docker.io on Linux). The `redis:7.4.12` image is pulled
 automatically by testcontainers on first run; prefetch it to avoid waiting:
 
 ```BASH
-docker pull redis:7.4.12
+docker pull redis:7.4.12@sha256:2e3eb11462c4e3759e6972678dd051d150ff54b1e60714b3c33b701260172a90
 ```
 
 In case of authorization issues make sure you have logged into docker using your [access token](https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry#authenticating-with-a-personal-access-token-classic).
