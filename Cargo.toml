@@ -134,8 +134,9 @@ mpc-utils = { path = "./chain-signatures/utils" }
 mpc-node = { path = "./chain-signatures/node" }
 mpc-primitives = { path = "./chain-signatures/primitives" }
 signet-crypto = { path = "./signet-crypto" }
-# The response encoding must match what the deployed Midnight contract decodes,
-# so it moves together with the contract.
+# The response encoding must match what the deployed Midnight contract decodes;
+# the midnight-respond-codec test vectors check it. Bumping this pin means
+# regenerating them with midnight-devtools' generate-midnight-respond-vectors.ts.
 signet-midnight-serde = "=0.24.0"
 signet-primitives = { path = "./signet-primitives" }
 signet-program = { path = "./chain-signatures/contract-sol" }
