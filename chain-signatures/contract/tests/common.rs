@@ -14,13 +14,16 @@ use k256::{AffinePoint, FieldBytes, Secp256k1};
 use mpc_contract::primitives::{CandidateInfo, ParticipantInfo, Participants, SignRequest};
 use mpc_contract::update::UpdateId;
 use mpc_crypto::kdf::{check_ec_signature, derive_secret_key};
-use mpc_crypto::{derive_epsilon_near, derive_key};
+use mpc_crypto::{derive_epsilon, derive_key, KeyPurpose};
 use near_workspaces::network::Sandbox;
 use near_workspaces::types::{AccountId, NearToken};
 use near_workspaces::{Account, Contract, Worker};
 use signature::DigestSigner;
-use signet_primitives::{SignId, Signature, LATEST_MPC_KEY_VERSION};
+use signet_primitives::{Chain, SignId, Signature, LATEST_MPC_KEY_VERSION};
 
+/// A minimal NEAR contract whose only method, `migrate`, panics.
+/// `test_invalid_contract_deploy` proposes it to check that a failed migration
+/// rolls the update back. Its source was removed; the binary is the fixture.
 pub const INVALID_CONTRACT: &str = "../res/mpc_test_contract.wasm";
 pub const PARTICIPANT_LEN: usize = 3;
 
@@ -205,7 +208,15 @@ pub async fn create_response(
     let (digest, scalar_hash, payload_hash) = process_message(msg).await;
     let pk = sk.public_key();
 
-    let epsilon = derive_epsilon_near(LATEST_MPC_KEY_VERSION, predecessor_id, path).unwrap();
+    let epsilon = derive_epsilon(
+        LATEST_MPC_KEY_VERSION,
+        Chain::NEAR,
+        KeyPurpose::Plain {
+            sender: predecessor_id.as_str(),
+            path,
+        },
+    )
+    .unwrap();
     let derived_sk = derive_secret_key(sk, epsilon);
     let derived_pk = derive_key(pk.into(), epsilon);
     let signing_key = k256::ecdsa::SigningKey::from(&derived_sk);
@@ -245,6 +256,23 @@ pub async fn create_response(
     (payload_hash, sign_id, respond_resp)
 }
 
+/// Waits until the contract holds at least `count` pending sign requests, so a
+/// test can act on requests it submitted with `transact_async`.
+pub async fn wait_for_pending_requests(contract: &Contract, count: u32) -> anyhow::Result<()> {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        let pending: u32 = contract.view("pending_requests").await?.json()?;
+        if pending >= count {
+            return Ok(());
+        }
+        anyhow::ensure!(
+            tokio::time::Instant::now() < deadline,
+            "{pending} of {count} sign requests pending after 30s"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+}
+
 pub async fn sign_and_validate(
     request: &SignRequest,
     respond: Option<(&SignId, &Signature)>,
@@ -261,9 +289,9 @@ pub async fn sign_and_validate(
         .await?;
     dbg!(&status);
 
-    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-
     if let Some((sign_id, respond_resp)) = respond {
+        wait_for_pending_requests(contract, 1).await?;
+
         // Call `respond` as if we are the MPC network itself.
         let respond = contract
             .call("respond")

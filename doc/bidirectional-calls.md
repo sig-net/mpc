@@ -38,7 +38,9 @@ Organization:
   own.
 * *Signet contract*: our contract on the source chain, through which
   requests, signatures and responses are published. It holds no per-
-  application state.
+  application state. On Midnight it is two contracts: requests are notified
+  to the Signet singleton, and signatures and attestations are published to
+  the signet responder (Section 4.2).
 * *MPC network*: the nodes that sign and attest.
 * *Broadcaster*: whoever submits the signed transaction to the target
   chain. Untrusted; the design does not depend on who it is.
@@ -70,7 +72,8 @@ Happy path:
 * *Request*: what the contract asks for, the tuple (sender, tx, target, key,
   schema): the contract that makes it, the transaction, its target chain,
   the key parameters to sign it with (a derivation path, key version and
-  signing scheme), and the schema of its output. The MPC decodes the output
+  [signing scheme](glossary.md#signing-scheme)), and the schema of its
+  output. The MPC decodes the output
   with that schema and encodes the response from it, in the source chain's
   types. Written `req`, with fields `req.sender`, `req.tx`, `req.target`,
   `req.key` and `req.schema` (Section 7 maps them to the fields on the wire,
@@ -109,9 +112,6 @@ Happy path:
   nothing, stops watching the request and logs why (Section 4.3). A node
   cannot tell a wrong schema from a changed contract, and the contract
   could not act on bytes it cannot decode.
-* *Attestation key*: a signing key the MPC derives from its root key, the
-  source chain, the contract, a reserved path and the request's key version,
-  used for nothing but attestations to that contract.
 * *Attestation*: a statement (rid, height, outcome) signed with the
   attestation key of rid's contract at the request's key version. The MPC
   nodes sign `attestationDigest(rid, att)` as defined in
@@ -124,6 +124,10 @@ Happy path:
   req.tx for Executed and Failed, the transaction that used up its replay
   protection for Unviable, or for an expired req.tx the first final
   block at or past the expiry.
+* *Attestation key*: the key the MPC derives for a contract at a key
+  version, used for nothing but attestations to that contract: under the
+  attestation [purpose](glossary.md#purpose-of-the-key) from key version 2, under a
+  reserved path before it (account-derivation.md).
 * *Response*: an attestation delivered to the contract that made rid's
   request.
 
@@ -378,8 +382,12 @@ call. It emits three events:
   directly, which is how a response is delivered where the signet contract
   cannot call it, and again after a failed handler.
 
-On Midnight, a second contract, the signet responder, emits `Signature` and
-`Response`; see [midnight-publisher.md](midnight-publisher.md).
+On Midnight the singleton emits `SignRequest` as a notification that names
+the requesting contract, and the MPC reads the request itself from the
+requesting contract's state (Sections 4.3 and 6). A second contract, the
+signet responder, emits `Signature` and `Response`.
+[midnight-publisher.md](midnight-publisher.md) says how the node publishes
+to the responder and which events the MPC reads from each contract.
 
 ### 4.3 MPC network
 
@@ -392,7 +400,7 @@ never meets a rid from another.
 
 state:
     backlog: RequestId -> Entry
-    Entry = { req, signatures: Set<Signature> }
+    Entry = { req, tx_ids: Set<TxId>, unviable_at: Height? }
     // backlog is a function of the finalised source chain only,
     // the same on every correct node that processed the same height
 
@@ -408,7 +416,7 @@ on SignRequest { rid, req } finalised on the source chain:
         drop
     if rid in backlog or not processable(req):            // M2
         drop
-    backlog[rid] = { req, signatures: {} }
+    backlog[rid] = { req, tx_ids: {}, unviable_at: none }
     signature = threshold_sign(req.tx, derived_key(req.sender, req.key))   // M1
     local[rid].issued.add(signature)       // stored before publishing
     publish_signature(rid, signature)
@@ -419,11 +427,9 @@ authentic(rid, req): bool
 processable(req): bool
     req.target parses to a chain this MPC can watch
     key derivation is valid: parameters canonical, key derivable for the
-      source chain, key version with a root key of its own (Section 5)
-    req.key's path is not the attestation key's (M1)
-    if another signing API on the source chain maps the same sender,
-      path and key version to the same key as sign_bidirectional:
-        req.key's path lies in the bidirectional namespace (M1)
+      source chain, a key version the MPC supports
+    below key version 2, whose derivation paths name no purpose (M1):
+      req.key's path is not the attestation key's
     req.tx is non-empty, parses as an unsigned transaction in target's
       format, commits to the network this MPC watches for target (EVM:
       carries that network's chain id; not required on Tron, which has
@@ -443,15 +449,14 @@ on Signature { rid, signature } finalised on the source chain:
     e = backlog[rid] if rid in backlog
     if e and signature verifies over e.req.tx
       under derived_key(e.req.sender, e.req.key):
-        e.signatures.add(signature)
+        e.tx_ids.add(txid(signature, e.req.tx))
 
 on target chain block at height h finalised on chain target:
     for (rid, e) in backlog for target and no local[rid].outcome:
         if txid ignores the signature on target:
             ours = { txid(e.req.tx) }
         else:
-            ours = { txid(s, e.req.tx)
-                     for s in e.signatures + local[rid].issued }
+            ours = e.tx_ids
         if some id in ours has receipt r in a final block at height h':  // M3
             for (rid', e') in backlog for target, other than rid, with e's
               account and e.req.tx's replay protection, unsigned bytes
@@ -482,35 +487,41 @@ on Response { rid, att, sig } finalised on the source chain:
       under attestation_key(e.req.sender, e.req.key.key_version):
         if att.kind is Executed or Failed:        // e.req.tx was included
             for (rid', e') in backlog for e.req.target, other than rid,
-              with e's account and e.req.tx's replay protection, unsigned
-              bytes other than e.req.tx, and no local[rid'].outcome:
-                attest(rid', (att.height, Unviable, empty))     // M4
+              with e's account and e.req.tx's replay protection, and
+              unsigned bytes other than e.req.tx:
+                e'.unviable_at = att.height                     // M4
+                if no local[rid'].outcome:
+                    attest(rid', (att.height, Unviable, empty))
         delete backlog[rid], local[rid]
 ```
 
 A node is *caught up* on a source chain when it has processed it up to its
 finalised head. A node that is behind, after a restart for instance, does
-not sign, attest or publish while it runs the handlers above: its backlog
-still holds requests the chain has already answered, and it cannot tell
-which of the signatures and attestations it holds are already published.
-Once caught up, it acts on each entry only for what is missing: it does
-not sign an entry that has a published signature or one it holds, and does
-not attest an entry it holds an attestation for.
+not start to sign, attest or publish while it runs the handlers above: its
+backlog still holds requests the chain has already answered, and it cannot
+tell which of the signatures and attestations it holds are already
+published. Once caught up, it acts on each entry only for what is missing:
+it does not sign an entry that has a published signature, one it holds, or
+an `unviable_at`, attests Unviable for an entry with an `unviable_at` and no
+outcome, and does not attest an entry it holds an attestation for.
 
 The MPC looks for a request's execution by transaction ID, under every
-signature it holds for the request, in any final block, so a node that
-starts looking late still finds it. A node holds the signatures published
-for the request and those it took part in producing. An execution under a
-signature it does not hold is not found (see Section 6 for alternatives),
-except where the transaction ID ignores the signature: there it needs none.
+signature published for the request, in any final block, so a node that
+starts looking late still finds it. A signature a node took part in
+producing is looked for once it is published, which every node reads. An
+execution under a signature that is never published is not found (see
+Section 6 for alternatives), except where the transaction ID ignores the
+signature: there it needs none.
 
 When the transaction of one request is included, every other request
 waiting on the same account and replay protection can never execute, and
-the MPC attests Unviable for each, at that transaction's height. A node
+the MPC attests Unviable for each, at that transaction's height, once it
+has recovered that transaction's output, decodable or not. A node
 learns of it in one of two ways: it finds the execution itself, or it
 reads the `Response` that reports it. The second reaches every node that
-reads the source chain. A node that is behind notes the outcome and
-attests once caught up.
+reads the source chain, and is recorded in the entry, since a node rebased
+onto a checkpoint never reads that `Response`. A node attests on reading
+it, and if it is behind or was rebased, from the entry once caught up.
 
 A repeated attestation has the same content (Section 5) and is dropped
 (C3a).
@@ -526,17 +537,19 @@ request a second time.
 Properties:
 
 * M1 The MPC signs a request only if it provably comes from the contract it
-  names, with a key derived from that contract. The attestation key is
-  derived from the contract, its source chain and the request's key version
-  under a reserved path that no request on any signing API may name
-  (`processable` covers this one); otherwise a contract could have its own
-  attestation key sign an arbitrary hash and forge a response to itself.
-  Likewise, where another signing API on the source chain maps the same
-  contract, path and key version to the same key, a bidirectional request's
-  path lies in a namespace reserved for bidirectional requests that no
-  request on that API may name; otherwise
-  such a request could have a transaction signed that uses up a
-  bidirectional request's replay protection unnoticed (Section 6).
+  names, with a key derived from that contract under the bidirectional
+  [purpose](glossary.md#purpose-of-the-key). No request is signed with an attestation
+  key; otherwise a contract could have its own attestation key sign an
+  arbitrary hash and forge a response to itself. No request on another
+  signing API is signed with a bidirectional request's key; otherwise it
+  could have a transaction signed that uses up a bidirectional request's
+  replay protection unnoticed (Section 6). The MPC picks a key's purpose
+  from the signing API a request comes on, never from its fields (Distinct
+  keys, Section 5). Key version 1's derivation paths name no purpose: there
+  the attestation key lies under a reserved path that no request on any signing API may
+  name (`processable`). Nothing keeps a bidirectional request's key from
+  another signing API at key version 1: where one maps the same contract,
+  path and key version to the same key, M1 holds only from key version 2.
 * M2 The MPC drops a request that is not authentic, that it cannot
   process, or whose rid is already in the backlog, and keeps nothing for
   it. A rid already in the backlog is the same transaction, already being
@@ -582,15 +595,16 @@ correct, with a signing threshold t, f+1 <= t <= n - f.
 * Distinct keys (account-derivation.md). The derivation path contains the
   source chain's id and the requesting contract, so different (source
   chain, contract, key parameters) derive different keys, where the key
-  parameters are a request's derivation path, key version and signing
-  scheme. The id names a chain family, so the same contract address on
-  two networks of one family derives the same key; a deployment watches
-  one network per family (Section 3.3), so within it the key still names
-  one contract. So an executed transaction's account tells the MPC
-  which contract and key parameters asked for it. Assumed here: two
-  signing schemes never share a key, and two key versions never share a
-  root key; `processable` refuses a key version without a root key of its
-  own.
+  parameters are a key's purpose, a request's derivation path, key version
+  and signing scheme. The id names a chain family, so the same contract
+  address on two networks of one family derives the same key; a
+  deployment watches one network per family (Section 3.3), so within it
+  the key still names one contract. So an executed transaction's account
+  tells the MPC which contract and key parameters asked for it. Assumed
+  here: two signing schemes never share a key. Key versions 0, 1 and 2
+  share a root key and differ by their derivation paths; every later key
+  version has a root key of its own, and `processable` refuses a key
+  version without its root key.
 
 * G1, in short: an execution this contract has already accepted is at or below
   last_seen, so a request made later records it as known and C3c drops any
@@ -726,10 +740,11 @@ a path from B48 through A15; the first at A12 has none.
   request for instance, names only a payload hash, so the MPC could not
   find a transaction it signed. With the same key as a bidirectional
   request, it could use up that request's replay protection and leave it
-  unanswered. The reserved path namespace (M1) keeps the keys apart. It
-  has to be one that no path accepted before the rule took effect lies in:
-  a transaction signed then stays valid until its replay protection is
-  used.
+  unanswered. From key version 2, separate purposes (M1) keep the keys
+  apart, and no key under the bidirectional purpose signed anything
+  earlier. At key version 1 nothing keeps them apart, and this risk is
+  accepted: a contract that needs the separation makes its requests at
+  key version 2.
 * Agreement has no enforcement point. A change to `authentic`,
   `processable` or the attestation function must apply only to requests
   made at or after a source height the upgrade names; applied to requests
@@ -742,9 +757,11 @@ a path from B48 through A15; the first at A12 has none.
 * A key version can be retired only once no entry that recorded it is
   outstanding, and an unanswered request is outstanding forever. Until
   then a compromised key can forge responses to the requests made under
-  it (C3b). A forged response with a large height also raises
-  `last_seen` for its target, so the library then drops genuine responses
-  on that target for requests of every key version (C3c, C3d).
+  it (C3b). Key versions 0, 1 and 2 share a root key, so retiring one of
+  them does not take a compromised root key out of the others. A forged response with a
+  large height also raises `last_seen` for its target, so the library
+  then drops genuine responses on that target for requests of every key
+  version (C3c, C3d).
 * The MPC's backlog and the library's `outstanding` can grow without
   bound. An entry lives until a verified Response, and a request whose
   signature nobody broadcasts, or whose output does not decode (M3),
@@ -826,10 +843,10 @@ stay out.
 
 | field | type | in rid | meaning |
 |---|---|---|---|
-| `keyVersion` | `u8` | yes | MPC root key version, at least 1 |
+| `keyVersion` | `u8` | yes | MPC key version, at least 1 |
 | `sender` | `address` | yes | the requesting contract |
-| `path` | `bytes(32)` | yes | key derivation path; the reserved response-key path is refused |
-| `algo` | `enum MPCSignatureAlgorithm` | yes | signing scheme |
+| `path` | `bytes(32)` | yes | key derivation path; at key version 1 the reserved response-key path is refused |
+| `algo` | `enum MPCSignatureAlgorithm` | yes | [signing scheme](glossary.md#signing-scheme) |
 | `txParamType` | `enum TxParamType` | yes | which transaction structure `txParams` holds |
 | `txParams` | per `txParamType` (7.3, 7.4) | as its digest | the transaction |
 | `executionDest` | `bytes(64)` | yes | CAIP-2 id of the target chain family in ASCII, zero padded, matched exactly; one fixed id per family, `eip155:1` for every Ethereum network. Which network the MPC executes on is set per deployment. An id contains no zero byte, so the padding is unambiguous |
@@ -1112,17 +1129,17 @@ make `debug_traceTransaction` available only on paid tiers.
 A node configured to provide this cache writes the serialised output to
 `<prefix>/<networkId>/<signetContractAddress>/<requestId>.bin` before posting
 the attestation to the source chain. Here `networkId` identifies the source
-network and `signetContractAddress` its signet contract. Clients can fetch
+network and `signetContractAddress` its signet contract (on Midnight, the
+singleton, not the responder). Clients can fetch
 the bytes by request ID from the endpoint advertised for their deployment
 and retry while they are not yet available. Providing a cache is optional.
 
-For `failed` and `unviable`, the serialised output is empty. It is also
-empty for an `executed` call without a return value, which requires an
-empty output schema. For a plain transfer it depends on the source chain's
-format: Midnight requires an empty output schema and gets an empty output;
-ABI and Borsh encode a default per schema field, `true` for a `bool` and
-`"non_function_call_success"` for a `string`, and refuse any other field
-type.
+For `failed` and `unviable`, the serialised output is empty. So is a
+Midnight output for an `executed` call without a return value or for a
+plain transfer; both require an empty output schema there. ABI and Borsh
+sources instead encode a default per respond-schema field in both cases —
+`true` for a `bool` and `"non_function_call_success"` for a `string` —
+and refuse any other field type.
 Whichever route supplies the bytes, they remain untrusted until the
 application contract's library recomputes the attestation digest and
 verifies the signature against the attestation key (Section 4.1). Incorrect
@@ -1131,21 +1148,24 @@ or forged bytes fail verification.
 ## 8. Implementation status
 
 Target chains are Ethereum and Tron (`Chain::supports_bidirectional_signing`).
-Source chains are Midnight, Solana, Hydration and Canton.
+Source chains are Midnight, Solana and Canton.
 
-Checked against `develop` at `1d823c4e`. Still to change:
+Refusing key version 0 at admission applies at once, not from a source
+height (Section 6): a key version 0 bidirectional request on Solana
+or Canton still waiting for its response gets none. A deployment
+confirms none is pending before it upgrades to a node that refuses them.
+
+Still to change:
 
 * `local` keeps the latest signature and the latest attestation per request.
-* Unviable from another request's response.
-* Finding nonce siblings, and executions under every published signature.
-* Refusing non-canonical request fields, and the reserved paths on every
-  source.
-* One key per key version, before a second version.
-* Catch-up for Hydration.
-* Hydration and Canton: source block time, so §4.3's expiry bound
-  anchors for them too.
+* Unviable from another request's response, on Solana and Canton.
+* Refusing non-canonical request fields.
+* Signing at key version 2 (account-derivation.md), once the SDKs support
+  it: the key derivation and the MPC's choice of purpose are in place.
+* A root key of its own for each key version after 2.
+* Canton: source block time, so §4.3's expiry bound anchors for it
+  too.
 * Tron: Unviable at expiry for packable spans past the 24 h walk cap
   (the admission bound anchors at the source block, which sits after
-  the TaPoS reference — such windows are admitted but never verdicted);
-  output schemas.
-* Solana, Hydration and Canton: structures of Section 7, and Unviable.
+  the TaPoS reference — such windows are admitted but never verdicted).
+* Solana and Canton: structures of Section 7, and Unviable.

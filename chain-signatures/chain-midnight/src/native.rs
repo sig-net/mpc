@@ -25,6 +25,7 @@ use midnight_onchain_state::state::ContractState;
 use midnight_storage::DefaultDB;
 use minocrab_publisher::intent::{build_intent, preimage_tx, PreimageIntent};
 use minocrab_publisher::{Deployment, InProcessProver, ManagedDir, SignerResolver};
+use mpc_utils::task::AbortOnDrop;
 use rand::rngs::StdRng;
 use rand::{Rng as _, SeedableRng as _};
 use tokio::time::Instant;
@@ -32,8 +33,10 @@ use tokio::time::Instant;
 use crate::funding::{dust_deficit, FeePayer, SealedTx, UnprovenTx};
 use crate::intent::{IntentRequest, RespondCircuit, Submitted};
 use crate::publisher::IntentClient;
-use crate::rpc::{Landing, PinnedReads, SubmitRefusal};
+use crate::rpc::publisher::PinnedReads;
+use crate::rpc::submit::{Landing, SubmitRefusal};
 use crate::submit_error::SubmitError;
+use crate::types::{BlockHash, LedgerTxHash, NetworkId};
 
 /// The respond intent's segment; the fee intent takes the next free one.
 const RESPOND_SEGMENT: u16 = 1;
@@ -46,18 +49,26 @@ const WORK_RESERVE: Duration = Duration::from_secs(120);
 /// How long past its TTL a landed transaction may take to finalize.
 const FINALITY_SLACK: Duration = Duration::from_secs(60);
 const LANDING_POLL: Duration = Duration::from_secs(2);
+/// How long after a submit went unanswered the transaction is first sent again. Each
+/// further unanswered attempt doubles the wait, up to `MAX_RESEND_DELAY`, so a node
+/// shedding load is not asked again at a fixed pace.
+const RESEND_DELAY: Duration = Duration::from_secs(6);
+const MAX_RESEND_DELAY: Duration = Duration::from_secs(60);
 
 /// What the submit path needs from the node, beyond the pinned reads.
 #[async_trait]
 pub(crate) trait SubmitChain: PinnedReads {
-    async fn block_number(&self, at_hash_0x: &str) -> anyhow::Result<u64>;
-    async fn block_hash_at(&self, number: u64) -> anyhow::Result<Option<String>>;
+    async fn block_number(&self, at: &BlockHash) -> anyhow::Result<u64>;
+    async fn block_hash_at(&self, number: u64) -> anyhow::Result<Option<BlockHash>>;
     /// The block's `Timestamp::Now`, in whole seconds.
-    async fn block_time(&self, at_hash_0x: &str) -> anyhow::Result<Timestamp>;
+    async fn block_time(&self, at: &BlockHash) -> anyhow::Result<Timestamp>;
     async fn submit(&self, transaction: &[u8]) -> Result<(), SubmitRefusal>;
     /// The status the block reports for the ledger transaction `tx_hash`, if it holds it.
-    async fn landing(&self, at_hash_0x: &str, tx_hash: [u8; 32])
-        -> anyhow::Result<Option<Landing>>;
+    async fn landing(
+        &self,
+        at: &BlockHash,
+        tx_hash: LedgerTxHash,
+    ) -> anyhow::Result<Option<Landing>>;
 }
 
 /// What a submit spent before it asked the wallet to pay, for its log line.
@@ -121,23 +132,23 @@ pub(crate) struct NativeIntentClient<W, C> {
     chain: Arc<C>,
     wallet: W,
     provers: Arc<Provers>,
-    network_id: String,
+    network_id: NetworkId,
     submit_timeout: Duration,
 }
 
-impl<W: FeePayer, C: SubmitChain> NativeIntentClient<W, C> {
+impl<W: FeePayer, C: SubmitChain + 'static> NativeIntentClient<W, C> {
     pub(crate) fn new(
         chain: Arc<C>,
         wallet: W,
         provers: Arc<Provers>,
-        network_id: impl Into<String>,
+        network_id: NetworkId,
         submit_timeout: Duration,
     ) -> Self {
         Self {
             chain,
             wallet,
             provers,
-            network_id: network_id.into(),
+            network_id,
             submit_timeout,
         }
     }
@@ -160,12 +171,12 @@ impl<W: FeePayer, C: SubmitChain> NativeIntentClient<W, C> {
             .verifier_key_hash(circuit)
             .map_err(|error| SubmitError::ContractMismatch(error.to_string()))?;
         let deployment = Deployment::new(
-            ContractAddress(HashOutput(request.contract_address)),
+            ContractAddress(HashOutput(*request.contract_address.as_bytes())),
             [(circuit.to_string(), packaged)],
         );
         deployment
             .check_deployed(&state)
-            .map_err(|error| SubmitError::ContractMismatch(error.to_string()))?;
+            .map_err(|error| SubmitError::DeployMismatch(error.to_string()))?;
 
         let call = match &request.circuit {
             RespondCircuit::Respond => minocrab_publisher::respond::<DefaultDB>(
@@ -199,13 +210,9 @@ impl<W: FeePayer, C: SubmitChain> NativeIntentClient<W, C> {
         Ok(bytes)
     }
 
-    /// `wallet_used` is set once the wallet is asked to pay, as the intent builder's
-    /// `walletUsed` was: from there on, a failure can implicate the wallet's state.
-    async fn submit_intent(
-        &self,
-        intent: &[u8],
-        wallet_used: &mut bool,
-    ) -> Result<Submitted, SubmitError> {
+    /// Submits the given intent to the wallet, proving and paying for it as necessary.
+    /// Returns a `Submitted` result if successful, or a `SubmitError` otherwise.
+    async fn submit_intent(&self, intent: &[u8]) -> Result<Submitted, SubmitError> {
         let deadline = Instant::now() + self.submit_timeout;
         let intent: PreimageIntent<DefaultDB> =
             midnight_serialize::tagged_deserialize(&mut &intent[..]).map_err(|error| {
@@ -226,17 +233,15 @@ impl<W: FeePayer, C: SubmitChain> NativeIntentClient<W, C> {
             wallet_wait,
             prove_respond,
         };
-        self.pay_for(&base, deadline, before, wallet_used).await
+        self.pay_for(&base, deadline, before).await
     }
 
-    /// Pays for the proven respond `base` and posts it: the half of a submit that asks
-    /// the wallet to pay, and so the half that sets `wallet_used`.
+    /// Pays for the proven respond `base` and posts it.
     async fn pay_for(
         &self,
         base: &SealedTx,
         deadline: Instant,
         before: SubmitTimings,
-        wallet_used: &mut bool,
     ) -> Result<Submitted, SubmitError> {
         let head = self.chain.finalized_head().await.map_err(node)?;
         let parameters: LedgerParameters = midnight_serialize::tagged_deserialize(
@@ -264,10 +269,9 @@ impl<W: FeePayer, C: SubmitChain> NativeIntentClient<W, C> {
             &parameters,
             ctime,
             ttl,
-            &self.network_id,
+            self.network_id.as_str(),
             &mut StdRng::from_entropy(),
         );
-        *wallet_used = plan_used_wallet(&plan);
         let plan = plan?;
         let price_fee = stage.elapsed();
         let fee_tx = plan.tx;
@@ -278,7 +282,7 @@ impl<W: FeePayer, C: SubmitChain> NativeIntentClient<W, C> {
 
         tracing::info!(
             fee = plan.fee,
-            tx_hash = %hex::encode(tx_hash),
+            tx_hash = %tx_hash,
             wallet_wait = ?before.wallet_wait,
             prove_respond = ?before.prove_respond,
             ?price_fee,
@@ -297,7 +301,11 @@ impl<W: FeePayer, C: SubmitChain> NativeIntentClient<W, C> {
 
     /// The fee's `ctime` at `head`, once the replay has caught up with what the
     /// indexer reports; see [`fee_ctime`].
-    async fn fee_ctime_at(&self, head: &str, deadline: Instant) -> Result<Timestamp, SubmitError> {
+    async fn fee_ctime_at(
+        &self,
+        head: &BlockHash,
+        deadline: Instant,
+    ) -> Result<Timestamp, SubmitError> {
         let head_time = self.chain.block_time(head).await.map_err(node)?;
         let indexed_time = self.wallet.indexed_time().await?;
         // Events indexed up to `indexed_time` may still be on their way to the replay.
@@ -313,7 +321,7 @@ impl<W: FeePayer, C: SubmitChain> NativeIntentClient<W, C> {
         intent: PreimageIntent<DefaultDB>,
         deadline: Instant,
     ) -> Result<SealedTx, SubmitError> {
-        let respond = preimage_tx(&self.network_id, RESPOND_SEGMENT, intent);
+        let respond = preimage_tx(self.network_id.as_str(), RESPOND_SEGMENT, intent);
         let provers = self.provers.clone();
         let proven = prove_blocking(deadline, move || async move {
             let prover = InProcessProver {
@@ -347,50 +355,71 @@ impl<W: FeePayer, C: SubmitChain> NativeIntentClient<W, C> {
     }
 
     /// Posts a paid transaction and waits for it: the UTXOs it spends stay reserved
-    /// until it lands, the node refuses or never receives it, a finalized block past
-    /// its TTL does not hold it, or a minute past its TTL. An ambiguous outcome comes
+    /// until it lands, the node refuses the first submit or it could not be sent, a
+    /// finalized block past its TTL does not hold it, or a minute past its TTL. An ambiguous outcome comes
     /// no earlier than that minute, so the retry may plan the same UTXOs; if this
     /// transaction landed after all, the node refuses that spend.
+    /// Only here does a failure strike the restored wallet: `post` runs once the
+    /// fee was planned, so a conflict raised before paying can never strike.
     async fn post(
         &self,
         bytes: &[u8],
-        tx_hash: [u8; 32],
+        tx_hash: LedgerTxHash,
         spent: &[DustNullifier],
         after: u64,
         ttl: Timestamp,
         deadline: Instant,
-    ) -> Result<String, SubmitError> {
+    ) -> Result<LedgerTxHash, SubmitError> {
         self.wallet.reserve(
             spent,
             Timestamp::from_secs(ttl.to_secs() + FINALITY_SLACK.as_secs()),
         );
         let started = Instant::now();
-        match self.chain.submit(bytes).await {
-            Ok(()) => {}
+        let unanswered = match self.chain.submit(bytes).await {
+            Ok(()) => false,
             Err(SubmitRefusal::Refused(reason)) => {
+                // TODO: exonerate refusals of the wallet's own just-reserved
+                // nullifiers (a late landing, not a stale snapshot); ship a
+                // cycle regression test with it (safe to defer: a drop takes
+                // three of these in a row, and only costs a replay).
                 self.wallet.release(spent);
+                self.wallet.struck();
                 return Err(SubmitError::StateConflict(format!(
                     "the node refused the transaction: {reason}; nothing was posted"
                 )));
             }
             Err(SubmitRefusal::Unsent(error)) => {
                 self.wallet.release(spent);
-                return Err(SubmitError::Node(format!(
-                    "the transaction could not be sent: {error:#}; nothing was posted"
-                )));
+                return Err(SubmitError::Node {
+                    source: error.context("the transaction could not be sent; nothing was posted"),
+                });
+            }
+            Err(SubmitRefusal::Mismatch(error)) => {
+                self.wallet.release(spent);
+                return Err(SubmitError::ContractMismatch(error.to_string()));
             }
             Err(SubmitRefusal::Unanswered(error)) => {
                 tracing::warn!(
-                    ?error,
-                    tx_hash = %hex::encode(tx_hash),
-                    "midnight: submit unanswered; watching for the transaction"
+                    error = %format_args!("{error:#}"),
+                    tx_hash = %tx_hash,
+                    "midnight: submit unanswered; sending it again while watching for the \
+                     transaction"
                 );
+                true
             }
-        }
+        };
         let submitted = started.elapsed();
+        // Ends with the wait, so a resend held up by the node never delays the scan.
+        let _resending = unanswered.then(|| {
+            AbortOnDrop(tokio::spawn(resend(
+                self.chain.clone(),
+                bytes.to_vec(),
+                tx_hash,
+            )))
+        });
         let landing = self.await_landing(tx_hash, after, ttl, deadline).await;
         tracing::info!(
-            tx_hash = %hex::encode(tx_hash),
+            tx_hash = %tx_hash,
             ?submitted,
             settled = ?started.elapsed(),
             outcome = ?landing,
@@ -400,12 +429,15 @@ impl<W: FeePayer, C: SubmitChain> NativeIntentClient<W, C> {
             // The respond's only transcript and the DUST spends are guaranteed, which
             // a partial success commits and readers read; the reservation ends when
             // the replay sees the spends.
-            Landing::Applied | Landing::PartialSuccess => Ok(hex::encode(tx_hash)),
+            Landing::Applied | Landing::PartialSuccess => Ok(tx_hash),
             Landing::Expired => {
                 self.wallet.release(spent);
+                // Expiry strikes with the refusal: after an unanswered first
+                // submit, `resend` only logs the node's refusal, so a stale spend
+                // surfaces here as `Landing::Expired`.
+                self.wallet.struck();
                 Err(SubmitError::StateConflict(format!(
-                    "transaction {} expired without landing; nothing was posted",
-                    hex::encode(tx_hash)
+                    "transaction {tx_hash} expired without landing"
                 )))
             }
         }
@@ -416,31 +448,41 @@ impl<W: FeePayer, C: SubmitChain> NativeIntentClient<W, C> {
     /// `deadline`, when the outcome is unknown.
     async fn await_landing(
         &self,
-        tx_hash: [u8; 32],
+        tx_hash: LedgerTxHash,
         after: u64,
         ttl: Timestamp,
         deadline: Instant,
     ) -> Result<Landing, SubmitError> {
         let mut scanned = after;
+        // The head a scan last finished at: while it stands, no block is new and its
+        // time was already compared with the TTL.
+        let mut scanned_head: Option<BlockHash> = None;
         loop {
             let scan = async {
                 let head = self.chain.finalized_head().await?;
+                if scanned_head.as_ref() == Some(&head) {
+                    return anyhow::Ok(None);
+                }
                 let head_number = self.chain.block_number(&head).await?;
                 while scanned < head_number {
                     let number = scanned + 1;
-                    let hash = self
-                        .chain
-                        .block_hash_at(number)
-                        .await?
-                        .with_context(|| format!("the node has no finalized block {number}"))?;
+                    let hash = if number == head_number {
+                        head
+                    } else {
+                        self.chain
+                            .block_hash_at(number)
+                            .await?
+                            .with_context(|| format!("the node has no finalized block {number}"))?
+                    };
                     if let Some(landing) = self.chain.landing(&hash, tx_hash).await? {
-                        return anyhow::Ok(Some(landing));
+                        return Ok(Some(landing));
                     }
                     scanned = number;
                 }
                 if self.chain.block_time(&head).await? > ttl {
                     return Ok(Some(Landing::Expired));
                 }
+                scanned_head = Some(head);
                 Ok(None)
             };
             match tokio::time::timeout_at(deadline, scan).await {
@@ -462,9 +504,8 @@ impl<W: FeePayer, C: SubmitChain> NativeIntentClient<W, C> {
             }
         }
         Err(SubmitError::Ambiguous(format!(
-            "transaction {} was not seen finalized within the submit budget; it may still land, \
-             and a later publisher retry may post the response again",
-            hex::encode(tx_hash)
+            "transaction {tx_hash} was not seen finalized within the submit budget; it may still \
+             land, and a later publisher retry may post the response again"
         )))
     }
 }
@@ -482,34 +523,24 @@ where
 
     /// Tells the wallet how the submit ended, as the intent builder's parent did: a
     /// landing clears the strikes, and any failure but an unsynced wallet starts the
-    /// replay over from the latest checkpoint.
+    /// replay over from the latest checkpoint; `post` strikes the restored state
+    /// itself on a state conflict, and unfunded/internal failures sustained with
+    /// none landing drop its checkpoint once.
     async fn submit(&self, intent: &[u8]) -> anyhow::Result<Submitted> {
-        let mut wallet_used = false;
-        let submitted = self.submit_intent(intent, &mut wallet_used).await;
-        report_submit(&self.wallet, &submitted, wallet_used);
+        let submitted = self.submit_intent(intent).await;
+        report_submit(&self.wallet, &submitted);
         submitted.map_err(SubmitError::into_publish_error)
     }
 }
 
-/// Whether planning the fee used the wallet. A fee it could not plan for its held
-/// UTXOs, or before it caught up, used nothing, as the intent builder's busy gate and
-/// readiness wait did not.
-fn plan_used_wallet(plan: &Result<crate::funding::FeePlan, SubmitError>) -> bool {
-    !matches!(
-        plan,
-        Err(SubmitError::WalletBusy(_) | SubmitError::WalletUnsynced(_))
-    )
-}
-
-fn report_submit<W: FeePayer>(
-    wallet: &W,
-    submitted: &Result<Submitted, SubmitError>,
-    wallet_used: bool,
-) {
+/// Reports the result of a submit to the wallet, updating its state accordingly.
+fn report_submit<W: FeePayer>(wallet: &W, submitted: &Result<Submitted, SubmitError>) {
     match submitted {
         Ok(_) => wallet.landed(),
-        Err(SubmitError::WalletUnsynced(_)) => {}
-        Err(_) => wallet.failed(wallet_used),
+        // `post` reported the strike itself; a conflict before paying strikes nothing.
+        Err(SubmitError::WalletUnsynced(_) | SubmitError::StateConflict(_)) => {}
+        Err(error) if error.stuck_restored_state() => wallet.stuck(),
+        Err(_) => wallet.failed(),
     }
 }
 
@@ -517,8 +548,11 @@ fn report_submit<W: FeePayer>(
 /// which the chain looks up by `ctime`, so it names a time the replay has seen: no
 /// later than the finalized head or the newest block the indexer has indexed, and
 /// no earlier than the newest replayed event. The replay is checked caught up after
-/// the indexer answers, but an event the subscription has not delivered yet still
-/// leaves the roots stale; the node then refuses the spend and the publish retries.
+/// the indexer answers, up to the newest event id the indexer names right after it.
+/// An event the subscription has not delivered can still leave the roots stale when
+/// the indexer names none in time, or when a subscription opened since serves an
+/// indexer that has not stored it yet; the node then refuses the spend and the publish
+/// retries.
 fn fee_ctime(head_time: Timestamp, indexed_time: Timestamp, sync_time: Timestamp) -> Timestamp {
     head_time.min(indexed_time).max(sync_time)
 }
@@ -529,7 +563,7 @@ fn paid_transaction(
     base: &SealedTx,
     fee: &SealedTx,
     parameters: &LedgerParameters,
-) -> Result<(Vec<u8>, [u8; 32]), SubmitError> {
+) -> Result<(Vec<u8>, LedgerTxHash), SubmitError> {
     let transaction = base
         .merge(fee)
         .map_err(|error| SubmitError::Internal(format!("merging the fee: {error:?}")))?;
@@ -545,7 +579,10 @@ fn paid_transaction(
     let mut bytes = Vec::new();
     midnight_serialize::tagged_serialize(&transaction, &mut bytes)
         .map_err(|error| SubmitError::Internal(format!("serializing the transaction: {error}")))?;
-    Ok((bytes, transaction.transaction_hash().0 .0))
+    Ok((
+        bytes,
+        LedgerTxHash::from_bytes(transaction.transaction_hash().0 .0),
+    ))
 }
 
 /// How long the fee intent stays includable with `remaining` of the budget left:
@@ -577,12 +614,62 @@ where
     }
 }
 
+/// Sends a transaction whose submit went unanswered again, `RESEND_DELAY` later and
+/// then at doubling intervals, until a node answers one: the node may never have
+/// received it. The ledger applies an intent once, so a resend cannot post it twice,
+/// and a refusal may be the transaction already in a block, so only the landing scan
+/// decides the outcome.
+async fn resend<C: SubmitChain>(chain: Arc<C>, transaction: Vec<u8>, tx_hash: LedgerTxHash) {
+    let mut delay = RESEND_DELAY;
+    loop {
+        tokio::time::sleep(delay).await;
+        match chain.submit(&transaction).await {
+            Ok(()) => {
+                tracing::info!(
+                    tx_hash = %tx_hash,
+                    "midnight: the node took the resent respond transaction"
+                );
+                return;
+            }
+            Err(SubmitRefusal::Refused(reason)) => {
+                tracing::info!(
+                    tx_hash = %tx_hash,
+                    %reason,
+                    "midnight: the node refused the resent respond transaction; watching for it"
+                );
+                return;
+            }
+            Err(SubmitRefusal::Mismatch(error)) => {
+                tracing::warn!(
+                    error = %format_args!("{error:#}"),
+                    tx_hash = %tx_hash,
+                    "midnight: the node cannot carry the resent respond transaction; watching \
+                     for it"
+                );
+                return;
+            }
+            Err(SubmitRefusal::Unanswered(error) | SubmitRefusal::Unsent(error)) => {
+                if let Some(count) = mpc_utils::throttle::check("midnight:resend-unanswered") {
+                    tracing::warn!(
+                        count,
+                        error = %format_args!("{error:#}"),
+                        tx_hash = %tx_hash,
+                        "midnight: resent respond transactions went unanswered"
+                    );
+                }
+                delay = (delay * 2).min(MAX_RESEND_DELAY);
+            }
+        }
+    }
+}
+
 fn node(error: anyhow::Error) -> SubmitError {
-    SubmitError::Node(format!("{error:#}"))
+    SubmitError::Node { source: error }
 }
 
 #[cfg(test)]
 mod tests {
+    use crate::MidnightAddress;
     use std::collections::VecDeque;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Mutex;
@@ -591,11 +678,13 @@ mod tests {
         ContractAction, ContractCall, Intent, ProofPreimageMarker, Signature, INITIAL_PARAMETERS,
     };
     use midnight_transient_crypto::commitment::PedersenRandomness;
+    use mpc_chain_integration_core::utils::retry::is_retryable;
 
     use super::*;
     use crate::emissions::{emissions_of_call, Emission, EmissionKind, MISC_PAYLOAD_LEN};
     use crate::funding::tests::{base, funded_key, replayed};
     use crate::funding::{plan_fee, FeePlan};
+    use crate::test_utils::rejected_http;
     use minocrab_publisher::{Attestation, EcdsaSignature};
 
     /// The responder's initial state with the package's verifier keys
@@ -608,6 +697,14 @@ mod tests {
 
     type ChainIntent = Intent<Signature, ProofPreimageMarker, PedersenRandomness, DefaultDB>;
 
+    /// How a submit's end was reported to the wallet.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum Report {
+        Failed,
+        Struck,
+        Stuck,
+    }
+
     /// A wallet that records reservations; the build and post paths never plan.
     #[derive(Default)]
     pub(super) struct RecordingWallet {
@@ -619,10 +716,8 @@ mod tests {
         indexed_secs: u64,
         /// Where the replay stands once `ready_by` has waited for it, if it moves.
         caught_up_secs: Option<u64>,
-        failures: Mutex<Vec<bool>>,
+        reports: Mutex<Vec<Report>>,
         landings: AtomicU64,
-        /// What the next `plan` refuses with.
-        plan_refusal: Mutex<Option<SubmitError>>,
     }
 
     impl FeePayer for RecordingWallet {
@@ -651,12 +746,7 @@ mod tests {
             _network_id: &str,
             _rng: &mut StdRng,
         ) -> Result<FeePlan, SubmitError> {
-            Err(self
-                .plan_refusal
-                .lock()
-                .unwrap()
-                .take()
-                .expect("these tests price no fee they do not refuse"))
+            unimplemented!("no test prices a fee")
         }
 
         fn reserve(&self, spent: &[DustNullifier], until: Timestamp) {
@@ -668,8 +758,16 @@ mod tests {
             self.released.lock().unwrap().push(spent.to_vec());
         }
 
-        fn failed(&self, wallet_used: bool) {
-            self.failures.lock().unwrap().push(wallet_used);
+        fn failed(&self) {
+            self.reports.lock().unwrap().push(Report::Failed);
+        }
+
+        fn struck(&self) {
+            self.reports.lock().unwrap().push(Report::Struck);
+        }
+
+        fn stuck(&self) {
+            self.reports.lock().unwrap().push(Report::Stuck);
         }
 
         fn landed(&self) {
@@ -677,16 +775,26 @@ mod tests {
         }
     }
 
-    /// A chain whose finalized head moves one block per ask, from `head` up to `last`,
-    /// with blocks six seconds apart from time 1000.
+    /// A chain whose finalized head moves `step` blocks (one by default) per ask, from
+    /// `head` up to `last`, with blocks six seconds apart from time 1000.
     pub(super) struct ScriptedChain {
         head: Mutex<u64>,
         last: u64,
-        submit: Mutex<Option<SubmitRefusal>>,
+        step: u64,
+        /// The blocks each head read asked about, by method.
+        number_reads: Mutex<Vec<u64>>,
+        time_reads: Mutex<Vec<u64>>,
+        hash_lookups: Mutex<Vec<u64>>,
+        /// What each submit answers, in turn; past the last, the node takes it.
+        submit: Mutex<VecDeque<SubmitRefusal>>,
+        /// When each submit was sent.
+        submitted: Mutex<Vec<Instant>>,
         landing: Option<(u64, Landing)>,
         landing_reads: Mutex<VecDeque<u64>>,
         /// A block whose first landing read fails.
         failing_read: Mutex<Option<u64>>,
+        /// A block whose first time read fails.
+        failing_time: Mutex<Option<u64>>,
     }
 
     impl ScriptedChain {
@@ -694,11 +802,22 @@ mod tests {
             Self {
                 head: Mutex::new(head),
                 last,
-                submit: Mutex::new(None),
+                step: 1,
+                number_reads: Mutex::new(Vec::new()),
+                time_reads: Mutex::new(Vec::new()),
+                hash_lookups: Mutex::new(Vec::new()),
+                submit: Mutex::new(VecDeque::new()),
+                submitted: Mutex::new(Vec::new()),
                 landing,
                 landing_reads: Mutex::new(VecDeque::new()),
                 failing_read: Mutex::new(None),
+                failing_time: Mutex::new(None),
             }
+        }
+
+        fn stepping(mut self, step: u64) -> Self {
+            self.step = step;
+            self
         }
 
         fn failing_once_at(self, number: u64) -> Self {
@@ -706,62 +825,92 @@ mod tests {
             self
         }
 
-        fn refusing(self, refusal: SubmitRefusal) -> Self {
-            *self.submit.lock().unwrap() = Some(refusal);
+        fn failing_time_once_at(self, number: u64) -> Self {
+            *self.failing_time.lock().unwrap() = Some(number);
             self
+        }
+
+        fn refusing(self, refusal: SubmitRefusal) -> Self {
+            self.submit.lock().unwrap().push_back(refusal);
+            self
+        }
+
+        fn submits(&self) -> Vec<Instant> {
+            self.submitted.lock().unwrap().clone()
         }
     }
 
-    fn block_hash(number: u64) -> String {
-        format!("0x{number:064x}")
+    fn block_hash(number: u64) -> BlockHash {
+        let mut bytes = [0u8; 32];
+        bytes[24..].copy_from_slice(&number.to_be_bytes());
+        BlockHash::from_bytes(bytes)
     }
 
-    fn block_number_of(hash: &str) -> u64 {
-        u64::from_str_radix(&hash[2..], 16).unwrap()
+    fn block_number_of(hash: &BlockHash) -> u64 {
+        u64::from_be_bytes(hash.as_bytes()[24..].try_into().unwrap())
     }
 
     #[async_trait]
     impl PinnedReads for ScriptedChain {
-        async fn finalized_head(&self) -> anyhow::Result<String> {
+        async fn finalized_head(&self) -> anyhow::Result<BlockHash> {
             let mut head = self.head.lock().unwrap();
-            *head = (*head + 1).min(self.last);
+            *head = (*head + self.step).min(self.last);
             Ok(block_hash(*head))
         }
 
-        async fn contract_state(&self, _: &str, _: &str) -> anyhow::Result<Option<Vec<u8>>> {
+        async fn contract_state(
+            &self,
+            _: &MidnightAddress,
+            _: &BlockHash,
+        ) -> anyhow::Result<Option<Vec<u8>>> {
             unimplemented!("the post path reads no contract state")
         }
 
-        async fn ledger_parameters(&self, _: &str) -> anyhow::Result<Vec<u8>> {
+        async fn ledger_parameters(&self, _: &BlockHash) -> anyhow::Result<Vec<u8>> {
             Ok(ledger_parameters())
         }
     }
 
     #[async_trait]
     impl SubmitChain for ScriptedChain {
-        async fn block_number(&self, at_hash_0x: &str) -> anyhow::Result<u64> {
-            Ok(block_number_of(at_hash_0x))
+        async fn block_number(&self, at: &BlockHash) -> anyhow::Result<u64> {
+            let number = block_number_of(at);
+            self.number_reads.lock().unwrap().push(number);
+            Ok(number)
         }
 
-        async fn block_hash_at(&self, number: u64) -> anyhow::Result<Option<String>> {
+        async fn block_hash_at(&self, number: u64) -> anyhow::Result<Option<BlockHash>> {
+            self.hash_lookups.lock().unwrap().push(number);
             Ok(Some(block_hash(number)))
         }
 
-        async fn block_time(&self, at_hash_0x: &str) -> anyhow::Result<Timestamp> {
-            Ok(Timestamp::from_secs(1000 + 6 * block_number_of(at_hash_0x)))
+        async fn block_time(&self, at: &BlockHash) -> anyhow::Result<Timestamp> {
+            let number = block_number_of(at);
+            self.time_reads.lock().unwrap().push(number);
+            let mut failing = self.failing_time.lock().unwrap();
+            if *failing == Some(number) {
+                *failing = None;
+                anyhow::bail!("the node dropped the time read of block {number}");
+            }
+            Ok(Timestamp::from_secs(1000 + 6 * number))
         }
 
-        async fn submit(&self, _transaction: &[u8]) -> Result<(), SubmitRefusal> {
-            self.submit.lock().unwrap().take().map_or(Ok(()), Err)
+        async fn submit(&self, transaction: &[u8]) -> Result<(), SubmitRefusal> {
+            assert_eq!(
+                transaction, b"tx",
+                "every submit sends the same transaction"
+            );
+            self.submitted.lock().unwrap().push(Instant::now());
+            self.submit.lock().unwrap().pop_front().map_or(Ok(()), Err)
         }
 
         async fn landing(
             &self,
-            at_hash_0x: &str,
-            tx_hash: [u8; 32],
+            at: &BlockHash,
+            tx_hash: LedgerTxHash,
         ) -> anyhow::Result<Option<Landing>> {
-            assert_eq!(tx_hash, TX_HASH);
-            let number = block_number_of(at_hash_0x);
+            assert_eq!(tx_hash, LedgerTxHash::from_bytes(TX_HASH));
+            let number = block_number_of(at);
             self.landing_reads.lock().unwrap().push_back(number);
             let mut failing = self.failing_read.lock().unwrap();
             if *failing == Some(number) {
@@ -832,7 +981,7 @@ mod tests {
                 Arc::new(chain),
                 RecordingWallet::default(),
                 Arc::new(Provers::new(dir.path(), dir.path()).unwrap()),
-                "undeployed",
+                NetworkId::Undeployed,
                 Duration::from_secs(420),
             ),
             _dir: dir,
@@ -862,7 +1011,7 @@ mod tests {
     pub(super) fn respond_request() -> IntentRequest {
         IntentRequest {
             circuit: RespondCircuit::Respond,
-            contract_address: hex32(RESPONDER),
+            contract_address: MidnightAddress::from_bytes(hex32(RESPONDER)),
             request_id: hex32(REQUEST_ID),
             signature: EcdsaSignature {
                 big_r_x: [0x11; 32],
@@ -961,9 +1110,11 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_contract_whose_key_is_not_the_packaged_one_is_refused() {
-        // The packaged respond key is another circuit's, so the deployed one differs.
+    #[tokio::test]
+    async fn a_contract_the_artifacts_do_not_prove_for_is_awaited_not_refused() {
+        // The packaged respond key is another circuit's, so the deployed one differs:
+        // an on-chain upgrade may still be landing, so the publish retries rather
+        // than paying a failover that hits the same mismatch everywhere.
         let dir = managed_dir(|circuit, bytes| {
             if circuit == "respond" {
                 let mut tampered = bytes;
@@ -975,19 +1126,30 @@ mod tests {
             }
         });
         let client = client_over(dir, ScriptedChain::new(0, 0, None));
-        let error = client.build_intent(&respond_request()).unwrap_err();
-        assert!(matches!(error, SubmitError::ContractMismatch(_)), "{error}");
+        let error = client.build(&respond_request()).await.unwrap_err();
+        assert_eq!(
+            crate::submit_error::refusal_code(&error),
+            Some("deploy_mismatch"),
+            "{error:#}"
+        );
+        assert!(is_retryable(&error), "{error:#}");
 
         let mut empty = Vec::new();
         midnight_serialize::tagged_serialize(&ContractState::<DefaultDB>::default(), &mut empty)
             .unwrap();
         let error = client
-            .build_intent(&IntentRequest {
+            .build(&IntentRequest {
                 contract_state: empty,
                 ..respond_request()
             })
+            .await
             .unwrap_err();
-        assert!(matches!(error, SubmitError::ContractMismatch(_)), "{error}");
+        assert_eq!(
+            crate::submit_error::refusal_code(&error),
+            Some("deploy_mismatch"),
+            "{error:#}"
+        );
+        assert!(is_retryable(&error), "{error:#}");
     }
 
     #[test]
@@ -1027,8 +1189,8 @@ mod tests {
             );
         }
         assert_eq!(
-            *client.wallet.failures.lock().unwrap(),
-            vec![false],
+            *client.wallet.reports.lock().unwrap(),
+            vec![Report::Failed],
             "the wallet hears of the failed submit, from before it paid anything"
         );
     }
@@ -1037,95 +1199,103 @@ mod tests {
     fn the_wallet_hears_how_each_submit_ended() {
         let wallet = RecordingWallet::default();
         let landed = Ok(Submitted {
-            tx_id: "00".into(),
+            tx_id: LedgerTxHash::from_bytes([0x00; 32]),
             dust_balance: 1,
         });
-        report_submit(&wallet, &landed, true);
+        report_submit(&wallet, &landed);
+        report_submit(&wallet, &Err(SubmitError::WalletUnsynced("syncing".into())));
+        report_submit(&wallet, &Err(SubmitError::StateConflict("refused".into())));
+        report_submit(&wallet, &Err(SubmitError::WalletBusy("held".into())));
+        report_submit(&wallet, &Err(SubmitError::WalletUnfunded("empty".into())));
+        report_submit(&wallet, &Err(SubmitError::Internal("spending DUST".into())));
+        // A throttled read fails like any other, but implicates nothing.
         report_submit(
             &wallet,
-            &Err(SubmitError::WalletUnsynced("syncing".into())),
-            false,
+            &Err(SubmitError::Node {
+                source: rejected_http(429),
+            }),
         );
-        report_submit(
-            &wallet,
-            &Err(SubmitError::StateConflict("refused".into())),
-            true,
-        );
-        report_submit(&wallet, &Err(SubmitError::WalletBusy("held".into())), false);
-        // An empty wallet is a failure like any other, as the intent builder's
-        // `wallet_unfunded` was.
-        report_submit(
-            &wallet,
-            &Err(SubmitError::WalletUnfunded("empty".into())),
-            true,
-        );
+        // A submit that outlived its proving or landing budget implicates nothing.
+        report_submit(&wallet, &Err(SubmitError::ProvingTimeout("budget".into())));
+        report_submit(&wallet, &Err(SubmitError::Ambiguous("unlanded".into())));
         assert_eq!(wallet.landings.load(Ordering::SeqCst), 1, "one landing");
         assert_eq!(
-            *wallet.failures.lock().unwrap(),
-            vec![true, false, true],
-            "every failure but an unsynced wallet, with whether it used the wallet"
+            *wallet.reports.lock().unwrap(),
+            vec![
+                Report::Failed,
+                Report::Stuck,
+                Report::Stuck,
+                Report::Failed,
+                Report::Failed,
+                Report::Failed,
+            ],
+            "every failure but an unsynced wallet, with how it implicates the restored state"
         );
     }
 
-    #[test]
-    fn only_a_fee_planned_or_refused_for_its_funds_used_the_wallet() {
-        let local = replayed();
-        let ctime = local.sync_time;
-        let ttl = Timestamp::from_secs(ctime.to_secs() + 180);
-        let mut rng = StdRng::seed_from_u64(7);
-        let planned = plan_fee(
-            &funded_key(),
-            &local,
-            &[],
-            &base(&mut rng, ttl),
-            &INITIAL_PARAMETERS,
-            ctime,
-            ttl,
-            "undeployed",
-            &mut rng,
+    #[tokio::test(start_paused = true)]
+    async fn post_failures_strike_the_restored_wallet_by_their_class() {
+        let client = client_over(
+            managed_dir(|_, bytes| bytes),
+            ScriptedChain::new(10, 20, None)
+                .refusing(SubmitRefusal::Refused("1010: Invalid Transaction".into())),
         );
-        assert!(planned.is_ok());
-        assert!(plan_used_wallet(&planned));
-        assert!(plan_used_wallet(&Err(SubmitError::WalletUnfunded(
-            "short".into()
-        ))));
-        assert!(!plan_used_wallet(&Err(SubmitError::WalletBusy(
-            "held".into()
-        ))));
-        assert!(!plan_used_wallet(&Err(SubmitError::WalletUnsynced(
-            "behind".into()
-        ))));
+        let error = client
+            .post(
+                b"tx",
+                LedgerTxHash::from_bytes(TX_HASH),
+                &spent(),
+                10,
+                Timestamp::from_secs(5000),
+                deadline(),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(error, SubmitError::StateConflict(_)), "{error}");
+        assert_eq!(
+            *client.wallet.reports.lock().unwrap(),
+            [Report::Struck],
+            "post strikes the refusal itself"
+        );
+        report_submit(&client.wallet, &Err(error));
+        assert_eq!(
+            *client.wallet.reports.lock().unwrap(),
+            [Report::Struck],
+            "submit does not report the strike twice"
+        );
+
+        let client = client_over(
+            managed_dir(|_, bytes| bytes),
+            // Block 14, at 1084, is the first past a 1080 TTL.
+            ScriptedChain::new(10, 20, None),
+        );
+        let error = client
+            .post(
+                b"tx",
+                LedgerTxHash::from_bytes(TX_HASH),
+                &spent(),
+                10,
+                Timestamp::from_secs(1080),
+                deadline(),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(error, SubmitError::StateConflict(_)), "{error}");
+        assert_eq!(
+            *client.wallet.reports.lock().unwrap(),
+            [Report::Struck],
+            "post strikes the expiry unlanded itself"
+        );
+        report_submit(&client.wallet, &Err(error));
+        assert_eq!(
+            *client.wallet.reports.lock().unwrap(),
+            [Report::Struck],
+            "submit does not report the strike twice"
+        );
     }
 
     #[tokio::test]
-    async fn a_fee_planned_against_the_wallets_funds_used_it_and_one_it_held_did_not() {
-        for (refusal, used) in [
-            (SubmitError::WalletUnfunded("short".into()), true),
-            (SubmitError::WalletBusy("held".into()), false),
-        ] {
-            let client = client_over(
-                managed_dir(|_, bytes| bytes),
-                ScriptedChain::new(10, 20, None),
-            );
-            *client.wallet.plan_refusal.lock().unwrap() = Some(refusal);
-            let mut rng = StdRng::seed_from_u64(3);
-            let base = base(&mut rng, Timestamp::from_secs(2_000));
-            let before = SubmitTimings {
-                started: Instant::now(),
-                wallet_wait: Duration::ZERO,
-                prove_respond: Duration::ZERO,
-            };
-            let mut wallet_used = !used;
-            client
-                .pay_for(&base, deadline(), before, &mut wallet_used)
-                .await
-                .expect_err("the plan was refused");
-            assert_eq!(wallet_used, used);
-        }
-    }
-
-    #[tokio::test]
-    async fn a_submit_failing_before_the_wallet_pays_reports_it_unused() {
+    async fn a_submit_failing_before_the_wallet_pays_strikes_nothing() {
         let client = client();
         let intent = client.build(&respond_request()).await.unwrap();
         // The packaged keys are empty here, so proving the respond fails.
@@ -1133,11 +1303,15 @@ mod tests {
             .submit(&intent)
             .await
             .expect_err("nothing can be proven");
-        assert_eq!(*client.wallet.failures.lock().unwrap(), vec![false]);
+        assert_eq!(
+            *client.wallet.reports.lock().unwrap(),
+            vec![Report::Stuck],
+            "a proving failure before the wallet paid reports stuck, never a strike"
+        );
     }
 
-    #[test]
-    fn malformed_requests_are_refused_before_anything_is_built() {
+    #[tokio::test]
+    async fn malformed_requests_are_refused_before_anything_is_built() {
         let cases: Vec<(&str, IntentRequest)> = vec![
             (
                 "undecodable contract state",
@@ -1156,10 +1330,15 @@ mod tests {
         ];
         let client = client();
         for (case, request) in cases {
-            let error = client.build_intent(&request).unwrap_err();
+            let error = client.build(&request).await.unwrap_err();
+            assert_eq!(
+                crate::submit_error::refusal_code(&error),
+                Some("bad_request"),
+                "{case}: {error:#}"
+            );
             assert!(
-                matches!(error, SubmitError::BadRequest(_)),
-                "{case}: {error}"
+                !is_retryable(&error),
+                "{case}: a malformed request must be terminal: {error:#}"
             );
         }
     }
@@ -1184,7 +1363,7 @@ mod tests {
         let landed = client
             .post(
                 b"tx",
-                TX_HASH,
+                LedgerTxHash::from_bytes(TX_HASH),
                 &spent(),
                 10,
                 Timestamp::from_secs(5000),
@@ -1192,7 +1371,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(landed, hex::encode(TX_HASH));
+        assert_eq!(landed, LedgerTxHash::from_bytes(TX_HASH));
         assert_eq!(*client.wallet.reserved.lock().unwrap(), vec![spent()]);
         assert_eq!(
             *client.wallet.reserved_until.lock().unwrap(),
@@ -1225,7 +1404,7 @@ mod tests {
         let error = client
             .post(
                 b"tx",
-                TX_HASH,
+                LedgerTxHash::from_bytes(TX_HASH),
                 &spent(),
                 10,
                 Timestamp::from_secs(5000),
@@ -1248,7 +1427,7 @@ mod tests {
         let error = client
             .post(
                 b"tx",
-                TX_HASH,
+                LedgerTxHash::from_bytes(TX_HASH),
                 &spent(),
                 10,
                 Timestamp::from_secs(5000),
@@ -1256,9 +1435,57 @@ mod tests {
             )
             .await
             .unwrap_err();
-        assert!(matches!(error, SubmitError::Node(_)), "{error}");
+        assert!(matches!(error, SubmitError::Node { .. }), "{error}");
         assert_eq!(*client.wallet.released.lock().unwrap(), vec![spent()]);
+        report_submit(&client.wallet, &Err(error));
+        assert_eq!(
+            *client.wallet.reports.lock().unwrap(),
+            [Report::Failed],
+            "a node that never carried the transaction strikes nothing"
+        );
         assert!(client.chain.landing_reads.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_runtime_without_the_call_is_a_contract_mismatch() {
+        let client = client_over(
+            managed_dir(|_, bytes| bytes),
+            ScriptedChain::new(10, 20, None).refusing(SubmitRefusal::Mismatch(anyhow::anyhow!(
+                "send_mn_transaction did not match the node's metadata"
+            ))),
+        );
+        let error = client
+            .post(
+                b"tx",
+                LedgerTxHash::from_bytes(TX_HASH),
+                &spent(),
+                10,
+                Timestamp::from_secs(5000),
+                deadline(),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(*client.wallet.released.lock().unwrap(), vec![spent()]);
+        let submitted = Err(error);
+        report_submit(&client.wallet, &submitted);
+        assert_eq!(
+            *client.wallet.reports.lock().unwrap(),
+            [Report::Failed],
+            "a runtime without the call strikes nothing"
+        );
+        let error = match submitted {
+            Err(error) => error.into_publish_error(),
+            Ok(_) => unreachable!("a runtime without the call cannot submit"),
+        };
+        assert_eq!(
+            crate::submit_error::refusal_code(&error),
+            Some("contract_mismatch"),
+            "{error:#}"
+        );
+        assert!(
+            !is_retryable(&error),
+            "a node without the call must be terminal: {error:#}"
+        );
     }
 
     #[tokio::test(start_paused = true)]
@@ -1272,7 +1499,7 @@ mod tests {
         let landed = client
             .post(
                 b"tx",
-                TX_HASH,
+                LedgerTxHash::from_bytes(TX_HASH),
                 &spent(),
                 10,
                 Timestamp::from_secs(5000),
@@ -1280,7 +1507,344 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(landed, hex::encode(TX_HASH));
+        assert_eq!(landed, LedgerTxHash::from_bytes(TX_HASH));
+    }
+
+    fn unanswered() -> SubmitRefusal {
+        SubmitRefusal::Unanswered(anyhow::anyhow!("request timed out"))
+    }
+
+    /// The gaps between consecutive submits.
+    fn gaps(submits: &[Instant]) -> Vec<Duration> {
+        submits.windows(2).map(|pair| pair[1] - pair[0]).collect()
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_unanswered_submit_is_sent_again_ever_later_until_the_node_answers() {
+        // Block 25 is the scan's 15th ask, 28 s in.
+        let client = client_over(
+            managed_dir(|_, bytes| bytes),
+            ScriptedChain::new(10, 30, Some((25, Landing::Applied)))
+                .refusing(unanswered())
+                .refusing(unanswered()),
+        );
+        let landed = client
+            .post(
+                b"tx",
+                LedgerTxHash::from_bytes(TX_HASH),
+                &spent(),
+                10,
+                Timestamp::from_secs(5000),
+                deadline(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(landed, LedgerTxHash::from_bytes(TX_HASH));
+        let submits = client.chain.submits();
+        assert_eq!(submits.len(), 3, "sent until the third was answered");
+        assert_eq!(gaps(&submits), [RESEND_DELAY, RESEND_DELAY * 2]);
+        assert!(client.wallet.released.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_resend_the_node_takes_is_not_sent_again() {
+        let client = client_over(
+            managed_dir(|_, bytes| bytes),
+            ScriptedChain::new(10, 30, Some((25, Landing::Applied))).refusing(unanswered()),
+        );
+        client
+            .post(
+                b"tx",
+                LedgerTxHash::from_bytes(TX_HASH),
+                &spent(),
+                10,
+                Timestamp::from_secs(5000),
+                deadline(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(client.chain.submits().len(), 2);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_resend_that_could_not_be_sent_is_sent_again() {
+        let client = client_over(
+            managed_dir(|_, bytes| bytes),
+            ScriptedChain::new(10, 30, Some((25, Landing::Applied)))
+                .refusing(unanswered())
+                .refusing(SubmitRefusal::Unsent(anyhow::anyhow!(
+                    "reading the node's runtime"
+                ))),
+        );
+        client
+            .post(
+                b"tx",
+                LedgerTxHash::from_bytes(TX_HASH),
+                &spent(),
+                10,
+                Timestamp::from_secs(5000),
+                deadline(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(client.chain.submits().len(), 3);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn resends_to_a_node_that_never_answers_back_off_to_their_cap() {
+        // The head stalls inside the TTL, so the wait runs to its deadline.
+        let mut chain = ScriptedChain::new(10, 12, None);
+        for _ in 0..20 {
+            chain = chain.refusing(unanswered());
+        }
+        let client = client_over(managed_dir(|_, bytes| bytes), chain);
+        let error = client
+            .post(
+                b"tx",
+                LedgerTxHash::from_bytes(TX_HASH),
+                &spent(),
+                10,
+                Timestamp::from_secs(5000),
+                Instant::now() + Duration::from_secs(300),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(error, SubmitError::Ambiguous(_)), "{error}");
+        report_submit(&client.wallet, &Err(error));
+        assert_eq!(
+            *client.wallet.reports.lock().unwrap(),
+            [Report::Failed],
+            "a submit that only outlived its watch strikes nothing"
+        );
+        let secs = |s| Duration::from_secs(s);
+        assert_eq!(
+            gaps(&client.chain.submits()),
+            [
+                secs(6),
+                secs(12),
+                secs(24),
+                secs(48),
+                secs(60),
+                secs(60),
+                secs(60)
+            ]
+        );
+        tokio::time::sleep(MAX_RESEND_DELAY * 2).await;
+        assert_eq!(
+            client.chain.submits().len(),
+            8,
+            "nothing is sent past the deadline"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_refused_resend_is_not_sent_again_and_the_scan_decides() {
+        let client = client_over(
+            managed_dir(|_, bytes| bytes),
+            ScriptedChain::new(10, 20, Some((19, Landing::Applied)))
+                .refusing(unanswered())
+                .refusing(SubmitRefusal::Refused(
+                    "1012: Transaction is temporarily banned".into(),
+                )),
+        );
+        let landed = client
+            .post(
+                b"tx",
+                LedgerTxHash::from_bytes(TX_HASH),
+                &spent(),
+                10,
+                Timestamp::from_secs(5000),
+                deadline(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(landed, LedgerTxHash::from_bytes(TX_HASH));
+        assert_eq!(client.chain.submits().len(), 2);
+        assert!(client.wallet.released.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_resend_the_node_cannot_carry_is_not_sent_again_and_the_scan_decides() {
+        let client = client_over(
+            managed_dir(|_, bytes| bytes),
+            // Block 25 is the scan's 15th ask, 28 s in: room for further resends.
+            ScriptedChain::new(10, 30, Some((25, Landing::Applied)))
+                .refusing(unanswered())
+                .refusing(SubmitRefusal::Mismatch(anyhow::anyhow!(
+                    "send_mn_transaction did not match the node's metadata"
+                ))),
+        );
+        let landed = client
+            .post(
+                b"tx",
+                LedgerTxHash::from_bytes(TX_HASH),
+                &spent(),
+                10,
+                Timestamp::from_secs(5000),
+                deadline(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(landed, LedgerTxHash::from_bytes(TX_HASH));
+        assert_eq!(client.chain.submits().len(), 2);
+        assert!(client.wallet.released.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_answered_submit_is_not_sent_again() {
+        let client = client_over(
+            managed_dir(|_, bytes| bytes),
+            ScriptedChain::new(10, 20, Some((19, Landing::Applied))),
+        );
+        client
+            .post(
+                b"tx",
+                LedgerTxHash::from_bytes(TX_HASH),
+                &spent(),
+                10,
+                Timestamp::from_secs(5000),
+                deadline(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(client.chain.submits().len(), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_transaction_the_node_never_answers_for_still_expires() {
+        // Block 26, at 1156, is the first past a 1150 TTL, 30 s in.
+        let mut chain = ScriptedChain::new(10, 30, None);
+        for _ in 0..10 {
+            chain = chain.refusing(unanswered());
+        }
+        let client = client_over(managed_dir(|_, bytes| bytes), chain);
+        let error = client
+            .post(
+                b"tx",
+                LedgerTxHash::from_bytes(TX_HASH),
+                &spent(),
+                10,
+                Timestamp::from_secs(1150),
+                deadline(),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(error, SubmitError::StateConflict(_)), "{error}");
+        assert_eq!(*client.wallet.released.lock().unwrap(), vec![spent()]);
+        let submits = client.chain.submits();
+        assert_eq!(
+            submits.len(),
+            3,
+            "the first and two resends until it expired"
+        );
+        assert_eq!(gaps(&submits), [RESEND_DELAY, RESEND_DELAY * 2]);
+        tokio::time::sleep(MAX_RESEND_DELAY * 2).await;
+        assert_eq!(
+            client.chain.submits().len(),
+            3,
+            "nothing is sent once the wait has ended"
+        );
+    }
+
+    /// A chain on the clock: block `10 + s / 6` is final `s` seconds in, and the
+    /// transaction lands in block `lands`. Reads answer at once; every submit is held
+    /// for the 10 s request timeout and goes unanswered.
+    struct ClockChain {
+        start: Instant,
+        lands: u64,
+        submits: Mutex<Vec<Instant>>,
+    }
+
+    #[async_trait]
+    impl PinnedReads for ClockChain {
+        async fn finalized_head(&self) -> anyhow::Result<BlockHash> {
+            Ok(block_hash(10 + self.start.elapsed().as_secs() / 6))
+        }
+
+        async fn contract_state(
+            &self,
+            _: &MidnightAddress,
+            _: &BlockHash,
+        ) -> anyhow::Result<Option<Vec<u8>>> {
+            unimplemented!("the post path reads no contract state")
+        }
+
+        async fn ledger_parameters(&self, _: &BlockHash) -> anyhow::Result<Vec<u8>> {
+            Ok(ledger_parameters())
+        }
+    }
+
+    #[async_trait]
+    impl SubmitChain for ClockChain {
+        async fn block_number(&self, at: &BlockHash) -> anyhow::Result<u64> {
+            Ok(block_number_of(at))
+        }
+
+        async fn block_hash_at(&self, number: u64) -> anyhow::Result<Option<BlockHash>> {
+            Ok(Some(block_hash(number)))
+        }
+
+        async fn block_time(&self, at: &BlockHash) -> anyhow::Result<Timestamp> {
+            Ok(Timestamp::from_secs(1000 + 6 * block_number_of(at)))
+        }
+
+        async fn submit(&self, _transaction: &[u8]) -> Result<(), SubmitRefusal> {
+            self.submits.lock().unwrap().push(Instant::now());
+            tokio::time::sleep(Duration::from_secs(10)).await;
+            Err(unanswered())
+        }
+
+        async fn landing(
+            &self,
+            at: &BlockHash,
+            _tx_hash: LedgerTxHash,
+        ) -> anyhow::Result<Option<Landing>> {
+            Ok((block_number_of(at) == self.lands).then_some(Landing::Applied))
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_resend_held_up_by_the_node_neither_delays_the_scan_nor_outlives_the_deadline() {
+        // Block 13 is final 18 s in; the second budget ends 21 s in.
+        for budget in [300, 21] {
+            let start = Instant::now();
+            let dir = managed_dir(|_, bytes| bytes);
+            let client = NativeIntentClient::new(
+                Arc::new(ClockChain {
+                    start,
+                    lands: 13,
+                    submits: Mutex::default(),
+                }),
+                RecordingWallet::default(),
+                Arc::new(Provers::new(dir.path(), dir.path()).unwrap()),
+                NetworkId::Undeployed,
+                Duration::from_secs(420),
+            );
+            let landed = client
+                .post(
+                    b"tx",
+                    LedgerTxHash::from_bytes(TX_HASH),
+                    &spent(),
+                    10,
+                    Timestamp::from_secs(5000),
+                    start + Duration::from_secs(budget),
+                )
+                .await
+                .unwrap_or_else(|error| panic!("budget {budget} s: {error}"));
+            assert_eq!(landed, LedgerTxHash::from_bytes(TX_HASH));
+            assert!(
+                start.elapsed() <= Duration::from_secs(18) + LANDING_POLL,
+                "budget {budget} s: seen {:?} in",
+                start.elapsed()
+            );
+            let sent = client.chain.submits.lock().unwrap().len();
+            tokio::time::sleep(MAX_RESEND_DELAY * 2).await;
+            assert_eq!(
+                client.chain.submits.lock().unwrap().len(),
+                sent,
+                "budget {budget} s: nothing is sent once the wait has ended"
+            );
+        }
     }
 
     #[tokio::test(start_paused = true)]
@@ -1292,7 +1856,7 @@ mod tests {
         let landed = client
             .post(
                 b"tx",
-                TX_HASH,
+                LedgerTxHash::from_bytes(TX_HASH),
                 &spent(),
                 10,
                 Timestamp::from_secs(5000),
@@ -1300,7 +1864,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(landed, hex::encode(TX_HASH));
+        assert_eq!(landed, LedgerTxHash::from_bytes(TX_HASH));
         assert!(
             client.wallet.released.lock().unwrap().is_empty(),
             "the guaranteed segment spent the DUST; the replay ends the reservation"
@@ -1372,10 +1936,10 @@ mod tests {
 
         let (bytes, tx_hash) = paid_transaction(&base, &fee, &INITIAL_PARAMETERS).unwrap();
         let posted: SealedTx = midnight_serialize::tagged_deserialize(&mut &bytes[..]).unwrap();
-        assert_eq!(posted.transaction_hash().0 .0, tx_hash);
+        assert_eq!(posted.transaction_hash().0 .0, *tx_hash.as_bytes());
         assert_eq!(
             base.merge(&fee).unwrap().transaction_hash().0 .0,
-            tx_hash,
+            *tx_hash.as_bytes(),
             "the posted transaction is the respond and its fee"
         );
 
@@ -1407,7 +1971,7 @@ mod tests {
         let landed = client
             .post(
                 b"tx",
-                TX_HASH,
+                LedgerTxHash::from_bytes(TX_HASH),
                 &spent(),
                 10,
                 Timestamp::from_secs(5000),
@@ -1415,7 +1979,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(landed, hex::encode(TX_HASH));
+        assert_eq!(landed, LedgerTxHash::from_bytes(TX_HASH));
         let reads: Vec<u64> = client
             .chain
             .landing_reads
@@ -1452,7 +2016,7 @@ mod tests {
             let error = client
                 .post(
                     b"tx",
-                    TX_HASH,
+                    LedgerTxHash::from_bytes(TX_HASH),
                     &spent(),
                     10,
                     Timestamp::from_secs(ttl),
@@ -1484,7 +2048,7 @@ mod tests {
         let error = client
             .post(
                 b"tx",
-                TX_HASH,
+                LedgerTxHash::from_bytes(TX_HASH),
                 &spent(),
                 10,
                 Timestamp::from_secs(5000),
@@ -1500,6 +2064,100 @@ mod tests {
             "{error}"
         );
         assert!(client.wallet.released.lock().unwrap().is_empty());
+        assert_eq!(
+            *client.chain.number_reads.lock().unwrap(),
+            [11, 12],
+            "a standing head is read once"
+        );
+        assert_eq!(*client.chain.time_reads.lock().unwrap(), [11, 12]);
+        assert_eq!(
+            *client.chain.landing_reads.lock().unwrap(),
+            [11, 12],
+            "every block after the pin, once"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_failed_time_read_at_a_standing_head_is_retried() {
+        // The head stands at 12, at 1072: past a 1070 TTL. Its first time read fails,
+        // so the next scan of that same head compares its time again and it expires.
+        let client = client_over(
+            managed_dir(|_, bytes| bytes),
+            ScriptedChain::new(11, 12, None).failing_time_once_at(12),
+        );
+        let error = client
+            .post(
+                b"tx",
+                LedgerTxHash::from_bytes(TX_HASH),
+                &spent(),
+                10,
+                Timestamp::from_secs(1070),
+                deadline(),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(error, SubmitError::StateConflict(_)), "{error}");
+        assert_eq!(*client.wallet.released.lock().unwrap(), vec![spent()]);
+        assert_eq!(*client.chain.time_reads.lock().unwrap(), [12, 12]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_failed_read_at_a_standing_head_is_retried() {
+        // The head stops at 13, the block whose first read fails: the next scan of
+        // that same head reads it again rather than taking it as scanned.
+        let client = client_over(
+            managed_dir(|_, bytes| bytes),
+            ScriptedChain::new(10, 13, Some((13, Landing::Applied))).failing_once_at(13),
+        );
+        let landed = client
+            .post(
+                b"tx",
+                LedgerTxHash::from_bytes(TX_HASH),
+                &spent(),
+                10,
+                Timestamp::from_secs(5000),
+                deadline(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(landed, LedgerTxHash::from_bytes(TX_HASH));
+        assert_eq!(
+            *client.chain.landing_reads.lock().unwrap(),
+            [11, 12, 13, 13]
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_head_that_jumps_is_scanned_through_every_block_before_it() {
+        // Heads 13 and 16: blocks 11, 12, 14 and 15 are looked up by number, each
+        // head is its own hash, and the transaction lands in block 15.
+        let client = client_over(
+            managed_dir(|_, bytes| bytes),
+            ScriptedChain::new(10, 20, Some((15, Landing::Applied))).stepping(3),
+        );
+        let landed = client
+            .post(
+                b"tx",
+                LedgerTxHash::from_bytes(TX_HASH),
+                &spent(),
+                10,
+                Timestamp::from_secs(5000),
+                deadline(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(landed, LedgerTxHash::from_bytes(TX_HASH));
+        assert_eq!(*client.chain.hash_lookups.lock().unwrap(), [11, 12, 14, 15]);
+        assert_eq!(
+            *client.chain.landing_reads.lock().unwrap(),
+            [11, 12, 13, 14, 15]
+        );
+        assert_eq!(*client.chain.number_reads.lock().unwrap(), [13, 16]);
+        assert_eq!(
+            *client.chain.time_reads.lock().unwrap(),
+            [13],
+            "the scan that lands reads no time"
+        );
     }
 }
 
@@ -1537,7 +2195,7 @@ mod bench {
                 )
                 .unwrap(),
             ),
-            "undeployed",
+            NetworkId::Undeployed,
             Duration::from_secs(3600),
         );
         let deadline = Instant::now() + Duration::from_secs(3600);
@@ -1610,11 +2268,13 @@ mod live {
     //! responder, a funded seed and the artifact directories. Proving wants `--release`.
 
     use super::*;
-    use crate::config::{MidnightAddress, MidnightConfig, PublisherConfig};
+    use crate::config::{MidnightConfig, PublisherConfig};
     use crate::dust_feed::IndexerDustEvents;
     use crate::funding::{dust_secret_key, parse_seed, FundingWallet};
-    use crate::rpc::MidnightPublisherRpc;
+    use crate::rpc::publisher::MidnightPublisherRpc;
+    use crate::types::MidnightAddress;
     use minocrab_publisher::{Attestation, EcdsaSignature};
+    use mpc_chain_integration_core::NoopPublisherTelemetry;
 
     fn env(name: &str) -> String {
         std::env::var(name).unwrap_or_else(|_| panic!("{name} must be set"))
@@ -1648,6 +2308,7 @@ mod live {
                 config.publisher.indexer_ws_url.clone(),
             )),
             None,
+            Arc::new(NoopPublisherTelemetry),
         );
         let provers = Arc::new(
             Provers::new(
@@ -1663,7 +2324,7 @@ mod live {
             rpc.network_id(),
             config.publisher.submit_timeout,
         );
-        let responder = config.responder_address.to_hex();
+        let responder = config.responder_address;
         let bidirectional = RespondCircuit::RespondBidirectional(Attestation {
             block_height: 123_456,
             output_kind: 0,
@@ -1685,7 +2346,7 @@ mod live {
             let parameters = rpc.ledger_parameters(&head).await.unwrap();
             let request = IntentRequest {
                 circuit,
-                contract_address: *config.responder_address.as_bytes(),
+                contract_address: config.responder_address,
                 request_id: rand::random(),
                 signature: EcdsaSignature {
                     big_r_x: [0x11; 32],

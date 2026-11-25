@@ -2,16 +2,10 @@ use crate::PublicKey;
 use anyhow::Context;
 use k256::{
     ecdsa::{signature::hazmat::PrehashSigner, RecoveryId, Signature, VerifyingKey},
-    elliptic_curve::{
-        point::{AffineCoordinates, DecompressPoint},
-        sec1::ToEncodedPoint,
-        CurveArithmetic,
-    },
-    Scalar, Secp256k1, SecretKey,
+    elliptic_curve::{point::DecompressPoint, sec1::ToEncodedPoint},
+    Scalar, SecretKey,
 };
-use mpc_primitives::{Chain, Signature as MpcSignature};
-use near_account_id::AccountId;
-use signet_crypto::KeyVersion;
+use mpc_primitives::Signature as MpcSignature;
 
 // `ScalarExt` and `Sha3_256` are used only by `derive_delta`, which is
 // excluded from the wasm contract build; gate the imports to match so the
@@ -25,36 +19,12 @@ use sha3::Sha3_256;
 // `signet-crypto` kernel; re-exported here so node paths (`mpc_crypto::kdf::…`,
 // `mpc_crypto::…`) keep resolving unchanged.
 pub use signet_crypto::{
-    derive_epsilon, derive_epsilon_bitcoin, derive_epsilon_canton, derive_epsilon_eth,
-    derive_epsilon_hydration, derive_epsilon_midnight, derive_epsilon_sol, derive_key,
-    DerivationParams, UnsupportedKeyVersion, EPSILON_DERIVATION_PREFIX_V1,
-    EPSILON_DERIVATION_PREFIX_V2,
+    derive_epsilon, derive_key, reconstruct_signature, reserved_path, x_coordinate, DeriveError,
+    KeyPurpose,
 };
-
-pub fn derive_epsilon_near(
-    key_version: KeyVersion,
-    account_id: &AccountId,
-    path: &str,
-) -> Result<Scalar, UnsupportedKeyVersion> {
-    derive_epsilon(&DerivationParams::UserAccount(
-        key_version,
-        Chain::NEAR,
-        account_id.to_string(),
-        path.to_string(),
-    ))
-}
 
 pub fn derive_secret_key(secret_key: &SecretKey, epsilon: Scalar) -> SecretKey {
     SecretKey::new((epsilon + secret_key.to_nonzero_scalar().as_ref()).into())
-}
-
-/// Get the x coordinate of a point, as a scalar
-pub fn x_coordinate(
-    point: &<Secp256k1 as CurveArithmetic>::AffinePoint,
-) -> <Secp256k1 as CurveArithmetic>::Scalar {
-    <<Secp256k1 as CurveArithmetic>::Scalar as k256::elliptic_curve::ops::Reduce<
-        <k256::Secp256k1 as k256::elliptic_curve::Curve>::Uint,
-    >>::reduce_bytes(&point.x())
 }
 
 pub fn check_ec_signature(
@@ -125,41 +95,6 @@ pub fn recover(
     .context("Failed to parse returned key")
 }
 
-/// Reconstructs a signature from its components and verifies that it matches the expected public key.
-pub fn reconstruct_signature(
-    public_key: &k256::AffinePoint,
-    big_r: &k256::AffinePoint,
-    s: &k256::Scalar,
-    msg_hash: Scalar,
-) -> anyhow::Result<MpcSignature> {
-    let public_key = public_key.to_encoded_point(false);
-    let signature = k256::ecdsa::Signature::from_scalars(x_coordinate(big_r), s)
-        .context("cannot create signature from cait_sith signature")?;
-    let pk0 = recover(
-        &msg_hash.to_bytes()[..],
-        &signature,
-        RecoveryId::try_from(0).context("cannot create recovery_id=0")?,
-    )
-    .context("unable to use 0 as recovery_id to recover public key")?
-    .to_encoded_point(false);
-    if public_key == pk0 {
-        return Ok(MpcSignature::new(*big_r, *s, 0));
-    }
-
-    let pk1 = recover(
-        &msg_hash.to_bytes()[..],
-        &signature,
-        RecoveryId::try_from(1).context("cannot create recovery_id=1")?,
-    )
-    .context("unable to use 1 as recovery_id to recover public key")?
-    .to_encoded_point(false);
-    if public_key == pk1 {
-        return Ok(MpcSignature::new(*big_r, *s, 1));
-    }
-
-    anyhow::bail!("cannot use either recovery id (0 or 1) to recover pubic key")
-}
-
 /// Generates a signature for the given payload using the provided root secret key and sign arguments.
 pub fn generate_signature(
     root_sk: &k256::SecretKey,
@@ -177,7 +112,7 @@ pub fn generate_signature(
     let s = *ecdsa_sig.s().as_ref();
     let expected_public_key = derive_key(root_sk.public_key().into(), args.epsilon);
 
-    reconstruct_signature(&expected_public_key, &big_r, &s, args.payload)
+    signet_crypto::reconstruct_signature(&expected_public_key, &big_r, &s, args.payload)
         .expect("signature should validate")
 }
 
@@ -223,6 +158,7 @@ pub fn derive_delta(
 mod tests {
     use super::*;
     use crate::near_public_key_to_affine_point;
+    use mpc_primitives::Chain;
     use std::str::FromStr;
 
     #[test]
@@ -282,11 +218,13 @@ mod tests {
     #[test]
     fn derive_ethereum_admin_key() {
         // Define epsilon
-        let epsilon = derive_epsilon(&DerivationParams::SystemAccount(
+        let epsilon = derive_epsilon(
             0,
             Chain::Ethereum,
-            "signing_contract_control".to_string(),
-        ))
+            KeyPurpose::System {
+                path: "signing_contract_control",
+            },
+        )
         .unwrap();
 
         // Mainnet root PK
@@ -310,104 +248,6 @@ mod tests {
                 .unwrap();
 
         assert_eq!(address, expected_address);
-    }
-
-    #[test]
-    fn test_reconstruct_signature_success() {
-        let sk = SecretKey::from_bytes((&[0x11; 32]).into()).unwrap();
-        let public_key: k256::AffinePoint = sk.public_key().into();
-        let msg_hash = Scalar::from_bytes([0x22; 32]).unwrap();
-
-        // Generate a valid signature
-        let (ecdsa_sig, expected_rec_id): (k256::ecdsa::Signature, _) =
-            k256::ecdsa::SigningKey::from(&sk)
-                .sign_prehash(&msg_hash.to_bytes())
-                .unwrap();
-
-        // Extract components
-        let (r_bytes, _) = ecdsa_sig.split_bytes();
-        let big_r =
-            k256::AffinePoint::decompress(&r_bytes, k256::elliptic_curve::subtle::Choice::from(0))
-                .unwrap();
-        let s = *ecdsa_sig.s().as_ref();
-
-        let mpc_sig = reconstruct_signature(&public_key, &big_r, &s, msg_hash).unwrap();
-        assert_eq!(mpc_sig.big_r, big_r);
-        assert_eq!(mpc_sig.s, s);
-        assert_eq!(mpc_sig.recovery_id, expected_rec_id.to_byte());
-    }
-
-    #[test]
-    fn test_reconstruct_signature_wrong_public_key() {
-        let sk = SecretKey::from_bytes((&[0x11; 32]).into()).unwrap();
-        // Generate a different secret key to simulate a wrong public key
-        let wrong_sk = SecretKey::from_bytes((&[0x99; 32]).into()).unwrap();
-        let wrong_public_key: k256::AffinePoint = wrong_sk.public_key().into();
-
-        let msg_hash = Scalar::from_bytes([0x22; 32]).unwrap();
-
-        // Generate a valid signature with the original secret key
-        let (ecdsa_sig, _): (k256::ecdsa::Signature, _) = k256::ecdsa::SigningKey::from(&sk)
-            .sign_prehash(&msg_hash.to_bytes())
-            .unwrap();
-
-        let (r_bytes, _) = ecdsa_sig.split_bytes();
-        let big_r =
-            k256::AffinePoint::decompress(&r_bytes, k256::elliptic_curve::subtle::Choice::from(0))
-                .unwrap();
-        let s = *ecdsa_sig.s().as_ref();
-
-        // Attempt to create an MPC signature with the wrong public key
-        let err = reconstruct_signature(&wrong_public_key, &big_r, &s, msg_hash).unwrap_err();
-        assert_eq!(
-            err.to_string(),
-            "cannot use either recovery id (0 or 1) to recover pubic key"
-        );
-    }
-
-    #[test]
-    fn test_reconstruct_signature_wrong_payload() {
-        let sk = SecretKey::from_bytes((&[0x11; 32]).into()).unwrap();
-        let public_key: k256::AffinePoint = sk.public_key().into();
-
-        let msg_hash = Scalar::from_bytes([0x22; 32]).unwrap();
-        // Use a different message hash to simulate a wrong payload
-        let wrong_msg_hash = Scalar::from_bytes([0x33; 32]).unwrap();
-
-        let (ecdsa_sig, _): (k256::ecdsa::Signature, _) = k256::ecdsa::SigningKey::from(&sk)
-            .sign_prehash(&msg_hash.to_bytes())
-            .unwrap();
-
-        let (r_bytes, _) = ecdsa_sig.split_bytes();
-        let big_r =
-            k256::AffinePoint::decompress(&r_bytes, k256::elliptic_curve::subtle::Choice::from(0))
-                .unwrap();
-        let s = *ecdsa_sig.s().as_ref();
-
-        // Attempt to create an MPC signature with the wrong message hash
-        let err = reconstruct_signature(&public_key, &big_r, &s, wrong_msg_hash).unwrap_err();
-        assert_eq!(
-            err.to_string(),
-            "cannot use either recovery id (0 or 1) to recover pubic key"
-        );
-    }
-
-    #[test]
-    fn test_reconstruct_signature_invalid_s_scalar() {
-        let sk = SecretKey::from_bytes((&[0x11; 32]).into()).unwrap();
-        let public_key: k256::AffinePoint = sk.public_key().into();
-        let msg_hash = Scalar::from_bytes([0x22; 32]).unwrap();
-
-        // use the public key as a dummy point for big_r
-        let dummy_big_r = public_key;
-        let invalid_s = Scalar::ZERO; // 0 is always an invalid 's' in ECDSA
-
-        // Attempt to create an MPC signature with an invalid 's' scalar
-        let err =
-            reconstruct_signature(&public_key, &dummy_big_r, &invalid_s, msg_hash).unwrap_err();
-        assert!(err
-            .to_string()
-            .contains("cannot create signature from cait_sith signature"));
     }
 
     #[test]

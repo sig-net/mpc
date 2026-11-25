@@ -14,5 +14,7 @@ pub use chain::{Chain, ChainFromError};
 pub use crypto::{borsh_scalar, PublicKey, ScalarExt, SignId, Signature, MAX_SECP256K1_SCALAR};
 pub use requests::SignRequest;
 
-pub const LATEST_MPC_KEY_VERSION: u32 = 1;
+/// The highest key version the network signs; it refuses requests above it.
+pub const LATEST_MPC_KEY_VERSION: u32 = 2;
+/// The first key version.
 pub const LEGACY_MPC_KEY_VERSION_0: u32 = 0;

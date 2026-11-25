@@ -1,0 +1,14 @@
+# Only clap reads the environment, so every setting of production code is a
+# parameter that `mpc-node start --help` lists. Tests, examples and benches
+# allow the lint where they read it.
+#
+# The lint sees our own calls only. Libraries that read the environment
+# themselves are outside it: `RUST_LOG` for the log filter, the cloud client's
+# credentials, reqwest's `HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY`, and the
+# OpenTelemetry SDK's `OTEL_*` variables.
+disallowed-methods = [
+    { path = "std::env::var", reason = "only clap reads the environment" },
+    { path = "std::env::var_os", reason = "only clap reads the environment" },
+    { path = "std::env::vars", reason = "only clap reads the environment" },
+    { path = "std::env::vars_os", reason = "only clap reads the environment" },
+]

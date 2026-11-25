@@ -24,8 +24,8 @@ pub trait ChainTelemetry: Send + Sync + Clone + 'static {
     fn request_indexed(&self, kind: RequestKind);
 
     /// Records a failed attempt to extract the output of a bidirectional
-    /// execution on this chain. Counts *attempts*: a retryable failure on the
-    /// same transaction increments once per retry.
+    /// execution on this chain. Counts *attempts*: fetch failures once
+    /// per polled id, classification failures once per watched request.
     fn bidirectional_extraction_failed(&self, kind: ExtractionFailureKind);
 
     /// Records an expiry scan deferred by a solidity head-fetch
@@ -79,6 +79,15 @@ pub trait PublisherTelemetry: Send + Sync + 'static {
 
     /// Records a request the chain's publisher answered with an error code.
     fn publish_refused(&self, _code: &str) {}
+
+    /// Counts restarts, not drops: only the wallet's own causes report,
+    /// even one with no checkpoint held; first-event replays by other
+    /// paths do not.
+    // TODO: `cause` is a Midnight-only closed family as string literals at five call
+    // sites (funding/sync.rs ×3, funding/wallet.rs ×2), restated in the node metric
+    // help text; a new cause needs edits in three crates. Replace with a cause enum
+    // in core to pin the family at compile time.
+    fn funding_wallet_replay_restarted(&self, _cause: &str) {}
 }
 
 /// No-op implementation for tests

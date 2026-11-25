@@ -8,9 +8,9 @@ use crate::node_client::NodeClient;
 use crate::rpc::{ContractStateWatcher, RpcChannel};
 use crate::sign_bidirectional::SignStatus;
 use crate::stream::ops::{
-    process_block_event, process_execution_confirmed, process_respond_bidirectional_event,
-    process_respond_event, process_sign_request, publish_failover_due,
-    requeue_pending_sign_requests, resume_pending_publish_requests,
+    answer_unviable, process_block_event, process_execution_confirmed,
+    process_respond_bidirectional_event, process_respond_event, process_sign_request,
+    publish_failover_due, requeue_pending_sign_requests, resume_pending_publish_requests,
 };
 use crate::types::{CheckpointWatcher, SignCommand};
 
@@ -30,6 +30,9 @@ pub struct StreamContext {
     pub node_client: NodeClient,
     pub checkpoints_rx: CheckpointWatcher,
     pub caught_up: bool,
+    /// Failover deadlines count from here at the earliest: this process's first catch-up on the
+    /// chain since starting or rebasing.
+    pub failover_floor: Option<u64>,
     /// This node's stored records, read by recovery and applied on catching up.
     pub local_records: Vec<(SignId, SignStatus)>,
     /// Overrides the failover schedule's observe lag; `None` is production. Fixtures
@@ -59,6 +62,7 @@ impl StreamContext {
             node_client,
             checkpoints_rx,
             caught_up: false,
+            failover_floor: None,
             local_records: Vec::new(),
             observe_lag: None,
             ethereum_chain_id: None,
@@ -86,7 +90,7 @@ impl StreamContext {
                 .await
                 .context("sign command channel closed")?;
         } else {
-            tracing::warn!(
+            tracing::debug!(
                 ?cmd,
                 "dropping sign command until catchup completes; the backlog requeues it on CatchupCompleted"
             );
@@ -109,6 +113,8 @@ pub(crate) async fn handle_chain_event<T: ChainTelemetry>(
                 return Ok(());
             }
             ctx.caught_up = true;
+            ctx.failover_floor
+                .get_or_insert_with(mpc_utils::time::current_unix_timestamp);
             // Before the flag lets another chain's stream send this chain's entries to sign.
             ctx.backlog
                 .claim_local(chain, std::mem::take(&mut ctx.local_records))
@@ -120,6 +126,7 @@ pub(crate) async fn handle_chain_event<T: ChainTelemetry>(
             requeue_pending_sign_requests(ctx, chain)
                 .await
                 .context("failed to requeue pending sign requests")?;
+            answer_unviable(chain, ctx, root_pk).await;
             resume_pending_publish_requests(ctx, chain).await;
         }
         ChainEvent::SignRequest {
@@ -177,6 +184,7 @@ pub(crate) async fn handle_chain_event<T: ChainTelemetry>(
                 result,
                 ctx,
                 chain,
+                root_pk,
             )
             .await
             .context("failed to process execution confirmation")?;

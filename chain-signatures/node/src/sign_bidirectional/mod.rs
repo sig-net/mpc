@@ -9,8 +9,8 @@ mod signing;
 use crate::protocol::Chain;
 use anyhow::Context as _;
 use k256::Scalar;
+use mpc_crypto::KeyPurpose;
 use mpc_primitives::ChainConfig as _;
-use mpc_primitives::LATEST_MPC_KEY_VERSION;
 pub use mpc_primitives::{
     BidirectionalTx, BidirectionalTxId, ChainFromError, SignBidirectionalEvent, Signature,
 };
@@ -21,7 +21,7 @@ pub use signing::sign_and_hash_transaction;
 use signing::validate_unsigned_transaction;
 pub(crate) use signing::{
     destination_expiry, owned_by_requester, pending_destination_id, transaction_chain_id,
-    ExpiryWindow,
+    transaction_nonce, ExpiryWindow,
 };
 
 /// The requester's chain-local identity string: Midnight and Canton senders
@@ -34,38 +34,6 @@ fn source_chain_sender_string(sender: [u8; 32], chain: Chain) -> anyhow::Result<
     }
 }
 
-/// Derives the request key's epsilon on the requester's chain.
-fn derive_epsilon(
-    chain: Chain,
-    key_version: u32,
-    sender_string: &str,
-    path: &str,
-) -> anyhow::Result<Scalar> {
-    match chain {
-        Chain::Solana => Ok(mpc_crypto::kdf::derive_epsilon_sol(
-            key_version,
-            sender_string,
-            path,
-        )?),
-        Chain::Hydration => Ok(mpc_crypto::kdf::derive_epsilon_hydration(
-            key_version,
-            sender_string,
-            path,
-        )?),
-        Chain::Canton => Ok(mpc_crypto::kdf::derive_epsilon_canton(
-            key_version,
-            sender_string,
-            path,
-        )?),
-        Chain::Midnight => Ok(mpc_crypto::kdf::derive_epsilon_midnight(
-            key_version,
-            sender_string,
-            path,
-        )?),
-        _ => anyhow::bail!("unsupported chain for epsilon derivation: {chain}"),
-    }
-}
-
 /// The only `algo`, `dest` and `params` a request may carry (Section 7.1 of
 /// doc/bidirectional-calls.md). The node signs ECDSA whatever they say, but they
 /// enter the request id, so any other value would give one execution a second
@@ -75,22 +43,8 @@ pub(crate) const SDK_ALGO: &str = "ECDSA";
 pub(crate) const SDK_DEST: &str = "";
 pub(crate) const SDK_PARAMS: &str = "";
 
-/// Key version 0 predates bidirectional signing.
-const MIN_BIDIRECTIONAL_KEY_VERSION: u32 = 1;
-
-/// Key version in `MIN_BIDIRECTIONAL_KEY_VERSION..=LATEST_MPC_KEY_VERSION`, and
 /// [`SDK_ALGO`], [`SDK_DEST`] and [`SDK_PARAMS`].
 fn check_request_fields(event: &SignBidirectionalEvent) -> anyhow::Result<()> {
-    anyhow::ensure!(
-        event.key_version >= MIN_BIDIRECTIONAL_KEY_VERSION,
-        "key version must be at least {MIN_BIDIRECTIONAL_KEY_VERSION}, got {}",
-        event.key_version
-    );
-    anyhow::ensure!(
-        event.key_version <= LATEST_MPC_KEY_VERSION,
-        "key version must be at most {LATEST_MPC_KEY_VERSION}, got {}",
-        event.key_version
-    );
     let fields = (
         event.algo.as_str(),
         event.dest.as_str(),
@@ -130,6 +84,14 @@ pub trait SignBidirectionalEventExt {
         mpc_sig: Signature,
         root_pk: mpc_primitives::PublicKey,
     ) -> anyhow::Result<BidirectionalTx>;
+
+    /// The [`BidirectionalTx`] whose id a signature of this event gave.
+    fn bidirectional_tx(
+        &self,
+        request_id: [u8; 32],
+        id: BidirectionalTxId,
+        root_pk: mpc_primitives::PublicKey,
+    ) -> anyhow::Result<BidirectionalTx>;
 }
 
 impl SignBidirectionalEventExt for SignBidirectionalEvent {
@@ -138,12 +100,15 @@ impl SignBidirectionalEventExt for SignBidirectionalEvent {
     }
 
     fn epsilon(&self) -> anyhow::Result<Scalar> {
-        derive_epsilon(
-            self.chain,
+        let purpose = KeyPurpose::Bidirectional {
+            sender: &self.sender_string()?,
+            path: &self.path,
+        };
+        Ok(mpc_crypto::derive_epsilon(
             self.key_version,
-            &self.sender_string()?,
-            &self.path,
-        )
+            self.chain,
+            purpose,
+        )?)
     }
 
     fn target_chain(&self) -> Result<Chain, mpc_primitives::ChainFromError> {
@@ -183,26 +148,13 @@ impl SignBidirectionalEventExt for SignBidirectionalEvent {
         // ops): wall-clock anchors would split verdicts, block time does not.
         let calldata = validate_unsigned_transaction(target, &self.serialized_transaction)
             .context("undecodable serialized_transaction")?;
-        match calldata {
-            Some(calldata) => mpc_chain_ethereum::validate_schemas(
-                calldata,
-                &self.output_deserialization_schema,
-                self.chain.respond_serialization_format(),
-                &self.respond_serialization_schema,
-            )
-            .context("unprocessable output schemas"),
-            // Tron: receipt-based output extraction arrives with the execution
-            // watcher, which also defines its schemas; until then admission
-            // requires a Tron target to carry none.
-            None => {
-                anyhow::ensure!(
-                    self.output_deserialization_schema.is_empty()
-                        && self.respond_serialization_schema.is_empty(),
-                    "Tron targets define no output schemas yet"
-                );
-                Ok(())
-            }
-        }
+        mpc_evm_common::validate_schemas(
+            &calldata,
+            &self.output_deserialization_schema,
+            self.chain.respond_serialization_format(),
+            &self.respond_serialization_schema,
+        )
+        .context("unprocessable output schemas")
     }
 
     fn to_bidirectional_tx(
@@ -214,14 +166,26 @@ impl SignBidirectionalEventExt for SignBidirectionalEvent {
         let target_chain = self.target_chain().with_context(|| {
             format!("failed to determine target chain for request: {request_id:?}")
         })?;
-        let epsilon = self.epsilon()?;
-        let from_address = derive_user_address(root_pk, epsilon);
-        // EVM-shaped; Tron consumers wrap it with `TronAddress::from_evm`.
-        let (signed_tx_hash, nonce) =
+        let signed_tx_hash =
             sign_and_hash_transaction(target_chain, &self.serialized_transaction, mpc_sig)?;
+        self.bidirectional_tx(request_id, BidirectionalTxId(signed_tx_hash), root_pk)
+    }
+
+    fn bidirectional_tx(
+        &self,
+        request_id: [u8; 32],
+        id: BidirectionalTxId,
+        root_pk: mpc_primitives::PublicKey,
+    ) -> anyhow::Result<BidirectionalTx> {
+        let target_chain = self.target_chain().with_context(|| {
+            format!("failed to determine target chain for request: {request_id:?}")
+        })?;
+        // EVM-shaped; Tron consumers wrap it with `TronAddress::from_evm`.
+        let from_address = **derive_user_address(root_pk, self.epsilon()?);
+        let nonce = transaction_nonce(target_chain, &self.serialized_transaction)?;
 
         Ok(BidirectionalTx {
-            id: BidirectionalTxId(signed_tx_hash),
+            id,
             sender: self.sender,
             serialized_transaction: self.serialized_transaction.clone(),
             source_chain: self.chain,
@@ -236,7 +200,7 @@ impl SignBidirectionalEventExt for SignBidirectionalEvent {
             output_deserialization_schema: self.output_deserialization_schema.clone(),
             respond_serialization_schema: self.respond_serialization_schema.clone(),
             request_id,
-            from_address: **from_address,
+            from_address,
             nonce,
         })
     }
@@ -245,21 +209,11 @@ impl SignBidirectionalEventExt for SignBidirectionalEvent {
 /// Extension trait for `BidirectionalTx` to provide additional helper methods.
 pub trait BidirectionalTxExt {
     fn sender_string(&self) -> anyhow::Result<String>;
-    fn epsilon(&self, path: &str) -> anyhow::Result<Scalar>;
 }
 
 impl BidirectionalTxExt for BidirectionalTx {
     fn sender_string(&self) -> anyhow::Result<String> {
         source_chain_sender_string(self.sender, self.source_chain)
-    }
-
-    fn epsilon(&self, path: &str) -> anyhow::Result<Scalar> {
-        derive_epsilon(
-            self.source_chain,
-            self.key_version,
-            &self.sender_string()?,
-            path,
-        )
     }
 }
 
@@ -267,12 +221,13 @@ impl BidirectionalTxExt for BidirectionalTx {
 mod tests {
     use super::eth_tx::legacy_tx;
     use super::{
-        SignBidirectionalEvent, SignBidirectionalEventExt as _, Signature, LATEST_MPC_KEY_VERSION,
-        SDK_ALGO, SDK_DEST, SDK_PARAMS,
+        SignBidirectionalEvent, SignBidirectionalEventExt as _, Signature, SDK_ALGO, SDK_DEST,
+        SDK_PARAMS,
     };
     use crate::protocol::Chain;
     use k256::elliptic_curve::sec1::FromEncodedPoint;
     use k256::{AffinePoint, EncodedPoint};
+    use mpc_primitives::LATEST_MPC_KEY_VERSION;
 
     /// Recorded mainnet USDT transfer (chain-tron fixture `usdt-transfer-1.json`)
     const RAW_HEX: &str = "0a02db6f220815ff9c9c504ad4a8409a80f5a491345aae01081f12a9010a31747970652e676f6f676c65617069732e636f6d2f70726f746f636f6c2e54726967676572536d617274436f6e747261637412740a154120eb85916a10d2c6542613e4c9517b5e99b2dee9121541a614f803b6fd780986a42c78ec9c7f77e6ded13c2244a9059cbb000000000000000000000000d9e02baf48ed306afc63cfa816a2b6be8442036a0000000000000000000000000000000000000000000000000000000008f428f870bad8e2a49134900180e1eb17";
@@ -313,19 +268,11 @@ mod tests {
     }
 
     #[test]
-    fn check_request_fields_accepts_only_key_version_1_and_the_sdk_fields() {
+    fn check_request_fields_accepts_only_the_sdk_fields() {
         type Edit = fn(&mut SignBidirectionalEvent);
-        let cases: [(&str, Edit, bool); 15] = [
+        let cases: [(&str, Edit, bool); 11] = [
             ("as the SDKs send it", |_| {}, true),
             ("from Hydration", |e| e.chain = Chain::Hydration, true),
-            (
-                "from Hydration at key version 0",
-                |e| {
-                    e.chain = Chain::Hydration;
-                    e.key_version = 0;
-                },
-                false,
-            ),
             (
                 "from Hydration, algo lowercase",
                 |e| {
@@ -335,8 +282,6 @@ mod tests {
                 false,
             ),
             ("from Canton", |e| e.chain = Chain::Canton, true),
-            ("key version 0", |e| e.key_version = 0, false),
-            ("key version 2", |e| e.key_version = 2, false),
             (
                 "algo secp256k1",
                 |e| e.algo = "secp256k1".to_string(),
@@ -355,14 +300,6 @@ mod tests {
                 },
                 false,
             ),
-            (
-                "from Midnight at key version 0",
-                |e| {
-                    e.chain = Chain::Midnight;
-                    e.key_version = 0;
-                },
-                false,
-            ),
         ];
         for (case, edit, accepted) in cases {
             let mut event = solana_event(Chain::Ethereum);
@@ -371,6 +308,27 @@ mod tests {
                 super::check_request_fields(&event).is_ok(),
                 accepted,
                 "{case}"
+            );
+        }
+    }
+
+    /// The key derivation refuses what the request fields only warn about.
+    #[test]
+    fn validate_refuses_key_versions_without_a_bidirectional_key() {
+        for (chain, key_version, accepted) in [
+            (Chain::Solana, LATEST_MPC_KEY_VERSION, true),
+            (Chain::Solana, 0, false),
+            (Chain::Hydration, 0, false),
+            (Chain::Canton, 0, false),
+            (Chain::Solana, LATEST_MPC_KEY_VERSION + 1, false),
+        ] {
+            let mut event = solana_event(Chain::Ethereum);
+            event.chain = chain;
+            event.key_version = key_version;
+            assert_eq!(
+                event.validate().is_ok(),
+                accepted,
+                "{chain} at key version {key_version}"
             );
         }
     }
@@ -421,11 +379,27 @@ mod tests {
             .unwrap()
         };
         let low = k256::Scalar::from(5u64);
-        let (id_low, nonce) = id_of(low, 1);
-        let (id_high, _) = id_of(-low, 0);
+        let id_low = id_of(low, 1);
+        let id_high = id_of(-low, 0);
         assert_eq!(id_low, id_high);
-        assert_eq!(nonce, 0);
         assert_eq!(hex::encode(id_low), TXID_HEX);
+    }
+
+    /// The recorded USDT transfer returns `bool`; the same schema pair
+    /// extraction decodes at execution.
+    #[test]
+    fn validate_admits_a_tron_target_with_schemas() {
+        let mut event = tron_event(hex::decode(RAW_HEX).unwrap());
+        event.output_deserialization_schema = br#"[{"name":"ok","type":"bool"}]"#.to_vec();
+        event.respond_serialization_schema = br#"[{"name":"ok","type":"bool"}]"#.to_vec();
+        assert!(event.validate().is_ok());
+
+        // A Borsh respond encoding carries exactly one field.
+        event.chain = Chain::Solana;
+        event.respond_serialization_schema =
+            br#"[{"name":"a","type":"bool"},{"name":"b","type":"bool"}]"#.to_vec();
+        let err = format!("{:#}", event.validate().unwrap_err());
+        assert!(err.contains("unprocessable output schemas"), "{err}");
     }
 
     #[test]

@@ -261,7 +261,10 @@ impl SignatureSpawner {
         );
 
         // Watcher that increments the delayed metric if not completed within the expected response time.
-        let unix_timestamp_indexed = request.unix_timestamp_indexed;
+        // An adopted request has no indexing time, so its budget starts here.
+        let unix_timestamp_indexed = request
+            .unix_timestamp_indexed
+            .unwrap_or_else(mpc_utils::time::current_unix_timestamp);
         let expected_response_time_secs = chain.expected_response_time_secs();
         let already_elapsed = unix_elapsed(unix_timestamp_indexed);
         let remaining_time =
@@ -511,7 +514,7 @@ impl SignatureSpawner {
             SignCommand::AbortChain(chain) => {
                 tracing::warn!(
                     ?chain,
-                    "aborting all in-flight signature tasks on chain regression"
+                    "aborting in-flight signature tasks to rebase onto the consensus checkpoint"
                 );
                 let to_abort: Vec<SignId> = self
                     .requests
@@ -565,13 +568,15 @@ impl SignatureSpawner {
                     return;
                 }
 
-                record_request_latency_since(
-                    entry.chain(),
-                    SignRequestStep::AwaitingGeneration,
-                    "ok",
-                    entry.request().request_kind(),
-                    entry.request().unix_timestamp_indexed,
-                );
+                if let Some(indexed) = entry.request().unix_timestamp_indexed {
+                    record_request_latency_since(
+                        entry.chain(),
+                        SignRequestStep::AwaitingGeneration,
+                        "ok",
+                        entry.request().request_kind(),
+                        indexed,
+                    );
+                }
 
                 self.add_request(governance, entry, signature_timeout);
             }
@@ -1132,6 +1137,18 @@ mod tests {
         // A completion naming the leg we do track still retires it.
         spawner.leg_completed(sign_id, RequestKind::RespondBidirectional);
         assert!(!spawner.test_requests_contains(&sign_id));
+    }
+
+    /// Round timing every node must share, pinned for both build flavours.
+    #[test]
+    fn round_timeouts_are_pinned() {
+        let (organize_posit, ceiling) = if cfg!(feature = "test-feature") {
+            (5, 30)
+        } else {
+            (20, 600)
+        };
+        assert_eq!(ORGANIZE_POSIT_TIMEOUT, Duration::from_secs(organize_posit));
+        assert_eq!(ROUND_TIMEOUT_CEILING, Duration::from_secs(ceiling));
     }
 
     #[test]

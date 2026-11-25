@@ -74,7 +74,7 @@ async fn main() -> anyhow::Result<()> {
             nonce: u64::MAX,
         };
 
-        state.watch_execution(Chain::Ethereum, Arc::new(tx)).await;
+        state.watch_execution(Arc::new(tx)).await;
     }
     tracing::info!("bench_watchers: injected {watchers_count} dummy watchers");
 

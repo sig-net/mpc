@@ -7,10 +7,10 @@ use alloy::primitives::{keccak256, Address, Bytes, TxKind, B256, U256};
 use alloy::sol_types::SolValue;
 use borsh::{BorshDeserialize, BorshSerialize};
 use mpc_chain_integration_core::utils::payload::bidirectional_payload_scalar;
-use mpc_crypto::x_coordinate;
 use mpc_primitives::{
     Chain, IndexedSignRequest, ScalarExt, SignArgs, SignBidirectionalEvent, SignId, Signature,
 };
+use signet_crypto::x_coordinate;
 
 use crate::daml::{
     CantonSignature, EvmAccessListEntry, EvmType2TransactionParams,
@@ -112,10 +112,13 @@ impl CantonSignBidirectionalRequestedEvent {
 
         let request_id = self.request_id;
 
-        let epsilon = mpc_crypto::kdf::derive_epsilon_canton(
+        let epsilon = signet_crypto::derive_epsilon(
             self.key_version,
-            &self.sender_string(),
-            &self.path,
+            Chain::Canton,
+            signet_crypto::KeyPurpose::Bidirectional {
+                sender: &self.sender_string(),
+                path: &self.path,
+            },
         )?;
 
         let target = Chain::from_caip2_chain_id(&self.caip2_id)?;

@@ -5,6 +5,7 @@ use url::Url;
 #[derive(Debug, Clone, clap::Parser)]
 #[group(id = "indexer_canton_options")]
 pub struct CantonArgs {
+    /// Canton JSON Ledger API HTTP URL of the participant the node uses.
     #[arg(
         long,
         env("MPC_CANTON_JSON_API_URL"),
@@ -22,6 +23,7 @@ pub struct CantonArgs {
         ]
     )]
     pub canton_json_api_url: Option<Url>,
+    /// Canton JSON Ledger API websocket URL, which the indexer reads ledger updates from.
     #[arg(
         long,
         env("MPC_CANTON_JSON_API_WS_URL"),
@@ -29,12 +31,14 @@ pub struct CantonArgs {
         requires = "canton_json_api_url"
     )]
     pub canton_json_api_ws_url: Option<Url>,
+    /// Ledger API user id the node submits its commands as.
     #[arg(
         long,
         env("MPC_CANTON_LEDGER_API_USER"),
         requires = "canton_json_api_url"
     )]
     pub canton_ledger_api_user: Option<String>,
+    /// OIDC token endpoint that issues the node's Ledger API access tokens.
     #[arg(
         long,
         env("MPC_CANTON_OIDC_TOKEN_URL"),
@@ -42,12 +46,14 @@ pub struct CantonArgs {
         requires = "canton_json_api_url"
     )]
     pub canton_oidc_token_url: Option<Url>,
+    /// OIDC client id for the token request.
     #[arg(
         long,
         env("MPC_CANTON_OIDC_CLIENT_ID"),
         requires = "canton_json_api_url"
     )]
     pub canton_oidc_client_id: Option<String>,
+    /// OIDC client secret for the token request.
     #[arg(
         long,
         env("MPC_CANTON_OIDC_CLIENT_SECRET"),
@@ -55,14 +61,17 @@ pub struct CantonArgs {
         requires = "canton_json_api_url"
     )]
     pub canton_oidc_client_secret: Option<String>,
+    /// Audience requested for the access token.
     #[arg(
         long,
         env("MPC_CANTON_OIDC_AUDIENCE"),
         requires = "canton_json_api_url"
     )]
     pub canton_oidc_audience: Option<String>,
+    /// Scope requested for the access token. Optional.
     #[arg(long, env("MPC_CANTON_OIDC_SCOPE"), requires = "canton_json_api_url")]
     pub canton_oidc_scope: Option<String>,
+    /// Canton party the node acts as and whose ledger updates it reads.
     #[arg(long, env("MPC_CANTON_PARTY_ID"), requires = "canton_json_api_url")]
     pub canton_party_id: Option<String>,
     /// The Signer contract ID on the Canton ledger. Must be updated if the contract is re-deployed.

@@ -2,7 +2,7 @@
 
 use integration_tests::mpc_fixture::{mock_stream::MockStream, MpcFixtureBuilder};
 use mpc_node::backlog::consensus::align_backlog_with_consensus;
-use mpc_node::backlog::mock::BacklogTestExt;
+use mpc_node::backlog::mock::{mock_root_pk, BacklogTestExt};
 use mpc_node::backlog::Backlog;
 use mpc_node::mesh::connection::NodeStatus;
 use mpc_node::mesh::MeshState;
@@ -72,7 +72,7 @@ async fn test_web_server_serves_checkpoint() {
     let response: mpc_node::web::CheckpointResponse =
         ciborium::from_reader(body.as_ref()).expect("should deserialize checkpoint");
     assert_eq!(response.version, mpc_node::CHECKPOINT_VERSION);
-    let checkpoints = response.checkpoints;
+    let checkpoints = response.facts;
 
     let retrieved = checkpoints
         .get(&chain)
@@ -82,7 +82,7 @@ async fn test_web_server_serves_checkpoint() {
         "retrieved checkpoint height should match"
     );
     assert_eq!(
-        retrieved.digest(),
+        mpc_node::backlog::Checkpoint::from(retrieved.clone()).digest(),
         digest,
         "retrieved checkpoint digest should match"
     );
@@ -135,7 +135,7 @@ async fn test_consensus_alignment_peer_fetch() {
             ciborium::from_reader(body.as_ref()).unwrap();
         assert_eq!(response.version, mpc_node::CHECKPOINT_VERSION);
         assert!(
-            response.checkpoints.contains_key(&chain),
+            response.facts.contains_key(&chain),
             "web server should serve the checkpoint"
         );
     }
@@ -175,6 +175,7 @@ async fn test_consensus_alignment_peer_fetch() {
             &mut mesh_rx,
             &node_client,
             &my_account_id,
+            mock_root_pk(),
         ),
     )
     .await;
@@ -258,6 +259,7 @@ async fn test_consensus_alignment_consensus_changes_while_fetching() {
             &mut mesh_rx,
             &node_client,
             &my_account_id,
+            mock_root_pk(),
         )
         .await
     });
@@ -358,6 +360,7 @@ async fn test_reset_converges_divergent_nodes() {
                 &mut mesh_rx,
                 &node_client,
                 &my_account_id,
+                mock_root_pk(),
             ),
         )
         .await

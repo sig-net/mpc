@@ -25,7 +25,7 @@ alias s := setup
 # Run GitHub workflows locally via act (needs Docker; pulls runner images on first run)
 # Usage: just run-ci [args] (e.g. just run-ci "-l" to list, just run-ci "-j lint-and-test")
 run-ci args="": (setup "act")
-    act -P warp-ubuntu-latest-x64-4x=catthehacker/ubuntu:act-latest -P ubuntu-latest=catthehacker/ubuntu:act-latest {{args}}
+    act -P warp-ubuntu-latest-x64-4x=catthehacker/ubuntu:act-latest-20261122@sha256:fc96e68f607a38291c8057b4280aeba5e7164994c7262c09b15dc81cd786f1f1 -P ubuntu-latest=catthehacker/ubuntu:act-latest-20261122@sha256:fc96e68f607a38291c8057b4280aeba5e7164994c7262c09b15dc81cd786f1f1 {{args}}
 
 # Run all integration tests
 # Usage: just t [filter]
@@ -33,9 +33,10 @@ test filter="": (setup "")
     cargo nextest run -p integration-tests {{ if filter != "" { "-E 'test(" + filter + ")'" } else { "" } }}
 alias t := test
 
-# Run only lightweight fixture tests (no full cluster or Docker beyond Redis)
+# Run only lightweight fixture tests (no full cluster or Docker beyond Redis).
+# Nodes run in-process, so no setup: neither the contract wasm nor the node binary is needed.
 # Usage: just tf [filter]
-test-fixture filter="": (setup "")
+test-fixture filter="":
     cargo nextest run -p integration-tests --profile fixture {{ if filter != "" { "-E 'test(" + filter + ")'" } else { "" } }}
 alias tf := test-fixture
 
@@ -72,21 +73,25 @@ fmt:
 
 # Fast unit tests (mirrors CI: no integration-tests, no Docker). The node
 # gates its test-only stores and flags behind test-feature, so its lib tests
-# run a second time with the feature on.
+# run a second time with the feature on. nextest runs all test binaries in
+# parallel but skips doctests, so those run separately.
 # Usage: just test-unit [filter]
 test-unit filter="":
-    cargo test --workspace --exclude integration-tests {{filter}}
-    cargo test -p mpc-node --lib --features test-feature {{filter}}
+    cargo nextest run --workspace --exclude integration-tests --no-tests=warn {{filter}}
+    cargo nextest run -p mpc-node --lib --features test-feature --no-tests=warn {{filter}}
+    cargo test --workspace --exclude integration-tests --doc {{filter}}
 alias tu := test-unit
 
 # Full CI gate locally: format check + clippy + unit tests
 ci: fmt-check lint test-unit
 alias c := ci
 
-# Security audit of dependencies (mirrors CI audit job)
+# Dependency checks (mirrors CI audit job): advisories, licenses, bans, sources, unused dependencies
 audit:
-    @if ! command -v cargo-audit >/dev/null; then cargo install cargo-audit --locked; fi
-    cargo audit
+    @if ! command -v cargo-deny >/dev/null; then cargo install cargo-deny --locked; fi
+    @if ! command -v cargo-machete >/dev/null; then cargo install cargo-machete --locked; fi
+    cargo deny check advisories bans licenses sources -W unmaintained -W unsound --hide-inclusion-graph
+    cargo machete
 
 # Run all tests sequentially (single-threaded)
 # Usage: just ts [filter]
@@ -95,16 +100,14 @@ test-seq filter="": (setup "")
 alias ts := test-seq
 
 # Build artifacts: `just build` = whole Rust workspace (via setup),
-# `just build eth` = EVM artifacts, `just build contract` = NEAR contract wasm,
+# `just build contract` = NEAR contract wasm,
 # `just build test-node` = mpc-node with test-feature, the binary the integration harness spawns (not the release build),
 # `just build midnight` = midnight-devtools real-stack fixtures,
 # `just build tests` = integration test binaries without running them,
 # `just build compat` = latest release node binary for the compat test
-# Usage: just build [target] (target="" | eth | contract | test-node | midnight | tests | compat)
+# Usage: just build [target] (target="" | contract | test-node | midnight | tests | compat)
 build target="":
-    @if [ "{{target}}" = "eth" ]; then \
-      cd chain-signatures/contract-eth && npm ci && npx hardhat compile; \
-    elif [ "{{target}}" = "contract" ]; then \
+    @if [ "{{target}}" = "contract" ]; then \
       ./build-contract.sh; \
     elif [ "{{target}}" = "test-node" ]; then \
       cargo build -p mpc-node --release --features test-feature,debug-page; \
@@ -117,22 +120,18 @@ build target="":
     elif [ -z "{{target}}" ]; then \
       just setup && cargo build --workspace; \
     else \
-      echo "Unknown build target: {{target}} (expected '' | eth | contract | test-node | midnight | tests | compat)" >&2; exit 1; \
+      echo "Unknown build target: {{target}} (expected '' | contract | test-node | midnight | tests | compat)" >&2; exit 1; \
     fi
 
-# Anvil-backed EVM tests: real EVM + real contract bytecode (needs anvil + eth-build output)
+# Anvil-backed EVM tests: real EVM + real contract bytecode (needs anvil)
 # Usage: just test-eth [filter]
-test-eth filter="": (build "eth")
+test-eth filter="":
     cargo test -p mpc-chain-ethereum --features integration --tests {{filter}}
 alias te := test-eth
 
 # Clippy for integration-gated EVM code (mirrors CI)
-lint-eth: (build "eth")
+lint-eth:
     cargo clippy -p mpc-chain-ethereum --tests --features integration -- -Dclippy::all
-
-# EVM contract unit tests (hardhat, no anvil needed)
-test-eth-unit:
-    cd chain-signatures/contract-eth && npx hardhat test
 
 # TRE-backed Tron gate: dockerized java-tron, token deployed via deploycontract
 # Usage: just test-tron-tre  (TRE_PORT overrides the host port, default 9090)
@@ -141,11 +140,9 @@ tre-port := env_var_or_default('TRE_PORT', '9090')
 test-tron-tre:
     #!/usr/bin/env bash
     set -euo pipefail
-    # Tag-pinned only: the vendor publishes no digest, so a republished
-    # 2.0.0 tag would change this chain silently.
     trap 'docker rm -f tre >/dev/null 2>&1 || true' EXIT
     docker rm -f tre >/dev/null 2>&1 || true
-    docker run -d --name tre -p {{tre-port}}:9090 -e useDefaultPrivateKey=true tronbox/tre:2.0.0 >/dev/null
+    docker run -d --name tre -p {{tre-port}}:9090 -e useDefaultPrivateKey=true tronbox/tre:2.0.0@sha256:f4332e11df12a9f360639a4546fd046593909630fda48af00b30410c144342f0 >/dev/null
     # Readiness: account funding is async after healthcheck, and a deploy
     # built against the genesis block fails broadcast.
     ready=0
@@ -166,7 +163,7 @@ test-tron-tre:
 # Midnight real-stack tests (ignored by default; each starts a Midnight node/indexer/proof-server,
 # Anvil and an MPC cluster). Runs one named test from cases::midnight_stream, or all of them.
 # Usage: just test-midnight [test]
-test-midnight test="": (build "eth") (setup "")
+test-midnight test="": (setup "")
     cargo nextest run -p integration-tests --test lib --run-ignored only --no-capture -E '{{ if test == "" { "test(/^cases::midnight_stream::/)" } else { "test(=cases::midnight_stream::" + test + ")" } }}'
 
 # Canton tests (default: stream; e2e via `just test-canton cases::canton`)
