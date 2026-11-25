@@ -171,7 +171,7 @@ test-tron-tre:
 # Midnight real-stack tests (ignored by default; each starts a Midnight node/indexer/proof-server,
 # Anvil and an MPC cluster). Runs one named test from cases::midnight_stream, or all of them.
 # Usage: just test-midnight [test]
-test-midnight test="": (build "eth") (setup "")
+test-midnight test="": (setup "")
     cargo nextest run -p integration-tests --test lib --run-ignored only --no-capture -E '{{ if test == "" { "test(/^cases::midnight_stream::/)" } else { "test(=cases::midnight_stream::" + test + ")" } }}'
 
 # Canton tests (default: stream; e2e via `just test-canton cases::canton`)

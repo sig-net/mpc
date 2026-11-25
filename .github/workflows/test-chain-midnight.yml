@@ -171,12 +171,8 @@ jobs:
       - name: Install cargo-near
         run: scripts/install-cargo-near.sh
 
-      # The tests embed contract-eth's hardhat artifact (include_bytes!), and `just test-midnight`
-      # recompiles it first; compiling it before the test build keeps that later compile a no-op.
       - name: Build integration tests
-        run: |
-          just build eth
-          just build tests
+        run: just build tests
 
       # nextest fails on an empty selection, so a renamed test cannot turn this
       # step into a silent no-op.
