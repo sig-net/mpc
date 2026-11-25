@@ -416,10 +416,8 @@ async fn test_legacy_checkpoint_keeps_its_digest() -> anyhow::Result<()> {
     );
 
     assert_eq!(
-        storage
-            .promote_pending(Chain::Solana, legacy.digest())
-            .await?,
-        Some(0)
+        storage.promote(Chain::Solana, legacy.digest()).await?,
+        (mpc_node::storage::Confirmation::PromotedPending, 0)
     );
     let latest = storage.load_latest(Chain::Solana).await?.unwrap();
     assert_eq!(latest, legacy);
@@ -465,10 +463,8 @@ async fn test_pending_checkpoint_persistence() -> anyhow::Result<()> {
     );
 
     assert_eq!(
-        restarted
-            .promote_pending(Chain::Solana, first.digest())
-            .await?,
-        Some(1)
+        restarted.promote(Chain::Solana, first.digest()).await?,
+        (mpc_node::storage::Confirmation::PromotedPending, 1)
     );
     assert_eq!(
         restarted.load_latest(Chain::Solana).await?,
@@ -490,20 +486,18 @@ async fn test_pending_checkpoint_persistence() -> anyhow::Result<()> {
         ));
     assert_eq!(restarted.persist_pending(&conflicting).await?, None);
     assert_eq!(restarted.persist_pending(&second).await?, Some(1));
-    assert!(restarted
-        .promote_pending(Chain::Solana, [99; 32])
-        .await?
-        .is_none());
+    assert_eq!(
+        restarted.promote(Chain::Solana, [99; 32]).await?.0,
+        mpc_node::storage::Confirmation::NotFound
+    );
     assert_eq!(restarted.load_latest(Chain::Solana).await?, Some(first));
     assert_eq!(
         restarted.load_pending(Chain::Solana).await?,
         vec![second.clone()]
     );
     assert_eq!(
-        restarted
-            .promote_pending(Chain::Solana, second.digest())
-            .await?,
-        Some(0)
+        restarted.promote(Chain::Solana, second.digest()).await?,
+        (mpc_node::storage::Confirmation::PromotedPending, 0)
     );
     assert_eq!(restarted.load_latest(Chain::Solana).await?, Some(second));
     assert!(restarted.load_pending(Chain::Solana).await?.is_empty());
@@ -537,6 +531,351 @@ async fn test_pending_checkpoint_persistence() -> anyhow::Result<()> {
     assert!(restarted.latest(Chain::Solana).await.is_err());
     assert!(restarted.has_checkpoint(Chain::Solana).await?);
 
+    Ok(())
+}
+
+/// Demotion is a single atomic Redis round trip that makes pending bodies
+/// durable, servable orphans: they leave `pending`, stay findable by digest,
+/// are idempotently re-demotable, and can still be promoted by that digest.
+#[test(tokio::test)]
+async fn test_redis_demote_pending_to_orphan_is_servable_by_digest() -> anyhow::Result<()> {
+    use near_account_id::AccountId;
+
+    let spawner = ClusterSpawner::default()
+        .network("test-demote-orphan")
+        .init_network()
+        .await?;
+    let redis_container = containers::Redis::run(&spawner).await;
+    let account_id: AccountId = "party0.near".parse()?;
+    let storage = CheckpointStorage::Redis(redis_container.pool(), account_id);
+    let chain = Chain::Solana;
+    let checkpoint = Checkpoint {
+        chain,
+        block_height: 10,
+        pending_requests: vec![dummy_backlog_entry(1, chain)],
+        legacy_digest: None,
+    };
+
+    assert!(!storage.has_checkpoint(chain).await?);
+    storage.persist_pending(&checkpoint).await?;
+    assert_eq!(storage.load_pending(chain).await?, vec![checkpoint.clone()]);
+
+    assert_eq!(storage.demote_pending_to_orphan(chain).await?, 1);
+    assert!(storage.load_pending(chain).await?.is_empty());
+    assert!(storage.has_checkpoint(chain).await?);
+    assert_eq!(
+        storage.find(chain, checkpoint.digest()).await?,
+        Some(checkpoint.clone())
+    );
+
+    // Drained pending makes a second pass a no-op that leaves the orphan intact.
+    assert_eq!(storage.demote_pending_to_orphan(chain).await?, 0);
+    assert_eq!(
+        storage.find(chain, checkpoint.digest()).await?,
+        Some(checkpoint.clone())
+    );
+
+    // The settled digest still promotes the orphan to canonical latest.
+    assert_eq!(
+        storage.promote(chain, checkpoint.digest()).await?,
+        (mpc_node::storage::Confirmation::PromotedOrphan, 0)
+    );
+    assert_eq!(storage.load_latest(chain).await?, Some(checkpoint));
+    Ok(())
+}
+
+/// A stale orphan digest left by the first demotion must not resolve to a
+/// different body persisted and demoted at the same height after a restart.
+#[test(tokio::test)]
+async fn test_redis_demote_overwrite_drops_stale_digest_body() -> anyhow::Result<()> {
+    use near_account_id::AccountId;
+
+    let spawner = ClusterSpawner::default()
+        .network("test-redis-demote-stale-digest")
+        .init_network()
+        .await?;
+    let redis_container = containers::Redis::run(&spawner).await;
+    let account_id: AccountId = "party0.near".parse()?;
+    let storage = CheckpointStorage::Redis(redis_container.pool(), account_id);
+    let chain = Chain::Solana;
+    let body = |id| Checkpoint {
+        chain,
+        block_height: 10,
+        pending_requests: vec![dummy_backlog_entry(id, chain)],
+        legacy_digest: None,
+    };
+    let old = body(1);
+    let new = body(2);
+    assert_ne!(old.digest(), new.digest());
+
+    // First pass: demote the body with digest `old` at height 10.
+    storage.persist_pending(&old).await?;
+    assert_eq!(storage.demote_pending_to_orphan(chain).await?, 1);
+
+    // Restart: persist a different body at the same height and demote again.
+    storage.persist_pending(&new).await?;
+    assert_eq!(storage.demote_pending_to_orphan(chain).await?, 1);
+
+    // The settled but stale digest must not return the new body or promote it.
+    let found = storage.find(chain, old.digest()).await?;
+    assert!(
+        found.as_ref().is_none_or(|cp| cp.digest() == old.digest()),
+        "find returned a body that does not match the requested digest"
+    );
+    assert_eq!(
+        storage.promote(chain, old.digest()).await?.0,
+        mpc_node::storage::Confirmation::NotFound
+    );
+    assert!(
+        storage
+            .load_latest(chain)
+            .await?
+            .is_none_or(|cp| cp.digest() != new.digest()),
+        "the stale digest promoted the new body as base"
+    );
+
+    // The current body is still servable and promotable.
+    assert_eq!(storage.find(chain, new.digest()).await?, Some(new.clone()));
+    assert_eq!(
+        storage.promote(chain, new.digest()).await?,
+        (mpc_node::storage::Confirmation::PromotedOrphan, 0)
+    );
+    assert_eq!(storage.load_latest(chain).await?, Some(new));
+    Ok(())
+}
+
+/// Re-demoting a different body at the same heights must overwrite the orphan
+/// bodies rather than accumulate them: against real Redis the orphan hash stays
+/// bounded by the number of boundary heights above the base, not by how often a
+/// node restarts or re-indexes.
+#[test(tokio::test)]
+async fn test_redis_demote_twice_does_not_grow_orphans() -> anyhow::Result<()> {
+    use deadpool_redis::redis;
+    use near_account_id::AccountId;
+
+    let spawner = ClusterSpawner::default()
+        .network("test-redis-demote-no-grow")
+        .init_network()
+        .await?;
+    let redis_container = containers::Redis::run(&spawner).await;
+    let account_id: AccountId = "party0.near".parse()?;
+    let storage = CheckpointStorage::Redis(redis_container.pool(), account_id);
+    let chain = Chain::Solana;
+    let at = |height, id| Checkpoint {
+        chain,
+        block_height: height,
+        pending_requests: vec![dummy_backlog_entry(id, chain)],
+        legacy_digest: None,
+    };
+
+    // Count the orphan bodies directly in Redis - no public API exposes this.
+    let orphan_bodies = || async {
+        let CheckpointStorage::Redis(pool, _) = &storage else {
+            unreachable!("redis storage expected");
+        };
+        let mut conn = pool.get().await?;
+        let (_, keys): (u64, Vec<String>) = redis::cmd("SCAN")
+            .arg(0)
+            .arg("MATCH")
+            .arg("*:checkpoint:orphan:*")
+            .arg("COUNT")
+            .arg(1000)
+            .query_async(&mut conn)
+            .await?;
+        let mut total = 0usize;
+        for key in keys {
+            let len: usize = redis::cmd("HLEN").arg(&key).query_async(&mut conn).await?;
+            total += len;
+        }
+        Ok::<_, anyhow::Error>(total)
+    };
+
+    // First pass: three boundary heights, one body each.
+    let old = [at(10, 1), at(20, 2), at(30, 3)];
+    for cp in &old {
+        storage.persist_pending(cp).await?;
+    }
+    assert_eq!(storage.demote_pending_to_orphan(chain).await?, 3);
+    assert_eq!(orphan_bodies().await?, 3);
+
+    // A restart re-indexes fresh bodies at the SAME heights with different
+    // digests. Each demotion must overwrite the orphan at that height.
+    let new = [at(10, 4), at(20, 5), at(30, 6)];
+    for (old_cp, new_cp) in old.iter().zip(&new) {
+        assert_ne!(old_cp.digest(), new_cp.digest());
+    }
+    for cp in &new {
+        storage.persist_pending(cp).await?;
+    }
+    assert_eq!(storage.demote_pending_to_orphan(chain).await?, 3);
+    // Still exactly one orphan per height - overwritten, not accumulated.
+    assert_eq!(orphan_bodies().await?, 3);
+
+    // The stale digests are gone from the index: they must not resolve to a
+    // different body (the stale-index regression), while the new ones do.
+    for old_cp in &old {
+        let found = storage.find(chain, old_cp.digest()).await?;
+        assert!(
+            found
+                .as_ref()
+                .is_none_or(|cp| cp.digest() == old_cp.digest()),
+            "find returned a body that does not match the requested stale digest"
+        );
+    }
+    for new_cp in &new {
+        assert_eq!(
+            storage.find(chain, new_cp.digest()).await?,
+            Some(new_cp.clone())
+        );
+    }
+
+    // Promoting the middle height retires every orphan at or below it.
+    let promoted = &new[1];
+    assert_eq!(
+        storage.promote(chain, promoted.digest()).await?,
+        (mpc_node::storage::Confirmation::PromotedOrphan, 0)
+    );
+    assert_eq!(storage.load_latest(chain).await?, Some(promoted.clone()));
+    assert_eq!(orphan_bodies().await?, 1);
+    assert!(storage.find(chain, new[0].digest()).await?.is_none());
+    assert_eq!(
+        storage.find(chain, new[2].digest()).await?,
+        Some(new[2].clone())
+    );
+    Ok(())
+}
+
+/// The confirmed base is a first-class `latest()` candidate in Redis too: it
+/// wins strictly higher heights, loses to strictly higher pending/orphan bodies,
+/// and wins height ties.
+#[test(tokio::test)]
+async fn test_redis_latest_compares_base_with_orphan() -> anyhow::Result<()> {
+    use near_account_id::AccountId;
+
+    let spawner = ClusterSpawner::default()
+        .network("test-redis-latest-base")
+        .init_network()
+        .await?;
+    let redis_container = containers::Redis::run(&spawner).await;
+    let account_id: AccountId = "party0.near".parse()?;
+    let storage = CheckpointStorage::Redis(redis_container.pool(), account_id);
+    let chain = Chain::Solana;
+    let at = |height, id| Checkpoint {
+        chain,
+        block_height: height,
+        pending_requests: vec![dummy_backlog_entry(id, chain)],
+        legacy_digest: None,
+    };
+
+    // Base strictly higher than the orphan.
+    let base = at(30, 1);
+    storage.persist(&base).await?;
+    storage.persist_pending(&at(10, 2)).await?;
+    assert_eq!(storage.demote_pending_to_orphan(chain).await?, 1);
+    assert_eq!(storage.latest(chain).await?, Some(base.clone()));
+
+    // Orphan strictly higher than the base.
+    storage.reset_to_latest(&base).await?;
+    let newer = at(40, 3);
+    storage.persist_pending(&newer).await?;
+    assert_eq!(storage.demote_pending_to_orphan(chain).await?, 1);
+    assert_eq!(storage.latest(chain).await?, Some(newer));
+
+    // Height tie: the confirmed base wins.
+    storage.reset_to_latest(&base).await?;
+    storage.persist_pending(&at(30, 4)).await?;
+    assert_eq!(storage.demote_pending_to_orphan(chain).await?, 1);
+    assert_eq!(storage.latest(chain).await?, Some(base));
+    Ok(())
+}
+
+/// Even with a corrupt/stale `orphan_digest` index entry in Redis, both `find`
+/// and `promote` verify the stored body's digest before returning or promoting it.
+#[test(tokio::test)]
+async fn test_redis_orphan_lookup_verifies_body_digest() -> anyhow::Result<()> {
+    use deadpool_redis::redis;
+    use near_account_id::AccountId;
+
+    let spawner = ClusterSpawner::default()
+        .network("test-redis-orphan-digest-verify")
+        .init_network()
+        .await?;
+    let redis_container = containers::Redis::run(&spawner).await;
+    let account_id: AccountId = "party0.near".parse()?;
+    let storage = CheckpointStorage::Redis(redis_container.pool(), account_id.clone());
+    let chain = Chain::Solana;
+    let at = |height, id| Checkpoint {
+        chain,
+        block_height: height,
+        pending_requests: vec![dummy_backlog_entry(id, chain)],
+        legacy_digest: None,
+    };
+    let stale = at(10, 1);
+    let real = at(10, 2);
+    assert_ne!(stale.digest(), real.digest());
+
+    storage.persist_pending(&real).await?;
+    assert_eq!(storage.demote_pending_to_orphan(chain).await?, 1);
+
+    // Inject a stale `orphan_digest` entry pointing at height 10, whose body is `real`.
+    let CheckpointStorage::Redis(pool, _) = &storage else {
+        unreachable!("redis storage expected");
+    };
+    let mut conn = pool.get().await?;
+    let (_, keys): (u64, Vec<String>) = redis::cmd("SCAN")
+        .arg(0)
+        .arg("MATCH")
+        .arg(format!("{account_id}:checkpoint:orphan_digest:*"))
+        .arg("COUNT")
+        .arg(100)
+        .query_async(&mut conn)
+        .await?;
+    assert_eq!(keys.len(), 1);
+    redis::cmd("HSET")
+        .arg(&keys[0])
+        .arg(hex::encode(stale.digest()))
+        .arg(10)
+        .query_async::<()>(&mut conn)
+        .await?;
+
+    assert!(
+        storage
+            .find(chain, stale.digest())
+            .await?
+            .is_none_or(|cp| cp.digest() == stale.digest()),
+        "find returned the wrong body for a stale orphan digest"
+    );
+    assert_eq!(
+        storage.promote(chain, stale.digest()).await?.0,
+        mpc_node::storage::Confirmation::NotFound
+    );
+    assert!(
+        storage
+            .load_latest(chain)
+            .await?
+            .is_none_or(|cp| cp.digest() != real.digest()),
+        "promote wrote the wrong orphan body as base"
+    );
+    assert_eq!(
+        storage.find(chain, real.digest()).await?,
+        Some(real.clone())
+    );
+    assert_eq!(
+        storage.promote(chain, real.digest()).await?,
+        (mpc_node::storage::Confirmation::PromotedOrphan, 0)
+    );
+    assert_eq!(storage.load_latest(chain).await?, Some(real));
+
+    // A stale `orphan_digest` entry must not mask a valid copy in canonical `latest`.
+    storage.persist(&stale).await?;
+    assert_eq!(
+        storage.find(chain, stale.digest()).await?,
+        Some(stale.clone())
+    );
+    assert_eq!(
+        storage.promote(chain, stale.digest()).await?,
+        (mpc_node::storage::Confirmation::AlreadyConfirmed, 0)
+    );
     Ok(())
 }
 

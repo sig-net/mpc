@@ -6,7 +6,7 @@ pub mod protocol_storage;
 pub mod triple_storage;
 
 use cait_sith::protocol::Participant;
-pub use checkpoint_storage::CheckpointStorage;
+pub use checkpoint_storage::{CheckpointStorage, Confirmation};
 pub use presignature_storage::PresignatureStorage;
 pub use protocol_storage::{Initializing, Ready, StorageError};
 #[cfg(feature = "test-feature")]

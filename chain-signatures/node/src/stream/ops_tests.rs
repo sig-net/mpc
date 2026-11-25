@@ -1371,7 +1371,7 @@ async fn process_execution_confirmed_recovery_requeues_final_respond_after_send_
             .checkpoints()
             .confirm(tx.source_chain, checkpoint.digest())
             .await,
-        Ok(true)
+        Ok(crate::backlog::Confirmation::PromotedPending)
     );
 
     let threshold = 1;

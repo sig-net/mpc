@@ -119,8 +119,8 @@ async fn spawn_supervised_stream(
     let (sign_tx, sign_rx) = mpsc::channel::<SignCommand>(16);
     let (rpc_tx, mut rpc_rx) = mpsc::channel::<RpcAction>(16);
     let rpc = RpcChannel { tx: rpc_tx };
-    // Checkpoint votes go out on this channel; drain it so a restart can
-    // resubmit the votes it recovers instead of failing on a closed channel.
+    // Drain RPC actions so the bounded channel never fills and blocks the
+    // supervised stream's senders; no receiver is needed in this test harness.
     tokio::spawn(async move { while rpc_rx.recv().await.is_some() {} });
 
     let account_id: AccountId = "test.near".parse().unwrap();
@@ -545,7 +545,7 @@ async fn test_solana_stream_republishes_pending_publish_after_checkpoint_recover
             .checkpoints()
             .confirm(Chain::Solana, checkpoint.digest())
             .await,
-        Ok(true)
+        Ok(outcome) if outcome.is_confirmed()
     ));
 
     let recovered_backlog = Backlog::persisted(storage);

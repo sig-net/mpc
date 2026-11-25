@@ -63,6 +63,11 @@ Because existing nodes are still running the previous release when the contract 
 - **Wire and serialization compatibility**:
    * The contract must continue supporting queries, views (`View`), and calls expected by the previous release binary.
    * Node-to-node protocol messages must also interoperate across adjacent versions.
+   * Protocol and checkpoint wire versions are compared with strict equality (no tolerance range); a mismatch rejects peer checkpoint exchange or removes the peer from the mesh.
+- **Checkpoint digest and body portability**:
+   * *Consensus digest*: the contract stores the voted 32-byte checkpoint digest verbatim without recomputing it. The digest-covered field set (`EntryFacts` / `checkpoint_digest`) must remain closed (`let Self { .. } = self` in `EntryFacts::digest_bytes` forces an explicit decision when adding a field); any change to digest-covered fields or their encoding breaks agreement across mixed binaries and requires a coordinated break or height-gated activation with cross-version golden vectors.
+   * *Persisted bodies*: checkpoint bodies are CBOR-encoded in Redis under a storage key-version namespace (`CHECKPOINT_STORAGE_VERSION`). A binary must remain able to read a confirmed base or orphan body written by an earlier binary (via backward-compatible schema additions and permanently retained legacy decoders such as `legacy_digest`), because bumping the key namespace strands existing data and an unreadable base cannot safely fall back to re-indexing across an upgrade. Removing a legacy body decoder is therefore an explicit exception to two-phase deprecation.
+   * *Staggered format changes*: never change the consensus digest encoding and the checkpoint storage encoding in the same release.
 - **CI enforcement**: The `Prod Compatibility Tests` workflow is a **required check**. It spins up a mixed cluster pairing current code against the latest release tag to verify that contract updates and rolling node restarts succeed without downtime.
   - *Exception*: If a future release intentionally introduces a hard, non-rolling break requiring coordinated downtime, the CI check can be explicitly modified or disabled for that release with team alignment.
 - **Two-phase deprecation (expand-and-contract)**:

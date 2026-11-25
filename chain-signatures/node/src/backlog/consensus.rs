@@ -1,18 +1,56 @@
-use crate::backlog::Backlog;
 use crate::mesh::MeshState;
 use crate::node_client::NodeClient;
 use crate::protocol::contract::primitives::ParticipantInfo;
 use crate::types::CheckpointWatcher;
 use mpc_chain_integration_core::StateManager;
 
-use crate::backlog::Checkpoint;
+use crate::backlog::{Backlog, Checkpoint, Confirmation};
 use cait_sith::protocol::Participant;
 use mpc_primitives::Chain;
 use near_account_id::AccountId;
 use rand::seq::SliceRandom;
 use rand::thread_rng;
+use std::ops::ControlFlow;
 use std::time::Duration;
 use tokio::sync::watch;
+
+/// Rebases the in-memory backlog onto the locally confirmed base when `confirm`
+/// found a checkpoint above our processed height. Returns `Break(result)` when
+/// `align_backlog_with_consensus` can return immediately, or `Continue(())` to
+/// fall through to peer fetch/reset.
+async fn rebase_if_behind(
+    chain: Chain,
+    backlog: &Backlog,
+    checkpoint_digest: mpc_primitives::CheckpointDigest,
+    outcome: Confirmation,
+    root_pk: mpc_primitives::PublicKey,
+) -> ControlFlow<Option<u64>> {
+    let processed = backlog.get_processed_block(chain).await;
+    if processed.is_some_and(|height| height >= checkpoint_digest.height) {
+        return ControlFlow::Break(None);
+    }
+    match backlog.hydrate(chain, root_pk).await {
+        Ok(Some(base)) if base.digest() == checkpoint_digest.digest => {
+            tracing::info!(
+                ?chain,
+                ?outcome,
+                height = base.block_height,
+                ?processed,
+                "rebased backlog onto locally confirmed checkpoint"
+            );
+            ControlFlow::Break(Some(base.block_height))
+        }
+        Ok(_) => ControlFlow::Continue(()),
+        Err(err) => {
+            tracing::warn!(
+                ?chain,
+                %err,
+                "transient storage error loading promoted checkpoint; retrying later"
+            );
+            ControlFlow::Break(None)
+        }
+    }
+}
 
 /// Returns None if we are aligned, Some(<new_height>) if we have regressed.
 pub async fn align_backlog_with_consensus(
@@ -31,11 +69,17 @@ pub async fn align_backlog_with_consensus(
         .confirm(chain, checkpoint_digest.digest)
         .await
     {
-        Ok(found) => {
-            if found {
-                return None;
+        Ok(Confirmation::PromotedPending) => return None,
+        // `AlreadyConfirmed` is included because `detect_regression` may have just
+        // promoted the orphan before triggering this recovery pass.
+        Ok(outcome @ (Confirmation::PromotedOrphan | Confirmation::AlreadyConfirmed)) => {
+            if let ControlFlow::Break(result) =
+                rebase_if_behind(chain, backlog, checkpoint_digest, outcome, root_pk).await
+            {
+                return result;
             }
         }
+        Ok(Confirmation::NotFound) => {}
         Err(err) => {
             tracing::warn!(
                 ?chain,
@@ -626,12 +670,15 @@ mod tests {
         // cursor to match.
         fixture.backlog.set_processed_block(chain, 100).await;
         let stale = fixture.backlog.checkpoint(chain).await.unwrap();
-        assert!(fixture
-            .backlog
-            .checkpoints()
-            .confirm(chain, stale.digest())
-            .await
-            .unwrap());
+        assert_eq!(
+            fixture
+                .backlog
+                .checkpoints()
+                .confirm(chain, stale.digest())
+                .await
+                .unwrap(),
+            crate::backlog::Confirmation::PromotedPending
+        );
 
         // The contract settles the canonical reset checkpoint for height 42.
         // The mesh is empty, so any attempt to fetch this from a peer would
@@ -746,5 +793,160 @@ mod tests {
 
         let result = handle.await.unwrap();
         assert!(result.is_none(), "aborted align should return None");
+    }
+
+    /// Builds an active peer whose `/checkpoint` serves `body` as facts at the current
+    /// version — the format an honest node uses to answer a by-digest query.
+    async fn mock_peer_serving(
+        chain: Chain,
+        body: &Checkpoint,
+        participant: u32,
+    ) -> (
+        mockito::ServerGuard,
+        mockito::Mock,
+        (Participant, ParticipantInfo),
+    ) {
+        let mut server = mockito::Server::new_async().await;
+        let mut response_body = Vec::new();
+        ciborium::into_writer(
+            &crate::web::CheckpointResponse {
+                version: crate::CHECKPOINT_VERSION,
+                facts: [(chain, body.facts())].into_iter().collect(),
+                ..Default::default()
+            },
+            &mut response_body,
+        )
+        .unwrap();
+        let mock = server
+            .mock("GET", "/checkpoint")
+            .match_query(mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/cbor")
+            .with_body(response_body)
+            .create_async()
+            .await;
+        let mut info = ParticipantInfo::new(participant);
+        info.url = server.url();
+        (server, mock, (Participant::from(participant), info))
+    }
+
+    /// A peer serving a well-formed body whose recomputed digest differs from the
+    /// requested one must be skipped, so a later honest peer can supply the body.
+    #[tokio::test]
+    async fn test_rejects_peer_body_with_mismatched_digest_and_tries_next() {
+        let chain = Chain::Ethereum;
+        let requested = Checkpoint::reset(chain, 100);
+        let requested_digest = requested.digest();
+
+        // A byzantine peer serves a valid body at a different height, so the body
+        // hashes to a digest other than the one the contract settled.
+        let malicious = Checkpoint::reset(chain, 777);
+        assert_ne!(malicious.digest(), requested_digest);
+
+        let (bad_server, bad_mock, peer0) = mock_peer_serving(chain, &malicious, 0).await;
+        let (good_server, good_mock, peer1) = mock_peer_serving(chain, &requested, 1).await;
+
+        let peers = [peer0, peer1];
+        let result =
+            query_peers_checkpoint(&peers, &NodeClient::new(), chain, requested_digest).await;
+
+        assert_eq!(result, Some(requested));
+        // Both peers were queried: the first was rejected, the second accepted.
+        bad_mock.assert_async().await;
+        good_mock.assert_async().await;
+        drop(bad_server);
+        drop(good_server);
+    }
+
+    /// If every peer serves a body whose digest does not match the settled digest,
+    /// no checkpoint is adopted — alignment must halt rather than trust a body.
+    #[tokio::test]
+    async fn test_mismatched_digest_from_every_peer_returns_none() {
+        let chain = Chain::Ethereum;
+        let requested_digest = Checkpoint::reset(chain, 100).digest();
+        let malicious = Checkpoint::reset(chain, 777);
+        assert_ne!(malicious.digest(), requested_digest);
+
+        let (server0, mock0, peer0) = mock_peer_serving(chain, &malicious, 0).await;
+        let (server1, mock1, peer1) = mock_peer_serving(chain, &malicious, 1).await;
+
+        let peers = [peer0, peer1];
+        let result =
+            query_peers_checkpoint(&peers, &NodeClient::new(), chain, requested_digest).await;
+
+        assert!(
+            result.is_none(),
+            "no peer served a body matching the settled digest, so nothing must be adopted"
+        );
+        mock0.assert_async().await;
+        mock1.assert_async().await;
+        drop(server0);
+        drop(server1);
+    }
+
+    /// When `hydrate` seeded from an older base while a newer checkpoint sat in
+    /// the orphan store, confirming that settled orphan must rebase the SAME
+    /// in-memory `Backlog` onto it without needing a peer or re-indexing.
+    #[tokio::test]
+    async fn align_rebases_in_memory_backlog_when_orphan_promoted_above_processed() {
+        let chain = Chain::Ethereum;
+        let storage = crate::storage::checkpoint_storage::CheckpointStorage::in_memory();
+        let old = Backlog::persisted(storage.clone());
+
+        // Older confirmed base at height 100.
+        old.set_processed_block(chain, 100).await.unwrap();
+        let base = old.checkpoint(chain).await.unwrap();
+        assert_eq!(
+            old.checkpoints()
+                .confirm(chain, base.digest())
+                .await
+                .unwrap(),
+            crate::backlog::Confirmation::PromotedPending
+        );
+
+        // Newer checkpoint at height 200 with a request, demoted to orphan.
+        old.insert_mock_sign(SignId::new([7u8; 32]), chain).await;
+        old.set_processed_block(chain, 200).await.unwrap();
+        let orphan = old.checkpoint(chain).await.unwrap();
+        assert_eq!(storage.demote_pending_to_orphan(chain).await.unwrap(), 1);
+
+        // Restarted node hydrates from the older base (100) before 200 is observed.
+        let restarted = Backlog::persisted(storage.clone());
+        restarted
+            .hydrate(chain, k256::AffinePoint::GENERATOR)
+            .await
+            .unwrap();
+        assert_eq!(restarted.get_processed_block(chain).await, Some(100));
+        assert_eq!(restarted.len_by_chain(chain).await, 0);
+
+        // Settlement for 200 arrives; no peers in mesh.
+        let (_cp_tx, mut checkpoints_rx) = watch::channel(Some(CheckpointDigest {
+            chain,
+            height: 200,
+            digest: orphan.digest(),
+        }));
+        let (_mesh_tx, mut mesh_rx) = watch::channel(MeshState::default());
+        let client = NodeClient::new();
+        let me: AccountId = "test.near".parse().unwrap();
+
+        let rebased = tokio::time::timeout(
+            Duration::from_secs(5),
+            align_backlog_with_consensus(
+                chain,
+                &restarted,
+                &mut checkpoints_rx,
+                &mut mesh_rx,
+                &client,
+                &me,
+                k256::AffinePoint::GENERATOR,
+            ),
+        )
+        .await
+        .expect("rebasing from local orphan must not wait on peers");
+
+        assert_eq!(rebased, Some(200));
+        assert_eq!(restarted.get_processed_block(chain).await, Some(200));
+        assert_eq!(restarted.len_by_chain(chain).await, 1);
+        assert_eq!(storage.load_latest(chain).await.unwrap(), Some(orphan));
     }
 }
