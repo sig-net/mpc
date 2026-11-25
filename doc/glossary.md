@@ -316,11 +316,6 @@ request's fields. From [key version](#key-version) 2 the derivation path
 names the purpose, so keys of different purposes differ. See
 [account-derivation.md](account-derivation.md#derivation-path-structure).
 
-*Code today:* the latest key version is 1 (`LATEST_MPC_KEY_VERSION`,
-`signet-primitives/src/lib.rs`), whose derivation path names no purpose: a
-bidirectional key is the plain key, and the attestation key is a plain key
-under a reserved path.
-
 ## Request
 
 What a contract asks the network to sign. A [bidirectional

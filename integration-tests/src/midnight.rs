@@ -316,6 +316,7 @@ impl MidnightContext {
             .request(&serde_json::json!({
                 "op": "initialise",
                 "responsePublicKey": response_public_key,
+                "keyVersion": mpc_primitives::LATEST_MPC_KEY_VERSION,
             }))
             .await
             .context("initialising the Midnight caller with the MPC response key")?;
