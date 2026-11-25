@@ -18,7 +18,8 @@ A node that has run as far ahead of its base as it may stops and waits for a set
 
 The model, n nodes of which at most f are faulty, crash-recovery, and the signing threshold t, is that of [system-model.md](system-model.md).
 This doc relies on f < t ≤ n - f: fewer than t nodes cannot sign, and the correct nodes alone can.
-Protocol upgrades, committee and threshold changes are out of scope of this doc.
+Committee and threshold changes are out of scope of this doc.
+Compatibility surfaces across binary upgrades (digest stability, body format portability, and strict wire/mesh version checks) are release policy in [releasing.md](releasing.md#rolling-upgrades-and-compatibility); surviving the confirmation-to-promotion gap across restarts is part of the design below (Section 4).
 
 A correct node is told the truth by its RPC provider, and keeps up: it indexes faster than the chain produces blocks, so it reaches the head from wherever it starts.
 A node whose provider misleads it is faulty, one of the f.
@@ -119,7 +120,7 @@ At t = n - f this is every correct node (Section 6).
 ```
 get_checkpoint(chain, digest) -> Checkpoint
   // reply with the Checkpoint matching the chain and digest, if
-  // held as `base` or in `pending`
+  // held as `base`, in `pending`, or in `orphan`
 ```
 
 ## 3. Properties, per source chain
@@ -148,11 +149,13 @@ Described for one node, one source chain; `backlog` is the node's backlog.
 
 * The node indexes finalised blocks in order.
   At every boundary it passes, not only the next one above its base, it creates a checkpoint at the height it reached, stores it in `pending` under that height, and votes for it.
-* It polls the contract for the settled checkpoint, and one of three things follows.
+* It polls the contract for the settled checkpoint, and one of four things follows.
   * Nothing new has settled: the node does nothing.
-  * The settled checkpoint is the one the node stored at that height: it becomes the base and the node carries on.
-  * The settled checkpoint is another one: the node stops indexing, fetches it from a peer, makes it the base, drops all of `pending` and re-indexes from it.
-* On a restart the node resumes from the newest checkpoint in `pending`, or the base if there is none, and votes again for every checkpoint in `pending`, since a vote in flight at the crash may have been lost.
+  * The settled checkpoint is in `pending` at that height: it becomes the base and the node carries on.
+  * The settled checkpoint is in `orphan` at that height: it becomes the base, drops `pending` and `orphan` up to its height, and re-indexes from it if behind its height.
+  * The settled checkpoint is not held locally: the node stops indexing, fetches it from a peer, makes it the base, drops `pending` and `orphan`, and re-indexes from it.
+* On a process restart, the node moves `pending` into `orphan` and never seeds from or re-votes it; it seeds from `base` (or genesis if none), and if the contract has already settled a digest in `orphan`, consensus alignment promotes it to `base` and rebases onto it before indexing starts.
+  An in-process restart (watchdog or a settlement ending a wait at the cap) keeps `pending` and the in-memory backlog intact so the cap still bounds `pending`.
 * A node is *at the cap* when `pending` holds `MAX_PENDING` checkpoints.
   This bounds how far the network signs from state nobody has agreed to.
   There it processes no block, so it is not caught up, and waits for a settlement; a signature it has started producing is still published.
@@ -163,6 +166,16 @@ Described for one node, one source chain; `backlog` is the node's backlog.
 `persist` writes `base` and `pending` durably in one step and is retried until it succeeds.
 `vote(c)` calls `vote_checkpoint` with c's chain, height and digest, and is retried until the contract has recorded the vote or has settled that height or a later one.
 
+#### Why `orphan` exists across restarts and upgrades
+
+The contract stores only a 32-byte digest, never the checkpoint body, so between voting and local promotion the body exists only in node storage.
+Resuming from or re-voting an unsettled `pending` body across a restart is unsafe across a binary upgrade, and re-indexing from an older base is not a safe fallback if new code applies historical blocks differently.
+Moving `pending` to `orphan` ensures a settled body stays readable and promotable without ever seeding or voting from unsettled state.
+
+Because `orphan` is height-keyed (`height -> body` plus a `digest -> height` lookup index), a later demotion at an already-occupied height overwrites the stored body and purges all index entries pointing to that height.
+If the contract settled the overwritten body, the node falls back to fetching it from a peer (and halts if no peer holds a matching body).
+Digest indexes (`pending_digest` and `orphan_digest`) are **lookup hints, not a trust boundary**: both local lookups (`find`, `promote`) and peer responses recompute and verify the decoded body's digest against the requested or settled digest before returning, promoting, or adopting it.
+
 ### Per-chain node state
 
 ```
@@ -171,6 +184,8 @@ Checkpoint = (Height, Digest, snapshot of backlog)
 persistent:
     base      Checkpoint               // the settled checkpoint we index from
     pending   {Height -> Checkpoint}   // the checkpoints we created above base
+    orphan    {Height -> Checkpoint}   // unsettled checkpoints moved from pending on process restart;
+                                       // servable and promotable, never a seed or re-voted
     local     RequestId -> Local       // node-local, as in
                                        // bidirectional-calls.md
 
@@ -186,11 +201,11 @@ in memory:
 ### Handlers
 
 ```
-on start:
+on start:                                         // process restart
+  move pending into orphan; pending = {}
   base = the one held, or the genesis checkpoint
-  top = the newest checkpoint in pending, or base
-  backlog, processed_height = top.backlog, top.height
-  for c in pending: vote(c)
+  backlog, processed_height = base.backlog, base.height
+  align with settled digest                       // promotes orphan if settled
   caught_up_at = the newest finalised height (head) the provider reports
 ```
 Indexing
@@ -222,6 +237,8 @@ on settlement poll period expiry:
                                      // stale RPC read
   if pending[h] has digest d:        // we created it, so we hold it
     rebase(pending[h])
+  else if orphan[h] has digest d:    // promoted from pre-restart pending
+    rebase(orphan[h])
   else:
     want = (h, d)                    // S3(i): indexing stops until we hold
                                      // it (Asking peers, below)
@@ -253,8 +270,12 @@ rebase(c):                                        // c settled, above base
             and processed_height >= c.height
   behind = pending is full                        // at the cap, blocks unread
   base = c
-  if aligned: pending.drop_up_to(c.height)
-  else: pending = {}
+  if aligned or orphan[c.height] has c's digest:  // promotion trims both <= c.height
+    pending.drop_up_to(c.height)
+    orphan.drop_up_to(c.height)
+  else:                                           // regression clears both
+    pending = {}
+    orphan = {}
   persist
   want = none
   if not aligned: re_index()
@@ -329,7 +350,7 @@ Correct nodes agree (S1), so what is left is how many are up:
 * t votes out of the n - f correct nodes leaves n - f - t of them free to be down, none at t = n - f.
 * Votes persist until the height settles or their node leaves the committee, so nodes need not be up together.
 * A node catching up votes at every boundary it passes rather than waiting for the head.
-* A vote is retried until the contract has it, and after a restart the node casts its votes for `pending` again.
+* A vote is retried while the node runs; on a process restart, `pending` is moved to `orphan` and not re-voted, so the node either promotes an already-settled orphan or re-indexes from `base` and votes again at boundaries it passes.
 
 ### *L2, a node that disagrees with a settled checkpoint ends up holding one.*
 Rebasing replaces the backlog wholesale rather than reconciling entry by entry, so a node behind and a node that diverged both take the settled checkpoint and index on from it.
@@ -366,14 +387,14 @@ Where no node can produce a checkpoint at all there is no recovery here (Section
 * No digest reaches t.
   Nodes run to the cap and stop.
   There is no in-band way out.
-  A restart resumes from the checkpoints built with the bug, so the release with the fix must also drop `pending`.
+  A process restart moves `pending` to `orphan` and resumes from `base`, so upgrading to the release with the fix drops the bugged `pending` state without manual intervention.
   The nodes then build the same checkpoints from the base again, and the next settlement realigns them.
 * A node that wrongly takes a request for finished deletes its record, with the signatures it issued.
 * A node that rebases onto a checkpoint it does not hold drops all of `pending`, also checkpoints above that height it voted for.
   Such a vote can settle a checkpoint no node holds, and every node that wants it then stalls.
   Keeping the dropped checkpoints for serving (see Options) would close this at any threshold.
 * Every copy of a settled checkpoint may be lost.
-  Retention (Section 5, L2) makes it unlikely; rebuilding it by indexing (Options) is the way out.
+  Retention (Section 5, L2) makes it unlikely; rebuilding it by indexing (Options) can recover within the same block-application rules, though not across an upgrade that changes how historical blocks are applied (Section 4).
 
 ### Options
 
@@ -384,8 +405,8 @@ Each closes one of the limits above, at a price.
 * Index to a settled checkpoint instead of only fetching it: a node whose processed height is below `want` keeps indexing from its base, without acting or voting, and holds the settled checkpoint once it reaches that height with the same digest (S1).
   The cap does not apply while it does so, since it neither acts nor votes.
   A node that is only behind then needs no peer.
-  It also covers losing every copy of a settled checkpoint: a node with an older base rebuilds it, and a node without any base starts from the genesis checkpoint, given providers that serve blocks back to the chain's start height and the time to index them.
-  A node whose backlog differs builds a different digest and still needs a peer.
+  It also covers losing every copy of a settled checkpoint within the same binary semantics: a node with an older base rebuilds it, and a node without any base starts from the genesis checkpoint, given providers that serve blocks back to the chain's start height and the time to index them.
+  It is not a safe recovery path across a binary upgrade that changes how historical blocks are applied (Section 4), and a node whose backlog differs builds a different digest and still needs a peer.
 * One vote per node and height in the contract, the newest replacing an older one.
   Faulty nodes then cannot inflate a tally, and a node that votes again at a height after a rebase replaces its vote for the checkpoint it dropped.
   The price is a contract change.

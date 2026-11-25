@@ -545,7 +545,7 @@ async fn test_solana_stream_republishes_pending_publish_after_checkpoint_recover
             .checkpoints()
             .confirm(Chain::Solana, checkpoint.digest())
             .await,
-        Ok(true)
+        Ok(outcome) if outcome.is_confirmed()
     ));
 
     let recovered_backlog = Backlog::persisted(storage);

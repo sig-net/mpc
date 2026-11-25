@@ -15,6 +15,63 @@ use std::sync::Arc;
 /// Per-chain digest-to-height index mirroring the Redis `orphan_digest` hash.
 type ChainDigestHeights = RwLock<HashMap<Chain, HashMap<[u8; 32], u64>>>;
 
+/// Outcome of confirming or promoting a checkpoint digest.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Confirmation {
+    /// Promoted a pending checkpoint created in this process run.
+    PromotedPending,
+    /// Promoted an orphan checkpoint left from before a process restart.
+    PromotedOrphan,
+    /// Already the confirmed canonical base.
+    AlreadyConfirmed,
+    /// Not found in pending, orphan, or confirmed base.
+    NotFound,
+}
+
+impl Confirmation {
+    /// Returns `true` if the digest is confirmed (promoted or already the base).
+    pub fn is_confirmed(self) -> bool {
+        !matches!(self, Self::NotFound)
+    }
+}
+
+/// Resolves a checkpoint body by digest starting at tier `ARGV[2]` (`1` = pending,
+/// `2` = orphan, `3` = confirmed latest), returning `{ source, pending_count, body }`.
+/// `pending_count` is `HLEN(pending)` when falling through to `latest` (`3`),
+/// and `0` otherwise so `promote` can answer `AlreadyConfirmed` / `NotFound` in
+/// a single round trip.
+const LOOKUP_BY_DIGEST: &str = r#"
+    local min_source = tonumber(ARGV[2]) or 1
+    if min_source <= 1 then
+        local height = redis.call('HGET', KEYS[2], ARGV[1])
+        local pending = height and redis.call('HGET', KEYS[1], height)
+        if pending then
+            return { 1, 0, pending }
+        end
+    end
+    if min_source <= 2 then
+        local orphan_height = redis.call('HGET', KEYS[5], ARGV[1])
+        local orphan = orphan_height and redis.call('HGET', KEYS[4], orphan_height)
+        if orphan then
+            return { 2, 0, orphan }
+        end
+    end
+    return { 3, redis.call('HLEN', KEYS[1]), redis.call('GET', KEYS[3]) }
+"#;
+
+fn confirm_latest_bytes(bytes: Option<&[u8]>, digest: [u8; 32]) -> anyhow::Result<Confirmation> {
+    let is_confirmed = bytes
+        .map(decode_checkpoint)
+        .transpose()
+        .context("failed to deserialize latest checkpoint")?
+        .is_some_and(|cp| cp.digest() == digest);
+    Ok(if is_confirmed {
+        Confirmation::AlreadyConfirmed
+    } else {
+        Confirmation::NotFound
+    })
+}
+
 #[derive(Clone, Debug)]
 pub enum CheckpointStorage {
     Redis(Pool, AccountId),
@@ -455,38 +512,58 @@ impl CheckpointStorage {
         }
     }
 
+    async fn lookup_by_digest(
+        &self,
+        conn: &mut deadpool_redis::Connection,
+        chain: Chain,
+        hex_digest: &str,
+        min_source: u8,
+    ) -> anyhow::Result<(u8, usize, Option<Vec<u8>>)> {
+        redis::Script::new(LOOKUP_BY_DIGEST)
+            .key(self.pending_checkpoint_key(chain))
+            .key(self.pending_digest_key(chain))
+            .key(self.checkpoint_key(chain))
+            .key(self.orphan_checkpoint_key(chain))
+            .key(self.orphan_digest_key(chain))
+            .arg(hex_digest)
+            .arg(min_source)
+            .invoke_async(conn)
+            .await
+            .context("failed to look up checkpoint by digest")
+    }
+
     /// Promote the durable checkpoint identified by its digest from either the
     /// pending or the orphan store, or confirm it if already the canonical base.
-    /// Returns `Some(remaining_pending_count)` if confirmed, or `None` if not found.
-    pub async fn promote(&self, chain: Chain, digest: [u8; 32]) -> anyhow::Result<Option<usize>> {
+    /// Returns `(outcome, remaining_pending_count)`.
+    pub async fn promote(
+        &self,
+        chain: Chain,
+        digest: [u8; 32],
+    ) -> anyhow::Result<(Confirmation, usize)> {
         match self {
             CheckpointStorage::Redis(pool, _) => {
                 let mut conn = pool.get().await.context("failed to get redis connection")?;
-                // Atomically promotes a pending or orphan checkpoint to canonical latest
-                // and trims obsolete entries, or falls back to checking the existing latest.
-                // Promotion matches by the stored digest index: DEMOTE's purge keeps each
-                // indexed digest pointing at the body it indexes, so no re-verification is
-                // needed here.
-                // 1. Looks up `height` from the pending index (`KEYS[2]`), else the orphan
-                //    index (`KEYS[5]`), and fetches the matching body.
-                // 2. If found:
-                //    - Overwrites canonical latest (`KEYS[3]`).
-                //    - Trims every entry with `height <= num` from both stores and both
-                //      indexes; the matched body's height is `num`, so this retires it
-                //      too (no separate retire step is needed).
-                //    - Returns `{ true, remaining_pending_count, false }` — orphans never
-                //      count toward the pending cap.
-                // 3. If absent from both:
-                //    - Returns `{ false, remaining_pending_count, latest_body }` so the
-                //      caller can verify whether the checkpoint was already promoted.
+                let hex_digest = hex::encode(digest);
+                // Atomically promotes the verified body (`ARGV[2]`) to canonical latest
+                // and trims all entries at or below its height from both stores and indexes.
+                // Re-checks `body == ARGV[2]` so a concurrent overwrite between lookup
+                // and promotion can never promote an unverified body.
+                // Returns `{ status, remaining_pending_count, maybe_latest }` where
+                // `status` is `1` (pending), `2` (orphan), or `0` (CAS missed).
                 const PROMOTE: &str = r#"
+                    local status = 0
                     local height = redis.call('HGET', KEYS[2], ARGV[1])
                     local body = height and redis.call('HGET', KEYS[1], height)
-                    if not body then
+                    if body == ARGV[2] then
+                        status = 1
+                    else
                         height = redis.call('HGET', KEYS[5], ARGV[1])
                         body = height and redis.call('HGET', KEYS[4], height)
+                        if body == ARGV[2] then
+                            status = 2
+                        end
                     end
-                    if body then
+                    if status ~= 0 then
                         redis.call('SET', KEYS[3], body)
                         local num = tonumber(height)
                         local index = redis.call('HGETALL', KEYS[2])
@@ -503,33 +580,64 @@ impl CheckpointStorage {
                                 redis.call('HDEL', KEYS[5], index[i])
                             end
                         end
-                        return { true, redis.call('HLEN', KEYS[1]), false }
+                        return { status, redis.call('HLEN', KEYS[1]), false }
                     end
-                    return { false, redis.call('HLEN', KEYS[1]), redis.call('GET', KEYS[3]) }
+                    return { 0, redis.call('HLEN', KEYS[1]), redis.call('GET', KEYS[3]) }
                 "#;
-                let (promoted, remaining, maybe_latest): (bool, usize, Option<Vec<u8>>) =
+
+                // The digest indexes are lookup hints, not a trust boundary: walk
+                // pending (1) -> orphan (2) -> latest (3) until a body matches
+                // `digest` before `PROMOTE` writes canonical latest (`KEYS[3]`).
+                let mut min_source = 1u8;
+                let (candidate_bytes, _) = loop {
+                    let (source, remaining, maybe_body) = self
+                        .lookup_by_digest(&mut conn, chain, &hex_digest, min_source)
+                        .await?;
+                    if source == 3 {
+                        return Ok((
+                            confirm_latest_bytes(maybe_body.as_deref(), digest)?,
+                            remaining,
+                        ));
+                    }
+                    let bytes = maybe_body.context("missing candidate body")?;
+                    let candidate = decode_checkpoint(&bytes)
+                        .context("failed to deserialize candidate checkpoint")?;
+                    if candidate.digest() == digest {
+                        break (bytes, remaining);
+                    }
+                    tracing::warn!(
+                        ?chain,
+                        source,
+                        requested = ?digest,
+                        actual = ?candidate.digest(),
+                        "stored checkpoint digest does not match index; skipping tier"
+                    );
+                    min_source = source + 1;
+                };
+
+                let (status, remaining, maybe_latest): (u8, usize, Option<Vec<u8>>) =
                     redis::Script::new(PROMOTE)
                         .key(self.pending_checkpoint_key(chain))
                         .key(self.pending_digest_key(chain))
                         .key(self.checkpoint_key(chain))
                         .key(self.orphan_checkpoint_key(chain))
                         .key(self.orphan_digest_key(chain))
-                        .arg(hex::encode(digest))
+                        .arg(&hex_digest)
+                        .arg(&candidate_bytes)
                         .invoke_async(&mut conn)
                         .await
                         .context("failed to promote checkpoint")?;
 
-                if promoted {
-                    return Ok(Some(remaining));
+                match status {
+                    1 => return Ok((Confirmation::PromotedPending, remaining)),
+                    2 => return Ok((Confirmation::PromotedOrphan, remaining)),
+                    _ => {}
                 }
 
-                let is_confirmed = maybe_latest
-                    .map(|bytes| decode_checkpoint(&bytes))
-                    .transpose()
-                    .context("failed to deserialize latest checkpoint")?
-                    .is_some_and(|cp| cp.digest() == digest);
-
-                Ok(is_confirmed.then_some(remaining))
+                Ok((
+                    confirm_latest_bytes(maybe_latest.as_deref(), digest)?,
+                    remaining,
+                ))
             }
             CheckpointStorage::InMemory {
                 latest,
@@ -546,7 +654,9 @@ impl CheckpointStorage {
                         checkpoints
                             .iter()
                             .find(|(_, cp)| cp.digest() == digest)
-                            .map(|(&height, cp)| (height, cp.clone()))
+                            .map(|(&height, cp)| {
+                                (Confirmation::PromotedPending, height, cp.clone())
+                            })
                     })
                 };
                 if found.is_none() {
@@ -560,13 +670,13 @@ impl CheckpointStorage {
                         let orphan = orphan.read().await;
                         if let Some(cp) = orphan.get(&chain).and_then(|m| m.get(&height)) {
                             if cp.digest() == digest {
-                                found = Some((height, cp.clone()));
+                                found = Some((Confirmation::PromotedOrphan, height, cp.clone()));
                             }
                         }
                     }
                 }
 
-                if let Some((height, promoted)) = found {
+                if let Some((outcome, height, promoted)) = found {
                     // Retire the matched body and every other entry at or below
                     // its height from both stores and the orphan index.
                     let mut pending = pending.write().await;
@@ -590,17 +700,21 @@ impl CheckpointStorage {
                     drop(index);
 
                     latest.write().await.insert(chain, promoted);
-                    return Ok(Some(remaining));
+                    return Ok((outcome, remaining));
                 }
 
                 let remaining = pending.read().await.get(&chain).map_or(0, |m| m.len());
-                let is_confirmed = latest
+                let outcome = if latest
                     .read()
                     .await
                     .get(&chain)
-                    .is_some_and(|cp| cp.digest() == digest);
-
-                Ok(is_confirmed.then_some(remaining))
+                    .is_some_and(|cp| cp.digest() == digest)
+                {
+                    Confirmation::AlreadyConfirmed
+                } else {
+                    Confirmation::NotFound
+                };
+                Ok((outcome, remaining))
             }
             #[cfg(test)]
             CheckpointStorage::Failing => anyhow::bail!("failing storage"),
@@ -766,8 +880,8 @@ impl CheckpointStorage {
                     .and_then(|checkpoints| checkpoints.values().next_back().cloned());
                 let confirmed = latest.read().await.get(&chain).cloned();
                 // The confirmed base wins height ties: it starts as the candidate and is
-                // replaced only by a strictly newer pending or orphan body, matching the
-                // Redis arm where the base height seeds the max comparison.
+                // replaced only by a strictly newer pending or orphan body (matching the
+                // Redis arm, where Lua picks the max pending/orphan and Rust checks base).
                 let mut best = confirmed;
                 for candidate in [newest_pending, newest_orphan].into_iter().flatten() {
                     if best
@@ -832,40 +946,27 @@ impl CheckpointStorage {
         match self {
             CheckpointStorage::Redis(pool, _) => {
                 let mut conn = pool.get().await.context("failed to get redis connection")?;
-                // Resolves a checkpoint by digest across pending, orphan and latest storage:
-                // checks the pending digest index (`KEYS[2]`), then the orphan digest index
-                // (`KEYS[5]`), then the confirmed base (`KEYS[3]`), and returns the body.
-                // The body's digest is always verified in Rust against the requested one;
-                // a stale orphan index must never make a different body look like a hit.
-                const FIND: &str = r#"
-                    local height = redis.call('HGET', KEYS[2], ARGV[1])
-                    local pending = height and redis.call('HGET', KEYS[1], height)
-                    if pending then
-                        return pending
-                    end
-                    local orphan_height = redis.call('HGET', KEYS[5], ARGV[1])
-                    local orphan = orphan_height and redis.call('HGET', KEYS[4], orphan_height)
-                    if orphan then
-                        return orphan
-                    end
-                    return redis.call('GET', KEYS[3])
-                "#;
-                let body: Option<Vec<u8>> = redis::Script::new(FIND)
-                    .key(self.pending_checkpoint_key(chain))
-                    .key(self.pending_digest_key(chain))
-                    .key(self.checkpoint_key(chain))
-                    .key(self.orphan_checkpoint_key(chain))
-                    .key(self.orphan_digest_key(chain))
-                    .arg(hex::encode(digest))
-                    .invoke_async(&mut conn)
-                    .await
-                    .context("failed to find checkpoint by digest")?;
-                let Some(body) = body else {
-                    return Ok(None);
-                };
-                let checkpoint =
-                    decode_checkpoint(&body).context("failed to deserialize checkpoint")?;
-                Ok((checkpoint.digest() == digest).then_some(checkpoint))
+                let hex_digest = hex::encode(digest);
+                // Walk pending (1) -> orphan (2) -> latest (3), verifying each
+                // body's digest in Rust so a stale index never passes off another
+                // body or masks a valid copy in a later tier.
+                let mut min_source = 1u8;
+                loop {
+                    let (source, _, body) = self
+                        .lookup_by_digest(&mut conn, chain, &hex_digest, min_source)
+                        .await?;
+                    if let Some(body) = body {
+                        let checkpoint =
+                            decode_checkpoint(&body).context("failed to deserialize checkpoint")?;
+                        if checkpoint.digest() == digest {
+                            return Ok(Some(checkpoint));
+                        }
+                    }
+                    if source >= 3 {
+                        return Ok(None);
+                    }
+                    min_source = source + 1;
+                }
             }
             CheckpointStorage::InMemory {
                 latest,
@@ -1059,7 +1160,10 @@ mod tests {
             vec![first.clone(), second.clone()]
         );
 
-        assert_eq!(storage.promote(chain, first.digest()).await?, Some(1));
+        assert_eq!(
+            storage.promote(chain, first.digest()).await?,
+            (Confirmation::PromotedPending, 1)
+        );
         assert_eq!(storage.load_latest(chain).await?, Some(first.clone()));
         assert_eq!(storage.load_pending(chain).await?, vec![second.clone()]);
         assert_eq!(storage.latest(chain).await?, Some(second));
@@ -1100,7 +1204,10 @@ mod tests {
         assert_eq!(storage.persist_pending(&checkpoint).await?, Some(1));
         assert_eq!(storage.persist_pending(&checkpoint).await?, Some(1));
         assert_eq!(storage.persist_pending(&conflicting).await?, None);
-        assert!(storage.promote(Chain::Solana, [99; 32]).await?.is_none());
+        assert_eq!(
+            storage.promote(Chain::Solana, [99; 32]).await?.0,
+            Confirmation::NotFound
+        );
         assert_eq!(storage.load_pending(Chain::Solana).await?, vec![checkpoint]);
         Ok(())
     }
@@ -1190,7 +1297,10 @@ mod tests {
         assert_eq!(storage.demote_pending_to_orphan(chain).await?, 2);
         assert!(storage.load_pending(chain).await?.is_empty());
 
-        assert_eq!(storage.promote(chain, second.digest()).await?, Some(0));
+        assert_eq!(
+            storage.promote(chain, second.digest()).await?,
+            (Confirmation::PromotedOrphan, 0)
+        );
         assert_eq!(storage.load_latest(chain).await?, Some(second.clone()));
         // Both orphans were at or below the promoted height and were retired.
         assert!(storage.find(chain, first.digest()).await?.is_none());
@@ -1261,7 +1371,10 @@ mod tests {
             found.as_ref().is_none_or(|cp| cp.digest() == old.digest()),
             "find returned a body that does not match the requested digest"
         );
-        assert!(storage.promote(chain, old.digest()).await?.is_none());
+        assert_eq!(
+            storage.promote(chain, old.digest()).await?.0,
+            Confirmation::NotFound
+        );
         assert!(
             storage
                 .load_latest(chain)
@@ -1272,7 +1385,10 @@ mod tests {
 
         // The current body is still servable and promotable.
         assert_eq!(storage.find(chain, new.digest()).await?, Some(new.clone()));
-        assert_eq!(storage.promote(chain, new.digest()).await?, Some(0));
+        assert_eq!(
+            storage.promote(chain, new.digest()).await?,
+            (Confirmation::PromotedOrphan, 0)
+        );
         assert_eq!(storage.load_latest(chain).await?, Some(new));
         Ok(())
     }
@@ -1348,7 +1464,10 @@ mod tests {
 
         // Promoting the middle height retires every orphan at or below it.
         let promoted = &new[1];
-        assert_eq!(storage.promote(chain, promoted.digest()).await?, Some(0));
+        assert_eq!(
+            storage.promote(chain, promoted.digest()).await?,
+            (Confirmation::PromotedOrphan, 0)
+        );
         assert_eq!(storage.load_latest(chain).await?, Some(promoted.clone()));
         assert_eq!(
             match &storage {
@@ -1399,7 +1518,10 @@ mod tests {
                 .is_none_or(|cp| cp.digest() == stale.digest()),
             "find returned the wrong body for a stale orphan digest"
         );
-        assert!(storage.promote(chain, stale.digest()).await?.is_none());
+        assert_eq!(
+            storage.promote(chain, stale.digest()).await?.0,
+            Confirmation::NotFound
+        );
         assert!(
             storage
                 .load_latest(chain)
@@ -1410,6 +1532,18 @@ mod tests {
         assert_eq!(
             storage.find(chain, real.digest()).await?,
             Some(real.clone())
+        );
+
+        // Even with the stale orphan index still present, a valid copy in
+        // canonical `latest` must not be masked by it.
+        storage.persist(&stale).await?;
+        assert_eq!(
+            storage.find(chain, stale.digest()).await?,
+            Some(stale.clone())
+        );
+        assert_eq!(
+            storage.promote(chain, stale.digest()).await?,
+            (Confirmation::AlreadyConfirmed, 0)
         );
         Ok(())
     }

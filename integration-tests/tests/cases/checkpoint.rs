@@ -1,6 +1,7 @@
 //! Tests checkpoint consensus alignment via peer-to-peer HTTP fetch.
 
 use integration_tests::mpc_fixture::{mock_stream::MockStream, MpcFixtureBuilder};
+use mpc_chain_integration_core::StateManager;
 use mpc_node::backlog::consensus::align_backlog_with_consensus;
 use mpc_node::backlog::mock::{mock_root_pk, BacklogTestExt};
 use mpc_node::backlog::Backlog;
@@ -200,12 +201,13 @@ async fn test_consensus_alignment_peer_fetch() {
     assert_eq!(persisted.unwrap().block_height, expected_height);
 }
 
-/// Encodes the confirmation-to-promotion gap from `doc/checkpoint-upgrade-safety.md`:
+/// Encodes the confirmation-to-promotion gap across restarts (`doc/checkpoints.md`, Section 4):
 /// nodes vote checkpoint D, the contract settles D, the whole cluster restarts *before*
 /// promotion, and the new binaries must still promote D from its durable orphan body
 /// (using the contract-settled digest, without re-indexing) and agree on the next one.
-/// After promotion it also rebuilds a fresh `Backlog` over the same storage to check a
-/// restarted node seeds only from the confirmed base, not from any leftover pending body.
+/// It rebuilds a fresh `Backlog` before promotion, hydrates it, and checks that
+/// `align_backlog_with_consensus` promotes the orphan and rebases that same `Backlog`
+/// to the settled height with no peers reachable.
 ///
 /// The full mixed old/new binary restart belongs in the prod-compat workflow; this
 /// test pins the storage invariant with in-memory storage so it runs in CI.
@@ -255,27 +257,60 @@ async fn settled_checkpoint_survives_restart_before_promotion() {
             "an unpromoted pending body must not seed the restarted backlog"
         );
 
-        // New binaries promote using the stored digest — no re-index, no recompute.
-        assert!(backlog.checkpoints().confirm(chain, digest).await.unwrap());
+        // Real restart: discard the live backlog and build a fresh one over the
+        // same durable storage before promotion. `hydrate` sees no base (or an
+        // older base), and `align_backlog_with_consensus` must promote the orphan
+        // AND rebase that same `Backlog` directly to `interval` with no peers.
+        let restarted = Backlog::persisted(storage.clone());
+        assert!(
+            restarted
+                .hydrate(chain, mock_root_pk())
+                .await
+                .unwrap()
+                .is_none(),
+            "an unpromoted orphan must not seed the restarted backlog"
+        );
+
+        let (_cp_tx, mut checkpoints_rx) = tokio::sync::watch::channel(Some(CheckpointDigest {
+            chain,
+            height: interval,
+            digest,
+        }));
+        let (_mesh_tx, mut mesh_rx) = tokio::sync::watch::channel(MeshState::default());
+        let me: AccountId = "restarted.near".parse().unwrap();
+        let rebased = tokio::time::timeout(
+            Duration::from_secs(5),
+            align_backlog_with_consensus(
+                chain,
+                &restarted,
+                &mut checkpoints_rx,
+                &mut mesh_rx,
+                &NodeClient::new(),
+                &me,
+                mock_root_pk(),
+            ),
+        )
+        .await
+        .expect("rebasing from local orphan must not wait on peers");
+        assert_eq!(
+            rebased,
+            Some(interval),
+            "align must rebase the in-memory backlog onto the promoted orphan"
+        );
         assert_eq!(
             storage.load_latest(chain).await.unwrap(),
             Some(checkpoint.clone()),
             "the settled body must become the canonical base"
         );
-
-        // Real restart after promotion: discard the live backlog and build a fresh one
-        // over the same durable storage. Promotion consumed the orphan body, so the
-        // only possible seed is the confirmed base.
-        let restarted = Backlog::persisted(storage.clone());
         assert_eq!(
-            restarted.hydrate(chain, mock_root_pk()).await.unwrap(),
-            Some(checkpoint.clone()),
-            "a restarted backlog must seed from the confirmed base"
+            restarted.get_processed_block(chain).await,
+            Some(interval),
+            "restarted backlog cursor must advance to the promoted orphan height"
         );
         assert_eq!(
             restarted.len_by_chain(chain).await,
             1,
-            "the restarted backlog carries the base's pending request"
+            "the restarted backlog carries the promoted orphan's pending request"
         );
 
         // And the next checkpoint each restarted node produces must still agree.

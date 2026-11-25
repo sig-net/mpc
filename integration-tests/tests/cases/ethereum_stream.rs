@@ -375,7 +375,7 @@ async fn test_ethereum_stream_resume_starts_after_checkpoint_height() -> Result<
             .checkpoints()
             .confirm(Chain::Ethereum, checkpoint.digest())
             .await,
-        Ok(true)
+        Ok(outcome) if outcome.is_confirmed()
     ));
 
     let mut expected_payload = [0x32; 32];
@@ -508,7 +508,7 @@ async fn test_ethereum_stream_linear_catchup_from_checkpoint() -> Result<()> {
             .checkpoints()
             .confirm(Chain::Ethereum, checkpoint.digest())
             .await,
-        Ok(true)
+        Ok(outcome) if outcome.is_confirmed()
     ));
 
     let backlog = Backlog::persisted(storage.clone());

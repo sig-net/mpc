@@ -4,11 +4,11 @@
 use super::recovery::recover_backlog;
 use super::{handle_chain_event, StreamContext};
 
-use crate::backlog::{Backlog, Checkpoint};
+use crate::backlog::{Backlog, Checkpoint, Confirmation};
 use crate::types::CheckpointWatcher;
 use crate::types::SignCommand;
 use mpc_chain_integration_core::utils::stream::chain_event_channel;
-use mpc_chain_integration_core::{ChainIndexer, ChainTelemetry};
+use mpc_chain_integration_core::{ChainIndexer, ChainTelemetry, StateManager};
 use mpc_primitives::{Chain, ChainConfig as _, ChainEvent};
 use std::sync::Arc;
 use tokio::time::{Duration, Instant};
@@ -80,16 +80,22 @@ async fn detect_regression(
 
     // A consensus digest can match the confirmed base, a retained pending
     // checkpoint, or a durable orphan while this node is ahead of consensus.
+    // A pending checkpoint was built in this run and `AlreadyConfirmed` was
+    // already our base; only promoting an orphan above our in-memory processed
+    // height needs a restart so recovery rebases onto it.
     match backlog
         .checkpoints()
         .confirm(chain, checkpoint_digest.digest)
         .await
     {
-        Ok(found) => {
-            if found {
-                return false;
-            }
+        Ok(Confirmation::PromotedPending | Confirmation::AlreadyConfirmed) => return false,
+        Ok(Confirmation::PromotedOrphan) => {
+            return backlog
+                .get_processed_block(chain)
+                .await
+                .is_none_or(|height| height < checkpoint_digest.height);
         }
+        Ok(Confirmation::NotFound) => {}
         Err(err) => {
             tracing::warn!(
                 ?chain,
@@ -356,7 +362,7 @@ async fn run_supervised_with_watchdog<I: ChainIndexer, T: ChainTelemetry>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::backlog::mock::mock_sign_request;
+    use crate::backlog::mock::{mock_sign_request, BacklogTestExt};
     use crate::backlog::Backlog;
     use crate::backlog::MAX_PENDING_CHECKPOINTS;
     use crate::mesh::MeshState;
@@ -367,7 +373,7 @@ mod tests {
     use mpc_primitives::SignId;
 
     use k256::ProjectivePoint;
-    use mpc_chain_integration_core::{NoopChainTelemetry, StateManager};
+    use mpc_chain_integration_core::NoopChainTelemetry;
     use mpc_primitives::{Chain, CheckpointDigest};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Mutex;
@@ -560,7 +566,8 @@ mod tests {
             .checkpoints()
             .confirm(chain, applied.digest())
             .await
-            .unwrap());
+            .unwrap()
+            .is_confirmed());
 
         let (_tx, mut rx) = make_digest(
             chain,
@@ -1049,7 +1056,8 @@ mod tests {
             .checkpoints()
             .confirm(chain, stale.digest())
             .await
-            .unwrap());
+            .unwrap()
+            .is_confirmed());
 
         let attempts = Arc::new(AtomicUsize::new(0));
         let first_cancel = Arc::new(Notify::new());
@@ -1262,7 +1270,8 @@ mod tests {
             .checkpoints()
             .confirm(chain, newest.digest())
             .await
-            .unwrap());
+            .unwrap()
+            .is_confirmed());
         tokio::time::sleep(TEST_BLOCK_TIME * 2 + ERROR_RESTART_DELAY).await;
 
         assert_eq!(
@@ -1447,5 +1456,172 @@ mod tests {
             );
         }
         task.abort();
+    }
+
+    /// An in-process restart (`load_local: false`) keeps the in-memory backlog
+    /// intact and must NOT demote pending checkpoints to orphans, so settling
+    /// the oldest checkpoint at `MAX_PENDING_CHECKPOINTS` leaves the remaining
+    /// `MAX_PENDING_CHECKPOINTS - 1` checkpoints counted against the cap.
+    #[tokio::test(start_paused = true)]
+    async fn in_process_restart_preserves_pending_window_at_cap() {
+        let chain = Chain::Ethereum;
+        let storage = CheckpointStorage::in_memory();
+        let backlog = Backlog::persisted(storage.clone());
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let indexer = RunIntoCapIndexer {
+            attempts: attempts.clone(),
+        };
+        let (sign_tx, sign_rx) = mpsc::channel(8);
+        let (ctx, cp_tx, mesh_tx, mut rpc_rx) = test_ctx(backlog.clone(), sign_tx);
+        tokio::spawn(async move {
+            let _channels_stay_open = (sign_rx, cp_tx, mesh_tx);
+            while rpc_rx.recv().await.is_some() {}
+        });
+        let task = tokio::spawn(run_supervised_with_watchdog(
+            indexer,
+            ctx,
+            NoopChainTelemetry,
+            TEST_WATCHDOG,
+        ));
+        while backlog.checkpoints().has_slot(chain) {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        assert_eq!(backlog.checkpoints().count(chain), MAX_PENDING_CHECKPOINTS);
+
+        // Settle the oldest pending checkpoint so MAX_PENDING_CHECKPOINTS - 1 remain.
+        let pending = storage.load_pending(chain).await.unwrap();
+        assert_eq!(pending.len(), MAX_PENDING_CHECKPOINTS);
+        let oldest = &pending[0];
+        assert!(backlog
+            .checkpoints()
+            .confirm(chain, oldest.digest())
+            .await
+            .unwrap()
+            .is_confirmed());
+
+        // Wait for the cap wait to end in an in-process restart. The restarted
+        // `RunIntoCapIndexer` emits one new boundary (`(MAX_PENDING + 1) * interval`),
+        // which consumes the single freed slot and puts the node back at the cap.
+        while attempts.load(Ordering::SeqCst) < 2 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        // Let the restarted run() emit its block event and finish recovery.
+        tokio::time::sleep(TEST_BLOCK_TIME).await;
+
+        assert_eq!(
+            backlog.checkpoints().count(chain),
+            MAX_PENDING_CHECKPOINTS,
+            "in-process restart must preserve the {}-checkpoint window so 1 new boundary reaches the cap",
+            MAX_PENDING_CHECKPOINTS - 1,
+        );
+        assert!(
+            !backlog.checkpoints().has_slot(chain),
+            "cap must still hold across an in-process restart"
+        );
+        assert_eq!(
+            storage.load_pending(chain).await.unwrap().len(),
+            MAX_PENDING_CHECKPOINTS,
+            "in-process restart must keep pending checkpoints instead of demoting them to orphans"
+        );
+        task.abort();
+    }
+
+    /// Startup recovery (`load_local: true`) promotes a settled orphan before
+    /// seeding so the restarted backlog starts at the settled height directly.
+    #[tokio::test]
+    async fn recover_backlog_promotes_settled_orphan_before_seeding() {
+        let chain = Chain::Ethereum;
+        let interval = crate::backlog::checkpoint_interval(chain).unwrap();
+        let storage = CheckpointStorage::in_memory();
+        let old_backlog = Backlog::persisted(storage.clone());
+
+        // Older confirmed base at `interval`.
+        old_backlog.set_processed_block(chain, interval).await;
+        let base = old_backlog.checkpoint(chain).await.unwrap();
+        assert!(old_backlog
+            .checkpoints()
+            .confirm(chain, base.digest())
+            .await
+            .unwrap()
+            .is_confirmed());
+
+        // Higher checkpoint at `2 * interval` created and demoted to orphan.
+        old_backlog
+            .insert_mock_sign(SignId::new([5; 32]), chain)
+            .await;
+        old_backlog.set_processed_block(chain, 2 * interval).await;
+        let settled = old_backlog.checkpoint(chain).await.unwrap();
+        assert_eq!(storage.demote_pending_to_orphan(chain).await.unwrap(), 1);
+
+        // Fresh process starts with the contract already settled at `2 * interval`.
+        let restarted = Backlog::persisted(storage.clone());
+        let (_digest_tx, mut digest_rx) = make_digest(chain, 2 * interval, settled.digest());
+        let (_mesh_tx, mut mesh) = watch::channel(MeshState::default());
+        let client = crate::node_client::NodeClient::new();
+        let me = "test.near".parse().unwrap();
+
+        recover_backlog(
+            chain,
+            true,
+            &restarted,
+            &mut digest_rx,
+            &mut mesh,
+            &client,
+            &me,
+            ProjectivePoint::GENERATOR.to_affine(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            restarted.get_processed_block(chain).await,
+            Some(2 * interval),
+            "startup must seed from the promoted orphan rather than the older base"
+        );
+        assert_eq!(
+            restarted.len_by_chain(chain).await,
+            1,
+            "restarted backlog must hold the promoted orphan's entry"
+        );
+        assert_eq!(storage.load_latest(chain).await.unwrap(), Some(settled));
+    }
+
+    /// If `detect_regression` promotes an orphan above the in-memory processed
+    /// height (e.g. settlement arrived after startup `hydrate` seeded from an
+    /// older base), it must trigger recovery so the supervisor rebases onto it.
+    #[tokio::test]
+    async fn detect_regression_triggers_recovery_when_orphan_promoted_above_processed() {
+        let chain = Chain::Ethereum;
+        let interval = crate::backlog::checkpoint_interval(chain).unwrap();
+        let storage = CheckpointStorage::in_memory();
+        let old = Backlog::persisted(storage.clone());
+
+        old.set_processed_block(chain, interval).await;
+        let base = old.checkpoint(chain).await.unwrap();
+        assert!(old
+            .checkpoints()
+            .confirm(chain, base.digest())
+            .await
+            .unwrap()
+            .is_confirmed());
+
+        old.set_processed_block(chain, 2 * interval).await;
+        let orphan = old.checkpoint(chain).await.unwrap();
+        assert_eq!(storage.demote_pending_to_orphan(chain).await.unwrap(), 1);
+
+        // Restarted backlog hydrated from `base` while consensus had not yet settled `2 * interval`.
+        let restarted = Backlog::persisted(storage.clone());
+        restarted
+            .hydrate(chain, ProjectivePoint::GENERATOR.to_affine())
+            .await
+            .unwrap();
+        assert_eq!(restarted.get_processed_block(chain).await, Some(interval));
+
+        let (_tx, mut rx) = make_digest(chain, 2 * interval, orphan.digest());
+        assert!(
+            detect_regression(chain, &restarted, &mut rx).await,
+            "promoting an orphan above processed height must trigger recovery to rebase"
+        );
+        assert_eq!(storage.load_latest(chain).await.unwrap(), Some(orphan));
     }
 }

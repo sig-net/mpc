@@ -1,5 +1,6 @@
 use super::{BacklogEntry, PendingRequests, MAX_PENDING_CHECKPOINTS};
 use crate::storage::checkpoint_storage::CheckpointStorage;
+pub use crate::storage::checkpoint_storage::Confirmation;
 
 use enum_map::EnumMap;
 use mpc_primitives::{BidirectionalTxId, Chain, SignArgs, SignId, SignKind};
@@ -280,28 +281,33 @@ impl Checkpoints {
 
     /// Promotes a pending or orphan checkpoint when its digest reaches consensus,
     /// or confirms it if already promoted.
-    pub async fn confirm(&self, chain: Chain, digest: [u8; 32]) -> Result<bool, CheckpointError> {
-        let outcome = self
+    pub async fn confirm(
+        &self,
+        chain: Chain,
+        digest: [u8; 32],
+    ) -> Result<Confirmation, CheckpointError> {
+        let (outcome, remaining_count) = self
             .storage
             .promote(chain, digest)
             .await
             .map_err(|source| CheckpointError::Storage { chain, source })?;
 
-        // Not a fault by itself: a node behind consensus has no such checkpoint yet.
-        let Some(remaining_count) = outcome else {
+        if outcome == Confirmation::NotFound {
+            // Not a fault by itself: a node behind consensus has no such checkpoint yet.
             tracing::debug!(?chain, ?digest, "checkpoint not found for promotion");
-            return Ok(false);
-        };
+            return Ok(Confirmation::NotFound);
+        }
 
         self.pending_counts[chain].store(remaining_count, Ordering::Release);
         self.observe(chain, remaining_count);
         tracing::info!(
             ?chain,
             ?digest,
+            ?outcome,
             remaining_count,
             "consensus checkpoint confirmed"
         );
-        Ok(true)
+        Ok(outcome)
     }
 
     /// Zeroes the locally tracked pending count. Recovery calls this after
@@ -507,7 +513,7 @@ mod tests {
         assert!(!checkpoints.has_slot(latest.chain));
         assert!(matches!(
             checkpoints.confirm(latest.chain, latest.digest()).await,
-            Ok(true)
+            Ok(Confirmation::PromotedPending)
         ));
         assert!(checkpoints.has_slot(latest.chain));
         assert!(checkpoints
@@ -528,7 +534,7 @@ mod tests {
 
         assert!(matches!(
             checkpoints.confirm(second.chain, second.digest()).await,
-            Ok(true)
+            Ok(Confirmation::PromotedPending)
         ));
         assert_eq!(checkpoints.count(first.chain), 1);
         assert_eq!(checkpoints.latest(first.chain).await.unwrap(), Some(third));
@@ -542,7 +548,7 @@ mod tests {
 
         assert!(matches!(
             checkpoints.confirm(checkpoint.chain, [1; 32]).await,
-            Ok(false)
+            Ok(Confirmation::NotFound)
         ));
         assert_eq!(checkpoints.count(checkpoint.chain), 1);
         assert_eq!(
@@ -648,7 +654,7 @@ mod tests {
             checkpoints
                 .confirm(checkpoint.chain, checkpoint.digest())
                 .await,
-            Ok(true)
+            Ok(Confirmation::PromotedPending)
         ));
 
         assert_eq!(
@@ -688,7 +694,7 @@ mod tests {
             checkpoints
                 .confirm(checkpoint.chain, checkpoint.digest())
                 .await,
-            Ok(true)
+            Ok(Confirmation::AlreadyConfirmed)
         ));
         assert_eq!(checkpoints.count(checkpoint.chain), 0);
     }
@@ -754,7 +760,7 @@ mod tests {
             checkpoints
                 .confirm(checkpoint.chain, checkpoint.digest())
                 .await,
-            Ok(true)
+            Ok(Confirmation::PromotedPending)
         ));
         assert_eq!(
             checkpoints

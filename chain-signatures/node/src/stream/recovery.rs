@@ -8,7 +8,7 @@ use near_account_id::AccountId;
 use tokio::sync::watch;
 
 /// Node-side checkpoint recovery:
-/// loads the local checkpoint into the backlog (it only touches local storage),
+/// demotes pending to orphan and loads the local base on a process restart (`load_local: true`),
 /// then aligns the backlog with the consensus checkpoint feed. Mesh availability
 /// is handled inside `align_backlog_with_consensus` when it needs to fetch a
 /// checkpoint from peers. Returns whether the backlog was rebased.
@@ -25,21 +25,20 @@ pub(crate) async fn recover_backlog(
 ) -> Result<bool, crate::backlog::CheckpointError> {
     tracing::info!(%chain, load_local, "starting checkpoint recovery or regression");
 
-    // Demote every durable pending checkpoint to an orphan at the very start of
-    // every recovery pass. Orphans stay durable, servable by digest, and
-    // promotable, but are never used as a recovery seed (nor re-voted). Demotion
-    // clears durable pending and resets the local counter as part of the same
-    // operation.
-    let demoted = backlog
-        .checkpoints()
-        .demote_pending_to_orphan(chain)
-        .await?;
-    if demoted > 0 {
-        tracing::info!(%chain, count = demoted, "demoted pending checkpoints to orphans during recovery");
-    }
-
-    // Hydrate local backlog state from durable storage on initial startup.
+    // Only process restarts (`load_local: true`) demote pending checkpoints to
+    // orphans: in-process restarts keep the in-memory backlog and its pending
+    // window intact, so clearing pending there would defeat `MAX_PENDING_CHECKPOINTS`.
+    // Orphans stay durable, servable by digest, and promotable, but are never used
+    // as a recovery seed (nor re-voted).
     if load_local {
+        let demoted = backlog
+            .checkpoints()
+            .demote_pending_to_orphan(chain)
+            .await?;
+        if demoted > 0 {
+            tracing::info!(%chain, count = demoted, "demoted pending checkpoints to orphans during recovery");
+        }
+
         match backlog.hydrate(chain, root_pk).await? {
             Some(checkpoint) => {
                 tracing::info!(

@@ -15,7 +15,9 @@ use crate::sign_bidirectional::{
     SignStatus,
 };
 use crate::storage::checkpoint_storage::CheckpointStorage;
-pub use checkpoints::{Checkpoint, CheckpointError, CheckpointFacts, Checkpoints, EntryFacts};
+pub use checkpoints::{
+    Checkpoint, CheckpointError, CheckpointFacts, Checkpoints, Confirmation, EntryFacts,
+};
 
 use enum_map::EnumMap;
 use mpc_chain_integration_core::{ExecutionWatchIndex, StateManager, WatchKey, WatchedExecution};

@@ -512,11 +512,14 @@ async fn test_stream_sends_pre_catchup_ethereum_completion() {
     // A restart seeds only from the canonical, contract-settled base. Promote the
     // pending checkpoint so the entry survives the simulated restart; a pending
     // body is still durable, servable, and promotable, but is never the seed.
-    seeded_backlog
-        .checkpoints()
-        .confirm(Chain::Ethereum, checkpoint.digest())
-        .await
-        .unwrap();
+    assert_eq!(
+        seeded_backlog
+            .checkpoints()
+            .confirm(Chain::Ethereum, checkpoint.digest())
+            .await
+            .unwrap(),
+        crate::backlog::Confirmation::PromotedPending
+    );
     assert_eq!(
         storage.load_latest(Chain::Ethereum).await.unwrap(),
         Some(checkpoint)
@@ -571,11 +574,14 @@ async fn test_stream_keeps_the_recovered_ethereum_entry_over_a_replay() {
     // Seed the restart from the canonical settled base. An unconfirmed pending
     // body stays durable, servable, and promotable but never seeds the backlog,
     // so the in-flight entry must come from this base.
-    seeded_backlog
-        .checkpoints()
-        .confirm(Chain::Ethereum, checkpoint.digest())
-        .await
-        .unwrap();
+    assert_eq!(
+        seeded_backlog
+            .checkpoints()
+            .confirm(Chain::Ethereum, checkpoint.digest())
+            .await
+            .unwrap(),
+        crate::backlog::Confirmation::PromotedPending
+    );
     assert_eq!(
         storage.load_latest(Chain::Ethereum).await.unwrap(),
         Some(checkpoint)
