@@ -7,6 +7,7 @@ mod client;
 mod config;
 mod events;
 mod indexer;
+mod program;
 mod publisher;
 #[cfg(test)]
 mod test_utils;
@@ -16,4 +17,5 @@ pub use anchor_lang::prelude::Pubkey;
 pub use client::{SolanaCatchupBlock, SolanaClient};
 pub use config::{SolConfig, SolIndexerConfig};
 pub use indexer::SolanaIndexer;
+pub use program::solana_signet_program;
 pub use solana_sdk::signer::keypair::Keypair;
