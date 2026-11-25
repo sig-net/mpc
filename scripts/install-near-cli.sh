@@ -12,7 +12,7 @@ case "$(uname -s)-$(uname -m)" in
     *) echo "no pinned near-cli-rs build for $(uname -s)-$(uname -m)" >&2; exit 1 ;;
 esac
 
-near --version 2>/dev/null | grep -qF "$VERSION" && exit 0
+near --version 2>/dev/null | grep -qxF "near-cli-rs $VERSION" && exit 0
 
 tmp="$(mktemp -d)"
 trap 'rm -rf "${tmp:?}"' EXIT
@@ -22,3 +22,4 @@ echo "$sha256  $tmp/near-cli-rs.tar.gz" | sha256sum -c -
 tar xzf "$tmp/near-cli-rs.tar.gz" -C "$tmp"
 mkdir -p "$HOME/.cargo/bin"
 install -m 755 "$tmp/near-cli-rs-$target/near" "$HOME/.cargo/bin/"
+near --version | grep -qxF "near-cli-rs $VERSION" || { echo "installed near-cli-rs, but \`near\` on PATH is not $VERSION" >&2; exit 1; }
