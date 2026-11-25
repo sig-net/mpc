@@ -604,13 +604,15 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Mutex;
 
+    use http::StatusCode;
     use midnight_ledger_v9::structure::{
         ContractAction, ContractCall, Intent, ProofPreimageMarker, Signature, INITIAL_PARAMETERS,
     };
     use midnight_transient_crypto::commitment::PedersenRandomness;
-    use mpc_chain_integration_core::utils::retry::is_retryable;
+    use mpc_chain_integration_core::utils::retry::{is_retryable, RpcFailure};
 
     use super::*;
+    use crate::chain_mock::scan_read_rejected;
     use crate::emissions::{emissions_of_call, Emission, EmissionKind, MISC_PAYLOAD_LEN};
     use crate::funding::tests::{base, funded_key, replayed};
     use crate::funding::{plan_fee, FeePlan};
@@ -724,8 +726,8 @@ mod tests {
         submitted: Mutex<Vec<Instant>>,
         landing: Option<(u64, Landing)>,
         landing_reads: Mutex<VecDeque<u64>>,
-        /// A block whose first landing read fails.
-        failing_read: Mutex<Option<u64>>,
+        /// When set, the landing read at that height fails once with this error.
+        failing_read: Mutex<Option<(u64, anyhow::Error)>>,
         /// A block whose first time read fails.
         failing_time: Mutex<Option<u64>>,
     }
@@ -754,7 +756,14 @@ mod tests {
         }
 
         fn failing_once_at(self, number: u64) -> Self {
-            *self.failing_read.lock().unwrap() = Some(number);
+            self.failing_read_with(
+                number,
+                anyhow::anyhow!("the node dropped the read of block {number}"),
+            )
+        }
+
+        fn failing_read_with(self, number: u64, error: anyhow::Error) -> Self {
+            *self.failing_read.lock().unwrap() = Some((number, error));
             self
         }
 
@@ -846,9 +855,8 @@ mod tests {
             let number = block_number_of(at);
             self.landing_reads.lock().unwrap().push_back(number);
             let mut failing = self.failing_read.lock().unwrap();
-            if *failing == Some(number) {
-                *failing = None;
-                anyhow::bail!("the node dropped the read of block {number}");
+            if let Some((_, error)) = failing.take_if(|(at, _)| *at == number) {
+                return Err(error);
             }
             Ok(self
                 .landing
@@ -1878,6 +1886,76 @@ mod tests {
                 "{fields:?}"
             );
         }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_terminal_scan_read_holds_reservations_and_is_not_retryable() {
+        let client = client_over(
+            managed_dir(|_, bytes| bytes),
+            ScriptedChain::new(10, 20, Some((13, Landing::Applied)))
+                .failing_read_with(13, scan_read_rejected(403)),
+        );
+        let error = client
+            .post(
+                b"tx",
+                LedgerTxHash::from_bytes(TX_HASH),
+                &spent(),
+                10,
+                Timestamp::from_secs(5000),
+                deadline(),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(error, SubmitError::Node { .. }), "{error:#}");
+        assert!(client.wallet.released.lock().unwrap().is_empty());
+        assert!(
+            client.wallet.reports.lock().unwrap().is_empty(),
+            "the read exit strikes and reports nothing"
+        );
+        assert_eq!(
+            *client.wallet.reserved_until.lock().unwrap(),
+            vec![Timestamp::from_secs(5000 + FINALITY_SLACK.as_secs())],
+            "the reservation keeps its original lifetime"
+        );
+        let published = SubmitError::into_publish_error(error);
+        assert!(!is_retryable(&published), "{published:#}");
+        let carrier = published
+            .chain()
+            .find_map(|cause| cause.downcast_ref::<RpcFailure>())
+            .unwrap_or_else(|| panic!("the exit carries its carrier: {published:#}"));
+        assert_eq!(
+            carrier.status(),
+            StatusCode::from_u16(403).ok(),
+            "{published:#}"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_early_exit_stops_the_resends_of_an_unanswered_submit() {
+        let client = client_over(
+            managed_dir(|_, bytes| bytes),
+            ScriptedChain::new(10, 20, None)
+                .refusing(SubmitRefusal::Unanswered(anyhow::anyhow!("no answer")))
+                .failing_read_with(13, scan_read_rejected(403)),
+        );
+        let error = client
+            .post(
+                b"tx",
+                LedgerTxHash::from_bytes(TX_HASH),
+                &spent(),
+                10,
+                Timestamp::from_secs(5000),
+                deadline(),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(error, SubmitError::Node { .. }), "{error:#}");
+        tokio::time::sleep(Duration::from_secs(20)).await;
+        assert_eq!(
+            client.chain.submits().len(),
+            1,
+            "the resend task died with the watch, not with the budget"
+        );
     }
 
     #[test]
