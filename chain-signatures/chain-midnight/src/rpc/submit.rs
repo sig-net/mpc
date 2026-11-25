@@ -8,6 +8,7 @@ use subxt::ext::subxt_rpcs::{rpc_params, Error as RawRpcError};
 use subxt::utils::H256;
 
 use super::publisher::{recall, remember, MidnightPublisherRpc, PinnedReads};
+use super::reads::attach_read_carrier;
 use super::statics::{TxApplied, TxPartialSuccess};
 use crate::types::{BlockHash, LedgerTxHash};
 
@@ -81,14 +82,12 @@ fn classify_submit_reply(
     }
 }
 
-#[async_trait::async_trait]
-impl SubmitChain for MidnightPublisherRpc {
-    async fn block_number(&self, at: &BlockHash) -> anyhow::Result<u64> {
-        let header = self.header(H256::from(*at)).await?;
-        Ok(u64::from(header.number))
+impl MidnightPublisherRpc {
+    async fn number_at(&self, at: &BlockHash) -> anyhow::Result<u64> {
+        Ok(u64::from(self.header(H256::from(*at)).await?.number))
     }
 
-    async fn block_hash_at(&self, number: u64) -> anyhow::Result<Option<BlockHash>> {
+    async fn hash_at(&self, number: u64) -> anyhow::Result<Option<BlockHash>> {
         Ok(self
             .legacy
             .chain_get_block_hash(Some(NumberOrHex::Number(number)))
@@ -97,7 +96,7 @@ impl SubmitChain for MidnightPublisherRpc {
             .map(BlockHash::from))
     }
 
-    async fn block_time(
+    async fn time_at(
         &self,
         at: &BlockHash,
     ) -> anyhow::Result<midnight_base_crypto::time::Timestamp> {
@@ -130,33 +129,7 @@ impl SubmitChain for MidnightPublisherRpc {
         Ok(time)
     }
 
-    async fn submit(&self, transaction: &[u8]) -> Result<(), SubmitRefusal> {
-        let client = self
-            .client_at(None)
-            .await
-            .map_err(|error| SubmitRefusal::Unsent(error.context("reading the node's runtime")))?;
-        let extrinsic = client
-            .tx()
-            .create_unsigned(&subxt::dynamic::tx(
-                "Midnight",
-                "send_mn_transaction",
-                vec![subxt::dynamic::Value::from_bytes(transaction)],
-            ))
-            .map_err(|error| {
-                SubmitRefusal::Mismatch(
-                    anyhow::Error::new(error)
-                        .context("send_mn_transaction did not match the node's metadata"),
-                )
-            })?;
-        let encoded = format!("0x{}", hex::encode(extrinsic.encoded()));
-        classify_submit_reply(
-            self.rpc
-                .request::<serde_json::Value>("author_submitExtrinsic", rpc_params![encoded])
-                .await,
-        )
-    }
-
-    async fn landing(
+    async fn landing_at(
         &self,
         at: &BlockHash,
         tx_hash: LedgerTxHash,
@@ -185,6 +158,63 @@ impl SubmitChain for MidnightPublisherRpc {
         Ok(None)
     }
 }
+
+#[async_trait::async_trait]
+impl SubmitChain for MidnightPublisherRpc {
+    async fn block_number(&self, at: &BlockHash) -> anyhow::Result<u64> {
+        self.number_at(at).await.map_err(attach_read_carrier)
+    }
+
+    async fn block_hash_at(&self, number: u64) -> anyhow::Result<Option<BlockHash>> {
+        self.hash_at(number).await.map_err(attach_read_carrier)
+    }
+
+    /// The block's `Timestamp::Now`, in whole seconds.
+    async fn block_time(
+        &self,
+        at: &BlockHash,
+    ) -> anyhow::Result<midnight_base_crypto::time::Timestamp> {
+        self.time_at(at).await.map_err(attach_read_carrier)
+    }
+
+    async fn submit(&self, transaction: &[u8]) -> Result<(), SubmitRefusal> {
+        let client = self
+            .client_at(None)
+            .await
+            .map_err(|error| SubmitRefusal::Unsent(error.context("reading the node's runtime")))?;
+        let extrinsic = client
+            .tx()
+            .create_unsigned(&subxt::dynamic::tx(
+                "Midnight",
+                "send_mn_transaction",
+                vec![subxt::dynamic::Value::from_bytes(transaction)],
+            ))
+            .map_err(|error| {
+                SubmitRefusal::Mismatch(
+                    anyhow::Error::new(error)
+                        .context("send_mn_transaction did not match the node's metadata"),
+                )
+            })?;
+        let encoded = format!("0x{}", hex::encode(extrinsic.encoded()));
+        classify_submit_reply(
+            self.rpc
+                .request::<serde_json::Value>("author_submitExtrinsic", rpc_params![encoded])
+                .await,
+        )
+    }
+
+    /// The status the block reports for the ledger transaction `tx_hash`, if it holds it.
+    async fn landing(
+        &self,
+        at: &BlockHash,
+        tx_hash: LedgerTxHash,
+    ) -> anyhow::Result<Option<Landing>> {
+        self.landing_at(at, tx_hash)
+            .await
+            .map_err(attach_read_carrier)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

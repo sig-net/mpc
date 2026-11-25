@@ -287,8 +287,7 @@ mod tests {
     use std::sync::Arc;
 
     use crate::rpc::reads::is_oversized_contract_state;
-    use crate::rpc::submit::Landing;
-    use crate::rpc::submit::SubmitChain as _;
+    use crate::rpc::submit::{Landing, SubmitChain};
     use crate::rpc::support::captured_applied_status_record;
     use crate::types::LedgerTxHash;
     use http::StatusCode;
@@ -308,6 +307,7 @@ mod tests {
         for (status, reason, retryable, throttled) in [
             (403u16, "Forbidden", false, false),
             (409, "Conflict", true, false),
+            (402, "Payment Required", true, true),
             (429, "Too Many Requests", true, true),
             (500, "Internal Server Error", true, false),
         ] {
@@ -325,6 +325,22 @@ mod tests {
                     .await
                     .expect_err("an HTTP rejection must fail the read"),
                 PinnedReads::ledger_parameters(&rpc, &at_hash)
+                    .await
+                    .expect_err("an HTTP rejection must fail the read"),
+                // The watch's reads: against an all-rejecting transport each
+                // fails at its first legacy call; subxt's wrappers forward
+                // source() to RawRpcError regardless (subxt 0.44.0
+                // error/mod.rs).
+                SubmitChain::block_number(&rpc, &at_hash)
+                    .await
+                    .expect_err("an HTTP rejection must fail the read"),
+                SubmitChain::block_hash_at(&rpc, 1)
+                    .await
+                    .expect_err("an HTTP rejection must fail the read"),
+                SubmitChain::block_time(&rpc, &at_hash)
+                    .await
+                    .expect_err("an HTTP rejection must fail the read"),
+                SubmitChain::landing(&rpc, &at_hash, LedgerTxHash::from_bytes([0x42; 32]))
                     .await
                     .expect_err("an HTTP rejection must fail the read"),
             ] {

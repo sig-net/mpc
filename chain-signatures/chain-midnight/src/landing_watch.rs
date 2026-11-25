@@ -89,6 +89,9 @@ pub(crate) async fn watch_landing<C: SubmitChain>(
                 if failure.is_terminal() {
                     return WatchEnd::TerminalRead(error);
                 }
+                // TODO: three consecutive throttled scans, reset by any other
+                // outcome, escape to the publisher's gate as a retryable end
+                // instead of polling the watch to the budget.
                 tracing::warn!(
                     ?error,
                     "midnight: watching for the respond transaction failed; retrying"
