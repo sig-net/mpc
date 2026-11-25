@@ -54,15 +54,6 @@ pub fn generate_sign_request(
         )),
     };
 
-    // The SDK reserves these bytes below key version 2; the key derivation only sees
-    // their hex rendering, so it cannot refuse them itself.
-    let mut response_key_path = [0; 32];
-    response_key_path[..21].copy_from_slice(b"midnight response key");
-    anyhow::ensure!(
-        key_version >= mpc_primitives::MPC_KEY_VERSION_2 || record.path != response_key_path,
-        "path is reserved for the MPC response key"
-    );
-
     // The contract declares path as 32 opaque bytes (a raw commitment is the common
     // case), so the rendering must accept any of them: full-width lowercase hex, never
     // trimmed, or `0xab..00` and `0xab..` would derive the same key.
@@ -313,26 +304,12 @@ mod tests {
         assert_eq!(event.chain_ctx, None);
     }
 
+    /// The bytes the SDK reserved for the response key below key version 2 are an
+    /// ordinary path: bidirectional keys exist only from key version 2.
     #[test]
-    fn reserved_response_key_path_is_rejected_exactly() {
-        let reserved = "midnight response key";
+    fn the_old_response_key_path_is_ordinary() {
         let mut record = caller_record();
-        record.key_version = u8::try_from(mpc_primitives::LEGACY_MPC_KEY_VERSION_1).unwrap();
-        record.path = ascii_padded(reserved.as_bytes());
-        let error = generate_sign_request(
-            &record,
-            &READ_ADDRESS,
-            REQUEST_ID,
-            BLOCK_HASH,
-            INDEXED_TS,
-            test_root_pk(),
-        )
-        .expect_err("SDK constructor reserves the exact padded response key path");
-        assert!(error.to_string().contains("path is reserved"));
-
-        // From key version 2 the bytes are an ordinary path.
-        record.path = ascii_padded(reserved.as_bytes());
-        record.key_version = u8::try_from(mpc_primitives::MPC_KEY_VERSION_2).unwrap();
+        record.path = ascii_padded(b"midnight response key");
         let request = generate_sign_request(
             &record,
             &READ_ADDRESS,
@@ -347,7 +324,7 @@ mod tests {
         assert_eq!(
             request.args.epsilon,
             signet_crypto::derive_epsilon(
-                mpc_primitives::MPC_KEY_VERSION_2,
+                mpc_primitives::LATEST_MPC_KEY_VERSION,
                 Chain::Midnight,
                 signet_crypto::KeyPurpose::Bidirectional {
                     sender: &READ_ADDRESS.to_hex(),
