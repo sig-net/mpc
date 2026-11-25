@@ -132,7 +132,9 @@ pub struct SyncTask {
     network: NetworkConfig,
 }
 
+#[bon::bon]
 impl SyncTask {
+    #[builder]
     pub fn new(
         client: &NodeClient,
         triples: TripleStorage<Initializing>,
@@ -609,15 +611,15 @@ mod tests {
         let (sync_report_tx, sync_report_rx) = SyncTask::sync_report_channel();
         let (mesh_tx, mesh_rx) = tokio::sync::watch::channel(MeshState::default());
 
-        let sync_task = SyncTask::new(
-            &NodeClient::new(),
-            TriplePair::storage(&pool, &my_account),
-            Presignature::storage(&pool, &my_account),
-            mesh_rx,
-            contract_watcher,
-            sync_report_tx,
-            my_network,
-        );
+        let sync_task = SyncTask::builder()
+            .client(&NodeClient::new())
+            .triples(TriplePair::storage(&pool, &my_account))
+            .presignatures(Presignature::storage(&pool, &my_account))
+            .mesh_state(mesh_rx)
+            .contract(contract_watcher)
+            .sync_report_tx(sync_report_tx)
+            .network(my_network)
+            .build();
 
         TestContext {
             my_account,

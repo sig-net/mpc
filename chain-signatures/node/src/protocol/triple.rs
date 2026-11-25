@@ -56,8 +56,9 @@ struct TripleGenerator {
     debug_view: crate::web::debug::DebugPageTaskHandle,
 }
 
+#[bon::bon]
 impl TripleGenerator {
-    #[allow(clippy::too_many_arguments)]
+    #[builder]
     pub async fn new(
         id: TripleId,
         me: Participant,
@@ -68,12 +69,10 @@ impl TripleGenerator {
         slot: TriplePairSlot,
         msg: &MessageChannel,
         pokes: Arc<Semaphore>,
-        _node_account_id: &str,
+        node_account_id: &str,
     ) -> Result<Self, InitializationError> {
-        #[cfg(feature = "debug-page")]
-        let node_account_id = _node_account_id;
         #[cfg(not(feature = "debug-page"))]
-        let _ = _node_account_id;
+        let _ = node_account_id;
 
         let mut participants = participants.to_vec();
         // Participants can be out of order, so let's sort them before doing anything.
@@ -565,19 +564,19 @@ impl TripleSpawner {
         };
 
         tracing::info!(?id, "starting protocol to generate a new triple");
-        let generator = TripleGenerator::new(
-            id,
-            self.me,
-            owner,
-            self.threshold,
-            participants,
-            timeout,
-            slot,
-            &self.msg,
-            self.pokes.clone(),
-            &self.node_account_id,
-        )
-        .await?;
+        let generator = TripleGenerator::builder()
+            .id(id)
+            .me(self.me)
+            .owner(owner)
+            .threshold(self.threshold)
+            .participants(participants)
+            .timeout(timeout)
+            .slot(slot)
+            .msg(&self.msg)
+            .pokes(self.pokes.clone())
+            .node_account_id(&self.node_account_id)
+            .build()
+            .await?;
 
         self.ongoing.spawn(id, generator.run(self.epoch));
         crate::metrics::protocols::NUM_TOTAL_HISTORICAL_TRIPLE_GENERATORS.inc();

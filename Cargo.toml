@@ -35,6 +35,7 @@ async-trait = "0.1"
 backon = "0.4"
 bip32 = { version = "0.5.3", default-features = false }
 borsh = { version = "1.6.1", features = ["derive"] }
+bon = "3.10.3"
 bs58 = "0.5.1"
 enum-map = "2.7.3"
 http = "1.5"

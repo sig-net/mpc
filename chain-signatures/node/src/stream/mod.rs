@@ -43,7 +43,9 @@ pub struct StreamContext {
     pub ethereum_chain_id: Option<u64>,
 }
 
+#[bon::bon]
 impl StreamContext {
+    #[builder]
     pub fn new(
         backlog: Backlog,
         sign_tx: mpsc::Sender<SignCommand>,
@@ -52,6 +54,8 @@ impl StreamContext {
         mesh_state: watch::Receiver<MeshState>,
         node_client: NodeClient,
         checkpoints_rx: CheckpointWatcher,
+        ethereum_chain_id: Option<u64>,
+        observe_lag: Option<Duration>,
     ) -> Self {
         Self {
             backlog,
@@ -64,21 +68,9 @@ impl StreamContext {
             caught_up: false,
             failover_floor: None,
             local_records: Vec::new(),
-            observe_lag: None,
-            ethereum_chain_id: None,
+            observe_lag,
+            ethereum_chain_id,
         }
-    }
-
-    pub fn with_ethereum_chain_id(mut self, chain_id: Option<u64>) -> Self {
-        self.ethereum_chain_id = chain_id;
-        self
-    }
-
-    /// Pin the publish failover schedule's observe lag, for fixtures that assert
-    /// the failover itself rather than its production timing.
-    pub fn with_observe_lag(mut self, lag: Option<Duration>) -> Self {
-        self.observe_lag = lag;
-        self
     }
 
     /// Forward a sign command to the signing pipeline, but only when caught up.

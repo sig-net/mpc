@@ -978,15 +978,15 @@ mod tests {
         let cipher_sk = mpc_keys::hpke::SecretKey::from_bytes(&[0; 32]);
         let my_addr = "http://127.0.0.1:3000".parse().unwrap();
         let contract_id: AccountId = "contract.testnet".parse().unwrap();
-        NearGovernanceClient::new(
-            near_fetch::Client::new(url),
-            &my_addr,
-            &sign_sk,
-            &cipher_sk,
-            &contract_id,
-            signer,
-            mpc_chain_near::NearRpcGates::new(SharedBackoff::new()),
-        )
+        NearGovernanceClient::builder()
+            .client(near_fetch::Client::new(url))
+            .my_addr(&my_addr)
+            .sign_sk(&sign_sk)
+            .cipher_sk(&cipher_sk)
+            .contract_id(&contract_id)
+            .signer(signer)
+            .gates(mpc_chain_near::NearRpcGates::new(SharedBackoff::new()))
+            .build()
     }
 
     #[tokio::test]

@@ -116,15 +116,15 @@ fn env() -> (Runtime, SyncEnv) {
             }),
         );
 
-        let _sync = SyncTask::new(
-            &client,
-            TriplePair::storage(&redis.pool(), &node_id),
-            Presignature::storage(&redis.pool(), &node_id),
-            mesh.watch(),
-            contract_watcher,
-            sync_report_tx,
-            Default::default(),
-        );
+        let _sync = SyncTask::builder()
+            .client(&client)
+            .triples(TriplePair::storage(&redis.pool(), &node_id))
+            .presignatures(Presignature::storage(&redis.pool(), &node_id))
+            .mesh_state(mesh.watch())
+            .contract(contract_watcher)
+            .sync_report_tx(sync_report_tx)
+            .network(Default::default())
+            .build();
 
         SyncEnv {
             _threshold: threshold,
