@@ -42,8 +42,22 @@ pub struct Options {
     /// The URL may carry a password, so it is carried as a [`SecretString`]
     /// and only exposed where the pool is built. Redis holds triples,
     /// presignatures, checkpoints and the Midnight wallet's DUST checkpoint.
-    #[arg(long, env("MPC_REDIS_URL"), hide_env_values = true)]
+    #[arg(
+        long,
+        env("MPC_REDIS_URL"),
+        hide_env_values = true,
+        value_parser = parse_redis_url
+    )]
     pub redis_url: SecretString,
+}
+
+/// Fail at the CLI boundary so a bad MPC_REDIS_URL is named in the error and
+/// the node does not start up before rejecting it. The value may contain a
+/// password, so return it as a `SecretString` and keep the message constant.
+fn parse_redis_url(value: &str) -> Result<SecretString, String> {
+    Url::parse(value)
+        .map(|_| value.to_owned().into())
+        .map_err(|_| "invalid MPC_REDIS_URL: not a valid URL".to_owned())
 }
 
 fn owner_key(base: &str, owner: Participant) -> String {
@@ -52,8 +66,10 @@ fn owner_key(base: &str, owner: Participant) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::Options;
+    use super::{parse_redis_url, Options};
     use clap::Parser as _;
+    use secrecy::ExposeSecret as _;
+    use std::error::Error as _;
 
     fn parse(extra: &[&str]) -> Result<Options, clap::Error> {
         Options::try_parse_from(
@@ -61,6 +77,36 @@ mod tests {
                 .into_iter()
                 .chain(extra.iter().copied()),
         )
+    }
+
+    #[test]
+    fn redis_url_is_validated_at_the_cli_boundary() {
+        let options = parse(&["--sk-share-secret-id", "s", "--gcp-project-id", "p"]).unwrap();
+        assert_eq!(options.redis_url.expose_secret(), "redis://localhost");
+
+        let error = Options::try_parse_from([
+            "test",
+            "--redis-url",
+            "not-a-url",
+            "--sk-share-secret-id",
+            "s",
+            "--gcp-project-id",
+            "p",
+        ])
+        .unwrap_err();
+        let message = error.to_string();
+        assert!(
+            message.contains("MPC_REDIS_URL"),
+            "unexpected URL error: {message}"
+        );
+        assert!(
+            !error.source().unwrap().to_string().contains("not-a-url"),
+            "the URL may carry a password, so validation must not echo it"
+        );
+        assert_eq!(
+            parse_redis_url("not-a-url").unwrap_err(),
+            "invalid MPC_REDIS_URL: not a valid URL"
+        );
     }
 
     #[test]
