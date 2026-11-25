@@ -19,7 +19,7 @@ async fn test_key_version() -> anyhow::Result<()> {
         .unwrap()
         .json()
         .unwrap();
-    assert_eq!(version, 1);
+    assert_eq!(version, 2);
     Ok(())
 }
 

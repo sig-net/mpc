@@ -353,42 +353,32 @@ mod tests {
             .unwrap(),
         );
 
-        // From key version 2 the bytes are an ordinary path; until that version is
-        // served, the record fails only at the key version cap.
+        // From key version 2 the bytes are an ordinary path.
         record.path = ascii_padded(reserved.as_bytes());
         record.key_version = 2;
-        let result = generate_sign_request(
+        let request = generate_sign_request(
             &record,
             &READ_ADDRESS,
             REQUEST_ID,
             BLOCK_HASH,
             INDEXED_TS,
             test_root_pk(),
+        )
+        .unwrap();
+        let path = hex::encode(record.path);
+        assert_eq!(request.args.path, path);
+        assert_eq!(
+            request.args.epsilon,
+            signet_crypto::derive_epsilon(
+                2,
+                Chain::Midnight,
+                signet_crypto::KeyPurpose::Bidirectional {
+                    sender: &READ_ADDRESS.to_hex(),
+                    path: &path,
+                },
+            )
+            .unwrap(),
         );
-        if mpc_primitives::LATEST_MPC_KEY_VERSION < 2 {
-            let error = result.expect_err("key version 2 is not served yet");
-            assert_eq!(
-                error.downcast_ref::<signet_crypto::DeriveError>(),
-                Some(&signet_crypto::DeriveError::UnsupportedKeyVersion(2)),
-                "{error:#}"
-            );
-        } else {
-            let request = result.unwrap();
-            let path = hex::encode(record.path);
-            assert_eq!(request.args.path, path);
-            assert_eq!(
-                request.args.epsilon,
-                signet_crypto::derive_epsilon(
-                    2,
-                    Chain::Midnight,
-                    signet_crypto::KeyPurpose::Bidirectional {
-                        sender: &READ_ADDRESS.to_hex(),
-                        path: &path,
-                    },
-                )
-                .unwrap(),
-            );
-        }
     }
 
     #[test]
