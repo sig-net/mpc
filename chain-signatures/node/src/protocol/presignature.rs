@@ -501,10 +501,7 @@ impl PresignatureSpawner {
         };
 
         match internal_action {
-            PositInternalAction::None => {}
-            PositInternalAction::Abort => {
-                tracing::warn!(?id, "presignature posit aborted due to too many rejections");
-            }
+            PositInternalAction::None | PositInternalAction::Abort => {}
             PositInternalAction::Reply(action) => {
                 self.msg
                     .send_posit(self.me, from, PositProtocolId::Presignature(id), action)

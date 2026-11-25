@@ -46,8 +46,8 @@ pub struct IndexedSignRequest {
     pub args: SignArgs,
     pub chain: Chain,
     /// Unix timestamp when the request was indexed by MPC node.
-    /// Preserved across recoveries to maintain original request creation time.
-    pub unix_timestamp_indexed: u64,
+    /// Preserved across recoveries; `None` once adopted from a peer, whose time is not verified.
+    pub unix_timestamp_indexed: Option<u64>,
     pub kind: SignKind,
 }
 
@@ -63,7 +63,7 @@ impl IndexedSignRequest {
             id,
             args,
             chain,
-            unix_timestamp_indexed,
+            unix_timestamp_indexed: Some(unix_timestamp_indexed),
             kind,
         }
     }

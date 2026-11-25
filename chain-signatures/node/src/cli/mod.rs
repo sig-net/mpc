@@ -28,8 +28,7 @@ use crate::{logs, storage, web};
 #[cfg(feature = "test-feature")]
 pub use args::ethereum::mock_indexer_config;
 pub use args::{
-    canton::CantonArgs, ethereum::EthArgs, hydration::HydrationArgs, midnight::MidnightArgs,
-    solana::SolArgs, tron::TronArgs,
+    canton::CantonArgs, ethereum::EthArgs, midnight::MidnightArgs, solana::SolArgs, tron::TronArgs,
 };
 
 use anyhow::Context as _;
@@ -38,7 +37,6 @@ use deadpool_redis::{Hook, Runtime};
 use enum_map::EnumMap;
 use mpc_chain_canton::{CantonClient, CantonConfig, CantonIndexer};
 use mpc_chain_ethereum::{publisher, EthConfig, EthereumIndexer};
-use mpc_chain_hydration::{HydrationConfig, HydrationIndexer};
 use mpc_chain_integration_core::{utils::retry::SharedBackoff, ChainPublisher, GatedPublisher};
 use mpc_chain_midnight::{
     DustCheckpointStore, MidnightConfig, MidnightIndexer, RecoveringMidnightPublisher,
@@ -78,10 +76,13 @@ pub enum Cli {
         /// This node's account ed25519 secret key
         #[arg(long, env("MPC_ACCOUNT_SK"), hide_env_values = true)]
         account_sk: SecretKey,
-        /// The web port for this server
-        /// this is default to 3000 for all nodes now.
-        /// Partners can choose to change the port, but then they also need to make sure they change their load balancer config to match this
-        #[arg(long, env("MPC_WEB_PORT"), default_value = "3000")]
+        /// Port the node's web server listens on.
+        #[arg(
+            long,
+            env("MPC_WEB_PORT"),
+            default_value = "3000",
+            value_parser = clap::value_parser!(u16).range(1..)
+        )]
         web_port: u16,
         /// The cipher secret key used to decrypt messages between nodes.
         #[arg(long, env("MPC_CIPHER_SK"), hide_env_values = true)]
@@ -95,9 +96,6 @@ pub enum Cli {
         /// Solana Indexer options
         #[command(flatten)]
         sol: SolArgs,
-        /// Hydration Indexer options
-        #[command(flatten)]
-        hydration: HydrationArgs,
         /// Canton Indexer options
         #[command(flatten)]
         canton: CantonArgs,
@@ -199,7 +197,6 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             sign_sk,
             eth,
             sol,
-            hydration,
             canton,
             midnight,
             tron,
@@ -251,10 +248,8 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 sync_report_tx,
             } = MeshHandles::new(&account_id);
 
-            let stack = ChainStack::new(ChainConfigs::from_args(
-                eth, sol, hydration, canton, midnight, tron,
-            )?)
-            .with_midnight_dust(midnight_dust);
+            let stack = ChainStack::new(ChainConfigs::from_args(eth, sol, canton, midnight, tron)?)
+                .with_midnight_dust(midnight_dust);
             let network = NetworkConfig { cipher_sk, sign_sk };
             let signer = match InMemorySigner::from_secret_key(account_id.clone(), account_sk) {
                 near_crypto::Signer::InMemory(s) => s,
@@ -442,7 +437,6 @@ fn checkpoint_watchers() -> (
 struct ChainConfigs {
     eth: Option<EthConfig>,
     sol: Option<SolConfig>,
-    hydration: Option<HydrationConfig>,
     canton: Option<CantonConfig>,
     midnight: Option<MidnightConfig>,
     tron: Option<TronConfig>,
@@ -452,7 +446,6 @@ impl ChainConfigs {
     fn from_args(
         eth: EthArgs,
         sol: SolArgs,
-        hydration: HydrationArgs,
         canton: CantonArgs,
         midnight: MidnightArgs,
         tron: TronArgs,
@@ -460,7 +453,6 @@ impl ChainConfigs {
         Ok(Self {
             eth: eth.into_config()?,
             sol: sol.into_config(),
-            hydration: hydration.into_config(),
             canton: canton.into_config(),
             midnight: midnight.into_config()?,
             tron: tron.into_config()?,
@@ -497,8 +489,8 @@ impl ChainStack {
     }
 
     /// Wraps an internally-ungated publisher in [`GatedPublisher`] bound to
-    /// this stack's gate for `chain` (Solana, Midnight and Hydration are
-    /// externally gated — their clients don't gate publishes themselves).
+    /// this stack's gate for `chain` (Solana and Midnight are externally
+    /// gated — their clients don't gate publishes themselves).
     /// `operation` labels the adapter's throttle warn per chain.
     ///
     /// TODO: deleted once those clients gate publishes internally
@@ -538,15 +530,6 @@ impl ChainStack {
             publishers.insert(
                 Chain::Solana,
                 self.gated_publisher(Chain::Solana, "solana publish", client),
-            );
-        }
-        if let Some(hydration) = &self.configs.hydration {
-            let telemetry = Arc::new(NodeTelemetry::new(Chain::Hydration));
-            let client = rpc::HydrationClient::new(hydration, telemetry)
-                .context("failed to create hydration client")?;
-            publishers.insert(
-                Chain::Hydration,
-                self.gated_publisher(Chain::Hydration, "hydration publish", client),
             );
         }
         if let Some(canton) = &self.configs.canton {
@@ -596,7 +579,6 @@ fn log_startup(
 ) {
     let eth_signer_address = chains.eth.as_ref().map(|c| c.signer_address());
     let sol_signer_address = chains.sol.as_ref().map(|c| c.signer_address());
-    let hydration_signer_address = chains.hydration.as_ref().and_then(|c| c.signer_address());
 
     tracing::info!(
         %mpc_contract_id,
@@ -607,6 +589,7 @@ fn log_startup(
         version = build::VERSION,
         git_commit_hash = build::GIT_COMMIT_HASH,
         build_timestamp = build::BUILD_TIMESTAMP,
+        test_build = build::TEST_BUILD,
         sign_pk = %network.sign_sk.public_key(),
         near_rpc_host = %host_of(near_rpc),
         eth_contract_address = %chains.eth.as_ref().map(|c| c.contract_address.to_string()).unwrap_or_else(|| "None".to_string()),
@@ -614,8 +597,6 @@ fn log_startup(
         sol_program_address = %chains.sol.as_ref().map(|c| c.program_address.to_string()).unwrap_or_else(|| "None".to_string()),
         sol_rpc_host = %chains.sol.as_ref().map_or("None", |c| host_of(&c.rpc_http_url)),
         sol_signer_address = %sol_signer_address.as_deref().unwrap_or("None"),
-        hydration_rpc_host = %chains.hydration.as_ref().map_or("None", |c| host_of(&c.rpc_ws_url)),
-        hydration_signer_address = %hydration_signer_address.as_deref().unwrap_or("None"),
         canton_json_api_host = %chains.canton.as_ref().map_or("None", |c| host_of(&c.json_api_url)),
         midnight_node_host = %chains.midnight.as_ref().map_or("None", |c| host_of(&c.node_url)),
         tron_host = %chains.tron.as_ref().map_or("None", |c| host_of(&c.endpoint)),
@@ -711,6 +692,9 @@ struct StorageHandles {
     midnight_dust: Arc<dyn DustCheckpointStore>,
 }
 
+/// How long a Redis pool wait, connect, recycle or command may take before it
+/// fails. Without a bound a stalled Redis hangs every caller, including the
+/// chain supervisors and their watchdog.
 const REDIS_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// A Redis pool whose waits, connects and commands all fail after [`REDIS_TIMEOUT`].
@@ -841,7 +825,6 @@ async fn spawn_indexers(
     let ChainConfigs {
         eth,
         sol,
-        hydration,
         canton,
         midnight,
         tron,
@@ -850,7 +833,6 @@ async fn spawn_indexers(
     tracing::info!(
         ethereum = eth.is_some(),
         solana = sol.is_some(),
-        hydration = hydration.is_some(),
         canton = canton.is_some(),
         midnight = midnight.is_some(),
         tron = tron.is_some(),
@@ -925,29 +907,6 @@ async fn spawn_indexers(
             )
             .with_ethereum_chain_id(ethereum_chain_id),
             sol_telemetry,
-        ));
-    }
-
-    if let Some(hydration_config) = hydration {
-        let hydration_telemetry = NodeTelemetry::new(Chain::Hydration);
-        // TODO: read-side gating - this indexer's reads don't share the
-        // chain's cooldown gate yet
-        let hydration_indexer =
-            HydrationIndexer::new(hydration_config, hydration_telemetry.clone());
-        tracing::info!("hydration indexer created successfully");
-        tasks.spawn(run_supervised(
-            hydration_indexer,
-            StreamContext::new(
-                backlog.clone(),
-                sign_tx.clone(),
-                rpc_channel.clone(),
-                contract_watcher.clone(),
-                mesh_state.clone(),
-                node_client.clone(),
-                checkpoints_rx[Chain::Hydration].clone(),
-            )
-            .with_ethereum_chain_id(ethereum_chain_id),
-            hydration_telemetry,
         ));
     }
 
@@ -1155,7 +1114,6 @@ mod tests {
         let chains = ChainConfigs::from_args(
             EthArgs::parse_from(["test"]),
             SolArgs::parse_from(["test"]),
-            HydrationArgs::parse_from(["test"]),
             CantonArgs::parse_from(["test"]),
             MidnightArgs::parse_from(["test"]),
             TronArgs::parse_from(["test"]),
@@ -1194,7 +1152,6 @@ mod tests {
         let chains = ChainConfigs::from_args(
             EthArgs::parse_from(["test"]),
             SolArgs::parse_from(["test"]),
-            HydrationArgs::parse_from(["test"]),
             CantonArgs::parse_from(["test"]),
             MidnightArgs::parse_from(["test"]),
             TronArgs::parse_from(["test", "--tron-endpoint", "https://api.trongrid.io"]),
@@ -1207,35 +1164,6 @@ mod tests {
         assert_eq!(tron.endpoint.as_str(), "https://api.trongrid.io/");
     }
 
-    /// Hydration's RPC is dialed on first publish: a node whose Hydration
-    /// endpoint is down still starts, and a bad signer still fails startup.
-    #[tokio::test]
-    async fn hydration_publisher_registers_while_its_rpc_is_unreachable() {
-        let chains = |signer_uri: &str| ChainConfigs {
-            eth: None,
-            sol: None,
-            hydration: Some(HydrationConfig {
-                // Nothing listens on port 1.
-                rpc_ws_url: "ws://127.0.0.1:1".parse().unwrap(),
-                signer_uri: signer_uri.to_string(),
-            }),
-            canton: None,
-            midnight: None,
-            tron: None,
-        };
-
-        let publishers = ChainStack::new(chains("//Alice"))
-            .publishers(undialed_near_client(), Backlog::new())
-            .await
-            .unwrap();
-        assert!(publishers.contains_key(&Chain::Hydration));
-
-        assert!(ChainStack::new(chains("not a signer uri"))
-            .publishers(undialed_near_client(), Backlog::new())
-            .await
-            .is_err());
-    }
-
     /// A Midnight node that is unreachable at startup must not leave the node without a
     /// Midnight publisher for its lifetime: the publisher registers and connects later.
     #[tokio::test]
@@ -1243,7 +1171,6 @@ mod tests {
         let chains = ChainConfigs {
             eth: None,
             sol: None,
-            hydration: None,
             canton: None,
             midnight: Some(MidnightConfig {
                 // Nothing listens on port 1, so the startup dial is refused.
@@ -1302,7 +1229,6 @@ mod tests {
         let stack = ChainStack::new(ChainConfigs {
             eth: None,
             sol: Some(sol_config_with_bogus_rpc()),
-            hydration: None,
             canton: None,
             midnight: None,
             tron: None,
@@ -1340,6 +1266,23 @@ mod tests {
         );
     }
 
+    /// `--help` is the only list of parameters, so each one explains itself there.
+    #[test]
+    fn every_start_parameter_has_help() {
+        use clap::CommandFactory;
+
+        let cmd = Cli::command();
+        let start = cmd
+            .find_subcommand("start")
+            .expect("start subcommand must exist");
+        let without_help: Vec<_> = start
+            .get_arguments()
+            .filter(|arg| arg.get_help().is_none())
+            .map(|arg| arg.get_id().as_str())
+            .collect();
+        assert!(without_help.is_empty(), "no help text: {without_help:?}");
+    }
+
     #[test]
     fn hide_env_values_configured_on_secret_arguments() {
         use clap::CommandFactory;
@@ -1357,14 +1300,12 @@ mod tests {
             "redis_url",
             "sol_account_sk",
             "eth_account_sk",
-            "hydration_signer_uri",
             "canton_oidc_client_secret",
             "midnight_funding_seed",
             "near_rpc",
             "otlp_endpoint",
             "eth_execution_rpc_http_url",
             "sol_rpc_http_url",
-            "hydration_rpc_ws_url",
             "canton_json_api_url",
             "canton_json_api_ws_url",
             "canton_oidc_token_url",

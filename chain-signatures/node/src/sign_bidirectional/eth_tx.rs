@@ -11,7 +11,7 @@ pub(crate) fn sign_and_hash_eip1559_from_unsigned(
     r: &[u8],
     s: &[u8],
     y_parity: bool,
-) -> anyhow::Result<([u8; 32], u64)> {
+) -> anyhow::Result<[u8; 32]> {
     // Strip optional type prefix
     let (_, body) = match unsigned.first().copied() {
         Some(0x02) => (true, &unsigned[1..]),
@@ -25,8 +25,6 @@ pub(crate) fn sign_and_hash_eip1559_from_unsigned(
         rlp.item_count()? == 9,
         "unexpected 1559 unsigned field count"
     );
-
-    let nonce: u64 = rlp.val_at::<u64>(1)?;
 
     // Re-encode with signature fields appended
     let mut srlp = EthereumTxRlp::new_list(12);
@@ -44,7 +42,7 @@ pub(crate) fn sign_and_hash_eip1559_from_unsigned(
     signed_bytes.extend_from_slice(srlp_body);
 
     let hash = keccak256(&signed_bytes);
-    Ok((hash.into(), nonce))
+    Ok(hash.into())
 }
 
 pub(crate) fn sign_and_hash_legacy_from_unsigned(
@@ -53,7 +51,7 @@ pub(crate) fn sign_and_hash_legacy_from_unsigned(
     r: &[u8],
     s: &[u8],
     y_parity: bool,
-) -> anyhow::Result<([u8; 32], u64)> {
+) -> anyhow::Result<[u8; 32]> {
     let rlp = Rlp::new(unsigned_rlp);
     anyhow::ensure!(rlp.is_list(), "unsigned legacy must be an RLP list");
     anyhow::ensure!(
@@ -61,7 +59,6 @@ pub(crate) fn sign_and_hash_legacy_from_unsigned(
         "unexpected legacy unsigned field count"
     );
 
-    let nonce: u64 = rlp.val_at::<u64>(0)?;
     let mut out = EthereumTxRlp::new_list(9);
     for i in 0..6 {
         out.append_raw_field(rlp.at(i)?.as_raw());
@@ -80,7 +77,7 @@ pub(crate) fn sign_and_hash_legacy_from_unsigned(
 
     let signed_bytes = out.into_vec();
     let hash = alloy::primitives::keccak256(&signed_bytes);
-    Ok((hash.into(), nonce))
+    Ok(hash.into())
 }
 
 pub(crate) struct EthereumTxRlp {
@@ -155,20 +152,26 @@ mod derive_tests {
     use alloy::primitives::Address;
     use k256::elliptic_curve::sec1::FromEncodedPoint;
     use k256::{AffinePoint, EncodedPoint};
-    use mpc_crypto::derive_epsilon_near;
+    use mpc_crypto::{derive_epsilon, KeyPurpose};
+    use mpc_primitives::Chain;
     use mpc_primitives::LEGACY_MPC_KEY_VERSION_0;
 
     #[test]
     fn derive_user_address_matches_golden() {
         let mpc_key = "045b4fa179e005361fd858f8a6f896d7afc23a53d3f95d6566a88cde954e7b2f1cb77c554705c35d4ffced67aeafbcda46d9d89d6f200c3a3d109f92872863b3dc";
-        let account_id = "dev-20250212213501-93636560094065.test.near"
-            .parse()
-            .unwrap();
+        let account_id = "dev-20250212213501-93636560094065.test.near";
         let mpc_pk = hex::decode(mpc_key).unwrap();
         let mpc_pk = EncodedPoint::from_bytes(mpc_pk).unwrap();
         let mpc_pk = AffinePoint::from_encoded_point(&mpc_pk).unwrap();
-        let derivation_epsilon =
-            derive_epsilon_near(LEGACY_MPC_KEY_VERSION_0, &account_id, "test").unwrap();
+        let derivation_epsilon = derive_epsilon(
+            LEGACY_MPC_KEY_VERSION_0,
+            Chain::NEAR,
+            KeyPurpose::Plain {
+                sender: account_id,
+                path: "test",
+            },
+        )
+        .unwrap();
         let expected: Address = "0x083c8776b5e447e91bae43b7883a92a9bdb66d1d"
             .parse()
             .unwrap();
@@ -203,7 +206,7 @@ mod tests {
         r[31] = 1;
         s[31] = 2;
 
-        let (hash, nonce) = sign_and_hash_eip1559_from_unsigned(&unsigned, &r, &s, true).unwrap();
+        let hash = sign_and_hash_eip1559_from_unsigned(&unsigned, &r, &s, true).unwrap();
 
         let signed = tx
             .into_signed(Signature::from_scalars_and_parity(
@@ -215,6 +218,5 @@ mod tests {
         let expected_hash: [u8; 32] = alloy::primitives::keccak256(&signed).into();
 
         assert_eq!(hash, expected_hash);
-        assert_eq!(nonce, 3);
     }
 }

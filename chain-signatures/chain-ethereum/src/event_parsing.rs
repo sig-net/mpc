@@ -3,29 +3,32 @@
 
 use crate::abi::{ChainSignatures, SignatureRequestedEncoding};
 use alloy::primitives::hex::ToHexExt;
-use alloy::primitives::{Address, Bytes, U256};
+use alloy::primitives::{Address, U256};
 use alloy::rpc::types::Log;
 use alloy::sol_types::SolEvent;
 use k256::elliptic_curve::sec1::FromEncodedPoint;
 use k256::{AffinePoint as K256AffinePoint, EncodedPoint, FieldBytes, Scalar};
-use mpc_crypto::{kdf::derive_epsilon_eth, ScalarExt as _};
 use mpc_primitives::{
     Chain, ChainEvent, IndexedSignRequest, SignArgs, SignId, Signature as MpcSignature,
     SignatureRespondedEvent, MAX_SECP256K1_SCALAR,
 };
 use mpc_utils::time::current_unix_timestamp;
+use signet_crypto::{derive_epsilon, KeyPurpose, ScalarExt as _};
 use tokio::sync::mpsc;
 
-/// Whether a transaction's calldata represents a contract call.
-pub fn is_contract_call(input: &Bytes) -> bool {
-    !input.is_empty()
+/// Derives request-specific entropy from the finalized containing block and request ID.
+pub(crate) fn derive_request_entropy(block_hash: [u8; 32], request_id: [u8; 32]) -> [u8; 32] {
+    let mut preimage = Vec::with_capacity(64);
+    preimage.extend_from_slice(&block_hash);
+    preimage.extend_from_slice(&request_id);
+    alloy::primitives::keccak256(preimage).into()
 }
 
-pub fn parse_filtered_logs(logs: Vec<Log>) -> Vec<IndexedSignRequest> {
+pub fn parse_filtered_logs(logs: Vec<Log>, block_hash: [u8; 32]) -> Vec<IndexedSignRequest> {
     let mut indexed_requests = Vec::new();
     for log in logs {
         tracing::debug!("Parsing Ethereum log: {:?}", log);
-        match sign_request_from_filtered_log(log.clone()) {
+        match sign_request_from_filtered_log(log.clone(), block_hash) {
             Some(request) => indexed_requests.push(request),
             None => tracing::warn!("Failed to parse Ethereum log: {:?}", log),
         }
@@ -96,7 +99,7 @@ fn sign_id_from_signature_responded_log(log: &Log) -> Option<SignId> {
     Some(SignId { request_id })
 }
 
-fn sign_request_from_filtered_log(log: Log) -> Option<IndexedSignRequest> {
+fn sign_request_from_filtered_log(log: Log, block_hash: [u8; 32]) -> Option<IndexedSignRequest> {
     let event = parse_event(&log)?;
     tracing::debug!("found eth event: {:?}", event);
     // Create sign request from event
@@ -113,22 +116,18 @@ fn sign_request_from_filtered_log(log: Log) -> Option<IndexedSignRequest> {
         return None;
     }
 
-    let epsilon = derive_epsilon_eth(
+    let epsilon = derive_epsilon(
         event.key_version,
-        format!("0x{}", event.requester.encode_hex()).as_str(),
-        &event.path,
+        Chain::Ethereum,
+        KeyPurpose::Plain {
+            sender: &format!("0x{}", event.requester.encode_hex()),
+            path: &event.path,
+        },
     )
-    .inspect_err(|_| {
-        tracing::info!(
-            key_version = event.key_version,
-            "unsupported key version; dropping sign request"
-        )
-    })
+    .inspect_err(|err| tracing::info!(%err, "dropping sign request"))
     .ok()?;
 
-    // Use transaction hash as entropy
-    let tx_hash = log.transaction_hash.unwrap_or_default();
-    let entropy = tx_hash;
+    let tx_hash = log.transaction_hash;
 
     let sign_id = SignId::new(generate_request_id(
         event.requester,
@@ -140,12 +139,13 @@ fn sign_request_from_filtered_log(log: Log) -> Option<IndexedSignRequest> {
         &event.dest,
         &event.params,
     ));
-    tracing::info!(%tx_hash, ?sign_id, "eth signature requested");
+    let entropy = derive_request_entropy(block_hash, sign_id.request_id);
+    tracing::info!(?tx_hash, ?sign_id, "eth signature requested");
 
     Some(IndexedSignRequest::sign(
         sign_id,
         SignArgs {
-            entropy: entropy.into(),
+            entropy,
             epsilon,
             payload,
             path: event.path,
@@ -233,7 +233,7 @@ pub fn generate_request_id(
 mod tests {
     use super::*;
     use crate::abi::ChainSignatures;
-    use alloy::primitives::{Address, FixedBytes, Log as PrimitiveLog, U256};
+    use alloy::primitives::{Address, Bytes, FixedBytes, Log as PrimitiveLog, U256};
     use alloy::sol_types::SolEvent;
 
     fn sample_requested_event() -> ChainSignatures::SignatureRequested {
@@ -262,12 +262,32 @@ mod tests {
     }
 
     #[test]
-    fn is_contract_call_detects_calldata() {
-        assert!(!is_contract_call(&Bytes::new()));
-        assert!(is_contract_call(&Bytes::from(vec![0u8; 2])));
-        assert!(is_contract_call(&Bytes::from(vec![
-            0xa9, 0x05, 0x9c, 0xbb, 0x00
-        ])));
+    fn parse_filtered_logs_derives_entropy_from_block_hash_and_request_id() {
+        let block_hash = [0xab; 32];
+        let first_event = sample_requested_event();
+        let mut second_event = sample_requested_event();
+        second_event.payload = FixedBytes::from([0x23; 32]);
+
+        let requests = parse_filtered_logs(
+            vec![
+                requested_log(first_event.encode_data()),
+                requested_log(second_event.encode_data()),
+            ],
+            block_hash,
+        );
+
+        assert_eq!(requests.len(), 2);
+        assert_ne!(requests[0].id.request_id, requests[1].id.request_id);
+        for request in &requests {
+            let mut preimage = block_hash.to_vec();
+            preimage.extend_from_slice(&request.id.request_id);
+            let expected: [u8; 32] = alloy::primitives::keccak256(preimage).into();
+            assert_eq!(request.args.entropy, expected);
+        }
+        assert_ne!(
+            requests[0].args.entropy, requests[1].args.entropy,
+            "requests in one block should receive distinct entropy"
+        );
     }
 
     #[test]

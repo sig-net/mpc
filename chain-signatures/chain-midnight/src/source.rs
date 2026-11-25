@@ -3,8 +3,9 @@
 use crate::config::MidnightConfig;
 use crate::emissions::ContractCallEmissions;
 use crate::reader::Node;
-use crate::rpc::{BlockRef, MidnightRpc};
+use crate::rpc::reader::{BlockRef, MidnightRpc};
 use crate::state::decode_contract_state;
+use crate::types::{BlockHash, LedgerTxHash, MidnightAddress};
 
 use async_trait::async_trait;
 
@@ -22,7 +23,8 @@ pub(crate) struct BlockProofSeed {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct CandidateTransactionEmissions {
-    pub ledger_tx_hash: [u8; 32],
+    /// The ledger transaction whose execution emitted the calls.
+    pub ledger_tx_hash: LedgerTxHash,
     pub extrinsic_index: u32,
     /// `TxPartialSuccess`: any fallible phase of either contract's calls may have
     /// rolled back.
@@ -58,14 +60,14 @@ pub(crate) trait ChainSource: Send + Sync {
     async fn block_emissions(
         &self,
         block: &BlockRef,
-        singleton: &[u8; 32],
-        responder: &[u8; 32],
+        singleton: &MidnightAddress,
+        responder: &MidnightAddress,
     ) -> anyhow::Result<Option<BlockEmissions>>;
-    /// The decoded state tree of `address_64hex` at `at_hash`.
+    /// The decoded state tree of `address` at `at_hash`.
     async fn contract_state_tree(
         &self,
-        address_64hex: &str,
-        at_hash: &str,
+        address: &MidnightAddress,
+        at_hash: &BlockHash,
     ) -> anyhow::Result<ContractState>;
 }
 
@@ -94,18 +96,18 @@ impl ChainSource for LiveSource {
     async fn block_emissions(
         &self,
         block: &BlockRef,
-        singleton: &[u8; 32],
-        responder: &[u8; 32],
+        singleton: &MidnightAddress,
+        responder: &MidnightAddress,
     ) -> anyhow::Result<Option<BlockEmissions>> {
         self.rpc.block_emissions(block, singleton, responder).await
     }
 
     async fn contract_state_tree(
         &self,
-        address_64hex: &str,
-        at_hash: &str,
+        address: &MidnightAddress,
+        at_hash: &BlockHash,
     ) -> anyhow::Result<ContractState> {
-        match self.rpc.contract_state(address_64hex, at_hash).await? {
+        match self.rpc.contract_state(address, at_hash).await? {
             None => Ok(ContractState::Absent),
             Some(state) => Ok(match decode_contract_state(&state) {
                 Ok(tree) => ContractState::Tree(tree),
@@ -135,7 +137,7 @@ mod proof_seed_tests {
                 scale_system_events: vec![0x61, 0x62, 0x63],
             },
             candidates: vec![CandidateTransactionEmissions {
-                ledger_tx_hash: [0x55; 32],
+                ledger_tx_hash: LedgerTxHash::from_bytes([0x55; 32]),
                 extrinsic_index: 1,
                 partial_success: false,
                 singleton_calls: vec![ContractCallEmissions {

@@ -160,7 +160,7 @@ async fn main() -> anyhow::Result<()> {
         if args.redis_url.is_some() {
             "External Redis instance"
         } else {
-            "Ephemeral Docker Container (redis:7.4.2)"
+            "Ephemeral Docker Container (redis:7.4.12)"
         }
     );
     println!(

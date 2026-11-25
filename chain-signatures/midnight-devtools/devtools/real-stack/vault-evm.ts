@@ -12,10 +12,7 @@ import {
   type TransactionReceipt,
 } from "ethers";
 
-const ARTIFACTS = new URL(
-  "../../../contract-eth/artifacts/contracts/MidnightVaultTargets.sol/",
-  import.meta.url,
-);
+const ARTIFACTS = new URL("../../../../integration-tests/fixtures/evm/", import.meta.url);
 
 interface Artifact {
   abi: InterfaceAbi;
@@ -27,7 +24,7 @@ function artifact(name: string): Artifact {
   try {
     return JSON.parse(readFileSync(url, "utf8")) as Artifact;
   } catch (error) {
-    throw new Error(`reading ${url.pathname}; run just build eth`, { cause: error });
+    throw new Error(`reading ${url.pathname}`, { cause: error });
   }
 }
 

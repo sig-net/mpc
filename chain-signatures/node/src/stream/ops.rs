@@ -3,15 +3,15 @@ use std::sync::Arc;
 use anyhow::Context;
 
 use crate::backlog::{
-    AnyProgress, Backlog, Bidirectional, Executing, Final, Initial, Sign, SignEntry,
+    AnyProgress, Backlog, BacklogError, Bidirectional, Executing, Final, Initial, Sign, SignEntry,
 };
 use crate::metrics::requests::{
     record_request_latency, SignRequestStep, EXECUTION_WAIT_UNMEASURED,
 };
 use crate::protocol::publish_failover::{observe_lag, publish_deadline};
 use crate::respond_bidirectional::{
-    claims_attestation_key, published_failure, published_midnight_payload,
-    published_midnight_signing_args, published_output_payload, published_output_signing_args,
+    published_failure, published_midnight_payload, published_midnight_signing_args,
+    published_output_payload, published_output_signing_args,
 };
 use crate::sign_bidirectional::{
     destination_expiry, owned_by_requester, transaction_chain_id, BidirectionalProgress,
@@ -19,11 +19,12 @@ use crate::sign_bidirectional::{
 };
 use crate::stream::StreamContext;
 use crate::types::SignCommand;
-use mpc_chain_integration_core::ChainTelemetry;
+use mpc_chain_integration_core::{ChainTelemetry, WatchKey};
 use mpc_chain_solana::Pubkey;
 use mpc_primitives::{
-    BidirectionalTx, Chain, ExecutionOutcome, IndexedSignRequest, RequestKind,
-    RespondBidirectionalEvent, SignBidirectionalEvent, SignId, SignKind, SignatureRespondedEvent,
+    AttestationOutcomeKind, BidirectionalTx, Chain, ExecutionOutcome, IndexedSignRequest,
+    RequestKind, RespondBidirectionalEvent, SignBidirectionalEvent, SignId, SignKind,
+    SignatureRespondedEvent,
 };
 use mpc_utils::time::unix_elapsed_checked;
 
@@ -90,15 +91,6 @@ pub(crate) async fn process_sign_request(
         }
         SignKind::Sign => {}
     }
-
-    // The attestation key is derived from the requesting contract under a fixed
-    // path, so a request naming that path forges a response to itself. Here
-    // rather than in `validate`, which plain `sign` never reaches.
-    anyhow::ensure!(
-        !claims_attestation_key(&sign_request),
-        "rejecting sign request {:?} on the reserved attestation path",
-        sign_request.id
-    );
 
     let sign_id = sign_request.id;
     let (entry, is_new) = ctx.backlog.insert(sign_request).await;
@@ -230,10 +222,8 @@ pub(crate) async fn resume_pending_publish_requests(ctx: &StreamContext, source_
         }
 
         let sign_id = entry.sign_id();
-        // This is the proposer's only retry for a publish that reported success but
-        // never landed, so it republishes even if it already dispatched one. Marking
-        // stops the sweep from putting a second copy on chain on the next block: the
-        // deadline was anchored before the restart, so it is already past.
+        // The proposer's only retry for a publish that reported success but never landed, so it
+        // republishes even if already dispatched. Marking keeps the sweep from adding a second copy.
         entry.mark_publish_dispatched().await;
         ctx.rpc.publish(entry);
         tracing::info!(?sign_id, %source_chain, "resumed pending publish request after catchup");
@@ -242,7 +232,8 @@ pub(crate) async fn resume_pending_publish_requests(ctx: &StreamContext, source_
 
 /// Publish entries whose proposer stayed silent past this node's deadline.
 ///
-/// Only one of the `m` participants needs a healthy stream for failover to happen.
+/// One of the `m` participants with a healthy stream is enough, if it stays up for the observe
+/// lag plus its draw.
 pub(crate) async fn publish_failover_due(ctx: &StreamContext, chain: Chain) {
     if !ctx.caught_up {
         return;
@@ -259,8 +250,13 @@ pub(crate) async fn publish_failover_due(ctx: &StreamContext, chain: Chain) {
         if entry.publish_dispatched() {
             continue;
         }
-        let Some(deadline) = publish_deadline(&entry.sign_id(), entry.publishing(), &me, lag)
-        else {
+        let Some(deadline) = publish_deadline(
+            &entry.sign_id(),
+            entry.publishing(),
+            &me,
+            lag,
+            ctx.failover_floor,
+        ) else {
             continue;
         };
         if now < deadline {
@@ -314,20 +310,17 @@ pub(crate) async fn process_respond_event(
         return advance_bidirectional_to_execution(entry, respond_event, root_pk, ctx).await;
     }
 
-    if entry.is::<Bidirectional<Executing>>() {
-        tracing::info!(
-            ?sign_id,
-            ?source_chain,
-            "respond event backlog entry is already advanced; treating as processed"
-        );
-        return Ok(());
+    if let Some(entry) = entry.cast::<Bidirectional<BidirectionalProgress>>() {
+        let kept = entry
+            .record_published_transaction_signature(respond_event.signature, root_pk)
+            .await?;
+        if !kept {
+            ctx.sign_tx
+                .send(SignCommand::Completion(sign_id))
+                .await
+                .context("sign command channel closed")?;
+        }
     }
-
-    tracing::info!(
-        ?sign_id,
-        ?source_chain,
-        "respond event is already finalized or pruned; skipping"
-    );
     Ok(())
 }
 
@@ -431,6 +424,9 @@ pub(crate) async fn process_respond_bidirectional_event(
             }
             mpc_crypto::verify_signature(root_pk, request.args.epsilon, payload, &event.signature)
                 .context("respond event carried invalid signature")?;
+            if let Some(published) = &event.attestation {
+                mark_nonce_siblings(&event, published, ctx, root_pk).await;
+            }
         }
         None => entry.verify_signature(root_pk, &event.signature)?,
     }
@@ -482,7 +478,7 @@ async fn settle_unobserved_midnight_response(
     root_pk: mpc_primitives::PublicKey,
 ) -> anyhow::Result<()> {
     let sign_id = entry.sign_id();
-    let Some(tx) = unobserved_tx(&entry) else {
+    let Some(tx) = unobserved_tx(&entry, ctx, root_pk).await else {
         return Ok(());
     };
     let published = event
@@ -492,6 +488,7 @@ async fn settle_unobserved_midnight_response(
     mpc_crypto::verify_signature(root_pk, epsilon, payload, &event.signature).with_context(
         || format!("respond event carried invalid signature for sign id {sign_id:?}"),
     )?;
+    mark_nonce_siblings(event, &published, ctx, root_pk).await;
 
     settle_unobserved(entry, &tx, ctx).await
 }
@@ -506,7 +503,7 @@ async fn settle_unobserved_response(
     root_pk: mpc_primitives::PublicKey,
 ) -> anyhow::Result<()> {
     let sign_id = entry.sign_id();
-    let Some(tx) = unobserved_tx(&entry) else {
+    let Some(tx) = unobserved_tx(&entry, ctx, root_pk).await else {
         return Ok(());
     };
     let Some(output) = &event.output else {
@@ -526,11 +523,22 @@ async fn settle_unobserved_response(
     settle_unobserved(entry, &tx, ctx).await
 }
 
-fn unobserved_tx(entry: &SignEntry) -> Option<Arc<BidirectionalTx>> {
+/// The transaction to check a Response against. A node that has not seen a signature yet
+/// names it by the request: another node may have answered it as a nonce sibling.
+async fn unobserved_tx(
+    entry: &SignEntry,
+    ctx: &StreamContext,
+    root_pk: mpc_primitives::PublicKey,
+) -> Option<Arc<BidirectionalTx>> {
     match entry.status() {
         SignStatus::Bidirectional(
             BidirectionalProgress::Executing(tx) | BidirectionalProgress::Parked(tx),
         ) => Some(Arc::clone(tx)),
+        SignStatus::Bidirectional(BidirectionalProgress::Initial(_)) => ctx
+            .backlog
+            .entry(entry.chain, &entry.sign_id())
+            .await?
+            .named_tx(root_pk),
         _ => {
             tracing::warn!(sign_id = ?entry.sign_id(), "bidirectional tx not found on completion");
             None
@@ -545,9 +553,7 @@ async fn settle_unobserved(
 ) -> anyhow::Result<()> {
     let sign_id = entry.sign_id();
     // An unviable transaction is never mined, so no execution event would retire its watch.
-    ctx.backlog
-        .unwatch_execution(tx.target_chain, &tx.id, tx.source_chain, &tx.sign_id())
-        .await;
+    ctx.backlog.unwatch_execution(WatchKey::of(tx)).await;
     entry.complete().await;
     tracing::info!(
         ?sign_id,
@@ -572,6 +578,7 @@ fn execution_status(failed: bool) -> &'static str {
 
 /// Process an execution confirmation emitted by a chain client.
 /// The target chain is the chain where the execution was observed.
+#[allow(clippy::too_many_arguments)]
 pub async fn process_execution_confirmed(
     tx_id: mpc_primitives::BidirectionalTxId,
     sign_id: SignId,
@@ -580,6 +587,7 @@ pub async fn process_execution_confirmed(
     result: ExecutionOutcome,
     ctx: &StreamContext,
     target_chain: Chain,
+    root_pk: mpc_primitives::PublicKey,
 ) -> anyhow::Result<()> {
     tracing::debug!(
         ?tx_id,
@@ -589,11 +597,13 @@ pub async fn process_execution_confirmed(
         "received execution confirmation event"
     );
 
-    let Some(entry) = ctx
-        .backlog
-        .executing_entry_for(target_chain, &tx_id, source_chain, &sign_id)
-        .await
-    else {
+    let key = WatchKey {
+        flat_id: tx_id,
+        source: source_chain,
+        sign_id,
+        target: target_chain,
+    };
+    let Some(entry) = ctx.backlog.executing_entry_for(key).await else {
         tracing::warn!(
             ?tx_id,
             ?sign_id,
@@ -612,6 +622,91 @@ pub async fn process_execution_confirmed(
         block_height,
         "handling execution confirmation"
     );
+
+    // An included transaction takes its nonce whatever its outcome.
+    let siblings = ctx
+        .backlog
+        .unwatch_nonce_siblings(source_chain, entry.execution_tx(), root_pk)
+        .await;
+    for sibling in siblings {
+        let sibling_id = sibling.execution_tx().id;
+        tracing::info!(
+            ?sibling_id,
+            taker = ?tx_id,
+            block_height,
+            "nonce taken by another request's transaction"
+        );
+        let outcome = mpc_chain_integration_core::unexecutable_outcome(sibling.chain);
+        // Logged, not propagated: a `?` would skip the rest and leave the
+        // taker, unwatched above, without an answer.
+        if let Err(err) = answer_execution(sibling, sibling_id, block_height, outcome, ctx).await {
+            tracing::error!(?sibling_id, ?err, "failed to answer a nonce sibling");
+        }
+    }
+
+    answer_execution(entry, tx_id, block_height, result, ctx).await
+}
+
+/// Answer the requests of `chain` a Response left unexecutable, or that a checkpoint says one
+/// did.
+pub(crate) async fn answer_unviable(
+    chain: Chain,
+    ctx: &StreamContext,
+    root_pk: mpc_primitives::PublicKey,
+) {
+    for entry in ctx.backlog.unwatch_unviable(chain, root_pk).await {
+        let stored = ctx.backlog.entry(chain, &entry.sign_id()).await;
+        let Some(height) = stored.and_then(|stored| stored.unviable_at) else {
+            continue;
+        };
+        let tx_id = entry.execution_tx().id;
+        let outcome = mpc_chain_integration_core::unexecutable_outcome(entry.chain);
+        if let Err(err) = answer_execution(entry, tx_id, height, outcome, ctx).await {
+            tracing::error!(
+                ?tx_id,
+                ?err,
+                "failed to answer a request a Response left unexecutable"
+            );
+        }
+    }
+}
+
+/// Mark what a verified Response saying Executed or Failed leaves unexecutable (#1430).
+/// Only Midnight's Response carries the height so far (#1429), so only Midnight gets here.
+async fn mark_nonce_siblings(
+    event: &RespondBidirectionalEvent,
+    published: &mpc_primitives::PublishedAttestation,
+    ctx: &StreamContext,
+    root_pk: mpc_primitives::PublicKey,
+) {
+    if published.outcome_kind == AttestationOutcomeKind::Unviable {
+        return;
+    }
+    let sign_id = SignId::new(event.request_id);
+    let taker = ctx.backlog.entry(event.chain, &sign_id).await;
+    let Some(taker) = taker.and_then(|taker| taker.named_tx(root_pk)) else {
+        tracing::warn!(?sign_id, "cannot derive the nonce a Response used");
+        return;
+    };
+    ctx.backlog
+        .mark_unviable(event.chain, &taker, published.block_height)
+        .await;
+    // A node that is behind or was rebased answers from the entry at catchup.
+    if ctx.caught_up {
+        answer_unviable(event.chain, ctx, root_pk).await;
+    }
+}
+
+/// Answers `entry`, whose transaction `tx_id` ended with `result` at `block_height`.
+async fn answer_execution(
+    entry: SignEntry<Bidirectional<Executing>>,
+    tx_id: mpc_primitives::BidirectionalTxId,
+    block_height: u64,
+    result: ExecutionOutcome,
+    ctx: &StreamContext,
+) -> anyhow::Result<()> {
+    let sign_id = entry.sign_id();
+    let source_chain = entry.chain;
 
     // Captured before `advance` consumes the entry: the wait ends here, and the
     // outcome is what distinguishes a healthy round trip from a reverted one.
@@ -645,6 +740,10 @@ pub async fn process_execution_confirmed(
     let execution_tx = Arc::clone(entry.execution_tx());
     let entry = match entry.advance(result, block_height).await {
         Ok(entry) => entry,
+        Err(err) if matches!(err.downcast_ref(), Some(BacklogError::AlreadyAnswered)) => {
+            tracing::info!(?sign_id, ?tx_id, "request was answered by another path");
+            return Ok(());
+        }
         Err(err) => {
             // Every failure here is deterministic, so a retry would
             // re-emit the same failing confirmation forever: park
@@ -727,7 +826,14 @@ pub(crate) async fn process_block_event<T: ChainTelemetry>(
     telemetry.checkpoint_created(checkpoint.block_height);
 
     let checkpoint_digest = mpc_primitives::CheckpointDigest::from(&checkpoint);
-    tracing::info!(block, ?checkpoint, %chain, ?checkpoint_digest, "created checkpoint");
+    tracing::info!(
+        block,
+        %chain,
+        tx_count = checkpoint.len(),
+        ?checkpoint,
+        ?checkpoint_digest,
+        "created checkpoint"
+    );
     ctx.rpc.vote_checkpoint(checkpoint_digest).await?;
 
     Ok(())
@@ -744,7 +850,6 @@ pub(crate) async fn process_block_event<T: ChainTelemetry>(
 pub(crate) fn sender_string(sender: [u8; 32], source_chain: Chain) -> anyhow::Result<String> {
     match source_chain {
         Chain::Solana => Ok(Pubkey::new_from_array(sender).to_string()),
-        Chain::Hydration => Ok(mpc_chain_hydration::ss58_address_from_account32(sender)),
         _ => anyhow::bail!("Unsupported chain: {source_chain}"),
     }
 }

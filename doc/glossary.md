@@ -138,7 +138,8 @@ A short hash that stands for a larger structure. The docs use two:
 A value from the block that holds a [request](#request). The requester cannot
 know or influence it before that block is validated. Nodes read it from a final
 block, so every node derives the same delta (`SignArgs::entropy`,
-`chain-signatures/primitives/src/crypto.rs`). It also seeds the
+`chain-signatures/primitives/src/crypto.rs`). A response has no such block: its
+entropy hashes the first leg's with the message it signs and its key. It also seeds the
 [proposer](#proposer) election. See
 [delta-derivation.md](delta-derivation.md).
 
@@ -202,6 +203,13 @@ for a signature: (sign id, [presignature](#presignature) id). The sign id
 (`SignId`, `signet-primitives/src/crypto.rs`) wraps the [request
 id](#request-id), the same 32 bytes.
 
+## Key version
+
+Which MPC root key and derivation format a key uses. See
+[account-derivation.md](account-derivation.md#derivation-path-structure).
+Every request names its key version. The network signs only up to the latest
+key version (`LATEST_MPC_KEY_VERSION`, `signet-primitives/src/lib.rs`).
+
 ## Mesh
 
 A node's connections to its peers, each `Offline` (no answer), `Inactive`
@@ -230,10 +238,8 @@ transaction, one of three kinds:
 
 See [bidirectional-calls.md §2](bidirectional-calls.md#2-vocabulary).
 
-*Code today:* Unviable is attested only for requests from Midnight, and even
-there not when only another request's response shows it
-([#1429](https://github.com/sig-net/mpc/issues/1429),
-[#1430](https://github.com/sig-net/mpc/issues/1430)).
+*Code today:* Unviable is attested only for requests from Midnight
+([#1429](https://github.com/sig-net/mpc/issues/1429)).
 
 ## Owner
 
@@ -300,6 +306,16 @@ counts as published once the event carrying it is final on the [source
 chain](#source-chain). See
 [bidirectional-calls.md §2](bidirectional-calls.md#2-vocabulary).
 
+## Purpose of the key
+
+What a key signs: [plain sign requests](#plain-sign-request),
+[bidirectional requests](#bidirectional-request),
+[attestations](#attestation) or a [system account](#system-account)'s
+transactions. The signing API a request comes on sets it, never the
+request's fields. From [key version](#key-version) 2 the derivation path
+names the purpose, so keys of different purposes differ. See
+[account-derivation.md](account-derivation.md#derivation-path-structure).
+
 ## Request
 
 What a contract asks the network to sign. A [bidirectional
@@ -348,9 +364,19 @@ digest never changes. See [checkpoints.md §1](checkpoints.md#1-background).
 The contract on a [source chain](#source-chain) that takes
 [requests](#request) and receives [published](#publish) signatures and
 [attestations](#attestation), for example `ChainSignatures.sol` on EVM chains
-(`chain-signatures/contract-eth/contracts/`) and `chain-signatures/contract-sol`
-on Solana. See [bidirectional-calls.md
+([sig-net/ethereum-signet-contract](https://github.com/sig-net/ethereum-signet-contract)) and `chain-signatures/contract-sol`
+on Solana. On Midnight it is two contracts: requests are notified to the
+Signet singleton, and the signet responder receives published signatures
+and attestations. See [bidirectional-calls.md
 §4.2](bidirectional-calls.md#42-signet-contract-per-source-chain).
+
+## Signing scheme
+
+The signature algorithm and curve a key signs with: ECDSA over secp256k1
+today, with EdDSA planned. A request names its signing scheme among its key
+parameters, in a field the contracts call `algo`. See
+[bidirectional-calls.md
+§7.1](bidirectional-calls.md#71-request-signbidirectionaleventv1).
 
 ## Source chain
 
@@ -365,6 +391,13 @@ It runs whenever a node connects or reconnects to a peer, and when a sign
 [presignature](#presignature) as missing (`MissingArtifact`) are synced again
 (`protocol/sync/`, `protocol/request/posit.rs`). See
 [state-sync.md](state-sync.md).
+
+## System account
+
+An account the MPC network itself controls on a chain, rather than one a
+[request](#request)'s sender controls: the admin of the Ethereum contract
+(`ChainSignatures.sol`), for instance. See
+[account-derivation.md](account-derivation.md#derivation-path-structure).
 
 ## Take
 

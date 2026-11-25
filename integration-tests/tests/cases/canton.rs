@@ -16,7 +16,6 @@ use mpc_chain_canton::{
     },
     parse_canton_signature,
 };
-use mpc_node::respond_bidirectional::CANTON_RESPOND_BIDIRECTIONAL_PATH;
 use mpc_node::sign_bidirectional::{derive_user_address, sign_and_hash_transaction};
 use mpc_node::util::NearPublicKeyExt;
 use mpc_primitives::{Chain, LATEST_MPC_KEY_VERSION};
@@ -127,10 +126,13 @@ async fn run_canton_eth_bidirectional_flow_case(case: EvmType2AnvilCase) -> Resu
 
     let mpc_signature = parse_canton_signature(&sig_payload.signature)?;
 
-    let sign_epsilon = mpc_crypto::derive_epsilon_canton(
+    let sign_epsilon = mpc_crypto::derive_epsilon(
         LATEST_MPC_KEY_VERSION,
-        &expected_event.sender,
-        &canton.requester_party,
+        mpc_primitives::Chain::Canton,
+        mpc_crypto::KeyPurpose::Bidirectional {
+            sender: &expected_event.sender,
+            path: &canton.requester_party,
+        },
     )?;
     let expected_sender_addr = derive_user_address(root_pk, sign_epsilon);
 
@@ -148,7 +150,7 @@ async fn run_canton_eth_bidirectional_flow_case(case: EvmType2AnvilCase) -> Resu
     let s_bytes: [u8; 32] = mpc_signature.s.to_bytes().into();
     let signed_bytes = encode_signed_eip1559(&evm_params, y_parity, &r_bytes, &s_bytes)?;
     let unsigned_bytes = TxEip1559::try_from(&evm_params)?.encoded_for_signing();
-    let (watched_tx_hash, _) =
+    let watched_tx_hash =
         sign_and_hash_transaction(Chain::Ethereum, &unsigned_bytes, mpc_signature)?;
     let watched_tx_hash = B256::from(watched_tx_hash);
 
@@ -209,10 +211,12 @@ async fn run_canton_eth_bidirectional_flow_case(case: EvmType2AnvilCase) -> Resu
             &hex::decode(&respond_payload.serialized_output)?,
         );
 
-    let respond_epsilon = mpc_crypto::derive_epsilon_canton(
+    let respond_epsilon = mpc_crypto::derive_epsilon(
         LATEST_MPC_KEY_VERSION,
-        &expected_event.sender,
-        CANTON_RESPOND_BIDIRECTIONAL_PATH,
+        mpc_primitives::Chain::Canton,
+        mpc_crypto::KeyPurpose::Attestation {
+            sender: &expected_event.sender,
+        },
     )?;
     let respond_derived_pk = mpc_crypto::derive_key(root_pk, respond_epsilon);
 

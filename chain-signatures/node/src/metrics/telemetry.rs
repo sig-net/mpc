@@ -6,7 +6,7 @@ use mpc_utils::time::unix_elapsed;
 
 use super::{
     indexers::{BIDIRECTIONAL_EXTRACTION_FAILURES, LATEST_BLOCK_NUMBER, TRON_EXPIRY_SCAN_DEFERRED},
-    publishers::{FUNDING_WALLET_BALANCE, PUBLISH_REFUSALS},
+    publishers::{FUNDING_WALLET_BALANCE, FUNDING_WALLET_REPLAY_RESTARTS, PUBLISH_REFUSALS},
     requests::{record_indexing_step_reached, record_request_latency_since, SignRequestStep},
 };
 
@@ -26,24 +26,10 @@ impl PublisherTelemetry for NodeTelemetry {
     fn record_publish_metrics(&self, action: &PublishAction) {
         let chain = action.request.chain;
         let kind = action.request.request_kind();
-        let elapsed_secs = unix_elapsed(action.request.unix_timestamp_indexed).as_secs();
-
-        if elapsed_secs <= chain.expected_response_time_secs() {
-            record_request_latency_since(
-                chain,
-                SignRequestStep::Total,
-                "in_time",
-                kind,
-                action.request.unix_timestamp_indexed,
-            );
-        } else {
-            record_request_latency_since(
-                chain,
-                SignRequestStep::Total,
-                "expired",
-                kind,
-                action.request.unix_timestamp_indexed,
-            );
+        if let Some(indexed) = action.request.unix_timestamp_indexed {
+            let in_time = unix_elapsed(indexed).as_secs() <= chain.expected_response_time_secs();
+            let outcome = if in_time { "in_time" } else { "expired" };
+            record_request_latency_since(chain, SignRequestStep::Total, outcome, kind, indexed);
         }
         record_request_latency_since(
             chain,
@@ -63,6 +49,12 @@ impl PublisherTelemetry for NodeTelemetry {
     fn publish_refused(&self, code: &str) {
         PUBLISH_REFUSALS
             .with_label_values(&[self.chain.as_str(), code])
+            .inc();
+    }
+
+    fn funding_wallet_replay_restarted(&self, cause: &str) {
+        FUNDING_WALLET_REPLAY_RESTARTS
+            .with_label_values(&[self.chain.as_str(), cause])
             .inc();
     }
 }
@@ -135,6 +127,28 @@ mod tests {
                 .with_label_values(&[chain, "wallet_unfunded"])
                 .get(),
             2.0
+        );
+    }
+
+    #[test]
+    fn replay_restarts_are_labelled_by_chain_and_cause() {
+        let telemetry = NodeTelemetry::new(Chain::Midnight);
+        let chain = Chain::Midnight.as_str();
+
+        telemetry.funding_wallet_replay_restarted("strikes");
+        telemetry.funding_wallet_replay_restarted("resume_timeout");
+
+        assert_eq!(
+            FUNDING_WALLET_REPLAY_RESTARTS
+                .with_label_values(&[chain, "strikes"])
+                .get(),
+            1.0
+        );
+        assert_eq!(
+            FUNDING_WALLET_REPLAY_RESTARTS
+                .with_label_values(&[chain, "resume_timeout"])
+                .get(),
+            1.0
         );
     }
 }

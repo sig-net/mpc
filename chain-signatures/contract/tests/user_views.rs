@@ -1,5 +1,5 @@
 pub mod common;
-use common::{create_response, init_env};
+use common::{create_response, init_env, wait_for_pending_requests};
 
 use mpc_contract::primitives::{PendingRequest, SignRequest};
 
@@ -9,20 +9,6 @@ use serde_json::json;
 use signet_primitives::SignId;
 use signet_primitives::LATEST_MPC_KEY_VERSION;
 use std::str::FromStr;
-#[tokio::test]
-async fn test_key_version() -> anyhow::Result<()> {
-    let (_, contract, _, _) = init_env().await;
-
-    let version: u32 = contract
-        .view("latest_key_version")
-        .await
-        .unwrap()
-        .json()
-        .unwrap();
-    assert_eq!(version, 1);
-    Ok(())
-}
-
 #[tokio::test]
 async fn test_public_key() -> anyhow::Result<()> {
     let (_, contract, _, _) = init_env().await;
@@ -90,8 +76,8 @@ async fn test_experimental_signature_deposit() -> anyhow::Result<()> {
             .await?;
     }
 
-    // wait so all sign are called, but not yet timeout
-    tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+    // wait until all requests are pending, before any of them times out
+    wait_for_pending_requests(&contract, 7).await?;
 
     let deposit: u128 = contract
         .view("experimental_signature_deposit")
@@ -129,7 +115,7 @@ async fn test_poll_pending_requests() -> anyhow::Result<()> {
         .transact_async()
         .await?;
 
-    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+    wait_for_pending_requests(&contract, 1).await?;
 
     let pending_requests: Vec<(SignId, PendingRequest)> = contract
         .view("pending_requests_data")

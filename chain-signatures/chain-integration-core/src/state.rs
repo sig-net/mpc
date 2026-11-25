@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use enum_map::EnumMap;
 use mpc_primitives::{BidirectionalTx, BidirectionalTxId, Chain, SignId};
 use tokio::sync::RwLock;
 
@@ -12,7 +13,9 @@ pub struct WatchedExecution {
 }
 
 impl WatchedExecution {
-    /// Create a new `WatchedExecution` for the given transaction.
+    /// The execution of `tx`, sign id derived from it. For pending
+    /// enumerations; watch rows carry the key's sign id instead
+    /// ([`ExecutionWatchIndex::all`]).
     pub fn of(tx: Arc<BidirectionalTx>) -> Self {
         Self {
             sign_id: tx.sign_id(),
@@ -21,12 +24,13 @@ impl WatchedExecution {
     }
 }
 
-/// Watch key for an execution: identifies the flat id, source chain, and sign id.
+/// Watch key: flat id, source, sign id, and target chain.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct WatchKey {
     pub flat_id: BidirectionalTxId,
     pub source: Chain,
     pub sign_id: SignId,
+    pub target: Chain,
 }
 
 impl WatchKey {
@@ -35,7 +39,60 @@ impl WatchKey {
             flat_id: tx.id,
             source: tx.source_chain,
             sign_id: tx.sign_id(),
+            target: tx.target_chain,
         }
+    }
+}
+
+/// The transactions a node watches for execution, one per watch key —
+/// the index the backlog rebuilds from its `Executing` entries and the
+/// test mock keeps independent of its pending entries.
+#[derive(Debug, Clone, Default)]
+pub struct ExecutionWatchIndex {
+    watches: HashMap<WatchKey, Arc<BidirectionalTx>>,
+}
+
+impl ExecutionWatchIndex {
+    pub fn insert(&mut self, tx: Arc<BidirectionalTx>) {
+        self.insert_at(WatchKey::of(&tx), tx);
+    }
+
+    /// Under an explicit key — for a sign id the tx does not derive.
+    pub fn insert_at(&mut self, key: WatchKey, tx: Arc<BidirectionalTx>) {
+        self.watches.insert(key, tx);
+    }
+
+    /// Replaces `source`'s watches with `entries`.
+    pub fn rebuild(
+        &mut self,
+        source: Chain,
+        entries: impl IntoIterator<Item = Arc<BidirectionalTx>>,
+    ) {
+        self.watches.retain(|key, _| key.source != source);
+        self.watches
+            .extend(entries.into_iter().map(|tx| (WatchKey::of(&tx), tx)));
+    }
+
+    pub fn remove(&mut self, key: &WatchKey) -> Option<Arc<BidirectionalTx>> {
+        self.watches.remove(key)
+    }
+
+    pub fn contains(&self, key: &WatchKey) -> bool {
+        self.watches.contains_key(key)
+    }
+
+    pub fn all(&self) -> HashMap<BidirectionalTxId, Vec<WatchedExecution>> {
+        let mut grouped: HashMap<BidirectionalTxId, Vec<WatchedExecution>> = HashMap::new();
+        for (key, tx) in &self.watches {
+            grouped
+                .entry(key.flat_id)
+                .or_default()
+                .push(WatchedExecution {
+                    sign_id: key.sign_id,
+                    tx: Arc::clone(tx),
+                });
+        }
+        grouped
     }
 }
 
@@ -58,16 +115,14 @@ pub trait StateManager: Send + Sync + Clone + 'static {
     /// derived index (the mock keeps the two independent).
     async fn get_pending_executions(&self, chain: Chain) -> Vec<WatchedExecution>;
 
-    /// Registers or refreshes the entry's own watch under `tx.id`;
-    /// sibling watches under the same flat id survive.
-    async fn watch_execution(&self, chain: Chain, tx: Arc<BidirectionalTx>);
+    /// Registers or refreshes the entry's own watch, keyed by its flat
+    /// id and sign id on `tx`'s target chain; sibling watches under the
+    /// same flat id survive.
+    async fn watch_execution(&self, tx: Arc<BidirectionalTx>);
 
     /// Set the processed block height for a specific chain.
     async fn set_processed_block(&self, chain: Chain, height: u64);
 }
-
-/// Type alias to make clippy happy
-type Watchers = Arc<RwLock<HashMap<Chain, HashMap<WatchKey, Arc<BidirectionalTx>>>>>;
 
 /// In-memory mock implementation of [`StateManager`] intended for use in tests.
 ///
@@ -76,10 +131,7 @@ type Watchers = Arc<RwLock<HashMap<Chain, HashMap<WatchKey, Arc<BidirectionalTx>
 #[derive(Clone, Default)]
 pub struct MockStateManager {
     processed_blocks: Arc<RwLock<HashMap<Chain, u64>>>,
-    // TODO: extract the watch map into a dedicated type to avoid
-    // divergence with the backlog — the identity is shared (`WatchKey`),
-    // the map shape is not.
-    watchers: Watchers,
+    watchers: Arc<EnumMap<Chain, RwLock<ExecutionWatchIndex>>>,
     pending: Arc<RwLock<Vec<Arc<BidirectionalTx>>>>,
 }
 
@@ -93,24 +145,7 @@ impl StateManager for MockStateManager {
         &self,
         chain: Chain,
     ) -> HashMap<BidirectionalTxId, Vec<WatchedExecution>> {
-        let watches = self
-            .watchers
-            .read()
-            .await
-            .get(&chain)
-            .cloned()
-            .unwrap_or_default();
-        let mut grouped: HashMap<BidirectionalTxId, Vec<WatchedExecution>> = HashMap::new();
-        for (key, tx) in watches {
-            grouped
-                .entry(key.flat_id)
-                .or_default()
-                .push(WatchedExecution {
-                    sign_id: key.sign_id,
-                    tx,
-                });
-        }
-        grouped
+        self.watchers[chain].read().await.all()
     }
 
     async fn get_pending_executions(&self, chain: Chain) -> Vec<WatchedExecution> {
@@ -127,12 +162,8 @@ impl StateManager for MockStateManager {
         self.processed_blocks.write().await.insert(chain, height);
     }
 
-    async fn watch_execution(&self, chain: Chain, tx: Arc<BidirectionalTx>) {
-        let mut watchers = self.watchers.write().await;
-        watchers
-            .entry(chain)
-            .or_default()
-            .insert(WatchKey::of(&tx), tx);
+    async fn watch_execution(&self, tx: Arc<BidirectionalTx>) {
+        self.watchers[tx.target_chain].write().await.insert(tx);
     }
 }
 
@@ -143,25 +174,14 @@ impl MockStateManager {
 
     /// Watch under an explicit sign_id — tests pair one the tx does
     /// not derive.
-    pub async fn watch_execution_as(
-        &self,
-        chain: Chain,
-        sign_id: SignId,
-        tx: Arc<BidirectionalTx>,
-    ) {
-        self.watchers
-            .write()
-            .await
-            .entry(chain)
-            .or_default()
-            .insert(
-                WatchKey {
-                    flat_id: tx.id,
-                    source: tx.source_chain,
-                    sign_id,
-                },
-                tx,
-            );
+    pub async fn watch_execution_as(&self, sign_id: SignId, tx: Arc<BidirectionalTx>) {
+        self.watchers[tx.target_chain].write().await.insert_at(
+            WatchKey {
+                sign_id,
+                ..WatchKey::of(&tx)
+            },
+            tx,
+        );
     }
 
     /// Register an `Executing` backlog entry targeting `tx.target_chain`.
@@ -179,23 +199,9 @@ impl MockStateManager {
             .retain(|tx| tx.source_chain != source_chain || tx.sign_id() != sign_id);
     }
 
-    /// Removes one entry's watch; sibling watches stay.
-    pub async fn remove_execution_watch(
-        &self,
-        chain: Chain,
-        tx_id: &BidirectionalTxId,
-        source_chain: Chain,
-        sign_id: SignId,
-    ) {
-        self.watchers
-            .write()
-            .await
-            .entry(chain)
-            .or_default()
-            .remove(&WatchKey {
-                flat_id: *tx_id,
-                source: source_chain,
-                sign_id,
-            });
+    /// Removes one entry's watch, routed to its target chain;
+    /// sibling watches stay.
+    pub async fn remove_execution_watch(&self, key: WatchKey) {
+        self.watchers[key.target].write().await.remove(&key);
     }
 }

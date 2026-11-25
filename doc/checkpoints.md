@@ -42,12 +42,12 @@ Vocabulary, per node per source chain:
   The indexer reports heights in order, with all their events; a chain may skip heights where nothing happened, and the indexers of correct nodes report the same heights.
   Apart from the indexer, only a re-index (see Base) or a restart moves it, back or forward.
 
-* **Caught up**: the node has processed every block up to the finalised head its provider reported when the node started or last re-indexed.
+* **Caught up**: the node has processed every block up to the finalised head its provider reported when the node started or last re-indexed, and has not stopped indexing.
   Acting waits for it, so that a node behind the head does not spend presignatures, posit rounds and peer messages on requests the chain has already answered.
 
 * **Backlog**: one *entry* per request admitted and not *finished*, that is, not yet removed by a finalised source-chain event.
-  An entry holds the request id (rid) as its key, the request as the chain gave it, and, for a bidirectional request, `signatures`: the signatures for it published in finalised blocks on the source chain.
-  A plain sign request is finished by its first published signature, so it won't have signatures in its entry.
+  An entry holds the request id (rid) as its key, the request as the chain gave it, and, for a bidirectional request, `tx_ids`, the transaction IDs that signatures for it published in finalised blocks on the source chain give, and `unviable_at`, the height at which a `Response` for another request says its replay protection was used up.
+  A plain sign request is finished by its first published signature, so its entry has neither.
   * Only finalised source-chain events change the backlog: for a bidirectional request, the handlers of [bidirectional-calls.md](bidirectional-calls.md) (Section 4.3); for a plain sign request, its admission and its first published signature.
   * Nothing read from a destination chain changes the backlog, and neither does anything the node produced itself.
   * Everything else a node keeps about a request is *node-local*. A node stores in `local` the signatures and attestations it took part in producing and what it read on the destination chain. A node tries to persist signatures and attestations before publishing them. `local` does not go into checkpoints.
@@ -82,16 +82,17 @@ digest(height, backlog) = H(
     for each entry, in rid order:
         rid
         request
-        signatures
+        tx_ids
+        unviable_at
 )
 ```
 
 The request goes in whole because the rid does not cover all of it, e.g., the schema.
-`signatures` goes in because a node rebased onto a checkpoint never reads the `Signature` events below its height again.
-A peer that served a checkpoint without one of them would leave that node looking for too few executions: each signature fixes one transaction ID to look for, and a request can have several, one per signing round whose signature was published ([bidirectional-calls.md](bidirectional-calls.md), Section 2).
+`tx_ids` and `unviable_at` go in because a node rebased onto a checkpoint never reads the `Signature` and `Response` events below its height again.
+A peer that served a checkpoint without a transaction ID would leave that node looking for too few executions: each signature fixes one transaction ID to look for, and a request can have several, one per signing round whose signature was published ([bidirectional-calls.md](bidirectional-calls.md), Section 2).
 
-The encoding of the entry must be canonical, one byte string per entry; the request has variable-length fields, so each gets its length before it.
-The order must be fixed too: entries go in rid order, and an entry's signatures in the order of their bytes.
+Each entry is encoded as the CBOR of these fields, which puts a length before every variable-length field.
+The order must be fixed too: entries go in rid order, and an entry's transaction IDs in the order of their bytes.
 
 ### Governance contract
 
@@ -133,7 +134,7 @@ get_checkpoint(chain, digest) -> Checkpoint
 (ii) A node holding `MAX_PENDING` checkpoints above its base processes no block and creates no new checkpoint until it rebases.
 
 **S4 Sufficiency.** A node holding only a settled checkpoint and its key share can do the same as a node that indexed from genesis but didn't participate in signing: join signing rounds, find executions, attest, and vote at the next boundary.
-The exception is attesting Unviable (Section 6).
+The exception is answering a request whose replay protection another request used up, on a source chain whose `Response` does not carry the outcome and height yet (Section 6). Such a chain answers it Failed, from the execution.
 
 ### Liveness, during a long-enough synchronous interval
 
@@ -153,9 +154,10 @@ Described for one node, one source chain; `backlog` is the node's backlog.
   * The settled checkpoint is another one: the node stops indexing, fetches it from a peer, makes it the base, drops all of `pending` and re-indexes from it.
 * On a restart the node resumes from the newest checkpoint in `pending`, or the base if there is none, and votes again for every checkpoint in `pending`, since a vote in flight at the crash may have been lost.
 * A node is *at the cap* when `pending` holds `MAX_PENDING` checkpoints.
-  There it processes no block and waits for a settlement, caught up or not.
   This bounds how far the network signs from state nobody has agreed to.
-* It starts to act only while it is caught up and is not missing a settled checkpoint it has read (`want` below); a step it has already started or queued, such as a signing round, may finish or be aborted.
+  There it processes no block, so it is not caught up, and waits for a settlement; a signature it has started producing is still published.
+  When a settlement takes it below the cap, it restarts.
+* It starts to act only while it is caught up; a step it has already started or queued, such as a signing round, may finish or be aborted.
   This holds for everything acting covers, between blocks too.
 
 `persist` writes `base` and `pending` durably in one step and is retried until it succeeds.
@@ -249,12 +251,14 @@ If the node takes a stale head for the real head, it deletes the record of a req
 rebase(c):                                        // c settled, above base
   aligned = pending[c.height] has c's digest      // backlog descends from c
             and processed_height >= c.height
+  behind = pending is full                        // at the cap, blocks unread
   base = c
   if aligned: pending.drop_up_to(c.height)
   else: pending = {}
   persist
   want = none
   if not aligned: re_index()
+  else if behind: restart
 
 re_index():                                       // start over from base
   backlog, processed_height = base.backlog, base.height
@@ -311,10 +315,11 @@ A rebase lifts both waits.
 
 ### *S4, a settled checkpoint is enough to take part.*
 Each thing a node does for a request reads the entry and nothing older than the checkpoint.
-Signing and joining a round read the request, which gives the key and the bytes to sign, and `signatures`, whose being empty says that no signature is final yet.
-Finding an execution reads `signatures`, which give the transaction IDs, and attesting reads the request's schema.
+Signing and joining a round read the request, which gives the key and the bytes to sign, and `tx_ids`, whose being empty says that no signature is final yet.
+Finding an execution reads `tx_ids`, and attesting reads the request's schema.
 Voting reads the backlog, which the node builds from the checkpoint and the blocks after it (S1).
-Attesting Unviable is the exception: it follows from the execution or the `Response` of another request ([bidirectional-calls.md](bidirectional-calls.md), Section 4.3), and once that request has left the backlog the checkpoint holds no trace of it.
+Attesting Unviable follows from the execution or the `Response` of another request ([bidirectional-calls.md](bidirectional-calls.md), Section 4.3).
+After a `Response` it reads `unviable_at`; after an execution, the other request is still in the backlog until its own `Response`, and a node that has not recorded its outcome finds the execution again from that entry's `tx_ids`.
 What the checkpoint cannot give back is node-local: a node that lost its storage has lost the signatures it issued and not yet seen published.
 They are not lost to the network where another correct node was in the round, which keeps and publishes its own ([bidirectional-calls.md](bidirectional-calls.md), Section 6).
 
@@ -322,7 +327,7 @@ They are not lost to the network where another correct node was in the round, wh
 Correct nodes agree (S1), so what is left is how many are up:
 
 * t votes out of the n - f correct nodes leaves n - f - t of them free to be down, none at t = n - f.
-* Votes persist until the height settles, so nodes need not be up together.
+* Votes persist until the height settles or their node leaves the committee, so nodes need not be up together.
 * A node catching up votes at every boundary it passes rather than waiting for the head.
 * A vote is retried until the contract has it, and after a restart the node casts its votes for `pending` again.
 
@@ -341,7 +346,7 @@ Where no node can produce a checkpoint at all there is no recovery here (Section
 * Settlement stalls when fewer than t nodes reach a boundary and vote.
   At t = n - f one correct node down while the others create `MAX_PENDING` checkpoints above the base is enough.
   The nodes that are up run to the cap and wait for a settlement.
-* Signing stalls while more than n - t nodes are faulty or not acting: catching up, missing a settled checkpoint, or, for requests they have not admitted, at the cap.
+* Signing stalls while more than n - t nodes are faulty or not acting: catching up, at the cap, or missing a settled checkpoint.
 * A fetch slower than the time between two settlements never completes.
   Holders drop a checkpoint when they rebase onto the next one.
 * Nothing bounds the size of a checkpoint.
@@ -351,9 +356,9 @@ Where no node can produce a checkpoint at all there is no recovery here (Section
 
 ### Dependencies on features not implemented yet
 
-* Unviable is attested from another request's execution or answer.
-  A node that starts from a checkpoint taken after that answer holds no trace of it and cannot attest.
-  A request's entry in the backlog must store that another request's response made it unviable.
+* The digest covers `tx_ids`, the transaction IDs the published signatures give, since finding an execution needs only those. `unviable_at`, the height at which another request's `Response` says its replay protection was used up, covers Midnight so far.
+* `unviable_at` needs the outcome and height a `Response` reports, which only Midnight's carries so far.
+  On the other source chains a node that starts from a checkpoint taken after another request's answer holds no trace of it and cannot attest.
 
 ### Outside the model: nodes build different backlogs
 
@@ -398,7 +403,7 @@ Each closes one of the limits above, at a price.
 
 ## 7. Implementation status
 
-The code, checked at `65b8d41b`, differs from the design as listed below, grouped by component.
+The code differs from the design as listed below, grouped by component.
 Each item says what the code does now and what the design asks for instead.
 
 Code under `chain-signatures/`: the contract in `contract/src/lib.rs`; the node in `node/src/`, mainly `backlog/checkpoints.rs`, `backlog/consensus.rs`, `storage/checkpoint_storage.rs`, `stream/supervisor.rs` and `stream/recovery.rs`.
@@ -417,22 +422,13 @@ The interval is `checkpoint_interval`, a per-chain constant with no per-node ove
 ### Node: backlog and digest
 
 3. Entries (§1 Backlog, which [bidirectional-calls.md](bidirectional-calls.md) also needs).
-   Now: an entry is the request and its status, the node's progress and the phases read from either chain, and the whole entry goes into the checkpoint.
+   Now: nodes exchange entries with only the fields the digest covers, except for a checkpoint in the earlier format, whose digest needs each entry's status: a node still serves and adopts its whole body.
    A node tries to store its signatures and attestations in `local` before publishing them, and applies them on catching up after a restart or a rebase.
-   There is no `signatures` list.
-   Design: an entry holds the rid, the request and `signatures`, and the node's own progress is node-local in `local`, outside checkpoints.
-4. Digest (§2).
-   Now: the digest covers the rids and one status tag per entry.
-   Design: it also covers each entry's request and `signatures`, in the canonical encoding of Section 2.
+   Design: nodes exchange only the fields the digest covers, for every checkpoint.
 
-### Node: indexing
+### Node: signatures
 
-5. Hydration (§1 Processed height).
-   Now: Hydration indexes only the blocks it receives live, with no backfill.
-   It loses the events of a block it cannot fetch or verify, and of the blocks between its stored height and the head on every restart or reconnect.
-   It reports catching up as done before it processes any block.
-   Design: every indexer processes every finalised block in order from its processed height.
-6. At the cap (§4).
-   Now: the indexer makes no progress at the cap, so the stall watchdog restarts it again and again, and each restart makes the node not caught up.
-   Until a settlement takes it below the cap, the node holds second-leg publishes and queues no second-leg sign requests.
-   Design: at the cap the node keeps its caught-up state and keeps acting on the requests it holds.
+8. Issued signatures (§1 Backlog).
+   Now: what a node signed and attested is in memory only until its next checkpoint stores it.
+   A node that adopts a settled checkpoint from a peer loses its signatures and attestations: that checkpoint replaces the stored one and does not hold them.
+   Design: a node stores signatures and attestations before publishing, and keeps them across restarts and when it adopts a settled checkpoint from a peer.
