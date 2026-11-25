@@ -23,9 +23,9 @@ pub async fn deploy_chain_signatures<P>(
 where
     P: Provider + Clone + 'static,
 {
-    let artifact: Value = serde_json::from_slice(include_bytes!(
-        "../../../contract-eth/artifacts/contracts/ChainSignatures.sol/ChainSignatures.json"
-    ))?;
+    // Hardhat artifact of ChainSignatures, which lives in sig-net/ethereum-signet-contract.
+    let artifact: Value =
+        serde_json::from_slice(include_bytes!("../../fixtures/ChainSignatures.json"))?;
 
     let bytecode = artifact
         .get("bytecode")

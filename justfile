@@ -100,16 +100,14 @@ test-seq filter="": (setup "")
 alias ts := test-seq
 
 # Build artifacts: `just build` = whole Rust workspace (via setup),
-# `just build eth` = EVM artifacts, `just build contract` = NEAR contract wasm,
+# `just build contract` = NEAR contract wasm,
 # `just build test-node` = mpc-node with test-feature, the binary the integration harness spawns (not the release build),
 # `just build midnight` = midnight-devtools real-stack fixtures,
 # `just build tests` = integration test binaries without running them,
 # `just build compat` = latest release node binary for the compat test
-# Usage: just build [target] (target="" | eth | contract | test-node | midnight | tests | compat)
+# Usage: just build [target] (target="" | contract | test-node | midnight | tests | compat)
 build target="":
-    @if [ "{{target}}" = "eth" ]; then \
-      cd chain-signatures/contract-eth && npm ci && npx hardhat compile; \
-    elif [ "{{target}}" = "contract" ]; then \
+    @if [ "{{target}}" = "contract" ]; then \
       ./build-contract.sh; \
     elif [ "{{target}}" = "test-node" ]; then \
       cargo build -p mpc-node --release --features test-feature,debug-page; \
@@ -122,22 +120,18 @@ build target="":
     elif [ -z "{{target}}" ]; then \
       just setup && cargo build --workspace; \
     else \
-      echo "Unknown build target: {{target}} (expected '' | eth | contract | test-node | midnight | tests | compat)" >&2; exit 1; \
+      echo "Unknown build target: {{target}} (expected '' | contract | test-node | midnight | tests | compat)" >&2; exit 1; \
     fi
 
-# Anvil-backed EVM tests: real EVM + real contract bytecode (needs anvil + eth-build output)
+# Anvil-backed EVM tests: real EVM + real contract bytecode (needs anvil)
 # Usage: just test-eth [filter]
-test-eth filter="": (build "eth")
+test-eth filter="":
     cargo test -p mpc-chain-ethereum --features integration --tests {{filter}}
 alias te := test-eth
 
 # Clippy for integration-gated EVM code (mirrors CI)
-lint-eth: (build "eth")
+lint-eth:
     cargo clippy -p mpc-chain-ethereum --tests --features integration -- -Dclippy::all
-
-# EVM contract unit tests (hardhat, no anvil needed)
-test-eth-unit:
-    cd chain-signatures/contract-eth && npx hardhat test
 
 # TRE-backed Tron gate: dockerized java-tron, token deployed via deploycontract
 # Usage: just test-tron-tre  (TRE_PORT overrides the host port, default 9090)
@@ -171,7 +165,7 @@ test-tron-tre:
 # Midnight real-stack tests (ignored by default; each starts a Midnight node/indexer/proof-server,
 # Anvil and an MPC cluster). Runs one named test from cases::midnight_stream, or all of them.
 # Usage: just test-midnight [test]
-test-midnight test="": (build "eth") (setup "")
+test-midnight test="": (setup "")
     cargo nextest run -p integration-tests --test lib --run-ignored only --no-capture -E '{{ if test == "" { "test(/^cases::midnight_stream::/)" } else { "test(=cases::midnight_stream::" + test + ")" } }}'
 
 # Canton tests (default: stream; e2e via `just test-canton cases::canton`)

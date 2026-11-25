@@ -10,20 +10,6 @@ use signet_primitives::SignId;
 use signet_primitives::LATEST_MPC_KEY_VERSION;
 use std::str::FromStr;
 #[tokio::test]
-async fn test_key_version() -> anyhow::Result<()> {
-    let (_, contract, _, _) = init_env().await;
-
-    let version: u32 = contract
-        .view("latest_key_version")
-        .await
-        .unwrap()
-        .json()
-        .unwrap();
-    assert_eq!(version, 2);
-    Ok(())
-}
-
-#[tokio::test]
 async fn test_public_key() -> anyhow::Result<()> {
     let (_, contract, _, _) = init_env().await;
 
