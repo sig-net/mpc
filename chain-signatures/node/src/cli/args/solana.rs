@@ -53,6 +53,7 @@ impl SolArgs {
 mod tests {
     use super::*;
     use clap::Parser as _;
+    use secrecy::ExposeSecret as _;
 
     /// The system program id: any valid address will do.
     const PROGRAM_ADDRESS: &str = "11111111111111111111111111111111";
@@ -67,6 +68,14 @@ mod tests {
             "--sol-program-address",
             program_address,
         ])
+    }
+
+    #[test]
+    fn the_cli_keeps_the_account_sk_secret() {
+        let account_sk = Keypair::new().to_base58_string();
+        let args = parse(&account_sk, PROGRAM_ADDRESS).unwrap();
+        let parsed = args.sol_account_sk.unwrap();
+        assert_eq!(parsed.expose_secret(), &account_sk);
     }
 
     #[test]
