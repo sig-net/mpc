@@ -49,10 +49,10 @@ impl CantonAuthProvider {
 
     pub async fn bearer_token(&self) -> anyhow::Result<String> {
         let mut cached_token = self.cached_token.lock().await;
-        if let Some(token) = cached_token.as_ref() {
-            if Instant::now() < token.refresh_after {
-                return Ok(token.access_token.clone());
-            }
+        if let Some(token) = cached_token.as_ref()
+            && Instant::now() < token.refresh_after
+        {
+            return Ok(token.access_token.clone());
         }
 
         let token = self.fetch_token().await?;

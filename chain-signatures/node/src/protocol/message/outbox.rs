@@ -4,8 +4,8 @@ use super::crypto::SignedMessage;
 use crate::metrics;
 use crate::metrics::messaging::set_channel_capacity_tx;
 use crate::node_client::NodeClient;
-use crate::protocol::contract::primitives::Participants;
 use crate::protocol::Config;
+use crate::protocol::contract::primitives::Participants;
 use crate::rpc::ContractStateWatcher;
 
 use crate::protocol::message::types::Message;

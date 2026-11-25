@@ -1,11 +1,11 @@
 use std::sync::LazyLock;
 use std::time::Duration;
 
-use prometheus::{exponential_buckets, CounterVec, HistogramVec, IntGauge};
+use prometheus::{CounterVec, HistogramVec, IntGauge, exponential_buckets};
 
 use crate::metrics::{
-    try_create_counter_vec_with_node_and_version, try_create_histogram_vec_with_node_and_version,
-    LatencyStart,
+    LatencyStart, try_create_counter_vec_with_node_and_version,
+    try_create_histogram_vec_with_node_and_version,
 };
 use crate::protocol::Chain;
 use mpc_primitives::RequestKind;

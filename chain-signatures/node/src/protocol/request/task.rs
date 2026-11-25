@@ -94,7 +94,7 @@ impl GeneratingPhase {
         )
         .await
         {
-            Ok(gen) => gen,
+            Ok(generator) => generator,
             Err(err) => {
                 return state.reorganize(&format!("failed to create generator: {err}"));
             }

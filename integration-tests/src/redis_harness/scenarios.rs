@@ -1,19 +1,19 @@
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::Context as _;
 use cait_sith::protocol::Participant;
-use mpc_node::backlog::{mock::mock_sign_request, BacklogEntry, Checkpoint};
+use mpc_node::backlog::{BacklogEntry, Checkpoint, mock::mock_sign_request};
 use mpc_node::storage::CheckpointStorage;
 use mpc_primitives::{Chain, SignId};
 
+use super::RedisHarness;
 use super::diagnostics::LatencySummary;
 use super::gate::StartingGate;
 use super::participant::{
-    next_id_block, ArtifactKind, ChurnState, MeasuredOp, SimulatedParticipant,
+    ArtifactKind, ChurnState, MeasuredOp, SimulatedParticipant, next_id_block,
 };
-use super::RedisHarness;
 
 fn summarize(name: &str, mut metric: MeasuredOp, wall: Duration) -> LatencySummary {
     LatencySummary::calculate_with_outcomes(
@@ -268,7 +268,10 @@ impl RedisHarness {
         }
         let wall = start.elapsed();
         let workload = workload?;
-        anyhow::ensure!(write_overlap && read_overlap, "checkpoint reads and writes did not both overlap the artifact workload; increase --items");
+        anyhow::ensure!(
+            write_overlap && read_overlap,
+            "checkpoint reads and writes did not both overlap the artifact workload; increase --items"
+        );
         let mut results = Vec::new();
         results.extend(baseline.into_iter().map(|mut result| {
             result.op_name.push_str("_no_checkpoint");
@@ -581,8 +584,14 @@ impl RedisHarness {
                 .iter()
                 .filter(|interval| overlaps(**interval, (workload_start, workload_end)))
                 .count();
-            anyhow::ensure!(overlapping > 0, "no DEBUG SLEEP spike overlapped the workload; increase the workload size or disable spikes with --spike-ms 0");
-            println!("   -> DEBUG SLEEP: {overlapping} spike(s) overlapped the workload ({} completed total)", intervals.len());
+            anyhow::ensure!(
+                overlapping > 0,
+                "no DEBUG SLEEP spike overlapped the workload; increase the workload size or disable spikes with --spike-ms 0"
+            );
+            println!(
+                "   -> DEBUG SLEEP: {overlapping} spike(s) overlapped the workload ({} completed total)",
+                intervals.len()
+            );
         }
         Ok(summaries)
     }
@@ -1374,11 +1383,13 @@ impl RedisHarness {
         let wall = overall_start.elapsed();
         println!(
             "   -> Churn outcome: {} committed, {} indeterminate commits, {total_aborts} dropped on timeout/reject",
-            metrics[1].latencies.len(), metrics[1].indeterminate,
+            metrics[1].latencies.len(),
+            metrics[1].indeterminate,
         );
         println!(
             "   -> Peak pending reservations: {}; simulated deliberations: {} (target {deliberation_delay_ms}ms)",
-            state.peak_pending.load(Ordering::Relaxed), total_deliberations,
+            state.peak_pending.load(Ordering::Relaxed),
+            total_deliberations,
         );
         let [peek, commit] = metrics;
         Ok(vec![

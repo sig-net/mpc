@@ -14,23 +14,23 @@ use std::time::Duration;
 
 use anyhow::Context as _;
 use async_trait::async_trait;
-use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode, BASE_URL};
+use midnight_base_crypto::data_provider::{BASE_URL, FetchMode, MidnightDataProvider, OutputMode};
 use midnight_base_crypto::hash::HashOutput;
 use midnight_base_crypto::time::Timestamp;
 use midnight_coin_structure::contract::ContractAddress;
-use midnight_ledger_v9::dust::{DustNullifier, DustResolver, DUST_EXPECTED_FILES};
+use midnight_ledger_v9::dust::{DUST_EXPECTED_FILES, DustNullifier, DustResolver};
 use midnight_ledger_v9::structure::LedgerParameters;
 use midnight_onchain_runtime::cost_model::INITIAL_COST_MODEL;
 use midnight_onchain_state::state::ContractState;
 use midnight_storage::DefaultDB;
-use minocrab_publisher::intent::{build_intent, preimage_tx, PreimageIntent};
+use minocrab_publisher::intent::{PreimageIntent, build_intent, preimage_tx};
 use minocrab_publisher::{Deployment, InProcessProver, ManagedDir, SignerResolver};
 use mpc_utils::task::AbortOnDrop;
 use rand::rngs::StdRng;
 use rand::{Rng as _, SeedableRng as _};
 use tokio::time::Instant;
 
-use crate::funding::{dust_deficit, FeePayer, SealedTx, UnprovenTx};
+use crate::funding::{FeePayer, SealedTx, UnprovenTx, dust_deficit};
 use crate::intent::{IntentRequest, RespondCircuit, Submitted};
 use crate::publisher::IntentClient;
 use crate::rpc::publisher::PinnedReads;
@@ -197,7 +197,7 @@ impl<W: FeePayer, C: SubmitChain + 'static> NativeIntentClient<W, C> {
 
         let mut rng = StdRng::from_entropy();
         let prototype = call
-            .prototype(&state.data, &parameters, rng.gen())
+            .prototype(&state.data, &parameters, rng.r#gen())
             .map_err(|error| SubmitError::Internal(error.to_string()))?;
         let intent = build_intent(
             &mut rng,
@@ -581,7 +581,7 @@ fn paid_transaction(
         .map_err(|error| SubmitError::Internal(format!("serializing the transaction: {error}")))?;
     Ok((
         bytes,
-        LedgerTxHash::from_bytes(transaction.transaction_hash().0 .0),
+        LedgerTxHash::from_bytes(transaction.transaction_hash().0.0),
     ))
 }
 
@@ -671,19 +671,19 @@ fn node(error: anyhow::Error) -> SubmitError {
 mod tests {
     use crate::MidnightAddress;
     use std::collections::VecDeque;
-    use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Mutex;
+    use std::sync::atomic::{AtomicU64, Ordering};
 
     use midnight_ledger_v9::structure::{
-        ContractAction, ContractCall, Intent, ProofPreimageMarker, Signature, INITIAL_PARAMETERS,
+        ContractAction, ContractCall, INITIAL_PARAMETERS, Intent, ProofPreimageMarker, Signature,
     };
     use midnight_transient_crypto::commitment::PedersenRandomness;
     use mpc_chain_integration_core::utils::retry::is_retryable;
 
     use super::*;
-    use crate::emissions::{emissions_of_call, Emission, EmissionKind, MISC_PAYLOAD_LEN};
+    use crate::emissions::{Emission, EmissionKind, MISC_PAYLOAD_LEN, emissions_of_call};
     use crate::funding::tests::{base, funded_key, replayed};
-    use crate::funding::{plan_fee, FeePlan};
+    use crate::funding::{FeePlan, plan_fee};
     use crate::test_utils::rejected_http;
     use minocrab_publisher::{Attestation, EcdsaSignature};
 
@@ -1061,7 +1061,7 @@ mod tests {
         let ContractAction::Call(call) = &actions[0] else {
             panic!("the single action must be a call");
         };
-        assert_eq!(hex::encode(call.address.0 .0), RESPONDER);
+        assert_eq!(hex::encode(call.address.0.0), RESPONDER);
         assert!(call.guaranteed_transcript.is_some());
         assert!(call.fallible_transcript.is_none());
         (**call).clone()
@@ -1936,9 +1936,9 @@ mod tests {
 
         let (bytes, tx_hash) = paid_transaction(&base, &fee, &INITIAL_PARAMETERS).unwrap();
         let posted: SealedTx = midnight_serialize::tagged_deserialize(&mut &bytes[..]).unwrap();
-        assert_eq!(posted.transaction_hash().0 .0, *tx_hash.as_bytes());
+        assert_eq!(posted.transaction_hash().0.0, *tx_hash.as_bytes());
         assert_eq!(
-            base.merge(&fee).unwrap().transaction_hash().0 .0,
+            base.merge(&fee).unwrap().transaction_hash().0.0,
             *tx_hash.as_bytes(),
             "the posted transaction is the respond and its fee"
         );
@@ -2170,7 +2170,7 @@ mod bench {
 
     use midnight_ledger_v9::structure::INITIAL_PARAMETERS;
 
-    use super::tests::{bidirectional_request, respond_request, RecordingWallet, ScriptedChain};
+    use super::tests::{RecordingWallet, ScriptedChain, bidirectional_request, respond_request};
     use super::*;
     use crate::funding::plan_fee;
     use crate::funding::tests::{funded_key, replayed};
@@ -2270,7 +2270,7 @@ mod live {
     use super::*;
     use crate::config::{MidnightConfig, PublisherConfig};
     use crate::dust_feed::IndexerDustEvents;
-    use crate::funding::{dust_secret_key, parse_seed, FundingWallet};
+    use crate::funding::{FundingWallet, dust_secret_key, parse_seed};
     use crate::rpc::publisher::MidnightPublisherRpc;
     use crate::types::MidnightAddress;
     use minocrab_publisher::{Attestation, EcdsaSignature};

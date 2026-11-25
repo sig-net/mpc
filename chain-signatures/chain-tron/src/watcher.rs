@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use alloy::primitives::B256;
 use anyhow::Context;
-use futures_util::stream::{iter, Stream, StreamExt};
+use futures_util::stream::{Stream, StreamExt, iter};
 use mpc_chain_integration_core::{
     ChainIndexer, ChainTelemetry, ExtractionFailure, StateManager, WatchedExecution,
 };
@@ -18,8 +18,8 @@ use tokio_util::sync::CancellationToken;
 use crate::client::TronHttp;
 use crate::config::TronConfig;
 use crate::expiry::{
-    closed_groups, expired_event, ExpiryVerdict, Group, SolidityCache, SolidityView,
-    MAX_CONCURRENT_PROVIDER_REQUESTS,
+    ExpiryVerdict, Group, MAX_CONCURRENT_PROVIDER_REQUESTS, SolidityCache, SolidityView,
+    closed_groups, expired_event,
 };
 use crate::types::{SolidifiedBlock, TronReceipt};
 
@@ -374,7 +374,7 @@ mod tests {
                 let event = run.events.recv().await.expect("watcher channel open");
                 match event {
                     ChainEvent::ExecutionConfirmed { tx_id, result, .. } if tx_id.0[0] == seed => {
-                        return (seen, result)
+                        return (seen, result);
                     }
                     other => seen.push(other),
                 }
@@ -485,7 +485,7 @@ mod tests {
         receipt_stub(&mut server, 1, unclassifiable_body(1)).create();
         let resultless = format!(
             r#"{{ "id": "{}", "blockNumber": 1 }}"#,
-            hex::encode(watcher_tx(2).0 .0)
+            hex::encode(watcher_tx(2).0.0)
         );
         receipt_stub(&mut server, 2, resultless).create();
 
@@ -627,7 +627,7 @@ mod tests {
         let malformed = format!(
             r#"{{ "id": "{}", "blockNumber": 1, "contractResult": ["zz"],
                  "receipt": {{ "result": "SUCCESS" }} }}"#,
-            hex::encode(watcher_tx(3).0 .0)
+            hex::encode(watcher_tx(3).0.0)
         );
         receipt_stub(&mut server, 3, malformed).create();
 
@@ -819,10 +819,9 @@ mod tests {
                     result,
                     ..
                 } = event
+                    && tx_id == *id
                 {
-                    if tx_id == *id {
-                        return (block_height, source_chain, result);
-                    }
+                    return (block_height, source_chain, result);
                 }
             }
         })
@@ -1012,16 +1011,15 @@ mod tests {
                     result,
                     ..
                 } = event
+                    && tx_id == id
                 {
-                    if tx_id == id {
-                        confirmed_state
-                            .remove_pending_execution(source_chain, sign_id)
-                            .await;
-                        if !seen.iter().any(|(sign, ..)| *sign == sign_id) {
-                            seen.push((sign_id, block_height, result));
-                            if seen.len() == 2 {
-                                return seen;
-                            }
+                    confirmed_state
+                        .remove_pending_execution(source_chain, sign_id)
+                        .await;
+                    if !seen.iter().any(|(sign, ..)| *sign == sign_id) {
+                        seen.push((sign_id, block_height, result));
+                        if seen.len() == 2 {
+                            return seen;
                         }
                     }
                 }

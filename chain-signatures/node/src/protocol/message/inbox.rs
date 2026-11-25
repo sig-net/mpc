@@ -1,6 +1,6 @@
 //! The receiving actor: decrypts, dedups, and routes incoming messages.
 
-use super::crypto::{cbor_name, SignedMessage};
+use super::crypto::{SignedMessage, cbor_name};
 use crate::metrics::messaging::{set_channel_capacity_tx, set_inbox_count};
 use crate::protocol::contract::primitives::ParticipantMap;
 use crate::protocol::message::sub::{
@@ -450,9 +450,9 @@ impl MessageInbox {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocol::ParticipantInfo;
     use crate::protocol::contract::primitives::Participants;
     use crate::protocol::message::{MessageChannel, SignedMessage};
-    use crate::protocol::ParticipantInfo;
     use crate::rpc::ContractStateWatcher;
     use crate::util::NearPublicKeyExt;
 
@@ -763,9 +763,11 @@ mod tests {
         let encrypted =
             SignedMessage::encrypt(&forged_envelope, peer, &my_sign_sk, &cipher_pk).unwrap();
         let cached = inbox.idempotent.len();
-        assert!(inbox
-            .decrypt(&encrypted, &cipher_sk, &participants)
-            .is_none());
+        assert!(
+            inbox
+                .decrypt(&encrypted, &cipher_sk, &participants)
+                .is_none()
+        );
         assert_eq!(
             inbox.idempotent.len(),
             cached,
@@ -782,9 +784,11 @@ mod tests {
         let unknown = triple_batch(4, peer);
         let encrypted = SignedMessage::encrypt(&unknown, peer, &peer_sign_sk, &cipher_pk).unwrap();
         let cached = inbox.idempotent.len();
-        assert!(inbox
-            .decrypt(&encrypted, &cipher_sk, &ParticipantMap::Zero)
-            .is_none());
+        assert!(
+            inbox
+                .decrypt(&encrypted, &cipher_sk, &ParticipantMap::Zero)
+                .is_none()
+        );
         assert_eq!(inbox.idempotent.len(), cached);
     }
 
@@ -840,7 +844,7 @@ mod tests {
     #[tokio::test]
     async fn test_signature_posit_backpressure_does_not_block_ready_messages() {
         use crate::protocol::message::{
-            sub, MessageInbox, PositMessage, PositProtocolId, ReadyMessage,
+            MessageInbox, PositMessage, PositProtocolId, ReadyMessage, sub,
         };
         use crate::protocol::posit::PositAction;
         use tokio::sync::mpsc;

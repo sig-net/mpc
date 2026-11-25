@@ -6,7 +6,7 @@ use std::str::FromStr;
 
 use crate::encoding::decode_bytes;
 use alloy::primitives::Address;
-use anyhow::{anyhow, Context};
+use anyhow::{Context, anyhow};
 use sha2::{Digest, Sha256};
 
 /// Byte prepended to the 20-byte EVM form on Tron mainnet.

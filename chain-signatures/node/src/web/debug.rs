@@ -3,13 +3,13 @@
 use crate::protocol::state::NodeStatus;
 use crate::web::AxumState;
 use alloy::primitives::map::HashMap;
-use axum::response::Html;
 use axum::Extension;
-use maud::{html, Markup, Render};
+use axum::response::Html;
+use maud::{Markup, Render, html};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::{sync::LazyLock, time::Instant};
-use tokio::sync::{watch, Mutex, RwLock};
+use tokio::sync::{Mutex, RwLock, watch};
 
 /// Global state used for easy access.
 ///

@@ -1,6 +1,6 @@
 use borsh::{BorshDeserialize, BorshSerialize};
 use k256::elliptic_curve::{
-    bigint::ArrayEncoding, sec1::ToEncodedPoint, CurveArithmetic, PrimeField,
+    CurveArithmetic, PrimeField, bigint::ArrayEncoding, sec1::ToEncodedPoint,
 };
 use k256::{AffinePoint, Scalar, Secp256k1, U256};
 use serde::{Deserialize, Serialize};
@@ -173,7 +173,7 @@ pub mod borsh_affine_point {
 mod tests {
     use super::*;
     use borsh::{BorshDeserialize, BorshSerialize};
-    use k256::{elliptic_curve::PrimeField, AffinePoint, Scalar};
+    use k256::{AffinePoint, Scalar, elliptic_curve::PrimeField};
     use serde::{Deserialize, Serialize};
 
     #[test]

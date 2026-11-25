@@ -4,8 +4,8 @@
 
 use anyhow::anyhow;
 use mpc_chain_integration_core::{
-    utils::retry::SharedBackoff, utils::stream::chain_event_channel, MockStateManager,
-    NoopChainTelemetry,
+    MockStateManager, NoopChainTelemetry, utils::retry::SharedBackoff,
+    utils::stream::chain_event_channel,
 };
 use mpc_chain_solana::{SolConfig, SolanaIndexer};
 

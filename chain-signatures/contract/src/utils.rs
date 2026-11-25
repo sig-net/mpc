@@ -9,11 +9,7 @@
 ///   an honest supermajority while scaling fault tolerance with the cohort size
 ///   (up to `n - threshold ≈ n / 3` participants may be offline).
 pub fn compute_threshold(n: usize) -> usize {
-    if n < 5 {
-        n / 2 + 1
-    } else {
-        2 * n / 3 + 1
-    }
+    if n < 5 { n / 2 + 1 } else { 2 * n / 3 + 1 }
 }
 
 #[cfg(test)]

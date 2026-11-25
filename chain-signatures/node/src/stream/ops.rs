@@ -6,7 +6,7 @@ use crate::backlog::{
     AnyProgress, Backlog, BacklogError, Bidirectional, Executing, Final, Initial, Sign, SignEntry,
 };
 use crate::metrics::requests::{
-    record_request_latency, SignRequestStep, EXECUTION_WAIT_UNMEASURED,
+    EXECUTION_WAIT_UNMEASURED, SignRequestStep, record_request_latency,
 };
 use crate::protocol::publish_failover::{observe_lag, publish_deadline};
 use crate::respond_bidirectional::{
@@ -14,8 +14,8 @@ use crate::respond_bidirectional::{
     published_output_payload, published_output_signing_args,
 };
 use crate::sign_bidirectional::{
-    destination_expiry, owned_by_requester, transaction_chain_id, BidirectionalProgress,
-    BidirectionalTxId, ExpiryWindow, SignBidirectionalEventExt, SignStatus,
+    BidirectionalProgress, BidirectionalTxId, ExpiryWindow, SignBidirectionalEventExt, SignStatus,
+    destination_expiry, owned_by_requester, transaction_chain_id,
 };
 use crate::stream::StreamContext;
 use crate::types::SignCommand;
@@ -436,22 +436,22 @@ pub(crate) async fn process_respond_bidirectional_event(
     // recovery does not change whether this observation is emitted -- but it
     // may therefore carry a peer's clock, so a future origin is skipped rather
     // than saturated to a zero-length round trip.
-    if let SignKind::RespondBidirectional(response) = &entry.request.kind {
-        if let Some(origin_indexed_at) = response.origin_indexed_at {
-            match unix_elapsed_checked(origin_indexed_at) {
-                Some(elapsed) => record_request_latency(
-                    source_chain,
-                    SignRequestStep::BidirectionalTotal,
-                    execution_status(published_failure(&event, response)),
-                    RequestKind::RespondBidirectional,
-                    elapsed,
-                ),
-                None => tracing::warn!(
-                    ?sign_id,
-                    origin_indexed_at,
-                    "skipping end-to-end latency: origin timestamp is ahead of local clock"
-                ),
-            }
+    if let SignKind::RespondBidirectional(response) = &entry.request.kind
+        && let Some(origin_indexed_at) = response.origin_indexed_at
+    {
+        match unix_elapsed_checked(origin_indexed_at) {
+            Some(elapsed) => record_request_latency(
+                source_chain,
+                SignRequestStep::BidirectionalTotal,
+                execution_status(published_failure(&event, response)),
+                RequestKind::RespondBidirectional,
+                elapsed,
+            ),
+            None => tracing::warn!(
+                ?sign_id,
+                origin_indexed_at,
+                "skipping end-to-end latency: origin timestamp is ahead of local clock"
+            ),
         }
     }
 
@@ -569,11 +569,7 @@ async fn settle_unobserved(
 }
 
 fn execution_status(failed: bool) -> &'static str {
-    if failed {
-        "execution_failed"
-    } else {
-        "ok"
-    }
+    if failed { "execution_failed" } else { "ok" }
 }
 
 /// Process an execution confirmation emitted by a chain client.

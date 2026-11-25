@@ -12,7 +12,7 @@ use mpc_primitives::{
     BidirectionalTx, BidirectionalTxId, Calldata, Chain, CompactMaybe, SignId, TronTxParams,
 };
 use mpc_tron_wire::pb::RawTransaction;
-use mpc_tron_wire::{to_unsigned_tron_tx, TronAddress};
+use mpc_tron_wire::{TronAddress, to_unsigned_tron_tx};
 use url::Url;
 
 use crate::config::TronConfig;

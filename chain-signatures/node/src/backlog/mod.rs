@@ -11,8 +11,8 @@ pub use request::{
 };
 
 use crate::sign_bidirectional::{
-    transaction_nonce, BidirectionalProgress, SignBidirectionalEventExt as _, SignProgress,
-    SignStatus,
+    BidirectionalProgress, SignBidirectionalEventExt as _, SignProgress, SignStatus,
+    transaction_nonce,
 };
 use crate::storage::checkpoint_storage::CheckpointStorage;
 pub use checkpoints::{Checkpoint, CheckpointError, CheckpointFacts, Checkpoints, EntryFacts};
@@ -23,8 +23,8 @@ use mpc_primitives::{
     BidirectionalTx, BidirectionalTxId, Chain, IndexedSignRequest, PublicKey, SignId, SignKind,
 };
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 

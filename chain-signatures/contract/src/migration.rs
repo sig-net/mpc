@@ -16,6 +16,7 @@
 //! This module allows us to keep track of rolling updates to the underlying contract
 //! state as deployments progress.
 
+use crate::MpcContract;
 use crate::config::ProtocolConfig;
 use crate::errors::{Error, InvalidState};
 use crate::primitives::{
@@ -25,12 +26,11 @@ use crate::state::{
     InitializingContractState, ProtocolContractState, ResharingContractState, RunningContractState,
 };
 use crate::update::ProposedUpdates;
-use crate::MpcContract;
 
 use borsh::{BorshDeserialize, BorshSerialize};
 use mpc_primitives::{Chain, CheckpointDigest, SignId};
-use near_sdk::store::IterableMap;
 use near_sdk::PublicKey;
+use near_sdk::store::IterableMap;
 use std::collections::HashMap;
 
 /// Config as currently deployed on every network: carries the removed timeouts,
@@ -265,9 +265,9 @@ pub(crate) fn migrate(state_bytes: &[u8]) -> Result<MpcContract, Error> {
 mod tests {
     use super::*;
     use crate::primitives::{CandidateInfo, StorageKey};
+    use near_sdk::AccountId;
     use near_sdk::test_utils::VMContextBuilder;
     use near_sdk::testing_env;
-    use near_sdk::AccountId;
     use std::str::FromStr;
 
     #[test]

@@ -1,9 +1,9 @@
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::Context as _;
-use deadpool_redis::redis::{cmd, Value};
+use deadpool_redis::redis::{Value, cmd};
 use deadpool_redis::{Config as RedisPoolConfig, Hook, Pool, Runtime as RedisRuntime, Status};
 use tokio::sync::Barrier;
 use tokio_util::task::AbortOnDropHandle;
@@ -579,7 +579,9 @@ impl LatencySummary {
 }
 
 pub fn print_summary_header() {
-    println!("Unknown: storage returned no value (unavailable or error); latency samples include successes only.");
+    println!(
+        "Unknown: storage returned no value (unavailable or error); latency samples include successes only."
+    );
     println!("{:-<133}", "");
     println!(
         "{:<26} | {:>7} | {:>8} | {:>8} | {:>9} | {:>9} | {:>9} | {:>9} | {:>9} | {:>10} | {:>9}",

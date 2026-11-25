@@ -6,7 +6,7 @@ use mpc_node::rpc::RpcAction;
 use mpc_primitives::{Chain, ChainEvent, SignKind};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{Mutex, mpsc};
 use tokio_util::sync::CancellationToken;
 
 #[derive(Default, Clone)]

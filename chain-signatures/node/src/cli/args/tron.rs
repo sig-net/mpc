@@ -51,10 +51,12 @@ mod tests {
 
     #[test]
     fn unconfigured_yields_no_config() {
-        assert!(TronArgs::parse_from(["test"])
-            .into_config()
-            .unwrap()
-            .is_none());
+        assert!(
+            TronArgs::parse_from(["test"])
+                .into_config()
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]

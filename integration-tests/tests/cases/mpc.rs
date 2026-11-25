@@ -5,9 +5,9 @@ use integration_tests::mpc_fixture::fixture_tasks::MessageFilter;
 use integration_tests::mpc_fixture::message_collector::MessageCounter;
 use integration_tests::mpc_fixture::{MpcFixture, MpcFixtureBuilder};
 use mpc_node::backlog::{Backlog, SignEntry};
+use mpc_node::protocol::ProtocolState;
 use mpc_node::protocol::message::SendMessage;
 use mpc_node::protocol::presignature::Presignature;
-use mpc_node::protocol::ProtocolState;
 use mpc_node::storage::protocol_storage::{ProtocolArtifact, ProtocolStorage};
 use mpc_node::storage::triple_storage::TriplePair;
 use mpc_node::types::SignCommand;
@@ -17,8 +17,8 @@ use std::fs;
 use std::sync::Arc;
 use std::time::Duration;
 use test_log::test;
-use tokio::sync::oneshot;
 use tokio::sync::Mutex;
+use tokio::sync::oneshot;
 
 /// Use this toggle locally to regenerate hard-coded inputs such as key shares,
 /// triples, and presignatures.

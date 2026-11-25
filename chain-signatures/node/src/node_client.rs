@@ -1,16 +1,16 @@
 use crate::backlog::Checkpoint;
-use crate::protocol::message::cbor_to_bytes;
 use crate::protocol::Chain;
+use crate::protocol::message::cbor_to_bytes;
 use crate::web::{
-    CheckpointResponse, StatusResponse, CHECKPOINT_TIMEOUT, MSG_TIMEOUT, STATUS_TIMEOUT,
-    SYNC_TIMEOUT,
+    CHECKPOINT_TIMEOUT, CheckpointResponse, MSG_TIMEOUT, STATUS_TIMEOUT, SYNC_TIMEOUT,
+    StatusResponse,
 };
 
 use mpc_keys::hpke::Ciphered;
 use reqwest::IntoUrl;
 use reqwest::StatusCode;
-use serde::de::DeserializeOwned;
 use serde::Serialize;
+use serde::de::DeserializeOwned;
 use url::Url;
 
 use std::collections::HashMap;

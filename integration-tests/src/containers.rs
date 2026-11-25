@@ -4,29 +4,29 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use url::Url;
 
+use crate::NodeConfig;
 use crate::cluster::spawner::ClusterSpawner;
 use crate::utils::{pick_preferred_or_unused_port, pick_preferred_or_unused_port_block};
-use crate::NodeConfig;
 
-use anchor_client::anchor_lang::{solana_program::system_program, InstructionData, ToAccountMetas};
-use anyhow::{anyhow, Context};
+use anchor_client::anchor_lang::{InstructionData, ToAccountMetas, solana_program::system_program};
+use anyhow::{Context, anyhow};
 use async_process::{Child, Command};
 use backon::{ExponentialBuilder, Retryable};
+use bollard::Docker;
 use bollard::errors::Error as DockerError;
 use bollard::models::{Ipam, Network, NetworkCreateRequest, PortBinding};
 use bollard::query_parameters::{
     ListContainersOptions, ListNetworksOptionsBuilder, RemoveContainerOptions,
 };
-use bollard::Docker;
 use borsh::{BorshDeserialize, BorshSerialize};
+use cait_sith::FullSignature;
 use cait_sith::protocol::Participant;
 use cait_sith::triples::{TriplePub, TripleShare};
-use cait_sith::FullSignature;
 use deadpool_redis::redis;
 use deadpool_redis::{Config as RedisPoolConfig, Pool as RedisPool, Runtime as RedisRuntime};
 use elliptic_curve::rand_core::OsRng;
-use k256::elliptic_curve::sec1::ToEncodedPoint as _;
 use k256::Secp256k1;
+use k256::elliptic_curve::sec1::ToEncodedPoint as _;
 use mpc_chain_solana::SolConfig;
 use mpc_contract::primitives::Participants;
 use mpc_node::protocol::presignature::Presignature;
@@ -45,12 +45,12 @@ use solana_sdk::pubkey::Pubkey as SolanaPubkey;
 use solana_sdk::signature::Keypair as SolanaKeypair;
 use solana_sdk::signature::{EncodableKey as _, Signature as SolanaSignature};
 use solana_sdk::signer::{SeedDerivable as _, Signer as _};
-use testcontainers::core::error::{ClientError, TestcontainersError};
 use testcontainers::ContainerAsync;
+use testcontainers::core::error::{ClientError, TestcontainersError};
 use testcontainers::{
+    GenericImage, ImageExt,
     core::{IntoContainerPort, WaitFor},
     runners::AsyncRunner,
-    GenericImage, ImageExt,
 };
 use tokio::runtime::Builder;
 use tokio::time::sleep;
@@ -1379,7 +1379,7 @@ impl Solana {
                             Ok(status.slot)
                         }
                         None => anyhow::bail!("duplicate initialize unexpectedly succeeded"),
-                    }
+                    };
                 }
                 None => tokio::time::sleep(Duration::from_millis(500)).await,
             }

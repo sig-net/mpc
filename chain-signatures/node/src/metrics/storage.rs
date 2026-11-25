@@ -1,6 +1,6 @@
 use std::sync::LazyLock;
 
-use prometheus::{exponential_buckets, HistogramVec, IntGauge};
+use prometheus::{HistogramVec, IntGauge, exponential_buckets};
 
 use super::{
     try_create_histogram_vec_with_node_account_id, try_create_int_gauge_vec_with_node_account_id,

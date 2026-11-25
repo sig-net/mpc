@@ -15,8 +15,8 @@ pub use crate::protocol::message::types::{
     GeneratingMessage, Message, MessageError, PositMessage, PositProtocolId, PresignatureMessage,
     ReadyMessage, ResharingMessage, SignatureMessage, TripleMessage,
 };
-pub(crate) use crypto::cbor_to_bytes;
 pub use crypto::SignedMessage;
+pub(crate) use crypto::cbor_to_bytes;
 pub use inbox::MessageInbox;
 pub use outbox::{MessageOutbox, SendMessage};
 pub use sub::{PresignaturePosit, SignaturePosit, Subscriber, TriplePosit};
@@ -36,13 +36,13 @@ pub const MAX_SUBSCRIBE_REQUESTS: usize = 16 * 1024;
 use crate::config::NetworkConfig;
 use crate::metrics::messaging::set_channel_capacity_tx;
 use crate::node_client::NodeClient;
+use crate::protocol::Config;
 use crate::protocol::message::sub::{
     SubscribeId, SubscribeRequest, SubscribeResponse, SubscriptionMessage,
 };
 use crate::protocol::posit::PositAction;
 use crate::protocol::presignature::PresignatureId;
 use crate::protocol::triple::TripleId;
-use crate::protocol::Config;
 use crate::rpc::ContractStateWatcher;
 use cait_sith::protocol::Participant;
 use mpc_keys::hpke::Ciphered;

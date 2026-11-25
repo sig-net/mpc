@@ -11,7 +11,7 @@ mod requests;
 
 pub use bidirectional::{BidirectionalTxId, RespondBidirectionalSerializedOutput};
 pub use chain::{Chain, ChainFromError};
-pub use crypto::{borsh_scalar, PublicKey, ScalarExt, SignId, Signature, MAX_SECP256K1_SCALAR};
+pub use crypto::{MAX_SECP256K1_SCALAR, PublicKey, ScalarExt, SignId, Signature, borsh_scalar};
 pub use requests::SignRequest;
 
 /// The highest key version the network signs; it refuses requests above it.

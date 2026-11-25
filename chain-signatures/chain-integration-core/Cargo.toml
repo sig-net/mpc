@@ -1,6 +1,6 @@
 [package]
 name = "mpc-chain-integration-core"
-edition = "2021"
+edition.workspace = true
 version.workspace = true
 publish.workspace = true
 description = "Core traits and types for the MPC chain integration including signature publishing and indexing."

@@ -3,24 +3,24 @@ use cait_sith::protocol::Participant;
 use integration_tests::containers::Solana;
 use k256::{AffinePoint, Scalar};
 use mpc_chain_integration_core::{
-    utils::{retry::SharedBackoff, test::ChainIndexerStream},
     ChainPublisher, NoopChainTelemetry, NoopPublisherTelemetry, PublishAction, StateManager,
+    utils::{retry::SharedBackoff, test::ChainIndexerStream},
 };
 use mpc_chain_solana::{SolConfig, SolanaClient, SolanaIndexer};
-use mpc_node::backlog::mock::{mock_bidi_response_request, mock_signature_output, BacklogTestExt};
 use mpc_node::backlog::Backlog;
-use mpc_node::mesh::connection::NodeStatus;
+use mpc_node::backlog::mock::{BacklogTestExt, mock_bidi_response_request, mock_signature_output};
 use mpc_node::mesh::MeshState;
+use mpc_node::mesh::connection::NodeStatus;
 use mpc_node::node_client::NodeClient;
 use mpc_node::protocol::contract::primitives::{ParticipantInfo, Participants};
 use mpc_node::rpc::{ContractStateWatcher, RpcAction, RpcChannel};
 
 use mpc_node::storage::checkpoint_storage::CheckpointStorage;
-use mpc_node::stream::{supervisor::run_supervised, StreamContext};
+use mpc_node::stream::{StreamContext, supervisor::run_supervised};
 use mpc_node::types::SignCommand;
 use mpc_primitives::{
-    BidirectionalTxId, Chain, ChainEvent, IndexedSignRequest, ScalarExt, SignId, Signature,
-    LATEST_MPC_KEY_VERSION,
+    BidirectionalTxId, Chain, ChainEvent, IndexedSignRequest, LATEST_MPC_KEY_VERSION, ScalarExt,
+    SignId, Signature,
 };
 use near_primitives::types::AccountId;
 use solana_sdk::signer::Signer;
@@ -28,8 +28,8 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::sync::watch;
-use tokio::time::timeout;
 use tokio::time::Instant;
+use tokio::time::timeout;
 
 use std::time::Duration;
 
@@ -222,11 +222,11 @@ async fn test_solana_stream_emits_blocks() -> Result<()> {
     let mut found_block = false;
     let deadline = Instant::now() + FINALIZED_EVENT_TIMEOUT;
     while Instant::now() < deadline {
-        if let Ok(Some(event)) = timeout(Duration::from_secs(1), indexer.next_event()).await {
-            if matches!(event, ChainEvent::Block(_)) {
-                found_block = true;
-                break;
-            }
+        if let Ok(Some(event)) = timeout(Duration::from_secs(1), indexer.next_event()).await
+            && matches!(event, ChainEvent::Block(_))
+        {
+            found_block = true;
+            break;
         }
     }
 
@@ -613,10 +613,10 @@ async fn test_solana_stream_republishes_pending_publish_after_checkpoint_recover
         .context("rpc channel closed before publish action")?;
 
     while let Ok(Some(message)) = timeout(Duration::from_millis(50), sign_rx.recv()).await {
-        if let SignCommand::Request(req) = &message {
-            if req.sign_id() == sign_id {
-                anyhow::bail!("recovered publish request was incorrectly requeued for signing");
-            }
+        if let SignCommand::Request(req) = &message
+            && req.sign_id() == sign_id
+        {
+            anyhow::bail!("recovered publish request was incorrectly requeued for signing");
         }
     }
 

@@ -14,11 +14,11 @@ use alloy::eips::BlockNumberOrTag;
 use alloy::network::TransactionResponse;
 use alloy::primitives::{Address, B256};
 use alloy::rpc::types::{Block, BlockId, BlockTransactions, TransactionReceipt};
-use futures_util::{stream, StreamExt};
+use futures_util::{StreamExt, stream};
 use mpc_chain_integration_core::{
     ChainTelemetry, ExtractionFailure, StateManager, WatchedExecution,
 };
-use mpc_evm_common::{build_serialized_output, is_contract_call, TraceOutput};
+use mpc_evm_common::{TraceOutput, build_serialized_output, is_contract_call};
 use mpc_primitives::{
     BidirectionalTx, BidirectionalTxId, Chain, ChainConfig as _, ChainEvent, ExecutionOutcome,
     SignId,
@@ -210,12 +210,12 @@ impl<'a, S: StateManager, T: ChainTelemetry> ExecutionWatcher<'a, S, T> {
             Ok(None) => {
                 return Err(ExtractionFailure::Retryable(anyhow::anyhow!(
                     "transaction {tx_id:?} not found by the rpc endpoint"
-                )))
+                )));
             }
             Err(err) => {
                 return Err(ExtractionFailure::Retryable(
                     err.context(format!("failed to fetch transaction {tx_id:?}")),
-                ))
+                ));
             }
         };
 
@@ -249,7 +249,7 @@ impl<'a, S: StateManager, T: ChainTelemetry> ExecutionWatcher<'a, S, T> {
                 Err(err) => {
                     return Err(ExtractionFailure::Retryable(
                         err.context(format!("debug_traceTransaction failed for {tx_id:?}")),
-                    ))
+                    ));
                 }
             }
         } else {
@@ -611,8 +611,8 @@ mod tests {
     use mockito::{Matcher, Server};
     use mpc_chain_integration_core::StateManager;
     use mpc_primitives::{
-        BidirectionalTx, BidirectionalTxId, Chain, ChainEvent, ExecutionOutcome, SignId,
-        LATEST_MPC_KEY_VERSION,
+        BidirectionalTx, BidirectionalTxId, Chain, ChainEvent, ExecutionOutcome,
+        LATEST_MPC_KEY_VERSION, SignId,
     };
     use serde_json::json;
     use std::collections::HashMap;
@@ -1676,9 +1676,17 @@ mod tests {
                         block.header.number = 6;
                     }
                     let recovered = harness.watcher().collect(&block).await.unwrap();
-                    assert!(matches!(recovered.as_slice(), [ChainEvent::ExecutionConfirmed {
-                    block_height: 3, result: ExecutionOutcome::Success { .. }, ..
-                }]), "{name}: later receipt/trace must recover at the inclusion height: {recovered:?}");
+                    assert!(
+                        matches!(
+                            recovered.as_slice(),
+                            [ChainEvent::ExecutionConfirmed {
+                                block_height: 3,
+                                result: ExecutionOutcome::Success { .. },
+                                ..
+                            }]
+                        ),
+                        "{name}: later receipt/trace must recover at the inclusion height: {recovered:?}"
+                    );
                 }
             }
         }

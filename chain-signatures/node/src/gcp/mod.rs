@@ -1,5 +1,5 @@
-use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD as BASE64;
 use google_cloud_auth::credentials::AccessTokenCredentials;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;

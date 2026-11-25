@@ -2,7 +2,7 @@
 name = "signet-primitives"
 version.workspace = true
 publish.workspace = true
-edition = "2021"
+edition.workspace = true
 description = "Interface types for the SigNet network"
 readme = "README.md"
 license = "MIT OR Apache-2.0"

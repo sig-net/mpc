@@ -4,8 +4,8 @@ use crate::sign_bidirectional::{
     BidirectionalProgress, SignBidirectionalEventExt as _, SignProgress, SignStatus,
 };
 use anyhow::Context as _;
-use cait_sith::protocol::Participant;
 use cait_sith::FullSignature;
+use cait_sith::protocol::Participant;
 use k256::Secp256k1;
 use mpc_crypto::{derive_key, reconstruct_signature};
 use mpc_primitives::{
@@ -13,8 +13,8 @@ use mpc_primitives::{
     SignBidirectionalEvent, SignId, SignKind, Signature,
 };
 use serde::{Deserialize, Serialize};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 /// Type alias for [`SignProgress`], indicating any progress state (generating or publishing).
@@ -323,10 +323,10 @@ impl SignEntry<Generating> {
         }
         if let Err(err) = self.record_publishing(&publish).await {
             // The request left while signing and its records were deleted before this one.
-            if matches!(err, BacklogError::NotFound { .. }) {
-                if let Err(err) = store.remove_local(self.chain, &[self.request.id]).await {
-                    tracing::warn!(sign_id = ?self.request.id, ?err, "failed to remove a local record");
-                }
+            if matches!(err, BacklogError::NotFound { .. })
+                && let Err(err) = store.remove_local(self.chain, &[self.request.id]).await
+            {
+                tracing::warn!(sign_id = ?self.request.id, ?err, "failed to remove a local record");
             }
             return Err(err);
         }
@@ -514,23 +514,23 @@ impl SignEntry<Bidirectional<Initial<Generating>>> {
 
 impl SignEntry<Bidirectional<Initial<Publishing>>> {
     pub fn publishing(&self) -> &Publishing {
-        &self.state.0 .0
+        &self.state.0.0
     }
 
     pub fn signature(&self) -> &Signature {
-        self.state.0 .0.signature()
+        self.state.0.0.signature()
     }
 
     pub fn participants(&self) -> &[Participant] {
-        self.state.0 .0.participants()
+        self.state.0.0.participants()
     }
 
     pub fn is_proposer(&self) -> bool {
-        self.state.0 .0.is_proposer()
+        self.state.0.0.is_proposer()
     }
 
     pub fn publishing_since(&self) -> Option<u64> {
-        self.state.0 .0.publishing_since()
+        self.state.0.0.publishing_since()
     }
 
     /// Advance Phase 1 into destination-chain `Executing`.
@@ -580,7 +580,7 @@ impl<P> SignEntry<Bidirectional<Initial<P>>> {
 
 impl SignEntry<Bidirectional<Executing>> {
     pub fn execution_tx(&self) -> &Arc<BidirectionalTx> {
-        &self.state.0 .0.tx
+        &self.state.0.0.tx
     }
 
     /// How long this entry has been waiting on the target chain.
@@ -590,19 +590,19 @@ impl SignEntry<Bidirectional<Executing>> {
 
     /// When this node observed the initial response.
     pub(crate) fn respond_observed_at(&self) -> Option<Instant> {
-        self.state.0 .0.respond_observed_at
+        self.state.0.0.respond_observed_at
     }
 
     /// This entry as the watch that found its execution, which may be of a later signature than
     /// the one its status names.
     pub(crate) fn with_execution_watch(mut self, watch: ExecutionWatch) -> Self {
-        self.state.0 .0 = watch;
+        self.state.0.0 = watch;
         self
     }
 
     /// This execution as a watch record.
     pub(crate) fn execution_watch(&self) -> ExecutionWatch {
-        self.state.0 .0.clone()
+        self.state.0.0.clone()
     }
 
     /// Watch execution of this bidirectional transaction on its target chain.
@@ -696,17 +696,17 @@ impl SignEntry<Bidirectional<BidirectionalProgress>> {
         )?;
         // A first signature, on an entry answered as a sibling: a node that has not answered it
         // quarantines it (see `advance_bidirectional_to_execution`), so this one must too.
-        if stored.tx_ids.is_empty() {
-            if let Err(err) = event.validate() {
-                tracing::error!(
-                    ?sign_id,
-                    ?source_chain,
-                    ?err,
-                    "quarantining bidirectional request that can never advance"
-                );
-                self.backlog.remove(source_chain, &sign_id).await;
-                return Ok(false);
-            }
+        if stored.tx_ids.is_empty()
+            && let Err(err) = event.validate()
+        {
+            tracing::error!(
+                ?sign_id,
+                ?source_chain,
+                ?err,
+                "quarantining bidirectional request that can never advance"
+            );
+            self.backlog.remove(source_chain, &sign_id).await;
+            return Ok(false);
         }
         let tx = event.to_bidirectional_tx(sign_id.request_id, signature, root_pk)?;
         self.backlog.add_published_tx(Arc::new(tx)).await;
@@ -751,23 +751,23 @@ impl<P> SignEntry<Bidirectional<Final<P>>> {
 
 impl SignEntry<Bidirectional<Final<Publishing>>> {
     pub fn publishing(&self) -> &Publishing {
-        &self.state.0 .0
+        &self.state.0.0
     }
 
     pub fn signature(&self) -> &Signature {
-        self.state.0 .0.signature()
+        self.state.0.0.signature()
     }
 
     pub fn participants(&self) -> &[Participant] {
-        self.state.0 .0.participants()
+        self.state.0.0.participants()
     }
 
     pub fn is_proposer(&self) -> bool {
-        self.state.0 .0.is_proposer()
+        self.state.0.0.is_proposer()
     }
 
     pub fn publishing_since(&self) -> Option<u64> {
-        self.state.0 .0.publishing_since()
+        self.state.0.0.publishing_since()
     }
 }
 

@@ -1,14 +1,14 @@
+use crate::EthConfig;
 use crate::abi::ChainSignatures;
 use crate::config::{GasConfig, PublisherConfig};
-use crate::EthConfig;
 use alloy::contract::Error as ContractError;
 use alloy::network::EthereumWallet;
 use alloy::primitives::{B256, U256};
 use alloy::providers::{
+    Provider, ProviderBuilder, RootProvider, WalletProvider,
     fillers::{
         BlobGasFiller, ChainIdFiller, FillProvider, GasFiller, JoinFill, NonceFiller, WalletFiller,
     },
-    Provider, ProviderBuilder, RootProvider, WalletProvider,
 };
 use alloy::rpc::types::TransactionReceipt;
 use alloy::transports::{
@@ -17,8 +17,8 @@ use alloy::transports::{
 use http::StatusCode;
 use k256::elliptic_curve::{point::AffineCoordinates, sec1::ToEncodedPoint};
 use mpc_chain_integration_core::{
-    utils::retry::{retry_rpc, RpcFailure, SharedBackoff},
     ChainPublisher, PublishAction, PublisherTelemetry,
+    utils::retry::{RpcFailure, SharedBackoff, retry_rpc},
 };
 use mpc_primitives::{SignId, Signature};
 use std::sync::Arc;
@@ -493,9 +493,9 @@ mod tests {
     use alloy::primitives::{Address, B256, U256};
     use k256::{AffinePoint, Scalar};
     use mockito::{Matcher, Mock, Server};
-    use mpc_chain_integration_core::utils::retry::{is_retryable, RetryConfig};
-    use mpc_chain_integration_core::utils::test::make_publish_action;
     use mpc_chain_integration_core::NoopPublisherTelemetry;
+    use mpc_chain_integration_core::utils::retry::{RetryConfig, is_retryable};
+    use mpc_chain_integration_core::utils::test::make_publish_action;
     use mpc_primitives::{Chain, SignKind};
     use serde_json::json;
     use std::sync::atomic::{AtomicUsize, Ordering};

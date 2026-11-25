@@ -5,8 +5,8 @@
 //! timing, emitting a `Catchup Benchmark Report` via [`report_metrics`].
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 /// Target for tracing logs emitted by the benchmarking helpers.

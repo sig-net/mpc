@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::Duration;
 
-use alloy::primitives::{keccak256, Address, Bytes, U256};
+use alloy::primitives::{Address, Bytes, U256, keccak256};
 use alloy::providers::ext::AnvilApi as _;
 use alloy::providers::{Provider, ProviderBuilder};
 use alloy::rpc::types::{TransactionInput, TransactionReceipt, TransactionRequest};
@@ -15,7 +15,7 @@ use k256::elliptic_curve::sec1::ToEncodedPoint as _;
 use mpc_chain_integration_core::utils::test::ChainIndexerStream;
 use mpc_chain_integration_core::{MockStateManager, NoopChainTelemetry};
 use mpc_chain_midnight::MidnightIndexer;
-use mpc_node::sign_bidirectional::{derive_user_address, SignBidirectionalEventExt as _};
+use mpc_node::sign_bidirectional::{SignBidirectionalEventExt as _, derive_user_address};
 use mpc_primitives::{
     AttestationMetadata, AttestationOutcomeKind, Chain, ChainEvent, IndexedSignRequest,
     PublishedAttestation, SignKind,

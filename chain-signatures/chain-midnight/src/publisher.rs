@@ -19,12 +19,12 @@ use secrecy::ExposeSecret as _;
 use crate::attestation::validate_attestation_response;
 use crate::config::{MidnightConfig, PublisherConfig};
 use crate::dust_feed::IndexerDustEvents;
-use crate::funding::{dust_secret_key, parse_seed, DustCheckpointStore, FundingWallet};
+use crate::funding::{DustCheckpointStore, FundingWallet, dust_secret_key, parse_seed};
 use crate::intent::{IntentRequest, RespondCircuit, Submitted};
 use crate::native::{NativeIntentClient, Provers};
 use crate::output_storage::{OutputStore, RecoveringOutputStore};
 use crate::rpc::publisher::{MidnightPublisherRpc, PinnedReads};
-use crate::submit_error::{refusal_code, SubmitError};
+use crate::submit_error::{SubmitError, refusal_code};
 use crate::types::{BlockHash, MidnightAddress};
 
 const SPECK_PER_DUST: f64 = 1e15;
@@ -463,17 +463,17 @@ mod tests {
     use super::*;
 
     use crate::submit_error::SubmitError;
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
     use crate::output_storage::GcsOutputStore;
     use crate::types::NetworkId;
+    use mpc_chain_integration_core::NoopPublisherTelemetry;
     use mpc_chain_integration_core::utils::{
         retry::{is_provider_throttled, is_retryable},
         test::make_publish_action,
     };
-    use mpc_chain_integration_core::NoopPublisherTelemetry;
     use mpc_primitives::{
         AttestationMetadata, BidirectionalTxId, Chain, RespondBidirectionalTx,
         SignBidirectionalEvent, SignId, SignKind,

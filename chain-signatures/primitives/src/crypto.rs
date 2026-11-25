@@ -30,10 +30,10 @@ impl std::fmt::Debug for SignArgs {
 /// forward and backward compatibility, so we need to implement our own
 /// custom serialization here.
 pub mod cbor_scalar {
+    use k256::Scalar;
     use k256::elliptic_curve::bigint::Encoding as _;
     use k256::elliptic_curve::scalar::FromUintUnchecked as _;
-    use k256::Scalar;
-    use serde::{de, Deserialize as _, Deserializer, Serialize, Serializer};
+    use serde::{Deserialize as _, Deserializer, Serialize, Serializer, de};
 
     pub fn serialize<S: Serializer>(scalar: &Scalar, ser: S) -> Result<S::Ok, S::Error> {
         let num = k256::U256::from(scalar);

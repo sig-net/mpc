@@ -292,7 +292,9 @@ async fn main() -> anyhow::Result<()> {
             let tasks_per_p = 5;
             let items_per_task = (args.items / tasks_per_p).max(10);
             let spike_ms = args.spike_ms;
-            println!("\n>>> Running Scenario 5: Cascading Saturation & Head-of-Line Blocking (50ms - 6s Grafana conditions)");
+            println!(
+                "\n>>> Running Scenario 5: Cascading Saturation & Head-of-Line Blocking (50ms - 6s Grafana conditions)"
+            );
             println!(
                 "    Simulating {} concurrent tasks across {} participants, one-second stock-count polling, and periodic {}ms Redis blocking spikes (insert + take)...",
                 args.participants * tasks_per_p,
@@ -319,9 +321,15 @@ async fn main() -> anyhow::Result<()> {
 
         if should_run(BenchScenario::Mixed) {
             let items = (args.items / 3).max(50);
-            println!("\n>>> Running Scenario 7: Mixed MPC Storage Workload (Triples + Presigs + Signers)");
-            println!("    Running concurrent triple gen, presig gen, sign requests, and one-second polling on per-node connection pools...");
-            println!("    Signing excludes newly generated local-only presignatures; deliberators hold pre-stocked shares.");
+            println!(
+                "\n>>> Running Scenario 7: Mixed MPC Storage Workload (Triples + Presigs + Signers)"
+            );
+            println!(
+                "    Running concurrent triple gen, presig gen, sign requests, and one-second polling on per-node connection pools..."
+            );
+            println!(
+                "    Signing excludes newly generated local-only presignatures; deliberators hold pre-stocked shares."
+            );
             let results = harness.bench_mixed_pipeline(items).await?;
             harness.report_results(&results).await?;
             record(results);
@@ -519,13 +527,15 @@ mod tests {
         assert!(
             Args::try_parse_from(["redis-bench", "--redis-url", "redis://127.0.0.1/"]).is_err()
         );
-        assert!(Args::try_parse_from([
-            "redis-bench",
-            "--redis-url",
-            "redis://127.0.0.1/",
-            "--allow-external-redis",
-        ])
-        .is_ok());
+        assert!(
+            Args::try_parse_from([
+                "redis-bench",
+                "--redis-url",
+                "redis://127.0.0.1/",
+                "--allow-external-redis",
+            ])
+            .is_ok()
+        );
         assert!(Args::try_parse_from(["redis-bench"]).is_ok());
     }
 }

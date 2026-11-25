@@ -77,9 +77,18 @@ mod tests {
     #[test]
     fn attestation_metadata_preserves_checkpoint_encoding() {
         for (outcome, fixture) in [
-            (AttestationOutcomeKind::Executed, "a36b6b65795f76657273696f6e016c626c6f636b5f686569676874182a6c6f7574636f6d655f6b696e64684578656375746564"),
-            (AttestationOutcomeKind::Failed, "a36b6b65795f76657273696f6e016c626c6f636b5f686569676874182a6c6f7574636f6d655f6b696e64664661696c6564"),
-            (AttestationOutcomeKind::Unviable, "a36b6b65795f76657273696f6e016c626c6f636b5f686569676874182a6c6f7574636f6d655f6b696e6468556e766961626c65"),
+            (
+                AttestationOutcomeKind::Executed,
+                "a36b6b65795f76657273696f6e016c626c6f636b5f686569676874182a6c6f7574636f6d655f6b696e64684578656375746564",
+            ),
+            (
+                AttestationOutcomeKind::Failed,
+                "a36b6b65795f76657273696f6e016c626c6f636b5f686569676874182a6c6f7574636f6d655f6b696e64664661696c6564",
+            ),
+            (
+                AttestationOutcomeKind::Unviable,
+                "a36b6b65795f76657273696f6e016c626c6f636b5f686569676874182a6c6f7574636f6d655f6b696e6468556e766961626c65",
+            ),
         ] {
             let metadata = AttestationMetadata {
                 key_version: 1,

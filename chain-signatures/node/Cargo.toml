@@ -2,7 +2,7 @@
 name = "mpc-node"
 version.workspace = true
 publish.workspace = true
-edition = "2021"
+edition.workspace = true
 
 [[bin]]
 name = "mpc-node"

@@ -8,8 +8,8 @@ use std::time::Duration;
 use anyhow::Context as _;
 use k256::elliptic_curve::sec1::ToEncodedPoint as _;
 use mpc_chain_midnight::{
-    probe_network_id, MidnightAddress, MidnightConfig, NetworkId, OutputStorageConfig,
-    PublisherConfig,
+    MidnightAddress, MidnightConfig, NetworkId, OutputStorageConfig, PublisherConfig,
+    probe_network_id,
 };
 use reqwest::Client;
 use serde::de::DeserializeOwned;
@@ -22,7 +22,7 @@ use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tokio::sync::Mutex;
 
 use crate::cluster::spawner::ClusterSpawner;
-use crate::containers::{start_container_with_network_retry, Container};
+use crate::containers::{Container, start_container_with_network_retry};
 
 const NODE_IMAGE: (&str, &str) = (
     "midnightntwrk/midnight-node",

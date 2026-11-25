@@ -7,7 +7,7 @@ use mpc_contract::errors;
 use mpc_contract::primitives::{CandidateInfo, Read, SignRequest, View};
 use mpc_primitives::CheckpointDigest;
 use near_workspaces::types::{AccountId, NearToken};
-use signet_primitives::{Chain, Signature, LATEST_MPC_KEY_VERSION};
+use signet_primitives::{Chain, LATEST_MPC_KEY_VERSION, Signature};
 
 use std::collections::HashMap;
 
@@ -54,9 +54,10 @@ async fn test_contract_sign_request() -> anyhow::Result<()> {
     let err = sign_and_validate(&request, None, &contract)
         .await
         .expect_err("should have failed with timeout");
-    assert!(err
-        .to_string()
-        .contains(&errors::SignError::Timeout.to_string()));
+    assert!(
+        err.to_string()
+            .contains(&errors::SignError::Timeout.to_string())
+    );
 
     Ok(())
 }
@@ -170,9 +171,10 @@ async fn test_contract_sign_fail_refund() -> anyhow::Result<()> {
         .unwrap()
         .into_result()
         .expect_err("should have failed with timeout");
-    assert!(err
-        .to_string()
-        .contains(&errors::SignError::Timeout.to_string()));
+    assert!(
+        err.to_string()
+            .contains(&errors::SignError::Timeout.to_string())
+    );
 
     let new_balance = alice.view_account().await?.balance;
     let new_contract_balance = contract.view_account().await?.balance;
@@ -232,19 +234,23 @@ async fn test_contract_sign_request_deposits() -> anyhow::Result<()> {
         .transact()
         .await?;
     dbg!(&respond);
-    assert!(respond
-        .into_result()
-        .unwrap_err()
-        .to_string()
-        .contains(&errors::InvalidParameters::RequestNotFound.to_string()));
+    assert!(
+        respond
+            .into_result()
+            .unwrap_err()
+            .to_string()
+            .contains(&errors::InvalidParameters::RequestNotFound.to_string())
+    );
 
     let execution = status.await?;
     dbg!(&execution);
-    assert!(execution
-        .into_result()
-        .unwrap_err()
-        .to_string()
-        .contains(&errors::InvalidParameters::InsufficientDeposit.to_string()));
+    assert!(
+        execution
+            .into_result()
+            .unwrap_err()
+            .to_string()
+            .contains(&errors::InvalidParameters::InsufficientDeposit.to_string())
+    );
 
     Ok(())
 }
@@ -510,9 +516,11 @@ async fn test_checkpoint_voting() -> anyhow::Result<()> {
     let stale_error = stale_vote
         .into_result()
         .expect_err("a behind checkpoint should be rejected");
-    assert!(stale_error
-        .to_string()
-        .contains(&errors::CheckpointError::CheckpointBehind.to_string()));
+    assert!(
+        stale_error
+            .to_string()
+            .contains(&errors::CheckpointError::CheckpointBehind.to_string())
+    );
 
     let conflicting = CheckpointDigest::new(Chain::Solana, 120, [8u8; 32]);
     let conflict = accounts[2]

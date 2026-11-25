@@ -1,9 +1,9 @@
+use crate::EthConfig;
 use crate::abi::ChainSignatures;
-use crate::client::{block_may_contain_logs, CatchupItem, EthereumClient};
+use crate::client::{CatchupItem, EthereumClient, block_may_contain_logs};
 use crate::event_parsing::{emit_respond_events, parse_filtered_logs};
 use crate::execution_watcher::{ExecutionWatcher, WatcherGateState};
 use crate::finalized_head::{FinalizedHeadTracker, FinalizedHeadWatcher};
-use crate::EthConfig;
 use alloy::eips::BlockNumberOrTag;
 use alloy::primitives::Address;
 use alloy::rpc::types::{Block, BlockId, Log};
@@ -12,7 +12,7 @@ use anyhow::Context as _;
 use async_trait::async_trait;
 use futures_util::{Stream, StreamExt};
 use mpc_chain_integration_core::utils::retry::{
-    retry_until_ok_or_terminal, retry_until_some_or_terminal, SharedBackoff,
+    SharedBackoff, retry_until_ok_or_terminal, retry_until_some_or_terminal,
 };
 use mpc_chain_integration_core::{ChainIndexer, ChainTelemetry, StateManager};
 use mpc_primitives::{Chain, ChainEvent, IndexedSignRequest};
@@ -527,8 +527,8 @@ mod tests {
     use mpc_chain_integration_core::{ChainIndexer, StateManager};
     use mpc_primitives::{Chain, ChainEvent};
     use serde_json::json;
-    use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use tokio::sync::mpsc;
     use tokio::time::Duration;
     use tokio_util::sync::CancellationToken;

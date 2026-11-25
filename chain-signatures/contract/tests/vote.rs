@@ -317,14 +317,16 @@ async fn test_vote_leave() -> anyhow::Result<()> {
         contract.view("state").await.unwrap().json().unwrap();
     match state {
         mpc_contract::ProtocolContractStateView::Resharing(r) => {
-            assert!(!r
-                .new_participants
-                .participants
-                .contains_key(accounts[0].id()));
-            assert!(!r
-                .new_participants
-                .account_to_participant_id
-                .contains_key(accounts[0].id()));
+            assert!(
+                !r.new_participants
+                    .participants
+                    .contains_key(accounts[0].id())
+            );
+            assert!(
+                !r.new_participants
+                    .account_to_participant_id
+                    .contains_key(accounts[0].id())
+            );
         }
         _ => panic!("should be in resharing state"),
     };

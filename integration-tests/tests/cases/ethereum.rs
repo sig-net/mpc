@@ -2,7 +2,7 @@ use alloy::primitives::U256;
 use alloy::providers::Provider;
 use alloy::rpc::types::Filter;
 use alloy::sol_types::SolEvent;
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use integration_tests::cluster::Cluster;
 use integration_tests::{actions, cluster, eth};
 use k256::ecdsa::VerifyingKey;
@@ -11,7 +11,7 @@ use k256::{AffinePoint, EncodedPoint, FieldBytes, PublicKey as K256PublicKey};
 use mpc_chain_ethereum::abi::ChainSignatures::{self, SignRequest, SignatureResponded};
 use mpc_chain_ethereum::utils::test::submit_sign_request;
 use mpc_crypto::derive_key;
-use mpc_crypto::kdf::{derive_epsilon, KeyPurpose};
+use mpc_crypto::kdf::{KeyPurpose, derive_epsilon};
 use mpc_node::backlog::Checkpoint;
 use mpc_node::sign_bidirectional::public_key_to_address;
 use mpc_primitives::{Chain, LATEST_MPC_KEY_VERSION};
@@ -495,10 +495,10 @@ async fn wait_node_checkpoint(
             interval.tick().await;
 
             let checkpoints = nodes.fetch_checkpoints(node_idx).await?;
-            if let Some(checkpoint) = checkpoints.get(&chain) {
-                if checkpoint.block_height >= min_block_height {
-                    return Ok(checkpoint.clone());
-                }
+            if let Some(checkpoint) = checkpoints.get(&chain)
+                && checkpoint.block_height >= min_block_height
+            {
+                return Ok(checkpoint.clone());
             }
         }
     })

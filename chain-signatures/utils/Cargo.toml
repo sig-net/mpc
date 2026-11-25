@@ -2,7 +2,7 @@
 name = "mpc-utils"
 version.workspace = true
 publish.workspace = true
-edition = "2021"
+edition.workspace = true
 description = "Generic shared utilities (time, task) for the MPC workspace."
 
 [dependencies]

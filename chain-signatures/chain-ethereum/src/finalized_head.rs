@@ -1,7 +1,7 @@
+use crate::EthConfig;
 use crate::client::EthereumClient;
 #[cfg(test)]
 use crate::config::IndexerConfig;
-use crate::EthConfig;
 use alloy::eips::BlockNumberOrTag;
 use alloy::rpc::types::BlockId;
 use mpc_primitives::{Chain, ChainConfig as _};
@@ -118,10 +118,10 @@ impl FinalizedHeadWatcher {
     pub async fn wait_for(&mut self, block_number: u64) -> Result<u64, WatcherExit> {
         let mut head_rx = self.tracker.head.subscribe();
         loop {
-            if let Some(head) = *head_rx.borrow_and_update() {
-                if head >= block_number {
-                    return Ok(head);
-                }
+            if let Some(head) = *head_rx.borrow_and_update()
+                && head >= block_number
+            {
+                return Ok(head);
             }
             tokio::select! {
                 changed = head_rx.changed() => if changed.is_err() { return Err(WatcherExit::UnexpectedExit); },

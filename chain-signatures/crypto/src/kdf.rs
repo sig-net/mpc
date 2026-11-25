@@ -1,9 +1,9 @@
 use crate::PublicKey;
 use anyhow::Context;
 use k256::{
-    ecdsa::{signature::hazmat::PrehashSigner, RecoveryId, Signature, VerifyingKey},
-    elliptic_curve::{point::DecompressPoint, sec1::ToEncodedPoint},
     Scalar, SecretKey,
+    ecdsa::{RecoveryId, Signature, VerifyingKey, signature::hazmat::PrehashSigner},
+    elliptic_curve::{point::DecompressPoint, sec1::ToEncodedPoint},
 };
 use mpc_primitives::Signature as MpcSignature;
 
@@ -19,8 +19,8 @@ use sha3::Sha3_256;
 // `signet-crypto` kernel; re-exported here so node paths (`mpc_crypto::kdf::…`,
 // `mpc_crypto::…`) keep resolving unchanged.
 pub use signet_crypto::{
-    derive_epsilon, derive_key, reconstruct_signature, reserved_path, x_coordinate, DeriveError,
-    KeyPurpose,
+    DeriveError, KeyPurpose, derive_epsilon, derive_key, reconstruct_signature, reserved_path,
+    x_coordinate,
 };
 
 pub fn derive_secret_key(secret_key: &SecretKey, epsilon: Scalar) -> SecretKey {

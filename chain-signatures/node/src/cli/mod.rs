@@ -15,15 +15,15 @@ use crate::protocol::presignature::Presignature;
 use crate::protocol::request::{SignatureSpawner, SignatureSpawnerTask};
 use crate::protocol::state::{Node, NodeStateWatcher};
 use crate::protocol::sync::{SyncReportSender, SyncTask};
-use crate::protocol::{spawn_system_metrics, MpcSignProtocol};
+use crate::protocol::{MpcSignProtocol, spawn_system_metrics};
 use crate::rpc::{self, ContractStateWatcher, NearGovernanceClient, RpcChannel, RpcExecutor};
+use crate::storage::Initializing;
 use crate::storage::checkpoint_storage::CheckpointStorage;
 use crate::storage::keystore::Keystore;
 use crate::storage::midnight_dust_storage::MidnightDustStorage;
 use crate::storage::presignature_storage::PresignatureStorage;
 use crate::storage::triple_storage::{TriplePair, TripleStorage};
-use crate::storage::Initializing;
-use crate::stream::{supervisor::run_supervised, StreamContext};
+use crate::stream::{StreamContext, supervisor::run_supervised};
 use crate::types::SignCommand;
 use crate::{logs, storage, web};
 #[cfg(feature = "test-feature")]
@@ -37,8 +37,8 @@ use clap::Parser;
 use deadpool_redis::{Hook, Runtime};
 use enum_map::EnumMap;
 use mpc_chain_canton::{CantonClient, CantonConfig, CantonIndexer};
-use mpc_chain_ethereum::{publisher, EthConfig, EthereumIndexer};
-use mpc_chain_integration_core::{utils::retry::SharedBackoff, ChainPublisher, GatedPublisher};
+use mpc_chain_ethereum::{EthConfig, EthereumIndexer, publisher};
+use mpc_chain_integration_core::{ChainPublisher, GatedPublisher, utils::retry::SharedBackoff};
 use mpc_chain_midnight::{
     DustCheckpointStore, MidnightConfig, MidnightIndexer, RecoveringMidnightPublisher,
 };

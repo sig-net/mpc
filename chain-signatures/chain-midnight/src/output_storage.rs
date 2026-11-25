@@ -391,12 +391,14 @@ mod tests {
             OutputStorageConfig::new("outputs".into(), "".into(), Duration::from_secs(2)),
             OutputStorageConfig::new("outputs".into(), "v1".into(), Duration::ZERO),
         ] {
-            assert!(RecoveringOutputStore::start(
-                Some(&config),
-                NetworkId::Preprod,
-                MidnightAddress::from_bytes([0xab; 32]),
-            )
-            .is_err());
+            assert!(
+                RecoveringOutputStore::start(
+                    Some(&config),
+                    NetworkId::Preprod,
+                    MidnightAddress::from_bytes([0xab; 32]),
+                )
+                .is_err()
+            );
         }
     }
 
@@ -497,12 +499,14 @@ mod tests {
             .unwrap()
             .unwrap();
         tokio::task::yield_now().await;
-        assert!(store
-            .ensure_output(&REQUEST_ID, &METADATA, &[1])
-            .await
-            .unwrap_err()
-            .to_string()
-            .contains("initializing"));
+        assert!(
+            store
+                .ensure_output(&REQUEST_ID, &METADATA, &[1])
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("initializing")
+        );
     }
 
     #[test]

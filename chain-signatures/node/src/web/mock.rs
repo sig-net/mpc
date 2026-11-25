@@ -3,10 +3,10 @@ use mockito::ServerGuard;
 use near_sdk::AccountId;
 
 use crate::{
-    node_client::NodeClient,
-    protocol::{contract::primitives::Participants, state::NodeStatus, ParticipantInfo},
-    web::StatusResponse,
     PROTOCOL_VERSION,
+    node_client::NodeClient,
+    protocol::{ParticipantInfo, contract::primitives::Participants, state::NodeStatus},
+    web::StatusResponse,
 };
 
 pub struct MockServer {

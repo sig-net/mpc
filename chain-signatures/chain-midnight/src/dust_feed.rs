@@ -408,8 +408,8 @@ mod tests {
     use super::*;
 
     use tokio::net::TcpListener;
-    use tokio_tungstenite::tungstenite::handshake::server::{Request, Response};
     use tokio_tungstenite::WebSocketStream;
+    use tokio_tungstenite::tungstenite::handshake::server::{Request, Response};
 
     type ServerSocket = WebSocketStream<tokio::net::TcpStream>;
 
@@ -670,10 +670,12 @@ mod tests {
             .unwrap()
             .unwrap_err();
         assert!(format!("{error:#}").contains("boom"), "{error:#}");
-        assert!(tokio::time::timeout(TEST_TIMEOUT, stream.next())
-            .await
-            .expect("the stream ends after the error")
-            .is_none());
+        assert!(
+            tokio::time::timeout(TEST_TIMEOUT, stream.next())
+                .await
+                .expect("the stream ends after the error")
+                .is_none()
+        );
         drop(stream);
         tokio::time::timeout(TEST_TIMEOUT, server)
             .await

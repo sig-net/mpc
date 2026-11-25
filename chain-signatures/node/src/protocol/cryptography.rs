@@ -2,15 +2,15 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use super::state::{
-    GeneratingState, NodeState, ReshareAwaiting, ReshareRunning, ResharingPhase, ResharingState,
-    RESHARING_READY_BROADCAST_INTERVAL,
-};
 use super::MpcSignProtocol;
+use super::state::{
+    GeneratingState, NodeState, RESHARING_READY_BROADCAST_INTERVAL, ReshareAwaiting,
+    ReshareRunning, ResharingPhase, ResharingState,
+};
+use crate::protocol::MeshState;
 use crate::protocol::contract::ResharingContractState;
 use crate::protocol::message::{GeneratingMessage, ReadyMessage, ResharingMessage};
 use crate::protocol::state::{KeyShare, WaitingForConsensusState};
-use crate::protocol::MeshState;
 use crate::types::{ReshareProtocol, SecretKeyShare};
 
 use cait_sith::protocol::{Action, Participant};

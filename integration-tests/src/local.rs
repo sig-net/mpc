@@ -1,7 +1,7 @@
 use std::fmt;
 use std::path::PathBuf;
 
-use crate::{execute, node_args, utils, NodeConfig};
+use crate::{NodeConfig, execute, node_args, utils};
 
 use crate::execute::executable;
 use anyhow::Context;

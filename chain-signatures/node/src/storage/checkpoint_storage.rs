@@ -836,10 +836,12 @@ mod tests {
         assert_eq!(storage.persist_pending(&checkpoint).await?, Some(1));
         assert_eq!(storage.persist_pending(&checkpoint).await?, Some(1));
         assert_eq!(storage.persist_pending(&conflicting).await?, None);
-        assert!(storage
-            .promote_pending(Chain::Solana, [99; 32])
-            .await?
-            .is_none());
+        assert!(
+            storage
+                .promote_pending(Chain::Solana, [99; 32])
+                .await?
+                .is_none()
+        );
         assert_eq!(storage.load_pending(Chain::Solana).await?, vec![checkpoint]);
         Ok(())
     }

@@ -8,8 +8,8 @@ use near_sdk::borsh::{self, BorshDeserialize, BorshSerialize};
 use near_sdk::serde::{Deserialize, Serialize};
 use near_sdk::store::IterableMap;
 use near_sdk::{AccountId, BorshStorageKey, CryptoHash, NearToken, PublicKey};
-use signet_primitives::{borsh_scalar, SignId, Signature};
-use std::collections::{btree_map, BTreeMap, BTreeSet, HashMap, HashSet};
+use signet_primitives::{SignId, Signature, borsh_scalar};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, btree_map};
 
 pub mod hpke {
     pub type PublicKey = [u8; 32];

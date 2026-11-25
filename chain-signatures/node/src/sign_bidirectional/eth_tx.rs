@@ -152,7 +152,7 @@ mod derive_tests {
     use alloy::primitives::Address;
     use k256::elliptic_curve::sec1::FromEncodedPoint;
     use k256::{AffinePoint, EncodedPoint};
-    use mpc_crypto::{derive_epsilon, KeyPurpose};
+    use mpc_crypto::{KeyPurpose, derive_epsilon};
     use mpc_primitives::Chain;
     use mpc_primitives::LEGACY_MPC_KEY_VERSION_0;
 

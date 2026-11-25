@@ -2,7 +2,7 @@
 // `run()` and dispatch its events. Regression or a watchdog stall cancels
 // `run()` and restarts it, re-running light recovery first.
 use super::recovery::recover_backlog;
-use super::{handle_chain_event, StreamContext};
+use super::{StreamContext, handle_chain_event};
 
 use crate::backlog::{Backlog, Checkpoint};
 use crate::types::CheckpointWatcher;
@@ -380,9 +380,9 @@ async fn run_supervised_with_watchdog<I: ChainIndexer, T: ChainTelemetry>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::backlog::mock::mock_sign_request;
     use crate::backlog::Backlog;
     use crate::backlog::MAX_PENDING_CHECKPOINTS;
+    use crate::backlog::mock::mock_sign_request;
     use crate::mesh::MeshState;
     use crate::rpc::RpcAction;
     use crate::storage::checkpoint_storage::CheckpointStorage;
@@ -393,9 +393,9 @@ mod tests {
     use k256::ProjectivePoint;
     use mpc_chain_integration_core::{NoopChainTelemetry, StateManager};
     use mpc_primitives::{Chain, CheckpointDigest};
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Mutex;
-    use tokio::sync::{mpsc, watch, Notify};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::sync::{Notify, mpsc, watch};
 
     /// Creates a test `StreamContext` along with channels for checkpoint and mesh state updates.
     fn test_ctx(
@@ -580,11 +580,13 @@ mod tests {
             applied.digest(),
             mpc_primitives::reset_checkpoint_digest(chain, 42)
         );
-        assert!(backlog
-            .checkpoints()
-            .confirm(chain, applied.digest())
-            .await
-            .unwrap());
+        assert!(
+            backlog
+                .checkpoints()
+                .confirm(chain, applied.digest())
+                .await
+                .unwrap()
+        );
 
         let (_tx, mut rx) = make_digest(
             chain,
@@ -1052,11 +1054,13 @@ mod tests {
         let backlog = Backlog::new();
         backlog.set_processed_block(chain, 100).await.unwrap();
         let stale = backlog.checkpoint(chain).await.unwrap();
-        assert!(backlog
-            .checkpoints()
-            .confirm(chain, stale.digest())
-            .await
-            .unwrap());
+        assert!(
+            backlog
+                .checkpoints()
+                .confirm(chain, stale.digest())
+                .await
+                .unwrap()
+        );
 
         let attempts = Arc::new(AtomicUsize::new(0));
         let first_cancel = Arc::new(Notify::new());
@@ -1265,11 +1269,13 @@ mod tests {
 
         // Frees the slot without a settlement notice; a block ends the wait.
         let newest = backlog.checkpoints().latest(chain).await.unwrap().unwrap();
-        assert!(backlog
-            .checkpoints()
-            .confirm(chain, newest.digest())
-            .await
-            .unwrap());
+        assert!(
+            backlog
+                .checkpoints()
+                .confirm(chain, newest.digest())
+                .await
+                .unwrap()
+        );
         tokio::time::sleep(TEST_BLOCK_TIME * 2 + ERROR_RESTART_DELAY).await;
 
         assert_eq!(

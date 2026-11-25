@@ -1,9 +1,9 @@
+use super::MpcSignProtocol;
 use super::message::{MessageChannel, PositProtocolId, TripleMessage};
 use super::posit::{PositAction, PositInternalAction, Posits};
-use super::MpcSignProtocol;
 use crate::config::Config;
 use crate::mesh::MeshState;
-use crate::protocol::{should_generate, AcceptLimits};
+use crate::protocol::{AcceptLimits, should_generate};
 use crate::storage::protocol_storage::StockCounts;
 
 use crate::protocol::posit::{PositRejectReason, Positor};
@@ -17,7 +17,7 @@ use cait_sith::triples::{TriplePub, TripleShare};
 use chrono::Utc;
 use k256::Secp256k1;
 use serde::{Deserialize, Serialize};
-use tokio::sync::{mpsc, watch, Semaphore};
+use tokio::sync::{Semaphore, mpsc, watch};
 use tokio::task::JoinHandle;
 
 use std::collections::HashSet;

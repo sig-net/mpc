@@ -2,25 +2,25 @@ mod near_governance;
 
 use crate::backlog::{Backlog, Publishing, SignEntry};
 use crate::config::Config;
-use crate::protocol::contract::primitives::{ParticipantMap, Participants};
 use crate::protocol::contract::RunningContractState;
+use crate::protocol::contract::primitives::{ParticipantMap, Participants};
 use crate::protocol::{Chain, IndexedSignRequest, ProtocolState};
 use crate::sign_bidirectional::{BidirectionalProgress, SignStatus};
 use crate::types::CheckpointWatcher;
 use enum_map::EnumMap;
 use std::collections::BTreeSet;
 use std::mem::DropGuard;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 pub use near_governance::{CheckpointVoteOutcome, NearGovernanceClient};
 
 use cait_sith::protocol::Participant;
-use dashmap::{mapref::entry::Entry, DashMap, DashSet};
+use dashmap::{DashMap, DashSet, mapref::entry::Entry};
 use k256::AffinePoint;
 use mpc_chain_integration_core::{
-    utils::retry::{retry_op, retry_rpc, RetryConfig, SharedBackoff},
     ChainPublisher, PublishAction,
+    utils::retry::{RetryConfig, SharedBackoff, retry_op, retry_rpc},
 };
 pub use mpc_contract::primitives::{Read, View};
 use mpc_primitives::{CheckpointDigest, RequestKind, SignId, SignKind, Signature};
@@ -677,18 +677,18 @@ async fn update_contract_data(
         }
     }
 
-    if let Some(state) = state_view {
-        if let Ok(protocol_state) = ProtocolState::try_from(state) {
-            contract.send_if_modified(|old_state| {
-                if let Some(old_state) = old_state {
-                    if *old_state == protocol_state {
-                        return false;
-                    }
-                }
-                *old_state = Some(protocol_state);
-                true
-            });
-        }
+    if let Some(state) = state_view
+        && let Ok(protocol_state) = ProtocolState::try_from(state)
+    {
+        contract.send_if_modified(|old_state| {
+            if let Some(old_state) = old_state
+                && *old_state == protocol_state
+            {
+                return false;
+            }
+            *old_state = Some(protocol_state);
+            true
+        });
     }
 
     if let Some(contract_config) = config_view {
@@ -759,16 +759,16 @@ pub async fn execute_publish(
         },
         // Try to publish the signature
         {
-            if let Some(backlog) = &backlog {
-                if !publish_still_awaited(backlog, &action).await? {
-                    tracing::info!(
-                        ?sign_id,
-                        ?chain,
-                        elapsed = ?action.timestamp.elapsed(),
-                        "response no longer awaited; dropping publish"
-                    );
-                    return Ok(());
-                }
+            if let Some(backlog) = &backlog
+                && !publish_still_awaited(backlog, &action).await?
+            {
+                tracing::info!(
+                    ?sign_id,
+                    ?chain,
+                    elapsed = ?action.timestamp.elapsed(),
+                    "response no longer awaited; dropping publish"
+                );
+                return Ok(());
             }
             publisher.publish_signature(&action).await
         }
@@ -901,19 +901,19 @@ where
 mod tests {
     use super::*;
     use crate::backlog::mock::{
-        mock_bidi_request, mock_bidi_response, mock_bidirectional_tx, mock_sign_request,
-        BacklogTestExt as _,
+        BacklogTestExt as _, mock_bidi_request, mock_bidi_response, mock_bidirectional_tx,
+        mock_sign_request,
     };
+    use crate::protocol::ProtocolState;
     use crate::protocol::contract::primitives::{ParticipantInfo, Participants};
     use crate::protocol::contract::{ResharingContractState, RunningContractState};
-    use crate::protocol::ProtocolState;
+    use mpc_chain_integration_core::GatedPublisher;
     use mpc_chain_integration_core::utils::retry::RpcFailure;
     use mpc_chain_integration_core::utils::test::make_publish_action;
-    use mpc_chain_integration_core::GatedPublisher;
     use mpc_primitives::{SignId, SignKind};
     use std::sync::{
-        atomic::{AtomicUsize, Ordering},
         Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
     };
 
     #[tokio::test]
@@ -1073,12 +1073,16 @@ mod tests {
     #[test]
     fn checkpoint_votes_admit_a_replacement_digest_at_the_same_height() {
         let votes = CheckpointVotes::default();
-        assert!(votes
-            .admit(checkpoint_digest(Chain::Ethereum, 10, 1), None)
-            .is_some());
-        assert!(votes
-            .admit(checkpoint_digest(Chain::Ethereum, 10, 2), None)
-            .is_some());
+        assert!(
+            votes
+                .admit(checkpoint_digest(Chain::Ethereum, 10, 1), None)
+                .is_some()
+        );
+        assert!(
+            votes
+                .admit(checkpoint_digest(Chain::Ethereum, 10, 2), None)
+                .is_some()
+        );
     }
 
     #[test]

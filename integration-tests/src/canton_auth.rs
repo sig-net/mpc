@@ -1,10 +1,10 @@
 use anyhow::{Context as _, Result};
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use testcontainers::core::{IntoContainerPort, WaitFor};
 use testcontainers::runners::AsyncRunner;
 use testcontainers::{ContainerAsync, GenericImage, ImageExt};
-use tokio::time::{sleep, Duration};
+use tokio::time::{Duration, sleep};
 use url::Url;
 
 pub(crate) const LOCAL_OIDC_AUDIENCE: &str = "https://canton.network.global";

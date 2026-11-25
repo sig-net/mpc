@@ -15,8 +15,8 @@ use midnight_ledger_v9::dust::{
 use midnight_ledger_v9::structure::{
     Intent, LedgerParameters, ProofPreimageMarker, Signature, Transaction,
 };
-use midnight_storage::arena::Sp;
 use midnight_storage::DefaultDB;
+use midnight_storage::arena::Sp;
 use midnight_transient_crypto::commitment::PedersenRandomness;
 use mpc_chain_integration_core::PublisherTelemetry;
 use mpc_utils::task::AbortOnDrop;
@@ -28,7 +28,7 @@ use tokio::time::Instant;
 use super::checkpoint::DustCheckpointStore;
 use super::keys::owner_of;
 use super::sync::{
-    clear, follow, now, Shared, Synced, RESTORE_STRIKES, RESTORE_STUCK_TIMEOUT, STALL_GRACE,
+    RESTORE_STRIKES, RESTORE_STUCK_TIMEOUT, STALL_GRACE, Shared, Synced, clear, follow, now,
 };
 use crate::dust_feed::DustEventSource;
 use crate::submit_error::SubmitError;

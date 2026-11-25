@@ -25,17 +25,17 @@ pub(crate) mod tests;
 // `DustCheckpointStore` reaches the crate's public API (`lib.rs` re-export).
 pub use checkpoint::DustCheckpointStore;
 pub(crate) use keys::{dust_secret_key, parse_seed};
-pub(crate) use wallet::{dust_deficit, FeePayer, FundingWallet, SealedTx, UnprovenTx};
+pub(crate) use wallet::{FeePayer, FundingWallet, SealedTx, UnprovenTx, dust_deficit};
 
 // Re-exported for the unit tests, which glob `super::*`.
 #[cfg(test)]
-pub(crate) use checkpoint::{Checkpoint, CHECKPOINT_INTERVAL};
+pub(crate) use checkpoint::{CHECKPOINT_INTERVAL, Checkpoint};
 #[cfg(test)]
 pub(crate) use keys::owner_of;
 #[cfg(test)]
 pub(crate) use sync::{
-    apply, event_hash, is_ledger_8_event, keep_checkpoint, resume_from, start_over, Shared, Synced,
-    RESTORE_STRIKES, RESTORE_STUCK_TIMEOUT, RESUBSCRIBE_DELAY, RESUME_TIMEOUT, STALL_GRACE,
+    RESTORE_STRIKES, RESTORE_STUCK_TIMEOUT, RESUBSCRIBE_DELAY, RESUME_TIMEOUT, STALL_GRACE, Shared,
+    Synced, apply, event_hash, is_ledger_8_event, keep_checkpoint, resume_from, start_over,
 };
 #[cfg(test)]
-pub(crate) use wallet::{plan_fee, FeePlan, Reservation};
+pub(crate) use wallet::{FeePlan, Reservation, plan_fee};

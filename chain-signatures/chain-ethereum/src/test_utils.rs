@@ -1,13 +1,13 @@
+use crate::EthConfig;
 use crate::client::{CatchupItem, EthereumClient};
 use crate::config::{CatchupFetchConfig, IndexerConfig, RpcConfig};
 use crate::execution_watcher::{ExecutionWatcher, WatcherGateState};
 use crate::indexer::EthereumIndexer;
-use crate::EthConfig;
 use alloy::primitives::{Address, Bloom};
 use alloy::rpc::types::{Block, Log};
 use mpc_chain_integration_core::{
-    utils::retry::{RetryConfig, SharedBackoff},
     ChainTelemetry, ExtractionFailureKind, MockStateManager, NoopChainTelemetry,
+    utils::retry::{RetryConfig, SharedBackoff},
 };
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};

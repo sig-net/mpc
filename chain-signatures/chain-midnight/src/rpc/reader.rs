@@ -2,15 +2,15 @@
 //! block-emission extraction the indexer consumes.
 
 use anyhow::Context as _;
+use subxt::SubstrateConfig;
 use subxt::backend::legacy::rpc_methods::BlockDetails;
 use subxt::client::OnlineClient;
 use subxt::ext::codec::Encode as _;
 use subxt::utils::H256;
-use subxt::SubstrateConfig;
 
-use super::reads::{retry_read, Reads};
+use super::reads::{Reads, retry_read};
 use super::statics::{
-    applied_status, decode_applied_transaction, AppliedStatus, SendMnTransaction, TimestampSet,
+    AppliedStatus, SendMnTransaction, TimestampSet, applied_status, decode_applied_transaction,
 };
 use super::transport::connect_http;
 use crate::config::MidnightConfig;
@@ -78,10 +78,10 @@ impl MidnightRpc {
     pub async fn finalized_block_ref(&self) -> anyhow::Result<BlockRef> {
         let head = self.reads.finalized_head().await?;
         let hash: BlockHash = head.into();
-        if let Some(known) = self.head().as_ref() {
-            if known.block_ref.hash == hash {
-                return Ok(known.block_ref.clone());
-            }
+        if let Some(known) = self.head().as_ref()
+            && known.block_ref.hash == hash
+        {
+            return Ok(known.block_ref.clone());
         }
         let (number, parent_hash, block) = self
             .block_or_header(head)
@@ -361,14 +361,14 @@ impl MidnightRpc {
 mod tests {
     use super::*;
     use crate::rpc::support::*;
+    use jsonrpsee::RpcModule;
     use jsonrpsee::server::ServerBuilder;
     use jsonrpsee::types::ErrorObjectOwned;
-    use jsonrpsee::RpcModule;
     use serde_json::json;
     use std::io::Write as _;
     use std::path::PathBuf;
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
     use subxt::ext::codec::DecodeAll as _;
 
@@ -686,7 +686,7 @@ mod tests {
         let tx = DecodedTransaction::Standard(tx);
         let mut bytes = Vec::new();
         midnight_serialize::tagged_serialize(&tx, &mut bytes).unwrap();
-        let hash = tx.transaction_hash().0 .0;
+        let hash = tx.transaction_hash().0.0;
         let mut applied = captured_applied_status_record();
         assert_eq!(&applied[..7], &[0, 4, 0, 0, 0, 5, 2]);
         applied[7..39].copy_from_slice(&hash);
@@ -735,7 +735,7 @@ mod tests {
         let tx: DecodedTransaction =
             midnight_serialize::tagged_deserialize(&mut &bytes[..]).unwrap();
         let (segment, mut call) = tx.calls().nth(1).unwrap();
-        let singleton = call.address.0 .0;
+        let singleton = call.address.0.0;
         let expected = emissions_in(&tx, &singleton).unwrap();
         let mut transcript = call.fallible_transcript.as_deref().unwrap().clone();
         let original = Vec::from(&transcript.program);
@@ -769,7 +769,7 @@ mod tests {
         let tx = DecodedTransaction::Standard(tx);
         let mut bytes = Vec::new();
         midnight_serialize::tagged_serialize(&tx, &mut bytes).unwrap();
-        let hash = tx.transaction_hash().0 .0;
+        let hash = tx.transaction_hash().0.0;
         let mut applied = captured_applied_status_record();
         applied[7..39].copy_from_slice(&hash);
 
@@ -805,7 +805,7 @@ mod tests {
         let tx: DecodedTransaction =
             midnight_serialize::tagged_deserialize(&mut &bytes[..]).unwrap();
         let (segment, mut call) = tx.calls().nth(1).unwrap();
-        let singleton = call.address.0 .0;
+        let singleton = call.address.0.0;
         let mut transcript = call.fallible_transcript.as_deref().unwrap().clone();
         edit(&mut transcript);
         call.fallible_transcript = Some(Sp::new(transcript));
@@ -825,7 +825,7 @@ mod tests {
         let mut bytes = Vec::new();
         midnight_serialize::tagged_serialize(&tx, &mut bytes).unwrap();
         let mut applied = captured_applied_status_record();
-        applied[7..39].copy_from_slice(&tx.transaction_hash().0 .0);
+        applied[7..39].copy_from_slice(&tx.transaction_hash().0.0);
         let mut partial = applied.clone();
         partial[6] = 7; // TxPartialSuccess in the captured metadata.
         (bytes, applied, partial)

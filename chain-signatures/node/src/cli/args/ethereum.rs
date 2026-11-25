@@ -120,10 +120,12 @@ mod tests {
 
     #[test]
     fn unconfigured_yields_no_config() {
-        assert!(EthArgs::parse_from(["test"])
-            .into_config()
-            .unwrap()
-            .is_none());
+        assert!(
+            EthArgs::parse_from(["test"])
+                .into_config()
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
@@ -166,16 +168,18 @@ mod tests {
 
     #[test]
     fn the_cli_rejects_an_invalid_rpc_url() {
-        assert!(EthArgs::try_parse_from([
-            "test",
-            "--eth-account-sk",
-            ACCOUNT_SK,
-            "--eth-execution-rpc-http-url",
-            "not a url",
-            "--eth-contract-address",
-            CONTRACT,
-        ])
-        .is_err());
+        assert!(
+            EthArgs::try_parse_from([
+                "test",
+                "--eth-account-sk",
+                ACCOUNT_SK,
+                "--eth-execution-rpc-http-url",
+                "not a url",
+                "--eth-contract-address",
+                CONTRACT,
+            ])
+            .is_err()
+        );
     }
 
     /// The help text promises both spellings.

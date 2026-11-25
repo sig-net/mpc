@@ -457,10 +457,10 @@ pub fn open_reply_for_test(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mesh::connection::NodeStatus;
     use crate::mesh::MeshState;
-    use crate::protocol::contract::primitives::Participants;
+    use crate::mesh::connection::NodeStatus;
     use crate::protocol::ProtocolState;
+    use crate::protocol::contract::primitives::Participants;
     use crate::rpc::ContractStateWatcher;
     use crate::storage::presignature_storage::Presignature;
     use crate::storage::triple_storage::TriplePair;

@@ -147,8 +147,8 @@ impl SignState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::backlog::mock::mock_sign_request;
     use crate::backlog::Backlog;
+    use crate::backlog::mock::mock_sign_request;
 
     /// A respawn rebuilds `SignState`; the round must resume from the carried
     /// value, not restart at 0 — peers read a round reset as time travel.

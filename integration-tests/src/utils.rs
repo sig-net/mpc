@@ -1,8 +1,8 @@
 use anyhow::Context;
 use near_workspaces::{
+    Account, AccountId, Worker,
     network::Sandbox,
     types::{KeyType, SecretKey},
-    Account, AccountId, Worker,
 };
 use rand::Rng;
 use std::sync::{Mutex, Once};
@@ -394,10 +394,10 @@ pub async fn ping_until_ok(
             }
         }
 
-        if let Ok(status) = get(addr).await {
-            if status == reqwest::StatusCode::OK {
-                return Ok(());
-            }
+        if let Ok(status) = get(addr).await
+            && status == reqwest::StatusCode::OK
+        {
+            return Ok(());
         }
 
         if Instant::now() >= deadline {

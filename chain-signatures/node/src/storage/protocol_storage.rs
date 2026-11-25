@@ -12,7 +12,7 @@ use std::{
 use tokio::sync::RwLock;
 use tracing;
 
-use super::{owner_key, STORAGE_VERSION};
+use super::{STORAGE_VERSION, owner_key};
 
 /// Unspent artifact counts: owned by one node, and stored under any owner.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

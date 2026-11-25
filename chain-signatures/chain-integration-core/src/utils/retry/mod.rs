@@ -8,10 +8,10 @@ mod gate;
 pub use crate::{retry_op, retry_rpc};
 
 pub use classify::{
-    http_status_read_retryable, http_status_retryable, is_provider_throttled, is_retryable,
-    is_retryable_typed, is_throttle_status, RpcFailure,
+    RpcFailure, http_status_read_retryable, http_status_retryable, is_provider_throttled,
+    is_retryable, is_retryable_typed, is_throttle_status,
 };
-pub use gate::{exhausted, run_gated, SharedBackoff};
+pub use gate::{SharedBackoff, exhausted, run_gated};
 
 use std::future::Future;
 use std::time::Duration;
@@ -262,8 +262,8 @@ mod tests {
     use super::*;
     use crate::utils::retry::RpcFailure;
     use http::StatusCode;
-    use std::sync::atomic::{AtomicU32, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicU32, Ordering};
 
     fn gated_test_config() -> RetryConfig {
         RetryConfig {

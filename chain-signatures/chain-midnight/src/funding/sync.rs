@@ -25,7 +25,7 @@ use sha2::Digest as _;
 use tokio::sync::watch;
 use tokio::time::Instant;
 
-use super::checkpoint::{Checkpoint, DustCheckpointStore, CHECKPOINT_INTERVAL, CHECKPOINT_TIMEOUT};
+use super::checkpoint::{CHECKPOINT_INTERVAL, CHECKPOINT_TIMEOUT, Checkpoint, DustCheckpointStore};
 use super::wallet::Reservation;
 use crate::dust_feed::{DustEventSource, DustEventUpdate};
 
@@ -307,7 +307,9 @@ async fn restore(shared: &Shared, store: &dyn DustCheckpointStore) {
         }
     };
     if checkpoint.owner != shared.owner {
-        tracing::info!("midnight funding wallet: the DUST checkpoint belongs to another funding key; replaying from the first event");
+        tracing::info!(
+            "midnight funding wallet: the DUST checkpoint belongs to another funding key; replaying from the first event"
+        );
         return;
     }
     tracing::info!(

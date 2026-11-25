@@ -3,19 +3,19 @@ use super::*;
 use crate::dust_feed::{DustEventSource, DustEventUpdate, Indexed};
 use crate::submit_error::SubmitError;
 use async_trait::async_trait;
-use futures_util::stream::BoxStream;
 use futures_util::StreamExt as _;
+use futures_util::stream::BoxStream;
 use midnight_base_crypto::time::Timestamp;
 use midnight_ledger_v9::dust::{DustLocalState, DustNullifier, DustOutput, DustSecretKey};
 use midnight_ledger_v9::events::Event;
 use midnight_ledger_v9::structure::{
-    Intent, ProofPreimageMarker, Signature, Transaction, INITIAL_PARAMETERS,
+    INITIAL_PARAMETERS, Intent, ProofPreimageMarker, Signature, Transaction,
 };
 use midnight_storage::DefaultDB;
 use midnight_transient_crypto::commitment::PedersenRandomness;
 use mpc_chain_integration_core::{NoopPublisherTelemetry, PublishAction, PublisherTelemetry};
-use rand::rngs::StdRng;
 use rand::SeedableRng as _;
+use rand::rngs::StdRng;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -3118,16 +3118,18 @@ async fn a_wallet_whose_submit_just_failed_plans_nothing() {
         "a wallet about to reload planned a fee"
     );
     ready(&wallet).await;
-    assert!(wallet
-        .plan(
-            &base,
-            &INITIAL_PARAMETERS,
-            ctime,
-            ttl,
-            "undeployed",
-            &mut rng
-        )
-        .is_ok());
+    assert!(
+        wallet
+            .plan(
+                &base,
+                &INITIAL_PARAMETERS,
+                ctime,
+                ttl,
+                "undeployed",
+                &mut rng
+            )
+            .is_ok()
+    );
 }
 
 /// Checkpoints of a caught-up replay that keeps moving are kept five minutes apart.

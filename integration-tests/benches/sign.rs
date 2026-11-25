@@ -1,6 +1,6 @@
-use criterion::measurement::ValueFormatter;
 use criterion::Criterion;
-use criterion::{measurement::Measurement, Throughput};
+use criterion::measurement::ValueFormatter;
+use criterion::{Throughput, measurement::Measurement};
 use integration_tests::cluster::{self, Cluster};
 use std::sync::Arc;
 use std::sync::Mutex;

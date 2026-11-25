@@ -2,13 +2,13 @@
 
 use alloy::consensus::{SignableTransaction as _, TxEip1559};
 use alloy::eips::eip2930::{AccessList, AccessListItem};
-use alloy::primitives::{Address, Bytes, TxKind, B256, U256};
+use alloy::primitives::{Address, B256, Bytes, TxKind, U256};
 
 use crate::records::SignBidirectionalRecord;
 use k256::Scalar;
 use mpc_chain_integration_core::utils::payload::derive_user_address;
 use mpc_primitives::{Calldata, CompactMaybe, EvmType2TxParams, TxParams};
-use mpc_tron_wire::{to_unsigned_tron_tx, TronAddress};
+use mpc_tron_wire::{TronAddress, to_unsigned_tron_tx};
 
 fn to_eip1559(params: &EvmType2TxParams) -> anyhow::Result<TxEip1559> {
     Ok(TxEip1559 {

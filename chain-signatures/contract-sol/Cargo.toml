@@ -3,7 +3,7 @@ name = "signet-program"
 version = "0.1.0"
 publish = false
 description = "Minimal types for Solana indexer integration"
-edition = "2021"
+edition.workspace = true
 
 [lib]
 crate-type = ["lib"]

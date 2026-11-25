@@ -8,11 +8,11 @@
 //! txID = sha256(raw_data), ref-block fields, and the 65-byte
 //! `[r ‖ s ‖ v]` signature with v ∈ {0,1}.
 
-use crate::pb::{
-    Contract, ContractType, Message, RawTransaction, Transaction, TriggerSmartContract,
-    TRIGGER_SMART_CONTRACT_TYPE_URL,
-};
 use crate::TronAddress;
+use crate::pb::{
+    Contract, ContractType, Message, RawTransaction, TRIGGER_SMART_CONTRACT_TYPE_URL, Transaction,
+    TriggerSmartContract,
+};
 use anyhow::Context as _;
 use mpc_primitives::{Calldata, CompactMaybe, TronTxParams};
 use prost_types::Any;
@@ -249,11 +249,13 @@ mod tests {
     fn calldata_reads_the_assembled_trigger_data() {
         let mut plain = params();
         let plain_bytes = to_unsigned_tron_tx(&plain, owner()).unwrap();
-        assert!(RawTransaction::parse(&plain_bytes)
-            .unwrap()
-            .calldata()
-            .unwrap()
-            .is_empty());
+        assert!(
+            RawTransaction::parse(&plain_bytes)
+                .unwrap()
+                .calldata()
+                .unwrap()
+                .is_empty()
+        );
 
         plain.calldata.is_some = true;
         plain.calldata.value.selector = [0xa9, 0x05, 0x9c, 0xbb];

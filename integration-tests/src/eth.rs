@@ -2,8 +2,8 @@ use alloy::network::EthereumWallet;
 use alloy::primitives::{Address, B256, U256};
 use alloy::providers::fillers::{FillProvider, JoinFill, WalletFiller};
 use alloy::providers::{ProviderBuilder, RootProvider};
-use alloy::signers::local::PrivateKeySigner;
 use alloy::signers::Signer;
+use alloy::signers::local::PrivateKeySigner;
 use anyhow::Result;
 
 pub type SandboxMiddleware = FillProvider<

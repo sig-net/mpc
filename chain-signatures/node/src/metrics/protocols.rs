@@ -1,10 +1,10 @@
 use std::sync::LazyLock;
 
-use prometheus::{exponential_buckets, linear_buckets, Counter, Histogram, IntGauge};
+use prometheus::{Counter, Histogram, IntGauge, exponential_buckets, linear_buckets};
 
 use super::{
-    try_create_counter_vec_with_node_account_id, try_create_histogram_vec_with_node_account_id,
-    try_create_int_gauge_vec_with_node_account_id, Histogram as MetricsHistogram,
+    Histogram as MetricsHistogram, try_create_counter_vec_with_node_account_id,
+    try_create_histogram_vec_with_node_account_id, try_create_int_gauge_vec_with_node_account_id,
 };
 
 // Triple metrics

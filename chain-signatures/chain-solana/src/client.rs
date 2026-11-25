@@ -1,8 +1,8 @@
 use anyhow::Context as _;
 use futures_util::StreamExt;
 use mpc_chain_integration_core::{
-    utils::retry::{is_retryable, retry_rpc, RetryConfig, RpcFailure, SharedBackoff},
     PublisherTelemetry,
+    utils::retry::{RetryConfig, RpcFailure, SharedBackoff, is_retryable, retry_rpc},
 };
 use secrecy::ExposeSecret as _;
 use serde::{Deserialize, Serialize};
@@ -613,8 +613,8 @@ mod tests {
     use super::*;
     use crate::test_utils::{signature_entry, signatures_response};
     use mpc_chain_integration_core::{
-        utils::retry::{is_provider_throttled, is_retryable},
         NoopPublisherTelemetry,
+        utils::retry::{is_provider_throttled, is_retryable},
     };
     use solana_client::rpc_custom_error::{
         JSON_RPC_SERVER_ERROR_BLOCK_CLEANED_UP, JSON_RPC_SERVER_ERROR_BLOCK_NOT_AVAILABLE,

@@ -232,15 +232,17 @@ mod tests {
             AttestationOutcomeKind::Failed,
             AttestationOutcomeKind::Unviable,
         ] {
-            assert!(compute_attestation_hash(
-                &rid,
-                &AttestationMetadata {
-                    outcome_kind: outcome,
-                    ..metadata
-                },
-                &[1]
-            )
-            .is_err());
+            assert!(
+                compute_attestation_hash(
+                    &rid,
+                    &AttestationMetadata {
+                        outcome_kind: outcome,
+                        ..metadata
+                    },
+                    &[1]
+                )
+                .is_err()
+            );
         }
     }
 }

@@ -15,7 +15,7 @@ use mpc_node::protocol::contract::primitives::ParticipantInfo;
 use mpc_node::protocol::message::{MessageError, SignedMessage};
 use mpc_node::protocol::state::NodeStateWatcher;
 use mpc_node::protocol::state::NodeStatus;
-use mpc_node::protocol::sync::{open_reply_for_test, process_sync_update, SyncError, SyncUpdate};
+use mpc_node::protocol::sync::{SyncError, SyncUpdate, open_reply_for_test, process_sync_update};
 use mpc_node::protocol::{Governance, MessageChannel, ProtocolState};
 use mpc_node::rpc::ContractStateWatcher;
 use mpc_node::storage::{PresignatureStorage, TripleStorage};
@@ -23,11 +23,11 @@ use mpc_node::types::SignCommand;
 use mpc_primitives::{Chain, CheckpointDigest, IndexedSignRequest};
 use near_sdk::AccountId;
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 use tokio::sync::mpsc;
-use tokio::sync::{watch, Mutex, Notify};
+use tokio::sync::{Mutex, Notify, watch};
 
 pub struct MpcFixture {
     pub nodes: Vec<MpcFixtureNode>,

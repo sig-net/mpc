@@ -1,7 +1,7 @@
 //! Component tests that combine the MPC network combined with a chain stream as
 //! input and output.
 
-use integration_tests::mpc_fixture::{mock_stream::MockStream, MpcFixtureBuilder};
+use integration_tests::mpc_fixture::{MpcFixtureBuilder, mock_stream::MockStream};
 use mpc_node::protocol::IndexedSignRequest;
 use mpc_primitives::{Chain, SignId};
 use std::time::Duration;
@@ -330,8 +330,8 @@ async fn run_stale_task_test(drop_respond_event: bool) {
     use cait_sith::protocol::Participant;
     use integration_tests::mpc_fixture::message_collector::CollectMessages;
     use integration_tests::mpc_fixture::mock_chain::EventDelivery;
-    use mpc_node::protocol::message::{PositProtocolId, SendMessage};
     use mpc_node::protocol::Message;
+    use mpc_node::protocol::message::{PositProtocolId, SendMessage};
     use mpc_primitives::ChainEvent;
     use std::collections::HashMap;
     use std::sync::Arc;
@@ -430,17 +430,15 @@ async fn run_stale_task_test(drop_respond_event: bool) {
             2,
             Box::new(move |msg: &SendMessage| {
                 let SendMessage { message, .. } = msg;
-                if let Message::Posit(posit_msg) = message {
-                    if let PositProtocolId::Signature(sign_id, ..) = posit_msg.id {
-                        if sign_id == bad_sign_id
-                            && matches!(
-                                posit_msg.action,
-                                mpc_node::protocol::posit::PositAction::Accept
-                            )
-                        {
-                            return false;
-                        }
-                    }
+                if let Message::Posit(posit_msg) = message
+                    && let PositProtocolId::Signature(sign_id, ..) = posit_msg.id
+                    && sign_id == bad_sign_id
+                    && matches!(
+                        posit_msg.action,
+                        mpc_node::protocol::posit::PositAction::Accept
+                    )
+                {
+                    return false;
                 }
                 true
             }),
@@ -451,10 +449,10 @@ async fn run_stale_task_test(drop_respond_event: bool) {
         builder = builder.with_chain_event_filter(
             2,
             Box::new(move |event: &ChainEvent| {
-                if let ChainEvent::Respond(respond) = event {
-                    if respond.request_id == bad_sign_id.request_id {
-                        return EventDelivery::Drop;
-                    }
+                if let ChainEvent::Respond(respond) = event
+                    && respond.request_id == bad_sign_id.request_id
+                {
+                    return EventDelivery::Drop;
                 }
                 EventDelivery::Deliver
             }),

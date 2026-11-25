@@ -20,8 +20,8 @@ pub use progress::{BidirectionalProgress, SignProgress, SignStatus};
 pub use signing::sign_and_hash_transaction;
 use signing::validate_unsigned_transaction;
 pub(crate) use signing::{
-    destination_expiry, owned_by_requester, pending_destination_id, transaction_chain_id,
-    transaction_nonce, ExpiryWindow,
+    ExpiryWindow, destination_expiry, owned_by_requester, pending_destination_id,
+    transaction_chain_id, transaction_nonce,
 };
 
 /// The requester's chain-local identity string: Midnight and Canton senders
@@ -221,8 +221,8 @@ impl BidirectionalTxExt for BidirectionalTx {
 mod tests {
     use super::eth_tx::legacy_tx;
     use super::{
-        SignBidirectionalEvent, SignBidirectionalEventExt as _, Signature, SDK_ALGO, SDK_DEST,
-        SDK_PARAMS,
+        SDK_ALGO, SDK_DEST, SDK_PARAMS, SignBidirectionalEvent, SignBidirectionalEventExt as _,
+        Signature,
     };
     use crate::protocol::Chain;
     use k256::elliptic_curve::sec1::FromEncodedPoint;
@@ -411,9 +411,11 @@ mod tests {
         assert_eq!(hex::encode(id.0), TXID_HEX);
         // Ethereum's id hashes the signed transaction: nothing to compare
         // pre-signing.
-        assert!(super::pending_destination_id(Chain::Ethereum, &raw)
-            .unwrap()
-            .is_none());
+        assert!(
+            super::pending_destination_id(Chain::Ethereum, &raw)
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]

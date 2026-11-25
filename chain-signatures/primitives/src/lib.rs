@@ -22,13 +22,13 @@ pub use attestation::{
 };
 
 pub use backlog::{
-    checkpoint_digest, empty_cumulative_digest, reset_checkpoint_digest, CheckpointDigest,
+    CheckpointDigest, checkpoint_digest, empty_cumulative_digest, reset_checkpoint_digest,
 };
 pub use bidirectional::{
     BidirectionalTx, RespondBidirectionalEvent, RespondBidirectionalTx, SignBidirectionalEvent,
 };
 pub use chain::{ChainConfig, SerDeserFormat};
-pub use crypto::{cbor_scalar, SignArgs};
+pub use crypto::{SignArgs, cbor_scalar};
 pub use events::{ChainEvent, ExecutionOutcome, SignatureRespondedEvent};
 pub use requests::{IndexedSignRequest, RequestKind, SignKind};
 pub use tx_params::{

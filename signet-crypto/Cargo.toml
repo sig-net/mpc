@@ -2,7 +2,7 @@
 name = "signet-crypto"
 version.workspace = true
 publish.workspace = true
-edition = "2021"
+edition.workspace = true
 description = "Key-derivation and signature-reconstruction primitives for the SigNet network"
 readme = "README.md"
 license = "MIT OR Apache-2.0"

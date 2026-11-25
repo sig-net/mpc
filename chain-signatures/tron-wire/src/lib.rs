@@ -10,7 +10,7 @@ pub mod encoding;
 mod tx;
 mod types;
 
-pub use address::{parse_hex, ParseTronAddressError, TronAddress, TRON_ADDRESS_PREFIX};
+pub use address::{ParseTronAddressError, TRON_ADDRESS_PREFIX, TronAddress, parse_hex};
 pub use pb::Message;
-pub use tx::{to_unsigned_tron_tx, MAX_EXPIRATION_SPAN_MS};
+pub use tx::{MAX_EXPIRATION_SPAN_MS, to_unsigned_tron_tx};
 pub use types::NowBlock;

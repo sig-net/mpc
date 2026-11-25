@@ -7,7 +7,7 @@ use mpc_utils::time::unix_elapsed;
 use super::{
     indexers::{BIDIRECTIONAL_EXTRACTION_FAILURES, LATEST_BLOCK_NUMBER, TRON_EXPIRY_SCAN_DEFERRED},
     publishers::{FUNDING_WALLET_BALANCE, FUNDING_WALLET_REPLAY_RESTARTS, PUBLISH_REFUSALS},
-    requests::{record_indexing_step_reached, record_request_latency_since, SignRequestStep},
+    requests::{SignRequestStep, record_indexing_step_reached, record_request_latency_since},
 };
 
 /// NodeTelemetry is a struct that implements the PublisherTelemetry and ChainTelemetry traits for recording telemetry data related to publishing signatures and indexing blocks on a blockchain.

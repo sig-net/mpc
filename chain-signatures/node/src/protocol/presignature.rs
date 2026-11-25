@@ -3,14 +3,14 @@ use super::posit::{PositAction, Positor, Posits};
 use super::triple::TripleId;
 use crate::config::Config;
 use crate::mesh::MeshState;
+use crate::protocol::MpcSignProtocol;
 use crate::protocol::contract::primitives::intersect_vec;
 use crate::protocol::posit::{PositInternalAction, PositRejectReason};
-use crate::protocol::MpcSignProtocol;
-use crate::protocol::{should_generate, AcceptLimits};
+use crate::protocol::{AcceptLimits, should_generate};
+use crate::storage::TripleStorage;
 use crate::storage::presignature_storage::{PresignatureSlot, PresignatureStorage};
 use crate::storage::protocol_storage::StockCounts;
 use crate::storage::triple_storage::{TriplesReserved, TriplesTaken, TriplesTakenDropper};
-use crate::storage::TripleStorage;
 use crate::types::{PresignatureProtocol, SecretKeyShare};
 use mpc_chain_near::AffinePointExt as _;
 use mpc_utils::task::JoinMap;
@@ -934,8 +934,8 @@ impl PendingTriples {
 
 #[cfg(test)]
 mod tests {
-    use cait_sith::{protocol::Participant, PresignOutput};
-    use k256::{elliptic_curve::CurveArithmetic, Secp256k1};
+    use cait_sith::{PresignOutput, protocol::Participant};
+    use k256::{Secp256k1, elliptic_curve::CurveArithmetic};
 
     use crate::protocol::presignature::Presignature;
 

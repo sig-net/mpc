@@ -9,7 +9,7 @@ use crate::mpc_fixture::message_collector::CollectMessages;
 use crate::mpc_fixture::mock_chain::{ChainEventFilter, MockChain};
 use crate::mpc_fixture::mock_governance::MockGovernance;
 use crate::mpc_fixture::mock_stream::MockStream;
-use crate::mpc_fixture::{fixture_tasks, MpcFixture, MpcFixtureNode};
+use crate::mpc_fixture::{MpcFixture, MpcFixtureNode, fixture_tasks};
 
 use cait_sith::protocol::Participant;
 use deadpool_redis::Pool as RedisPool;
@@ -21,8 +21,8 @@ use mpc_contract::primitives::{
 use mpc_keys::hpke::{self, Ciphered};
 use mpc_node::backlog::Backlog;
 use mpc_node::config::{Config, NetworkConfig, Timeouts};
-use mpc_node::mesh::connection::NodeStatus;
 use mpc_node::mesh::MeshState;
+use mpc_node::mesh::connection::NodeStatus;
 use mpc_node::node_client::NodeClient;
 use mpc_node::protocol::contract::primitives::{Candidates, Participants, PkVotes};
 use mpc_node::protocol::contract::{InitializingContractState, RunningContractState};
@@ -41,7 +41,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc::{self, Sender};
-use tokio::sync::{watch, Mutex};
+use tokio::sync::{Mutex, watch};
 
 pub struct MpcFixtureBuilder {
     prepared_nodes: Vec<MpcFixtureNodeBuilder>,

@@ -7,14 +7,14 @@ use anyhow::Context as _;
 use http::StatusCode;
 use jsonrpsee::core::client::Error as JsonrpseeClientError;
 use jsonrpsee::types::error::{INVALID_PARAMS_CODE, OVERSIZED_RESPONSE_CODE};
-use mpc_chain_integration_core::utils::retry::{exhausted, RetryConfig, RpcFailure};
-use subxt::backend::legacy::rpc_methods::{BlockDetails, NumberOrHex};
+use mpc_chain_integration_core::utils::retry::{RetryConfig, RpcFailure, exhausted};
+use subxt::SubstrateConfig;
 use subxt::backend::legacy::LegacyRpcMethods;
+use subxt::backend::legacy::rpc_methods::{BlockDetails, NumberOrHex};
 use subxt::backend::rpc::RpcClient;
 use subxt::ext::codec::DecodeAll as _;
-use subxt::ext::subxt_rpcs::{rpc_params, Error as RawRpcError, UserError};
+use subxt::ext::subxt_rpcs::{Error as RawRpcError, UserError, rpc_params};
 use subxt::utils::H256;
-use subxt::SubstrateConfig;
 
 #[cfg(feature = "sandbox")]
 use super::transport::connect_http_endpoint;
@@ -523,12 +523,12 @@ mod tests {
     use crate::rpc::publisher::MidnightPublisherRpc;
     use crate::rpc::transport::connect_http;
     use crate::submit_error::SubmitError;
-    use jsonrpsee::server::ServerBuilder;
     use jsonrpsee::RpcModule;
+    use jsonrpsee::server::ServerBuilder;
     use mpc_chain_integration_core::utils::retry::RpcFailure;
     use mpc_chain_integration_core::utils::retry::{is_provider_throttled, is_retryable};
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use subxt::backend::rpc::RawValue;
     use subxt::ext::codec::Encode as _;
     use subxt::ext::subxt_rpcs::UserError;
