@@ -9,6 +9,7 @@ pub mod eth;
 pub mod execute;
 pub mod gcs;
 pub mod local;
+pub mod memory_harness;
 pub mod midnight;
 pub mod mpc_fixture;
 mod node_args;

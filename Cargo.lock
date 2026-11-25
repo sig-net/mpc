@@ -5774,6 +5774,7 @@ dependencies = [
  "futures",
  "hex",
  "k256 0.13.4",
+ "libc",
  "mpc-chain-canton",
  "mpc-chain-ethereum",
  "mpc-chain-hydration",
