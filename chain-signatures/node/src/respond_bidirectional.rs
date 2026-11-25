@@ -378,7 +378,7 @@ mod tests {
             (Chain::Midnight, "midnight response key"),
         ] {
             for key_version in
-                mpc_primitives::LEGACY_MPC_KEY_VERSION_1..=mpc_primitives::LATEST_MPC_KEY_VERSION
+                mpc_primitives::MIN_BIDI_KEY_VERSION..=mpc_primitives::LATEST_MPC_KEY_VERSION
             {
                 let mut tx = (*sample_bidirectional_tx(chain, [0x32; 32])).clone();
                 tx.key_version = key_version;
@@ -959,13 +959,14 @@ mod tests {
     /// key; the network's own response is signed with it and passes.
     #[test]
     fn claims_attestation_key_refuses_requests_on_the_reserved_path() {
-        let mut tx = (*sample_bidirectional_tx(Chain::Solana, [0x30; 32])).clone();
-        tx.key_version = mpc_primitives::LEGACY_MPC_KEY_VERSION_1;
-        let mut response = CompletedTx::new(Arc::new(tx), None, None, 456, [0; 32])
-            .create_sign_request_from_serialized_output(vec![1; 32])
-            .unwrap();
-        assert!(!claims_attestation_key(&response));
-        // As a response built before responses named no path.
+        // A response recovered from a checkpoint taken before key version 2.
+        let mut response = (*crate::backlog::mock::mock_bidi_response_request(
+            SignId::new([0x30; 32]),
+            BidirectionalTxId([0x30; 32]),
+            Chain::Solana,
+        ))
+        .clone();
+        response.args.key_version = mpc_primitives::LEGACY_MPC_KEY_VERSION_1;
         response.args.path = "solana response key".to_string();
         assert!(!claims_attestation_key(&response));
 

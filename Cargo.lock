@@ -10824,7 +10824,6 @@ dependencies = [
  "getrandom 0.2.17",
  "hex",
  "k256 0.13.4",
- "serde_json",
  "sha3 0.10.9",
  "signet-primitives",
  "thiserror 1.0.69",

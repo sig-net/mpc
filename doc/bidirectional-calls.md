@@ -126,8 +126,8 @@ Happy path:
   block at or past the expiry.
 * *Attestation key*: the key the MPC derives for a contract at a key
   version, used for nothing but attestations to that contract: under the
-  attestation [purpose](glossary.md#purpose-of-the-key) from key version 2, under a
-  reserved path before it (account-derivation.md).
+  attestation [purpose](glossary.md#purpose-of-the-key), from key version 2
+  (account-derivation.md).
 * *Response*: an attestation delivered to the contract that made rid's
   request.
 
@@ -427,9 +427,8 @@ authentic(rid, req): bool
 processable(req): bool
     req.target parses to a chain this MPC can watch
     key derivation is valid: parameters canonical, key derivable for the
-      source chain, a key version the MPC supports
-    below key version 2, whose derivation paths name no purpose (M1):
-      req.key's path is not the attestation key's
+      source chain, a key version the MPC supports and at least 2, the
+      first whose derivation paths name the purpose (M1)
     req.tx is non-empty, parses as an unsigned transaction in target's
       format, commits to the network this MPC watches for target (EVM:
       carries that network's chain id; not required on Tron, which has
@@ -545,11 +544,11 @@ Properties:
   could have a transaction signed that uses up a bidirectional request's
   replay protection unnoticed (Section 6). The MPC picks a key's purpose
   from the signing API a request comes on, never from its fields (Distinct
-  keys, Section 5). Key version 1's derivation paths name no purpose: there
-  the attestation key lies under a reserved path that no request on any signing API may
-  name (`processable`). Nothing keeps a bidirectional request's key from
-  another signing API at key version 1: where one maps the same contract,
-  path and key version to the same key, M1 holds only from key version 2.
+  keys, Section 5). Bidirectional requests need key version 2, the first
+  whose derivation paths name the purpose. Below it the attestation key lay
+  under a reserved path that contracts may still trust, so the MPC refuses
+  a request below key version 2 naming that path on every signing API
+  (account-derivation.md).
 * M2 The MPC drops a request that is not authentic, that it cannot
   process, or whose rid is already in the backlog, and keeps nothing for
   it. A rid already in the backlog is the same transaction, already being
@@ -740,11 +739,9 @@ a path from B48 through A15; the first at A12 has none.
   request for instance, names only a payload hash, so the MPC could not
   find a transaction it signed. With the same key as a bidirectional
   request, it could use up that request's replay protection and leave it
-  unanswered. From key version 2, separate purposes (M1) keep the keys
-  apart, and no key under the bidirectional purpose signed anything
-  earlier. At key version 1 nothing keeps them apart, and this risk is
-  accepted: a contract that needs the separation makes its requests at
-  key version 2.
+  unanswered. Separate purposes (M1) keep the keys apart: bidirectional
+  requests need key version 2, and no key under the bidirectional purpose
+  signed anything earlier.
 * Agreement has no enforcement point. A change to `authentic`,
   `processable` or the attestation function must apply only to requests
   made at or after a source height the upgrade names; applied to requests
@@ -843,9 +840,9 @@ stay out.
 
 | field | type | in rid | meaning |
 |---|---|---|---|
-| `keyVersion` | `u8` | yes | MPC key version, at least 1 |
+| `keyVersion` | `u8` | yes | MPC key version, at least 2 |
 | `sender` | `address` | yes | the requesting contract |
-| `path` | `bytes(32)` | yes | key derivation path; at key version 1 the reserved response-key path is refused |
+| `path` | `bytes(32)` | yes | key derivation path |
 | `algo` | `enum MPCSignatureAlgorithm` | yes | [signing scheme](glossary.md#signing-scheme) |
 | `txParamType` | `enum TxParamType` | yes | which transaction structure `txParams` holds |
 | `txParams` | per `txParamType` (7.3, 7.4) | as its digest | the transaction |
@@ -1150,10 +1147,10 @@ or forged bytes fail verification.
 Target chains are Ethereum and Tron (`Chain::supports_bidirectional_signing`).
 Source chains are Midnight, Solana and Canton.
 
-Refusing key version 0 at admission applies at once, not from a source
-height (Section 6): a key version 0 bidirectional request on Solana
-or Canton still waiting for its response gets none. A deployment
-confirms none is pending before it upgrades to a node that refuses them.
+Refusing key versions 0 and 1 at admission applies at once, not from a
+source height (Section 6): a key version 0 or 1 bidirectional request still
+waiting for its response gets none. A deployment confirms none is pending
+before it upgrades to a node that refuses them.
 
 Still to change:
 
