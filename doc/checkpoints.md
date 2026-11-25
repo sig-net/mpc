@@ -426,13 +426,6 @@ The interval is `checkpoint_interval`, a per-chain constant with no per-node ove
    A node tries to store its signatures and attestations in `local` before publishing them, and applies them on catching up after a restart or a rebase.
    Design: nodes exchange only the fields the digest covers, for every checkpoint.
 
-### Node: indexing
-
-5. Hydration (§1 Processed height).
-   Now: Hydration indexes only the blocks it receives live, with no backfill.
-   It loses the events of a block it cannot fetch or verify, and of the blocks between its stored height and the head on every restart or reconnect.
-   It reports catching up as done before it processes any block.
-   Design: every indexer processes every finalised block in order from its processed height.
 ### Node: signatures
 
 8. Issued signatures (§1 Backlog).

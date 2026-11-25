@@ -14,7 +14,6 @@ members = [
     "chain-signatures/chain-solana",
     "chain-signatures/chain-ethereum",
     "chain-signatures/chain-near",
-    "chain-signatures/chain-hydration",
     "chain-signatures/chain-midnight",
 "chain-signatures/chain-tron",
     "chain-signatures/tron-wire",
@@ -122,7 +121,6 @@ mpc-chain-canton = { path = "./chain-signatures/chain-canton" }
 mpc-chain-ethereum = { path = "./chain-signatures/chain-ethereum" }
 mpc-chain-solana = { path = "./chain-signatures/chain-solana" }
 mpc-chain-near = { path = "./chain-signatures/chain-near" }
-mpc-chain-hydration = { path = "./chain-signatures/chain-hydration" }
 mpc-chain-midnight = { path = "./chain-signatures/chain-midnight" }
 mpc-chain-tron = { path = "./chain-signatures/chain-tron" }
 mpc-tron-wire = { path = "./chain-signatures/tron-wire" }
