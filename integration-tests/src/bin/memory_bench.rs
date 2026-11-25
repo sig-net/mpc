@@ -7,6 +7,14 @@ use integration_tests::memory_harness::{
     MemorySummary,
 };
 
+#[cfg(all(
+    feature = "jemalloc",
+    not(target_env = "msvc"),
+    not(target_arch = "wasm32")
+))]
+#[global_allocator]
+static GLOBAL: mpc_node::alloc::Jemalloc = mpc_node::alloc::Jemalloc;
+
 #[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
 #[value(rename_all = "snake_case")]
 pub enum MemoryBenchScenario {
@@ -107,11 +115,31 @@ async fn main() -> anyhow::Result<()> {
         config = config.with_threshold(t);
     }
 
+    let allocator_name = if cfg!(all(
+        feature = "jemalloc",
+        not(target_env = "msvc"),
+        not(target_arch = "wasm32")
+    )) {
+        "tikv-jemallocator (jemalloc)"
+    } else {
+        "system allocator (default)"
+    };
+
     if !args.json {
         println!("==========================================================================================");
         println!("                         MPC NODE MEMORY BENCHMARK HARNESS                                ");
         println!("==========================================================================================");
-        println!("Allocator:          system allocator (default)");
+        println!("Allocator:          {allocator_name}");
+        #[cfg(all(
+            feature = "jemalloc",
+            not(target_env = "msvc"),
+            not(target_arch = "wasm32")
+        ))]
+        {
+            if let Ok((dirty, muzzy)) = mpc_node::alloc::query_decay_ms() {
+                println!("Jemalloc Decay:     dirty_decay_ms={dirty}, muzzy_decay_ms={muzzy}");
+            }
+        }
         println!("Participants:       {}", config.num_participants);
         println!("Threshold:          {}", config.threshold);
         println!("Items / Batch:      {}", config.items_per_batch);
