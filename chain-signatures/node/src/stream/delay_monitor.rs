@@ -1,48 +1,35 @@
-//! Counts each admitted request leg once on this node: in time if its response
-//! is observed on chain before its deadline, delayed otherwise.
+//! Counts a leg from indexing until this node observes its response or its deadline passes.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::num::NonZeroUsize;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use futures_util::StreamExt;
 use lru::LruCache;
-use mpc_primitives::{Chain, ChainConfig as _, RequestKind, SignId};
+use mpc_primitives::{Chain, ChainConfig as _, IndexedSignRequest, RequestKind, SignId};
 use mpc_utils::time::unix_elapsed;
-use tokio::sync::mpsc;
-use tokio::task::JoinHandle;
-use tokio::time::Instant;
-use tokio_util::time::delay_queue::{DelayQueue, Key};
+use tokio::sync::watch;
+use tokio::time::{sleep_until, Instant};
 
 use crate::metrics::requests::{
     record_request_latency_since, SignRequestStep, SIGN_REQUEST_DELAYED,
 };
 
-/// How many late, unanswered legs are remembered.
 const MAX_LATE: usize = 8192;
+type Leg = (Chain, SignId, RequestKind);
 
-type Leg = (SignId, RequestKind);
-
-/// Where and when this node indexed a leg; its latency runs from here.
-#[derive(Clone, Copy)]
-struct Indexed {
-    chain: Chain,
-    unix_timestamp: u64,
-}
-
+#[derive(Debug)]
 struct Watched {
-    key: Key,
-    indexed: Indexed,
+    deadline: Instant,
+    indexed: u64,
 }
 
-enum DelayCommand {
-    Watch {
-        leg: Leg,
-        indexed: Indexed,
-        deadline: Instant,
-    },
-    Responded(Leg),
-    AbortChain(Chain),
+#[derive(Debug)]
+struct State {
+    watched: HashMap<Leg, Watched>,
+    deadlines: BTreeSet<(Instant, Leg)>,
+    // Remember unanswered late legs across a rebase and for their eventual latency.
+    late: LruCache<Leg, u64>,
 }
 
 /// The deadline of a request indexed at `unix_timestamp_indexed`, `None` if it
@@ -56,181 +43,170 @@ fn deadline(unix_timestamp_indexed: u64, expected: Duration) -> Option<Instant> 
     }
 }
 
-/// A single-task monitor counting each request leg as in time or delayed.
-#[derive(Debug)]
+/// Shared by this node's streams. The last sender dropping stops the deadline task.
+#[derive(Clone, Debug)]
 pub struct DelayMonitor {
-    tx: mpsc::UnboundedSender<DelayCommand>,
-    handle: JoinHandle<()>,
-}
-
-impl Drop for DelayMonitor {
-    fn drop(&mut self) {
-        self.handle.abort();
-    }
+    started: Instant,
+    state: Arc<Mutex<State>>,
+    earlier_deadline: watch::Sender<()>,
 }
 
 impl DelayMonitor {
-    /// Spawns the single background delay monitor task.
     pub fn spawn() -> Self {
-        let (tx, rx) = mpsc::unbounded_channel();
-        let handle = tokio::spawn(Self::run(rx));
-        Self { tx, handle }
-    }
-
-    /// Watches a leg until its response is observed or its chain's expected
-    /// response time passes. A deadline already passed counts at once, unless it
-    /// passed before this monitor started: the node was not running to see it.
-    pub fn watch(
-        &self,
-        sign_id: SignId,
-        kind: RequestKind,
-        chain: Chain,
-        unix_timestamp_indexed: u64,
-    ) {
-        let expected = Duration::from_secs(chain.expected_response_time_secs());
-        if let Some(deadline) = deadline(unix_timestamp_indexed, expected) {
-            self.watch_until(sign_id, kind, chain, unix_timestamp_indexed, deadline);
-        }
-    }
-
-    fn watch_until(
-        &self,
-        sign_id: SignId,
-        kind: RequestKind,
-        chain: Chain,
-        unix_timestamp_indexed: u64,
-        deadline: Instant,
-    ) {
-        let _ = self.tx.send(DelayCommand::Watch {
-            leg: (sign_id, kind),
-            indexed: Indexed {
-                chain,
-                unix_timestamp: unix_timestamp_indexed,
-            },
-            deadline,
-        });
-    }
-
-    /// The leg's response was observed on chain.
-    pub fn responded(&self, sign_id: SignId, kind: RequestKind) {
-        let _ = self.tx.send(DelayCommand::Responded((sign_id, kind)));
-    }
-
-    /// Stops watching the chain's legs without counting them; they are watched
-    /// again when re-admitted.
-    pub fn abort_chain(&self, chain: Chain) {
-        let _ = self.tx.send(DelayCommand::AbortChain(chain));
-    }
-
-    async fn run(mut rx: mpsc::UnboundedReceiver<DelayCommand>) {
-        let mut state = DelayState {
-            started: Instant::now(),
+        let (earlier_deadline, changed) = watch::channel(());
+        let state = Arc::new(Mutex::new(State {
             watched: HashMap::new(),
-            queue: DelayQueue::new(),
+            deadlines: BTreeSet::new(),
             late: LruCache::new(NonZeroUsize::new(MAX_LATE).unwrap()),
-        };
-
-        loop {
-            tokio::select! {
-                cmd = rx.recv() => {
-                    let Some(cmd) = cmd else {
-                        break;
-                    };
-                    state.handle_command(cmd);
-                }
-                Some(expired) = state.queue.next(), if !state.queue.is_empty() => {
-                    state.delayed(expired.into_inner());
-                }
-            }
+        }));
+        tokio::spawn(Self::run(state.clone(), changed));
+        Self {
+            started: Instant::now(),
+            state,
+            earlier_deadline,
         }
-
-        tracing::info!("delay monitor shutting down");
     }
-}
 
-/// The monitor task's state.
-struct DelayState {
-    started: Instant,
-    watched: HashMap<Leg, Watched>,
-    queue: DelayQueue<Leg>,
-    /// Legs counted as delayed and not answered yet: a re-admitted one is not
-    /// counted again, and its response records `expired`.
-    late: LruCache<Leg, Indexed>,
-}
+    pub(crate) fn watch(&self, request: &IndexedSignRequest) {
+        self.watch_if(request, || true);
+    }
 
-impl DelayState {
-    fn handle_command(&mut self, cmd: DelayCommand) {
-        match cmd {
-            DelayCommand::Watch {
-                leg,
+    pub(crate) fn watch_if(&self, request: &IndexedSignRequest, enabled: impl FnOnce() -> bool) {
+        let indexed = request
+            .unix_timestamp_indexed
+            .unwrap_or_else(mpc_utils::time::current_unix_timestamp);
+        let expected = Duration::from_secs(request.chain.expected_response_time_secs());
+        if let Some(deadline) = deadline(indexed, expected) {
+            self.register(
+                (request.chain, request.id, request.request_kind()),
                 indexed,
                 deadline,
-            } => {
-                if self.late.contains(&leg) || self.watched.contains_key(&leg) {
-                    return;
-                }
-                if deadline < self.started {
-                    let (sign_id, _) = leg;
-                    tracing::debug!(?sign_id, "deadline passed before the node started");
-                    return;
-                }
-                let key = self.queue.insert_at(leg, deadline.max(Instant::now()));
-                self.watched.insert(leg, Watched { key, indexed });
-            }
-            DelayCommand::Responded(leg) => self.responded(leg),
-            DelayCommand::AbortChain(chain) => {
-                let queue = &mut self.queue;
-                self.watched.retain(|_, watched| {
-                    if watched.indexed.chain != chain {
-                        return true;
-                    }
-                    queue.remove(&watched.key);
-                    false
-                });
-            }
+                enabled,
+            );
         }
     }
 
-    fn responded(&mut self, leg: Leg) {
-        let (_, kind) = leg;
-        let (indexed, status) = if let Some(watched) = self.watched.remove(&leg) {
-            self.queue.remove(&watched.key);
-            (watched.indexed, "in_time")
-        } else if let Some(indexed) = self.late.pop(&leg) {
+    #[cfg(test)]
+    fn watch_until(
+        &self,
+        id: SignId,
+        kind: RequestKind,
+        chain: Chain,
+        indexed: u64,
+        deadline: Instant,
+    ) {
+        self.register((chain, id, kind), indexed, deadline, || true);
+    }
+
+    // Check the source catch-up flag under the same lock as abort_chain: a racing
+    // second leg is either registered before the abort or skipped after the flag clears.
+    fn register(&self, leg: Leg, indexed: u64, deadline: Instant, enabled: impl FnOnce() -> bool) {
+        let mut state = self.state.lock().unwrap();
+        if !enabled()
+            || deadline < self.started
+            || state.late.contains(&leg)
+            || state.watched.contains_key(&leg)
+        {
+            return;
+        }
+        if deadline <= Instant::now() {
+            state.late.put(leg, indexed);
+            drop(state);
+            record_delayed(leg, indexed);
+            return;
+        }
+        let wake = state
+            .deadlines
+            .first()
+            .is_none_or(|(first, _)| deadline < *first);
+        state.watched.insert(leg, Watched { deadline, indexed });
+        state.deadlines.insert((deadline, leg));
+        if wake {
+            self.earlier_deadline.send_replace(());
+        }
+    }
+
+    pub(crate) fn responded(&self, chain: Chain, id: SignId, kind: RequestKind) {
+        let leg = (chain, id, kind);
+        let mut state = self.state.lock().unwrap();
+        let (indexed, status) = if let Some(watch) = state.watched.remove(&leg) {
+            state.deadlines.remove(&(watch.deadline, leg));
+            let in_time = Instant::now() < watch.deadline;
+            drop(state);
+            if in_time {
+                (watch.indexed, "in_time")
+            } else {
+                record_delayed(leg, watch.indexed);
+                (watch.indexed, "expired")
+            }
+        } else if let Some(indexed) = state.late.pop(&leg) {
+            drop(state);
             (indexed, "expired")
         } else {
             return;
         };
-        record_request_latency_since(
-            indexed.chain,
-            SignRequestStep::Total,
-            status,
-            kind,
-            indexed.unix_timestamp,
-        );
+        record_request_latency_since(chain, SignRequestStep::Total, status, kind, indexed);
     }
 
-    fn delayed(&mut self, leg: Leg) {
-        let Some(watched) = self.watched.remove(&leg) else {
-            return;
-        };
-        let (sign_id, kind) = leg;
-        let Indexed {
-            chain,
-            unix_timestamp,
-        } = watched.indexed;
-        tracing::warn!(
-            ?sign_id,
-            ?chain,
-            kind = kind.as_str(),
-            elapsed_secs = unix_elapsed(unix_timestamp).as_secs(),
-            "signature request delayed beyond expected response time"
-        );
-        self.late.put(leg, watched.indexed);
-        SIGN_REQUEST_DELAYED
-            .with_label_values(&[chain.as_str(), kind.as_str()])
-            .inc();
+    pub(crate) fn abort_chain(&self, chain: Chain) {
+        let mut state = self.state.lock().unwrap();
+        let State {
+            watched, deadlines, ..
+        } = &mut *state;
+        watched.retain(|leg, watch| {
+            if leg.0 != chain {
+                return true;
+            }
+            deadlines.remove(&(watch.deadline, *leg));
+            false
+        });
     }
+
+    async fn run(state: Arc<Mutex<State>>, mut changed: watch::Receiver<()>) {
+        loop {
+            // A catch-up burst can leave many deadlines ready in the same scheduler turn.
+            tokio::task::consume_budget().await;
+            let next = {
+                let mut state = state.lock().unwrap();
+                let next = state.deadlines.first().copied();
+                if let Some((deadline, leg)) = next {
+                    if deadline <= Instant::now() {
+                        state.deadlines.pop_first();
+                        let watched = state
+                            .watched
+                            .remove(&leg)
+                            .expect("queued deadline has a watch");
+                        state.late.put(leg, watched.indexed);
+                        drop(state);
+                        record_delayed(leg, watched.indexed);
+                        continue;
+                    }
+                }
+                next
+            };
+            if let Some((deadline, _)) = next {
+                tokio::select! {
+                    _ = sleep_until(deadline) => continue,
+                    changed = changed.changed() => if changed.is_err() { break; }
+                }
+            } else if changed.changed().await.is_err() {
+                break;
+            }
+        }
+    }
+}
+
+fn record_delayed((chain, sign_id, kind): Leg, indexed: u64) {
+    tracing::warn!(
+        ?sign_id,
+        ?chain,
+        kind = kind.as_str(),
+        elapsed_secs = unix_elapsed(indexed).as_secs(),
+        "signature request delayed beyond expected response time"
+    );
+    SIGN_REQUEST_DELAYED
+        .with_label_values(&[chain.as_str(), kind.as_str()])
+        .inc();
 }
 
 #[cfg(test)]
@@ -283,14 +259,14 @@ mod tests {
 
         monitor.watch_until(sign_id(2), kind, chain, 0, after(20));
         settle(5).await;
-        monitor.responded(sign_id(2), kind);
+        monitor.responded(chain, sign_id(2), kind);
         settle(30).await;
 
         assert_eq!(total(chain, kind, "in_time") - in_time_before, 1);
         assert_eq!(delayed_count(chain, kind) - delayed_before, 0);
 
         // A replayed response does not count again.
-        monitor.responded(sign_id(2), kind);
+        monitor.responded(chain, sign_id(2), kind);
         settle(5).await;
         assert_eq!(total(chain, kind, "in_time") - in_time_before, 1);
     }
@@ -304,8 +280,8 @@ mod tests {
 
         monitor.watch_until(sign_id(3), kind, chain, 0, after(10));
         settle(20).await;
-        monitor.responded(sign_id(3), kind);
-        monitor.responded(sign_id(3), kind);
+        monitor.responded(chain, sign_id(3), kind);
+        monitor.responded(chain, sign_id(3), kind);
         settle(5).await;
 
         assert_eq!(delayed_count(chain, kind) - delayed_before, 1);
@@ -321,7 +297,7 @@ mod tests {
 
         monitor.watch_until(sign_id(9), kind, chain, 0, after(10));
         settle(20).await;
-        monitor.responded(sign_id(9), kind);
+        monitor.responded(chain, sign_id(9), kind);
         settle(1).await;
         assert_eq!(delayed_count(chain, kind) - before, 1);
 
@@ -373,7 +349,7 @@ mod tests {
 
         monitor.watch_until(sign_id(6), leg1, chain, 0, after(20));
         monitor.watch_until(sign_id(6), leg2, chain, 0, after(20));
-        monitor.responded(sign_id(6), leg2);
+        monitor.responded(chain, sign_id(6), leg2);
         settle(30).await;
 
         assert_eq!(delayed_count(chain, leg1) - leg1_before, 1);
@@ -389,7 +365,7 @@ mod tests {
         let monitor = DelayMonitor::spawn();
 
         monitor.watch_until(sign_id(7), kind, aborted, 0, after(20));
-        monitor.watch_until(sign_id(8), kind, kept, 0, after(20));
+        monitor.watch_until(sign_id(7), kind, kept, 0, after(20));
         monitor.abort_chain(aborted);
         settle(30).await;
 
@@ -428,5 +404,34 @@ mod tests {
         settle(30).await;
 
         assert_eq!(delayed_count(chain, kind) - before, 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn response_at_deadline_before_timer_runs_counts_as_late() {
+        let (chain, kind) = (Chain::Tron, RequestKind::RespondBidirectional);
+        let (late, expired) = (delayed_count(chain, kind), total(chain, kind, "expired"));
+        let monitor = DelayMonitor::spawn();
+        let id = sign_id(13);
+        monitor.watch_until(id, kind, chain, 0, Instant::now());
+        monitor.responded(chain, id, kind);
+        assert_eq!(delayed_count(chain, kind) - late, 1);
+        assert_eq!(total(chain, kind, "expired") - expired, 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn dropping_the_last_handle_releases_pending_watches() {
+        let monitor = DelayMonitor::spawn();
+        let state = Arc::downgrade(&monitor.state);
+        monitor.watch_until(
+            sign_id(14),
+            RequestKind::Sign,
+            Chain::NEAR,
+            0,
+            after(60_000),
+        );
+        tokio::task::yield_now().await;
+        drop(monitor);
+        tokio::task::yield_now().await;
+        assert!(state.upgrade().is_none());
     }
 }

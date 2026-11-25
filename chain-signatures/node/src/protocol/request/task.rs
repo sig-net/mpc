@@ -249,7 +249,6 @@ pub struct SignTask {
     pub msg: MessageChannel,
     pub rpc: RpcChannel,
     pub signature_timeout: Duration,
-    pub is_proposer: Arc<AtomicBool>,
     /// Posit round, shared with `SignEntry` so it survives a respawn.
     pub round: Arc<AtomicUsize>,
     pub limiter: SignLimiter,

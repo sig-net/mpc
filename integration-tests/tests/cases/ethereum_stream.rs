@@ -417,6 +417,7 @@ async fn test_ethereum_stream_resume_starts_after_checkpoint_height() -> Result<
         indexer,
         StreamContext::new(
             backlog.clone(),
+            mpc_node::stream::DelayMonitor::spawn(),
             sign_tx.clone(),
             rpc.clone(),
             contract_watcher.clone(),
@@ -569,6 +570,7 @@ async fn test_ethereum_stream_linear_catchup_from_checkpoint() -> Result<()> {
         indexer,
         StreamContext::new(
             backlog.clone(),
+            mpc_node::stream::DelayMonitor::spawn(),
             sign_tx.clone(),
             rpc.clone(),
             contract_watcher.clone(),
@@ -586,7 +588,7 @@ async fn test_ethereum_stream_linear_catchup_from_checkpoint() -> Result<()> {
 
     for _ in 0..8 {
         match next_sign_message_within(&mut sign_rx, Duration::from_secs(20)).await? {
-            SignCommand::Responded { sign_id, .. } if sign_id == resolved_sign_id => {
+            SignCommand::Retire(sign_id) if sign_id == resolved_sign_id => {
                 saw_resolved_completion = true;
             }
             SignCommand::Request(req) if req.sign_id() == execution_sign_id => {
@@ -724,6 +726,7 @@ async fn test_ethereum_stream_backfills_late_execution_watcher_after_catchup() -
         indexer,
         StreamContext::new(
             backlog.clone(),
+            mpc_node::stream::DelayMonitor::spawn(),
             sign_tx.clone(),
             rpc.clone(),
             contract_watcher.clone(),

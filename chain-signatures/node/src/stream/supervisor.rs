@@ -333,6 +333,7 @@ async fn run_supervised_with_watchdog<I: ChainIndexer, T: ChainTelemetry>(
                             // survive it. One sent just before the clear is still held
                             // at publish until the source catches up.
                             ctx.backlog.set_caught_up(chain, false);
+                            ctx.delay_monitor.abort_chain(chain);
                             ctx.rpc.abort_checkpoints(chain).await;
                             if let Err(err) =
                                 ctx.sign_tx.send(SignCommand::AbortChain(chain)).await

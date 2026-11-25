@@ -363,6 +363,19 @@ impl Backlog {
             .collect()
     }
 
+    /// Legs whose source-chain response is still outstanding at catch-up, including
+    /// signatures already waiting to be published by another participant.
+    pub(crate) async fn unanswered_legs(&self, chain: Chain) -> Vec<Arc<IndexedSignRequest>> {
+        self.pending(&chain)
+            .read()
+            .await
+            .requests
+            .values()
+            .filter(|entry| entry.awaits_response())
+            .map(|entry| Arc::clone(entry.request()))
+            .collect()
+    }
+
     /// Returns backlog requests for a chain that are still eligible to be
     /// enqueued for processing after catchup completes.
     pub async fn requeueable_requests(&self, chain: Chain) -> Vec<SignEntry<Generating>> {
@@ -943,13 +956,20 @@ impl BacklogEntry {
     /// unanswered marked entry is answered Unviable instead; one already answered still needs
     /// its response signed.
     fn signs_at_catchup(&self) -> bool {
+        self.status.is_pending_generation() && self.awaits_response()
+    }
+
+    fn awaits_response(&self) -> bool {
+        if !self.status.is_pending_generation() && self.status.publishing().is_none() {
+            return false;
+        }
         let signed_first_leg = !self.tx_ids.is_empty()
             && matches!(
                 self.status,
                 SignStatus::Bidirectional(BidirectionalProgress::Initial(_))
             );
         let unanswered_mark = self.unviable_at.is_some() && self.awaits_execution();
-        self.status.is_pending_generation() && !signed_first_leg && !unanswered_mark
+        !signed_first_leg && !unanswered_mark
     }
 
     /// The source-chain facts the digest covers; indexing times are node-local.

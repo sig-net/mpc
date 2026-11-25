@@ -29,15 +29,10 @@ pub type CheckpointWatcher = watch::Receiver<Option<CheckpointDigest>>;
 #[derive(Debug, Clone, PartialEq)]
 pub enum SignCommand {
     Request(SignEntry<Generating>),
-    /// Stop signing a request that ended without a response, e.g. parked.
+    /// Stop all signing for a completed or retired request.
     Retire(SignId),
-    /// The request's response for this leg was observed on chain.
-    Responded {
-        sign_id: SignId,
-        kind: RequestKind,
-    },
     /// A bidirectional leg's response landed on chain, so its task has nothing
-    /// left to do. Unlike [`SignCommand::Responded`] the sign id stays live:
+    /// left to do. Unlike [`SignCommand::Retire`] the sign id stays live:
     /// the next leg reuses it and must not be dropped as already finished.
     ///
     /// Carries the kind of the leg that finished. The next leg is enqueued by
@@ -71,11 +66,7 @@ impl SignCommand {
                     }
                     mpc_chain_near::SignCommand::Completion(sign_id) => {
                         backlog.remove(Chain::NEAR, &sign_id).await;
-                        let responded = Self::Responded {
-                            sign_id,
-                            kind: RequestKind::Sign,
-                        };
-                        if sign_tx.send(responded).await.is_err() {
+                        if sign_tx.send(Self::Retire(sign_id)).await.is_err() {
                             break;
                         }
                     }

@@ -1,8 +1,10 @@
+mod delay_monitor;
+pub use delay_monitor::DelayMonitor;
 pub mod ops;
 pub(crate) mod recovery;
 pub mod supervisor;
 
-use crate::backlog::Backlog;
+use crate::backlog::{Backlog, Generating, SignEntry};
 use crate::mesh::MeshState;
 use crate::node_client::NodeClient;
 use crate::rpc::{ContractStateWatcher, RpcChannel};
@@ -23,6 +25,7 @@ use tokio::sync::{mpsc, watch};
 /// Shared, per-chain dependencies
 pub struct StreamContext {
     pub backlog: Backlog,
+    pub(crate) delay_monitor: DelayMonitor,
     pub sign_tx: mpsc::Sender<SignCommand>,
     pub rpc: RpcChannel,
     pub contract_watcher: ContractStateWatcher,
@@ -44,8 +47,10 @@ pub struct StreamContext {
 }
 
 impl StreamContext {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         backlog: Backlog,
+        delay_monitor: DelayMonitor,
         sign_tx: mpsc::Sender<SignCommand>,
         rpc: RpcChannel,
         contract_watcher: ContractStateWatcher,
@@ -55,6 +60,7 @@ impl StreamContext {
     ) -> Self {
         Self {
             backlog,
+            delay_monitor,
             sign_tx,
             rpc,
             contract_watcher,
@@ -83,15 +89,16 @@ impl StreamContext {
 
     /// Forward a sign command to the signing pipeline, but only when caught up.
     /// Pre-catchup commands are dropped: the backlog retains the request and re-enqueues it on `CatchupCompleted`.
-    pub async fn try_enqueue(&self, cmd: SignCommand) -> anyhow::Result<()> {
+    pub(crate) async fn try_enqueue(&self, entry: SignEntry<Generating>) -> anyhow::Result<()> {
         if self.caught_up {
+            self.delay_monitor.watch(entry.request());
             self.sign_tx
-                .send(cmd)
+                .send(SignCommand::Request(entry))
                 .await
                 .context("sign command channel closed")?;
         } else {
             tracing::debug!(
-                ?cmd,
+                sign_id = ?entry.sign_id(),
                 "dropping sign command until catchup completes; the backlog requeues it on CatchupCompleted"
             );
         }

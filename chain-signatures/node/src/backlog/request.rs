@@ -223,6 +223,7 @@ impl<State> SignEntry<State> {
     async fn responding(
         &self,
         respond_request: Arc<IndexedSignRequest>,
+        observe: impl FnOnce(&IndexedSignRequest),
     ) -> Result<(), BacklogError> {
         let mut pending = self.backlog.pending(&self.chain).write().await;
         let entry = pending
@@ -236,6 +237,9 @@ impl<State> SignEntry<State> {
         if !entry.awaits_execution() {
             return Err(BacklogError::AlreadyAnswered);
         }
+        // Register while holding the write lock: the source stream can settle this leg
+        // as soon as its final request becomes visible.
+        observe(&respond_request);
         entry.status = SignStatus::Bidirectional(BidirectionalProgress::Final {
             respond_request,
             progress: SignProgress::Generating,
@@ -628,6 +632,15 @@ impl SignEntry<Bidirectional<Executing>> {
         outcome: ExecutionOutcome,
         block_height: u64,
     ) -> anyhow::Result<SignEntry<Bidirectional<Final<Generating>>>> {
+        self.advance_observing(outcome, block_height, |_| {}).await
+    }
+
+    pub(crate) async fn advance_observing(
+        self,
+        outcome: ExecutionOutcome,
+        block_height: u64,
+        observe: impl FnOnce(&IndexedSignRequest),
+    ) -> anyhow::Result<SignEntry<Bidirectional<Final<Generating>>>> {
         let chain_ctx = match &self.request.kind {
             SignKind::SignBidirectional(event) => event.chain_ctx.clone(),
             _ => None,
@@ -661,7 +674,8 @@ impl SignEntry<Bidirectional<Executing>> {
         };
 
         let respond_request = Arc::new(sign_request);
-        self.responding(Arc::clone(&respond_request)).await?;
+        self.responding(Arc::clone(&respond_request), observe)
+            .await?;
         Ok(SignEntry {
             chain: self.chain,
             request: respond_request,
