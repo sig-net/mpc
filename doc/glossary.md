@@ -208,9 +208,7 @@ id](#request-id), the same 32 bytes.
 Which MPC root key and derivation format a key uses. See
 [account-derivation.md](account-derivation.md#derivation-path-structure).
 Every request names its key version. The network signs only up to the latest
-key version (`LATEST_MPC_KEY_VERSION`, `signet-primitives/src/lib.rs`), which
-the [governance contract](#governance-contract) reports as
-`latest_key_version`.
+key version (`LATEST_MPC_KEY_VERSION`, `signet-primitives/src/lib.rs`).
 
 ## Mesh
 
