@@ -7,12 +7,12 @@
 
 services:
   redis:
-    image: redis:7-alpine
+    image: redis:7.4.12-alpine@sha256:7f7d30b7fdd09467bac58198a1f166dd69789d348d4fe859cccb20e0cf287fbe
     ports: ["6379:6379"]
     healthcheck: { test: ["CMD", "redis-cli", "ping"], interval: 2s, retries: 10 }
 
   erpc:
-    image: flairsdk/erpc:main-eeee5c0f
+    image: flairsdk/erpc:main-eeee5c0f@sha256:21617c28d105f4963d1a846ea7d906482c105a2452494be7a9c35c201456667f
     ports: ["4000:4000", "4001:4001"]
     volumes: ["./erpc.yaml:/erpc.yaml:ro"]
     entrypoint: ["/erpc-server"]
