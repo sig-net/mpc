@@ -374,7 +374,6 @@ mod tests {
     fn a_response_is_signed_with_the_attestation_key() {
         for (chain, reserved) in [
             (Chain::Solana, "solana response key"),
-            (Chain::Hydration, "hydration response key"),
             (Chain::Canton, "canton response key"),
             (Chain::Midnight, "midnight response key"),
         ] {
@@ -534,7 +533,7 @@ mod tests {
     /// A successful output may itself begin with the error prefix.
     #[test]
     fn success_with_error_prefix_remains_success() {
-        for chain in [Chain::Solana, Chain::Canton, Chain::Hydration] {
+        for chain in [Chain::Solana, Chain::Canton] {
             let request = CompletedTx::new(
                 sample_bidirectional_tx(chain, [0x33; 32]),
                 None,
@@ -701,7 +700,7 @@ mod tests {
             )),
             expected
         );
-        for source_chain in [Chain::Solana, Chain::Hydration, Chain::Canton] {
+        for source_chain in [Chain::Solana, Chain::Canton] {
             let request = CompletedTx::new(
                 sample_bidirectional_tx(source_chain, request_id),
                 None,
@@ -844,7 +843,7 @@ mod tests {
         );
         assert!(is_failed_execution_response(response));
 
-        for chain in [Chain::Solana, Chain::Canton, Chain::Hydration] {
+        for chain in [Chain::Solana, Chain::Canton] {
             assert!(
                 CompletedTx::new(
                     sample_bidirectional_tx(chain, request_id),

@@ -3,8 +3,7 @@ name: Canton Tests
 # On demand only: the Canton suites need a dpm + JDK toolchain and a full
 # integration build per job, which is costly to repeat on every PR. Canton code
 # is still compiled and linted by `just lint` and unit-tested by `just test-unit`
-# in the Unit Tests workflow, the same coverage Hydration gets (it has no
-# integration suite). Run this from the Actions tab for Canton changes.
+# in the Unit Tests workflow. Run this from the Actions tab for Canton changes.
 on:
   workflow_dispatch:
 
@@ -77,13 +76,6 @@ jobs:
           toolchain: 1.100.0
           targets: wasm32-unknown-unknown
 
-      - name: Install Node.js
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
-        with:
-          node-version: '22.23.5'
-          cache: 'npm'
-          cache-dependency-path: chain-signatures/contract-eth/package-lock.json
-
       - name: Install cargo-near
         run: scripts/install-cargo-near.sh
 
@@ -112,9 +104,6 @@ jobs:
           cache-on-failure: false
           # Only save the cache if there are dependency changes or it's not a merge group
           save-if: ${{ github.event_name != 'merge_group' && (github.event_name != 'pull_request' || steps.depchange.outputs.changed == 'true') }}
-
-      - name: Build eth contract
-        run: just build eth
 
       - name: Build integration tests
         run: just build tests

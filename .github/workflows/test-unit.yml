@@ -29,13 +29,6 @@ jobs:
           targets: wasm32-unknown-unknown
           components: clippy, rustfmt
 
-      - name: Install Node.js
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
-        with:
-          node-version: "22.23.5"
-          cache: 'npm'
-          cache-dependency-path: chain-signatures/contract-eth/package-lock.json
-
       - name: Detect dependency changes vs develop
         id: depchange
         if: github.event_name == 'pull_request'
@@ -73,12 +66,7 @@ jobs:
 
       - name: Compile Contract
         run: just build contract
-      - name: Compile eth contract
-        run: just build eth
-      
-      - name: Eth contract unit tests
-        run: just test-eth-unit
-      
+
       - name: Test format
         run: just fmt-check
       

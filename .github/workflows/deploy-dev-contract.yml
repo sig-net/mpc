@@ -23,13 +23,8 @@ jobs:
         uses: taiki-e/install-action@ab49d3c64680143e184118bed66a46419fc15519 # v2.90.5
         with:
           tool: just@1.54.0
-      - name: Use Node.js
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
-        with:
-          node-version: '22.23.5'
-
-      - name: Install near-cli
-        run: 'npm install -g near-cli@4.0.13'
+      - name: Install near-cli-rs
+        run: scripts/install-near-cli.sh
 
       - name: Install Rust (1.100.0)
         uses: dtolnay/rust-toolchain@d5e4d57b030548f435d0befec15ff413a2c60eff # 1.100.0
@@ -63,5 +58,9 @@ jobs:
       - name: Build & Deploy Dev Contract
         run: |
           just build contract
-          (yes || true) | near deploy dev.sig-net.testnet target/near/mpc_contract/mpc_contract.wasm
-          near call dev.sig-net.testnet migrate '{}' --accountId dev.sig-net.testnet --gas 300000000000000
+          near contract deploy dev.sig-net.testnet \
+            use-file target/near/mpc_contract/mpc_contract.wasm without-init-call \
+            network-config testnet sign-with-legacy-keychain send
+          near contract call-function as-transaction dev.sig-net.testnet migrate json-args '{}' \
+            prepaid-gas '300 Tgas' attached-deposit '0 NEAR' sign-as dev.sig-net.testnet \
+            network-config testnet sign-with-legacy-keychain send
