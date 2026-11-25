@@ -1258,7 +1258,7 @@ mod tests {
                 central_address: mpc_chain_midnight::MidnightAddress::from_bytes([0xab; 32]),
                 responder_address: mpc_chain_midnight::MidnightAddress::from_bytes([0xcd; 32]),
                 publisher: mpc_chain_midnight::PublisherConfig {
-                    funding_seed: "ab".repeat(32),
+                    funding_seed: "ab".repeat(32).into(),
                     indexer_ws_url: "ws://127.0.0.1:1/api/v3/graphql/ws".parse().unwrap(),
                     ..Default::default()
                 },
@@ -1298,7 +1298,7 @@ mod tests {
 
     fn sol_config_with_bogus_rpc() -> SolConfig {
         SolConfig {
-            account_sk: mpc_chain_solana::Keypair::new().to_base58_string(),
+            account_sk: mpc_chain_solana::Keypair::new().to_base58_string().into(),
             rpc_http_url: "http://127.0.0.1:1".parse().unwrap(),
             program_address: mpc_chain_solana::Pubkey::new_unique(),
             indexer: Default::default(),

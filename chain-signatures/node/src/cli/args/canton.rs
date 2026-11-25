@@ -1,5 +1,5 @@
 use mpc_chain_canton::{CantonAuthConfig, CantonConfig};
-use secrecy::{ExposeSecret as _, SecretString};
+use secrecy::SecretString;
 use url::Url;
 
 /// CLI arguments for the Canton indexer.
@@ -97,7 +97,7 @@ impl CantonArgs {
         let auth = CantonAuthConfig {
             token_url: self.canton_oidc_token_url?,
             client_id: self.canton_oidc_client_id?,
-            client_secret: self.canton_oidc_client_secret?.expose_secret().to_string(),
+            client_secret: self.canton_oidc_client_secret?,
             audience: self.canton_oidc_audience?,
             scope: self.canton_oidc_scope,
         };

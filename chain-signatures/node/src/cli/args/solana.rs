@@ -1,5 +1,5 @@
 use mpc_chain_solana::{Keypair, Pubkey, SolConfig, SolIndexerConfig};
-use secrecy::{ExposeSecret as _, SecretString};
+use secrecy::SecretString;
 use url::Url;
 
 /// Configures Solana indexer.
@@ -30,17 +30,18 @@ pub struct SolArgs {
 }
 
 /// The Solana client loads the key with a call that panics on a malformed key,
-/// so clap checks it first.
-fn parse_account_sk(value: &str) -> Result<String, String> {
+/// so clap checks it first. Keep the parsed key secret, and return a constant
+/// error: base58 decoding errors can quote the offending input.
+fn parse_account_sk(value: &str) -> Result<SecretString, String> {
     Keypair::try_from_base58_string(value)
-        .map(|_| value.to_owned())
-        .map_err(|e| e.to_string())
+        .map(|_| value.to_owned().into())
+        .map_err(|_| "invalid solana account sk".to_owned())
 }
 
 impl SolArgs {
     pub fn into_config(self) -> Option<SolConfig> {
         Some(SolConfig {
-            account_sk: self.sol_account_sk?.expose_secret().to_string(),
+            account_sk: self.sol_account_sk?,
             rpc_http_url: self.sol_rpc_http_url?,
             program_address: self.sol_program_address?,
             indexer: SolIndexerConfig::default(),
