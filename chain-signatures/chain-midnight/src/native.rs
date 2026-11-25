@@ -1996,7 +1996,7 @@ mod tests {
         // Already due: the proof is still running when the deadline is checked.
         let error = prove_blocking(Instant::now(), || async {
             std::thread::sleep(Duration::from_millis(200));
-            Ok::<_, std::convert::Infallible>(())
+            Ok::<_, !>(())
         })
         .await
         .unwrap_err();
