@@ -28,7 +28,6 @@ use cluster::spawner::ClusterSpawner;
 use mpc_chain_canton::CantonConfig;
 use mpc_chain_ethereum::utils::test::deploy_chain_signatures;
 use mpc_chain_ethereum::EthConfig;
-use mpc_chain_hydration::HydrationConfig;
 use mpc_chain_midnight::MidnightConfig;
 use mpc_chain_solana::SolConfig;
 use mpc_contract::config::ProtocolConfig;
@@ -69,7 +68,6 @@ pub struct NodeConfig {
     pub protocol: ProtocolConfig,
     pub eth: Option<EthConfig>,
     pub sol: Option<SolConfig>,
-    pub hydration: Option<HydrationConfig>,
     pub canton: Option<CantonConfig>,
     pub midnight: Option<MidnightConfig>,
 }
@@ -82,7 +80,6 @@ impl Default for NodeConfig {
             protocol: ProtocolConfig::new(16, 16, 2),
             eth: None,
             sol: None,
-            hydration: None,
             canton: None,
             midnight: None,
         }

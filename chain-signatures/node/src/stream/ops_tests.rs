@@ -3088,12 +3088,7 @@ async fn recovered_midnight_final_publication_requires_canonical_metadata() {
 /// could not be interpreted. No sign request is queued.
 #[tokio::test]
 async fn decode_failure_parks_request_and_preserves_source_checkpoint() {
-    for source_chain in [
-        Chain::Midnight,
-        Chain::Solana,
-        Chain::Canton,
-        Chain::Hydration,
-    ] {
+    for source_chain in [Chain::Midnight, Chain::Solana, Chain::Canton] {
         for caught_up in [false, true] {
             let backlog = Backlog::new();
             let tx = test_bidirectional_tx(97, source_chain, Chain::Ethereum);
@@ -3503,7 +3498,6 @@ async fn unobserved_response_settles_when_it_verifies() {
         ),
         (Chain::Solana, success(), false, "signed", true),
         (Chain::Solana, success(), true, "signed", true),
-        (Chain::Hydration, success(), false, "signed", true),
         (Chain::Canton, success(), false, "signed", true),
         (Chain::Solana, success(), false, "altered", false),
     ] {
@@ -3580,13 +3574,13 @@ async fn final_response_latency_follows_the_recorded_outcome() {
     let root_sk = k256::SecretKey::from_slice(&[1; 32]).unwrap();
     let count = |status| {
         crate::metrics::requests::request_latency_count(
-            Chain::Hydration,
+            Chain::Canton,
             SignRequestStep::BidirectionalTotal,
             status,
             RequestKind::RespondBidirectional,
         )
     };
-    // No other test records a Hydration `bidirectional_total` latency, so the counts below
+    // No other test records a Canton `bidirectional_total` latency, so the counts below
     // are this test's. The cases share one test for the same reason.
     for (seed, outcome, status) in [
         (
@@ -3598,7 +3592,7 @@ async fn final_response_latency_follows_the_recorded_outcome() {
         ),
         (108, ExecutionOutcome::Failed, "execution_failed"),
     ] {
-        let tx = test_bidirectional_tx(seed, Chain::Hydration, Chain::Ethereum);
+        let tx = test_bidirectional_tx(seed, Chain::Canton, Chain::Ethereum);
         let backlog = Backlog::new();
         backlog.insert_mock_executing(&tx).await;
         let (sign_tx, mut sign_rx) = mpsc::channel(4);
@@ -3615,7 +3609,7 @@ async fn final_response_latency_follows_the_recorded_outcome() {
             attestation: None,
             request_id: tx.request_id,
             signature: mpc_crypto::generate_signature(&root_sk, &entry.request().args),
-            chain: Chain::Hydration,
+            chain: Chain::Canton,
         };
         let (ok, failed) = (count("ok"), count("execution_failed"));
 
