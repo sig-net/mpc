@@ -3,7 +3,6 @@
 //! Create an isolated MPC network for testing without hitting a real network.
 
 pub mod builder;
-pub mod checkpoint_settlement;
 pub mod fixture_interface;
 pub mod fixture_tasks;
 pub mod input;
