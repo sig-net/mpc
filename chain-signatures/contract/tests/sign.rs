@@ -4,7 +4,9 @@ use common::{
 };
 
 use mpc_contract::errors;
-use mpc_contract::primitives::{CandidateInfo, Read, SignRequest, View};
+use mpc_contract::primitives::{
+    CandidateInfo, CheckpointDigest as StoredCheckpoint, Read, SignRequest, View,
+};
 use mpc_primitives::CheckpointDigest;
 use near_workspaces::types::{AccountId, NearToken};
 use signet_primitives::{Chain, Signature, LATEST_MPC_KEY_VERSION};
@@ -389,14 +391,14 @@ async fn test_checkpoint_voting() -> anyhow::Result<()> {
         .args_json(serde_json::json!({ "reads": [Read::Checkpoints] }))
         .await?
         .json()?;
-    let checkpoints: HashMap<Chain, CheckpointDigest> = views
+    let checkpoints: HashMap<String, StoredCheckpoint> = views
         .into_iter()
         .find_map(|view| match view {
             View::Checkpoints(checkpoints) => Some(checkpoints),
             _ => None,
         })
         .expect("read should return a Checkpoints view");
-    assert_eq!(checkpoints.get(&Chain::Solana), Some(&checkpoint));
+    assert_eq!(checkpoints.get("Solana"), Some(&checkpoint.into()));
 
     let latest: Option<CheckpointDigest> = contract
         .view("latest_checkpoint")
@@ -431,15 +433,15 @@ async fn test_checkpoint_voting() -> anyhow::Result<()> {
         .args_json(serde_json::json!({ "reads": [Read::Checkpoints] }))
         .await?
         .json()?;
-    let checkpoints: HashMap<Chain, CheckpointDigest> = views
+    let checkpoints: HashMap<String, StoredCheckpoint> = views
         .into_iter()
         .find_map(|view| match view {
             View::Checkpoints(checkpoints) => Some(checkpoints),
             _ => None,
         })
         .expect("read should return a Checkpoints view");
-    assert_eq!(checkpoints.get(&Chain::Solana), Some(&checkpoint));
-    assert_eq!(checkpoints.get(&Chain::Ethereum), Some(&eth_checkpoint));
+    assert_eq!(checkpoints.get("Solana"), Some(&checkpoint.into()));
+    assert_eq!(checkpoints.get("Ethereum"), Some(&eth_checkpoint.into()));
     for (chain, cp) in &checkpoints {
         assert_eq!(
             *chain, cp.chain,

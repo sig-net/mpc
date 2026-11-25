@@ -25,6 +25,8 @@ pub enum CheckpointError {
     CheckpointBehind,
     #[error("A conflicting checkpoint already exists for this chain and height.")]
     ConflictingCheckpoint,
+    #[error("The chain name is too long.")]
+    ChainNameTooLong,
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, thiserror::Error)]

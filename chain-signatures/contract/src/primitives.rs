@@ -1,4 +1,3 @@
-pub use mpc_primitives::CheckpointDigest;
 pub use signet_primitives::{Chain, SignRequest};
 
 use crate::config::ProtocolConfig;
@@ -23,6 +22,49 @@ pub enum StorageKey {
     LatestCheckpoints,
     LatestCheckpointDigests,
     Candidates,
+}
+
+/// A checkpoint digest submitted for consensus voting and tracked by the contract.
+///
+/// `chain` is the chain's name, `Chain`'s JSON form, so the JSON matches the
+/// digest nodes submit. The contract stores it as a string: it holds
+/// checkpoints for any chain, and adding or removing a chain never changes how
+/// the others decode.
+#[derive(
+    BorshDeserialize,
+    BorshSerialize,
+    Serialize,
+    Deserialize,
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+)]
+#[borsh(crate = "near_sdk::borsh")]
+#[serde(crate = "near_sdk::serde")]
+pub struct CheckpointDigest {
+    pub chain: String,
+    pub height: u64,
+    pub digest: [u8; 32],
+}
+
+impl CheckpointDigest {
+    pub fn new(chain: Chain, height: u64, digest: [u8; 32]) -> Self {
+        Self {
+            chain: chain.to_string(),
+            height,
+            digest,
+        }
+    }
+}
+
+impl From<mpc_primitives::CheckpointDigest> for CheckpointDigest {
+    fn from(checkpoint: mpc_primitives::CheckpointDigest) -> Self {
+        Self::new(checkpoint.chain, checkpoint.height, checkpoint.digest)
+    }
 }
 
 /// One chain's entry in a checkpoint reset.
@@ -61,7 +103,7 @@ pub enum Read {
 pub enum View {
     State(Box<ProtocolContractStateView>),
     Config(ProtocolConfig),
-    Checkpoints(HashMap<Chain, CheckpointDigest>),
+    Checkpoints(HashMap<String, CheckpointDigest>),
 }
 
 /// The index into calling the YieldResume feature of NEAR. This will allow to resume

@@ -691,8 +691,11 @@ async fn update_contract_data(
     }
 
     if let Some(signed_checkpoints) = checkpoints_view {
+        // Keyed by chain name: names this node does not know are skipped.
         for (chain, tx) in checkpoints {
-            let new_digest = signed_checkpoints.get(&chain).copied();
+            let new_digest = signed_checkpoints
+                .get(chain.as_str())
+                .map(|cp| CheckpointDigest::new(chain, cp.height, cp.digest));
             tx.send_if_modified(|old| {
                 if *old == new_digest {
                     return false;
