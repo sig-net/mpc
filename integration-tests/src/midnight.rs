@@ -28,9 +28,6 @@ const NODE_IMAGE: (&str, &str) = ("midnightntwrk/midnight-node", "2.1.101");
 const INDEXER_IMAGE: (&str, &str) = ("midnightntwrk/indexer-standalone", "4.4.101");
 const PROOF_IMAGE: (&str, &str) = ("midnightntwrk/proof-server", "9.0.1");
 
-/// The key version the real-stack caller contract files its requests at.
-pub const CALLER_KEY_VERSION: u32 = 1;
-
 /// Set to a deployed network's node RPC URL to run the cases there instead of on a local node
 /// and indexer; the other `MPC_MIDNIGHT_E2E_*` variables then become required.
 const DEPLOYED_NODE_URL_ENV: &str = "MPC_MIDNIGHT_E2E_NODE_URL";
@@ -295,7 +292,7 @@ impl MidnightContext {
             caller_bytes.len()
         );
         let epsilon = mpc_crypto::derive_epsilon(
-            CALLER_KEY_VERSION,
+            mpc_primitives::LATEST_MPC_KEY_VERSION,
             mpc_primitives::Chain::Midnight,
             mpc_crypto::KeyPurpose::Attestation {
                 sender: &hex::encode(caller_bytes),
@@ -310,6 +307,7 @@ impl MidnightContext {
             .request(&serde_json::json!({
                 "op": "initialise",
                 "responsePublicKey": response_public_key,
+                "keyVersion": mpc_primitives::LATEST_MPC_KEY_VERSION,
             }))
             .await
             .context("initialising the Midnight caller with the MPC response key")?;

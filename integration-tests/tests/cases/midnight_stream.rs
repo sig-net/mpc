@@ -9,7 +9,7 @@ use alloy::rpc::types::{TransactionInput, TransactionReceipt, TransactionRequest
 use anyhow::Context as _;
 use integration_tests::cluster;
 use integration_tests::midnight::{
-    AdversarialScenario, CallPlacement, MidnightContext, PlacementScenario, CALLER_KEY_VERSION,
+    AdversarialScenario, CallPlacement, MidnightContext, PlacementScenario,
 };
 use k256::elliptic_curve::sec1::ToEncodedPoint as _;
 use mpc_chain_integration_core::utils::test::ChainIndexerStream;
@@ -704,7 +704,7 @@ fn expect_executed_attestation(
         hex::encode(request_id)
     );
     let metadata = AttestationMetadata {
-        key_version: CALLER_KEY_VERSION,
+        key_version: mpc_primitives::LATEST_MPC_KEY_VERSION,
         block_height,
         outcome_kind: AttestationOutcomeKind::Executed,
     };
