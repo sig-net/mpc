@@ -227,7 +227,7 @@ mod tests {
     use crate::protocol::Chain;
     use k256::elliptic_curve::sec1::FromEncodedPoint;
     use k256::{AffinePoint, EncodedPoint};
-    use mpc_primitives::LATEST_MPC_KEY_VERSION;
+    use mpc_primitives::{LATEST_MPC_KEY_VERSION, LEGACY_MPC_KEY_VERSION_0};
 
     /// Recorded mainnet USDT transfer (chain-tron fixture `usdt-transfer-1.json`)
     const RAW_HEX: &str = "0a02db6f220815ff9c9c504ad4a8409a80f5a491345aae01081f12a9010a31747970652e676f6f676c65617069732e636f6d2f70726f746f636f6c2e54726967676572536d617274436f6e747261637412740a154120eb85916a10d2c6542613e4c9517b5e99b2dee9121541a614f803b6fd780986a42c78ec9c7f77e6ded13c2244a9059cbb000000000000000000000000d9e02baf48ed306afc63cfa816a2b6be8442036a0000000000000000000000000000000000000000000000000000000008f428f870bad8e2a49134900180e1eb17";
@@ -317,9 +317,9 @@ mod tests {
     fn validate_refuses_key_versions_without_a_bidirectional_key() {
         for (chain, key_version, accepted) in [
             (Chain::Solana, LATEST_MPC_KEY_VERSION, true),
-            (Chain::Solana, 0, false),
-            (Chain::Hydration, 0, false),
-            (Chain::Canton, 0, false),
+            (Chain::Solana, LEGACY_MPC_KEY_VERSION_0, false),
+            (Chain::Hydration, LEGACY_MPC_KEY_VERSION_0, false),
+            (Chain::Canton, LEGACY_MPC_KEY_VERSION_0, false),
             (Chain::Solana, LATEST_MPC_KEY_VERSION + 1, false),
         ] {
             let mut event = solana_event(Chain::Ethereum);

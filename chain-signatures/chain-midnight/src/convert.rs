@@ -59,7 +59,7 @@ pub fn generate_sign_request(
     let mut response_key_path = [0; 32];
     response_key_path[..21].copy_from_slice(b"midnight response key");
     anyhow::ensure!(
-        key_version >= 2 || record.path != response_key_path,
+        key_version >= mpc_primitives::MPC_KEY_VERSION_2 || record.path != response_key_path,
         "path is reserved for the MPC response key"
     );
 
@@ -355,7 +355,7 @@ mod tests {
 
         // From key version 2 the bytes are an ordinary path.
         record.path = ascii_padded(reserved.as_bytes());
-        record.key_version = 2;
+        record.key_version = u8::try_from(mpc_primitives::MPC_KEY_VERSION_2).unwrap();
         let request = generate_sign_request(
             &record,
             &READ_ADDRESS,
@@ -370,7 +370,7 @@ mod tests {
         assert_eq!(
             request.args.epsilon,
             signet_crypto::derive_epsilon(
-                2,
+                mpc_primitives::MPC_KEY_VERSION_2,
                 Chain::Midnight,
                 signet_crypto::KeyPurpose::Bidirectional {
                     sender: &READ_ADDRESS.to_hex(),
@@ -490,7 +490,7 @@ mod tests {
     #[test]
     fn generate_sign_request_bounds_key_versions() {
         let mut record = caller_record();
-        record.key_version = 0;
+        record.key_version = u8::try_from(mpc_primitives::LEGACY_MPC_KEY_VERSION_0).unwrap();
         let err = generate_sign_request(
             &record,
             &READ_ADDRESS,

@@ -74,7 +74,7 @@ pub(crate) fn published_midnight_payload(
         AttestationError::NonemptyFailureOutput
     );
     let metadata = AttestationMetadata {
-        key_version: 0,
+        key_version: mpc_primitives::LATEST_MPC_KEY_VERSION,
         block_height: published.block_height,
         outcome_kind: published.outcome_kind,
     };
@@ -377,7 +377,9 @@ mod tests {
             (Chain::Canton, "canton response key"),
             (Chain::Midnight, "midnight response key"),
         ] {
-            for key_version in 1..=mpc_primitives::LATEST_MPC_KEY_VERSION {
+            for key_version in
+                mpc_primitives::LEGACY_MPC_KEY_VERSION_1..=mpc_primitives::LATEST_MPC_KEY_VERSION
+            {
                 let mut tx = (*sample_bidirectional_tx(chain, [0x32; 32])).clone();
                 tx.key_version = key_version;
                 let sender = tx.sender_string().unwrap();
@@ -394,7 +396,11 @@ mod tests {
                     request.args.epsilon, attestation,
                     "{chain:?} v{key_version}"
                 );
-                let path = if key_version < 2 { reserved } else { "" };
+                let path = if key_version < mpc_primitives::MPC_KEY_VERSION_2 {
+                    reserved
+                } else {
+                    ""
+                };
                 assert_eq!(request.args.path, path, "{chain:?} v{key_version}");
             }
         }
@@ -786,7 +792,7 @@ mod tests {
 
         assert_eq!(request.chain, Chain::Midnight);
         assert_eq!(request.args.payload, expected_payload);
-        let path = if request.args.key_version < 2 {
+        let path = if request.args.key_version < mpc_primitives::MPC_KEY_VERSION_2 {
             "midnight response key"
         } else {
             ""
@@ -811,7 +817,7 @@ mod tests {
         assert_eq!(response.attestation, Some(metadata));
         assert!(response.output.is_empty());
         assert_eq!(response.origin_indexed_at, Some(100));
-        let path = if request.args.key_version < 2 {
+        let path = if request.args.key_version < mpc_primitives::MPC_KEY_VERSION_2 {
             "midnight response key"
         } else {
             ""
@@ -954,7 +960,7 @@ mod tests {
     #[test]
     fn claims_attestation_key_refuses_requests_on_the_reserved_path() {
         let mut tx = (*sample_bidirectional_tx(Chain::Solana, [0x30; 32])).clone();
-        tx.key_version = 1;
+        tx.key_version = mpc_primitives::LEGACY_MPC_KEY_VERSION_1;
         let mut response = CompletedTx::new(Arc::new(tx), None, None, 456, [0; 32])
             .create_sign_request_from_serialized_output(vec![1; 32])
             .unwrap();
@@ -972,11 +978,11 @@ mod tests {
             (*crate::backlog::mock::mock_bidi_request(SignId::new([0x31; 32]), Chain::Solana))
                 .clone();
         leg_one.args.path = "solana response key".to_string();
-        leg_one.args.key_version = 1;
+        leg_one.args.key_version = mpc_primitives::LEGACY_MPC_KEY_VERSION_1;
         assert!(claims_attestation_key(&leg_one));
 
         let mut v2 = attack.clone();
-        v2.args.key_version = 2;
+        v2.args.key_version = mpc_primitives::MPC_KEY_VERSION_2;
         assert!(
             !claims_attestation_key(&v2),
             "from key version 2 the path is ordinary"
