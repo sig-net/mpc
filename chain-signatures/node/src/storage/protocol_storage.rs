@@ -383,7 +383,7 @@ impl<A: ProtocolArtifact> ProtocolStorage<A, Ready> {
             -- Read and delete the holders set
             local holders_key = artifact_key .. ':holders:' .. artifact_id
             local holders = redis.call("SMEMBERS", holders_key)
-            redis.call("DEL", holders_key)
+            redis.call("UNLINK", holders_key)
 
             return {artifact, holders}
         "#;
@@ -545,7 +545,7 @@ impl<A: ProtocolArtifact> ProtocolStorage<A, Ready> {
 
             local holders_key = artifact_key .. ':holders:' .. artifact_id
             local holders = redis.call("SMEMBERS", holders_key)
-            redis.call("DEL", holders_key)
+            redis.call("UNLINK", holders_key)
 
             return {artifact, holders}
         "#;
@@ -631,7 +631,7 @@ impl<A: ProtocolArtifact> ProtocolStorage<A, Ready> {
                         local count = redis.call('SCARD', holders_key)
                         if count < threshold then
                             redis.call('HDEL', artifact_key, id)
-                            redis.call('DEL', holders_key)
+                            redis.call('UNLINK', holders_key)
                             redis.call('SREM', owner_key, id)
                             table.insert(removed, id)
                         else
@@ -774,7 +774,7 @@ impl<A: ProtocolArtifact, Phase> ProtocolStorage<A, Phase> {
                     redis.call("HDEL", artifact_key, unpack(outdated))
                     -- also delete holders sets for each outdated artifact
                     for _, oid in ipairs(outdated) do
-                        redis.call("DEL", artifact_key .. ':holders:' .. oid)
+                        redis.call("UNLINK", artifact_key .. ':holders:' .. oid)
                     end
                     -- clear the outdated list for the next batch
                     outdated = {}
@@ -787,7 +787,7 @@ impl<A: ProtocolArtifact, Phase> ProtocolStorage<A, Phase> {
                 redis.call("HDEL", artifact_key, unpack(outdated))
                 -- also delete holders sets for each outdated artifact
                 for _, oid in ipairs(outdated) do
-                    redis.call("DEL", artifact_key .. ':holders:' .. oid)
+                    redis.call("UNLINK", artifact_key .. ':holders:' .. oid)
                 end
             end
 
@@ -808,7 +808,7 @@ impl<A: ProtocolArtifact, Phase> ProtocolStorage<A, Phase> {
                         redis.call("HDEL", artifact_key, id)
                     end
                     redis.call("SREM", owner_key, id)
-                    redis.call("DEL", holders_key)
+                    redis.call("UNLINK", holders_key)
                     table.insert(not_found, id)
                 end
             end
@@ -873,7 +873,7 @@ impl<A: ProtocolArtifact, Phase> ProtocolStorage<A, Phase> {
 
             -- Store holders in a dedicated Redis set
             local holders_key = artifact_key .. ':holders:' .. artifact_id
-            redis.call("DEL", holders_key)
+            redis.call("UNLINK", holders_key)
             if num_holders > 0 then
                 redis.call("SADD", holders_key, unpack(ARGV, 4, 3 + num_holders))
             end
@@ -1013,15 +1013,15 @@ impl<A: ProtocolArtifact, Phase> ProtocolStorage<A, Phase> {
             local owner_keys = redis.call("SMEMBERS", KEYS[1])
             local artifact_ids = redis.call("HKEYS", artifact_key)
 
-            -- One DEL per key: unpack() of a large table fails in Redis Lua.
+            -- One UNLINK per key: unpack() of a large table fails in Redis Lua.
             for _, key in ipairs(KEYS) do
-                redis.call("DEL", key)
+                redis.call("UNLINK", key)
             end
             for _, key in ipairs(owner_keys) do
-                redis.call("DEL", key)
+                redis.call("UNLINK", key)
             end
             for _, id in ipairs(artifact_ids) do
-                redis.call("DEL", artifact_key .. ':holders:' .. id)
+                redis.call("UNLINK", artifact_key .. ':holders:' .. id)
             end
         "#;
 
