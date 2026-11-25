@@ -31,7 +31,10 @@ use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 
 /// Max pending (unconfirmed) checkpoints per chain before stalling.
-pub const MAX_PENDING_CHECKPOINTS: usize = 32;
+/// Steady-state unsettled backlog oscillates around one boundary per chain
+/// (settled within one contract poll), so this stays clear of normal operation while
+/// bounding how far a node indexes past its base, and thus restart re-index distance.
+pub const MAX_PENDING_CHECKPOINTS: usize = 8;
 
 /// Base delay before storing a checkpoint is retried; doubles up to `MAX_PERSIST_RETRY_DELAY`.
 const PERSIST_RETRY_DELAY: Duration = Duration::from_secs(1);

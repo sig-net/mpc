@@ -5,12 +5,13 @@ use crate::mpc_fixture::fixture_interface::SharedOutput;
 use crate::mpc_fixture::mock_chain::MockChain;
 use crate::mpc_fixture::mock_stream::{MockIndexer, MockStream};
 use cait_sith::protocol::Participant;
-use mpc_chain_integration_core::NoopChainTelemetry;
+use mpc_chain_integration_core::{ChainIndexer, NoopChainTelemetry};
 use mpc_keys::hpke::Ciphered;
 use mpc_node::mesh::MeshState;
 use mpc_node::protocol::message::{MessageOutbox, SendMessage, SignedMessage};
 use mpc_node::rpc::RpcAction;
 use mpc_node::stream::{supervisor::run_supervised, StreamContext};
+use mpc_primitives::CheckpointDigest;
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -22,6 +23,7 @@ pub type MessageFilter = Box<dyn FnMut(&SendMessage) -> bool + Send>;
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn test_mock_network(
+    checkpoint_tx: watch::Sender<Option<CheckpointDigest>>,
     routing_table: HashMap<Participant, Sender<Ciphered>>,
     shared_output: &SharedOutput,
     mut outbox: MessageOutbox,
@@ -102,6 +104,18 @@ pub(super) fn test_mock_network(
                         actions_log.insert(action_str);
                         drop(actions_log);
                         actions_changed.notify_one();
+                    }
+
+                    // Stand in for the contract: settle each node's own vote so the
+                    // backlog base advances instead of filling the pending cap.
+                    if let RpcAction::VoteCheckpoint { checkpoint, .. } = &rpc {
+                        if checkpoint.chain == MockIndexer::CHAIN {
+                            checkpoint_tx.send_if_modified(|old| {
+                                if *old == Some(*checkpoint) { return false; }
+                                *old = Some(*checkpoint);
+                                true
+                            });
+                        }
                     }
 
                     if let Some(chain) = &mock_chain {

@@ -565,6 +565,7 @@ impl MpcFixtureNodeBuilder {
         // handle outbox messages manually, we want them before they are
         // encrypted and we want to send them directly to other node's inboxes
         let _mock_network_handle = fixture_tasks::test_mock_network(
+            checkpoint_tx.clone(),
             context.routing_table,
             shared_output,
             self.messaging.outbox,
