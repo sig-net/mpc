@@ -17,24 +17,20 @@ use crate::storage::presignature_storage::{PresignatureReservation, Presignature
 use crate::storage::{Initializing, PresignatureStorage};
 use crate::types::SignCommand;
 
-use mpc_utils::{
-    task::JoinMap,
-    time::{unix_elapsed, TimeoutBudget},
-};
+use mpc_utils::{task::JoinMap, time::TimeoutBudget};
 
 use cait_sith::protocol::Participant;
 use enum_map::EnumMap;
 use lru::LruCache;
-use mpc_primitives::{ChainConfig as _, IndexedSignRequest, RequestKind, SignId};
+use mpc_primitives::{IndexedSignRequest, RequestKind, SignId};
 use std::collections::{BTreeSet, HashMap};
 use std::num::NonZeroUsize;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, watch, OwnedSemaphorePermit, Semaphore};
 use tokio::task::JoinHandle;
 
-mod delay_monitor;
 mod limiter;
 mod mailbox;
 mod metrics;
@@ -43,7 +39,6 @@ mod posit;
 mod state;
 mod task;
 
-use delay_monitor::DelayMonitor;
 use limiter::SignLimiter;
 use task::SignTask;
 
@@ -164,17 +159,14 @@ impl DeadKinds {
     }
 }
 
-/// A retained in-flight request. `is_proposer` is shared with the current
-/// task incarnation and read by the deadline watcher; `round` carries the
-/// posit round across respawns.
+/// A retained request and its posit round across respawns.
 struct SignEntry {
     entry: backlog::SignEntry<Generating>,
-    is_proposer: Arc<AtomicBool>,
     round: Arc<AtomicUsize>,
 }
 
 /// Router and lifecycle owner for all in-flight sign tasks: one task per
-/// `sign_id`, plus the posit mailboxes, delayed-response watchers, and dedup state
+/// `sign_id`, plus the posit mailboxes and dedup state
 /// that outlive individual tasks. (TODO: needs refactoring)
 pub struct SignatureSpawner {
     contract: ContractStateWatcher,
@@ -186,8 +178,6 @@ pub struct SignatureSpawner {
     /// task spawns. Segregating by RequestKind prevents second leg posits from entering
     /// first leg mailboxes.
     posit_mailboxes: HashMap<SignTaskKey, Arc<PositMailbox>>,
-    /// Monitor alerting when signature requests exceed their expected response time.
-    delay_monitor: DelayMonitor,
     /// In-flight requests: enables chain-scoped abort and respawning.
     requests: HashMap<SignId, SignEntry>,
     /// Recently completed/aborted sign IDs and leg kinds; prevents late peer posit messages from recreating orphan mailboxes.
@@ -219,7 +209,6 @@ impl SignatureSpawner {
             presignatures,
             tasks: JoinMap::new(),
             posit_mailboxes: HashMap::new(),
-            delay_monitor: DelayMonitor::spawn(),
             requests: HashMap::new(),
             dead_ids: LruCache::new(NonZeroUsize::new(MAX_DEAD_IDS).unwrap()),
             mesh_state,
@@ -235,7 +224,7 @@ impl SignatureSpawner {
         crate::metrics::requests::SIGN_QUEUE_SIZE.set(self.tasks.len() as i64);
     }
 
-    /// Admit a request: retain it, start its deadline watcher, and spawn its
+    /// Admit a request: retain it and spawn its
     /// task (held until `spawn_tasks` when governance is not running).
     fn add_request(
         &mut self,
@@ -248,34 +237,13 @@ impl SignatureSpawner {
         // Ensure we don't retain the dead tag from a prior incarnation of this
         // sign ID (e.g. after regression recovery re-queues a completed request).
         self.unmark_dead(sign_id, kind);
-        let is_proposer = Arc::new(AtomicBool::new(false));
-        let chain = entry.chain();
         let request = Arc::clone(entry.request());
         self.requests.insert(
             sign_id,
             SignEntry {
                 entry,
-                is_proposer: Arc::clone(&is_proposer),
                 round: Arc::new(AtomicUsize::new(0)),
             },
-        );
-
-        // Watcher that increments the delayed metric if not completed within the expected response time.
-        // An adopted request has no indexing time, so its budget starts here.
-        let unix_timestamp_indexed = request
-            .unix_timestamp_indexed
-            .unwrap_or_else(mpc_utils::time::current_unix_timestamp);
-        let expected_response_time_secs = chain.expected_response_time_secs();
-        let already_elapsed = unix_elapsed(unix_timestamp_indexed);
-        let remaining_time =
-            Duration::from_secs(expected_response_time_secs).saturating_sub(already_elapsed);
-        self.delay_monitor.watch(
-            sign_id,
-            chain,
-            request.request_kind(),
-            unix_timestamp_indexed,
-            remaining_time,
-            Arc::clone(&is_proposer),
         );
 
         if !governance.is_running {
@@ -295,16 +263,10 @@ impl SignatureSpawner {
         let sign_id = request.id;
         tracing::info!(?sign_id, "spawning signature task");
 
-        let (is_proposer, round, entry) = self
+        let (round, entry) = self
             .requests
             .get(&sign_id)
-            .map(|q| {
-                (
-                    Arc::clone(&q.is_proposer),
-                    Arc::clone(&q.round),
-                    q.entry.clone(),
-                )
-            })
+            .map(|q| (Arc::clone(&q.round), q.entry.clone()))
             .expect("sign request entry must exist when spawning its task");
 
         let kind = request.request_kind();
@@ -325,7 +287,6 @@ impl SignatureSpawner {
             msg: self.msg.clone(),
             rpc: self.rpc.clone(),
             signature_timeout,
-            is_proposer,
             round,
             limiter: self.limiters[request.chain].clone(),
             node_account_id: self.node_account_id.clone(),
@@ -341,7 +302,7 @@ impl SignatureSpawner {
 
     /// Spawn a fresh incarnation for every retained request; the caller must
     /// have aborted previous incarnations. Not a retirement: mailboxes,
-    /// watchers, and dedup state survive.
+    /// and dedup state survive.
     fn spawn_tasks(&mut self, governance: &GovernanceInfo, signature_timeout: Duration) {
         let requests: Vec<Arc<IndexedSignRequest>> = self
             .requests
@@ -374,11 +335,11 @@ impl SignatureSpawner {
             .push(msg);
     }
 
-    /// A peer/chain reported this signature done: tear down and abort our task.
-    fn handle_completion(&mut self, sign_id: SignId) {
-        let aborted = self.retire_all(sign_id, "completion");
+    /// The request ended on chain: tear down and abort our task.
+    fn handle_retire(&mut self, sign_id: SignId, reason: &'static str) {
+        let aborted = self.retire_all(sign_id, reason);
         if aborted {
-            tracing::info!(?sign_id, "aborting signature task due to completion event");
+            tracing::info!(?sign_id, %reason, "aborting signature task; the request ended");
         } else {
             tracing::info!(?sign_id, "task already completed or unable to be aborted");
         }
@@ -463,15 +424,15 @@ impl SignatureSpawner {
     }
 
     /// Common teardown when a sign request ends: abort its task if one is still
-    /// running, mark the id and leg kind dead, forget the request, drop its mailbox and
-    /// unwatch its delay monitoring. Returns whether a task was aborted.
+    /// running, mark the id and leg kind dead, forget the request and drop its
+    /// mailbox. Returns whether a task was aborted.
     fn retire_task(&mut self, sign_id: SignId, kind: RequestKind, reason: &'static str) -> bool {
         self.mark_dead(sign_id, kind);
         let aborted = self.tasks.abort((sign_id, kind));
         if let Some(tracked) = self.requests.get(&sign_id) {
             if tracked.entry.request().request_kind() == kind {
                 self.requests.remove(&sign_id);
-                self.delay_monitor.unwatch(sign_id, reason);
+                tracing::info!(?sign_id, ?kind, %reason, "retired sign request");
             }
         }
         self.posit_mailboxes.remove(&(sign_id, kind));
@@ -479,8 +440,8 @@ impl SignatureSpawner {
     }
 
     /// Complete teardown when a sign request completes, is refused, or aborts on chain regression:
-    /// abort tasks and drop mailboxes for all kinds, mark all kinds dead, forget the request,
-    /// and unwatch its delay monitoring. Returns whether any task was aborted.
+    /// abort tasks and drop mailboxes for all kinds, mark all kinds dead and forget the
+    /// request. Returns whether any task was aborted.
     fn retire_all(&mut self, sign_id: SignId, reason: &'static str) -> bool {
         self.mark_dead_all(sign_id);
         let mut aborted = false;
@@ -493,7 +454,7 @@ impl SignatureSpawner {
             self.posit_mailboxes.remove(&(sign_id, kind));
         }
         if self.requests.remove(&sign_id).is_some() {
-            self.delay_monitor.unwatch(sign_id, reason);
+            tracing::info!(?sign_id, %reason, "retired sign request");
         }
         aborted
     }
@@ -505,8 +466,8 @@ impl SignatureSpawner {
         signature_timeout: Duration,
     ) {
         match sign {
-            SignCommand::Completion(sign_id) => {
-                self.handle_completion(sign_id);
+            SignCommand::Retire(sign_id) => {
+                self.handle_retire(sign_id, "retired");
             }
             SignCommand::LegCompleted { sign_id, kind } => {
                 self.handle_leg_completed(sign_id, kind);
@@ -758,8 +719,8 @@ mod tests {
             self.handle_sign(SignCommand::LegCompleted { sign_id, kind });
         }
 
-        fn completion(&mut self, sign_id: SignId) {
-            self.handle_sign(SignCommand::Completion(sign_id));
+        fn retire(&mut self, sign_id: SignId) {
+            self.handle_sign(SignCommand::Retire(sign_id));
         }
 
         fn abort_chain(&mut self, chain: Chain) {
@@ -888,7 +849,6 @@ mod tests {
             probe_id,
             SignEntry {
                 entry,
-                is_proposer: Arc::new(AtomicBool::new(false)),
                 round: Arc::new(AtomicUsize::new(0)),
             },
         );
@@ -1319,8 +1279,8 @@ mod tests {
         spawner.handle_posit(sign_id, RequestKind::RespondBidirectional, propose(124));
         assert!(spawner.test_posit_mailboxes_contains(&sign_id, RequestKind::RespondBidirectional));
 
-        // 3. Completion arrives: must retire first leg AND buffered second leg posits, consuming exactly 1 LRU slot
-        spawner.completion(sign_id);
+        // 3. Retire arrives: must retire first leg AND buffered second leg posits, consuming exactly 1 LRU slot
+        spawner.retire(sign_id);
         assert!(!spawner.test_tasks_contains(sign_id, RequestKind::SignBidirectional));
         assert!(!spawner.test_requests_contains(&sign_id));
         assert!(!spawner.test_posit_mailboxes_contains(&sign_id, RequestKind::SignBidirectional));

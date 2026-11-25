@@ -549,9 +549,11 @@ impl MpcFixtureNodeBuilder {
 
         let flat_mock_streams = self.mock_streams.values().cloned().collect::<Vec<_>>();
         let (checkpoint_tx, checkpoints_rx) = watch::channel(None);
+        let delay_monitor = mpc_node::stream::DelayMonitor::spawn();
         fixture_tasks::start_mock_stream_tasks(&flat_mock_streams, || {
             StreamContext::new(
                 backlog.clone(),
+                delay_monitor.clone(),
                 sign_tx.clone(),
                 rpc_channel.clone(),
                 context.contract_state.clone(),

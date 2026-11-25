@@ -151,6 +151,7 @@ async fn spawn_supervised_stream(
             indexer,
             StreamContext::new(
                 backlog,
+                mpc_node::stream::DelayMonitor::spawn(),
                 sign_tx,
                 rpc,
                 contract_watcher,
@@ -584,6 +585,7 @@ async fn test_solana_stream_republishes_pending_publish_after_checkpoint_recover
             indexer,
             StreamContext::new(
                 recovered_backlog.clone(),
+                mpc_node::stream::DelayMonitor::spawn(),
                 sign_tx.clone(),
                 rpc.clone(),
                 contract_watcher.clone(),

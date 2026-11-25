@@ -117,6 +117,7 @@ impl NearIndexer {
 struct Context<S: StateManager> {
     mpc_contract_id: AccountId,
     sign_tx: mpsc::Sender<SignCommand>,
+    observe: Box<dyn Fn(&SignCommand) + Send + Sync>,
     indexer: NearIndexer,
     rpc_client: near_fetch::Client,
     state_manager: S,
@@ -132,7 +133,7 @@ async fn poll_pending_requests<S: StateManager>(ctx: &mut Context<S>) -> anyhow:
         .fetch_pending_requests(&ctx.rpc_client, &ctx.mpc_contract_id)
         .await?;
 
-    let mut new_requests = Vec::new();
+    let mut commands = Vec::new();
     let mut current_pending = HashSet::new();
 
     for (sign_id, pending_request) in pending_requests.into_iter() {
@@ -154,35 +155,23 @@ async fn poll_pending_requests<S: StateManager>(ctx: &mut Context<S>) -> anyhow:
             "found new sign request"
         );
 
-        new_requests.push(indexed_request);
+        commands.push(SignCommand::Request(Arc::new(indexed_request)));
         ctx.indexer.mark_request_seen(sign_id);
     }
 
-    let completed_requests = ctx.indexer.completed_requests(&current_pending);
-
-    // Send all new requests
-    for request in new_requests {
-        tracing::info!(
-            sign_id = ?request.id,
-            "sending new sign request to processing queue"
-        );
-        if let Err(err) = ctx
-            .sign_tx
-            .send(SignCommand::Request(Arc::new(request)))
-            .await
-        {
-            tracing::error!(?err, "failed to send the sign request into sign queue");
-        }
+    commands.extend(
+        ctx.indexer
+            .completed_requests(&current_pending)
+            .into_iter()
+            .map(SignCommand::Completion),
+    );
+    // The poll already observed the entire batch, even if forwarding its first item blocks.
+    for command in &commands {
+        (ctx.observe)(command);
     }
-
-    for sign_id in completed_requests {
-        tracing::info!(?sign_id, "detected completed NEAR sign request");
-        if let Err(err) = ctx.sign_tx.send(SignCommand::Completion(sign_id)).await {
-            tracing::error!(
-                ?err,
-                ?sign_id,
-                "failed to send completion event into sign queue"
-            );
+    for command in commands {
+        if let Err(err) = ctx.sign_tx.send(command).await {
+            tracing::error!(?err, "failed to forward NEAR sign command");
         }
     }
 
@@ -205,6 +194,7 @@ pub fn run<S: StateManager>(
     sign_tx: mpsc::Sender<SignCommand>,
     rpc_client: near_fetch::Client,
     state_manager: S,
+    observe: impl Fn(&SignCommand) + Send + Sync + 'static,
 ) -> anyhow::Result<JoinHandle<anyhow::Result<()>>> {
     tracing::info!(
         %mpc_contract_id,
@@ -219,6 +209,7 @@ pub fn run<S: StateManager>(
         indexer,
         rpc_client,
         state_manager,
+        observe: Box::new(observe),
     };
 
     Ok(tokio::spawn(async move {

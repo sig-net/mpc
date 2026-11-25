@@ -80,8 +80,6 @@ impl OrganizingPhase {
             .copied()
             .collect::<Vec<_>>();
 
-        ctx.is_proposer.store(false, Ordering::Relaxed);
-
         tracing::info!(?sign_id, round = ?state.round(), "entering organizing phase");
         let (active, proposer, is_proposer) = {
             let Some(active) = self
@@ -97,7 +95,6 @@ impl OrganizingPhase {
             let proposer = Self::proposer_per_round(state.round(), &participants, &entropy);
 
             let is_proposer = proposer == me;
-            ctx.is_proposer.store(is_proposer, Ordering::Relaxed);
 
             tracing::info!(
                 ?sign_id,

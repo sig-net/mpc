@@ -10,8 +10,8 @@ use crate::metrics::requests::{
 };
 use crate::protocol::publish_failover::{observe_lag, publish_deadline};
 use crate::respond_bidirectional::{
-    published_failure, published_midnight_payload, published_midnight_signing_args,
-    published_output_payload, published_output_signing_args,
+    claims_attestation_key, published_failure, published_midnight_payload,
+    published_midnight_signing_args, published_output_payload, published_output_signing_args,
 };
 use crate::sign_bidirectional::{
     destination_expiry, owned_by_requester, transaction_chain_id, BidirectionalProgress,
@@ -98,7 +98,7 @@ pub(crate) async fn process_sign_request(
         tracing::debug!(?sign_id, "sign request already pending; keeping its entry");
         return Ok(false);
     }
-    ctx.try_enqueue(SignCommand::Request(entry)).await?;
+    ctx.try_enqueue(entry).await?;
 
     Ok(true)
 }
@@ -192,9 +192,15 @@ pub(crate) async fn requeue_pending_sign_requests(
     ctx: &StreamContext,
     source_chain: Chain,
 ) -> anyhow::Result<()> {
+    // Register the whole batch before the first enqueue can block, including signed legs.
+    for request in ctx.backlog.unanswered_legs(source_chain).await {
+        if !claims_attestation_key(&request) && validate_midnight_signing_request(&request).is_ok()
+        {
+            ctx.delay_monitor.watch(&request);
+        }
+    }
     for entry in ctx.backlog.requeueable_requests(source_chain).await {
         let sign_id = entry.sign_id();
-        let source_chain = entry.chain();
         if let Err(error) = validate_midnight_signing_request(entry.request()) {
             tracing::error!(?sign_id, %source_chain, ?error, "leaving incompatible restored Midnight request pending without signing");
             continue;
@@ -295,11 +301,13 @@ pub(crate) async fn process_respond_event(
 
     if let Some(entry) = entry.cast::<Sign<AnyProgress>>() {
         entry.verify_signature(root_pk, &respond_event.signature)?;
+        ctx.delay_monitor
+            .responded(source_chain, sign_id, RequestKind::Sign);
         tracing::info!(?sign_id, "sign request completed successfully");
         entry.complete().await;
         // Sent even during catchup: unlike a request, nothing requeues it later.
         ctx.sign_tx
-            .send(SignCommand::Completion(sign_id))
+            .send(SignCommand::Retire(sign_id))
             .await
             .context("sign command channel closed")?;
         return Ok(());
@@ -316,7 +324,7 @@ pub(crate) async fn process_respond_event(
             .await?;
         if !kept {
             ctx.sign_tx
-                .send(SignCommand::Completion(sign_id))
+                .send(SignCommand::Retire(sign_id))
                 .await
                 .context("sign command channel closed")?;
         }
@@ -360,6 +368,7 @@ async fn advance_bidirectional_to_execution(
         root_pk,
     )?);
 
+    ctx.delay_monitor.responded(source_chain, sign_id, leg_kind);
     entry.advance(tx).await.with_context(|| {
         format!("advance bidirectional tx to execution failed for sign id {sign_id:?}")
     })?;
@@ -424,11 +433,14 @@ pub(crate) async fn process_respond_bidirectional_event(
             }
             mpc_crypto::verify_signature(root_pk, request.args.epsilon, payload, &event.signature)
                 .context("respond event carried invalid signature")?;
-            if let Some(published) = &event.attestation {
-                mark_nonce_siblings(&event, published, ctx, root_pk).await;
-            }
         }
         None => entry.verify_signature(root_pk, &event.signature)?,
+    }
+
+    ctx.delay_monitor
+        .responded(source_chain, sign_id, RequestKind::RespondBidirectional);
+    if let Some(published) = event.attestation.as_ref().filter(|_| payload.is_some()) {
+        mark_nonce_siblings(&event, published, ctx, root_pk).await;
     }
 
     // The whole round trip, measured against when the initial request was
@@ -459,7 +471,7 @@ pub(crate) async fn process_respond_bidirectional_event(
     tracing::info!(?sign_id, "bidirectional tx completed");
     // Sent even during catchup: unlike a request, nothing requeues it later.
     ctx.sign_tx
-        .send(SignCommand::Completion(sign_id))
+        .send(SignCommand::Retire(sign_id))
         .await
         .context("sign command channel closed")?;
 
@@ -488,9 +500,7 @@ async fn settle_unobserved_midnight_response(
     mpc_crypto::verify_signature(root_pk, epsilon, payload, &event.signature).with_context(
         || format!("respond event carried invalid signature for sign id {sign_id:?}"),
     )?;
-    mark_nonce_siblings(event, &published, ctx, root_pk).await;
-
-    settle_unobserved(entry, &tx, ctx).await
+    settle_unobserved(entry, &tx, ctx, Some((&published, root_pk))).await
 }
 
 /// Settle a request whose execution this node has not seen yet, on a source chain other than
@@ -520,7 +530,7 @@ async fn settle_unobserved_response(
         return Ok(());
     }
 
-    settle_unobserved(entry, &tx, ctx).await
+    settle_unobserved(entry, &tx, ctx, None).await
 }
 
 /// The transaction to check a Response against. A node that has not seen a signature yet
@@ -550,18 +560,29 @@ async fn settle_unobserved(
     entry: SignEntry,
     tx: &BidirectionalTx,
     ctx: &StreamContext,
+    midnight: Option<(
+        &mpc_primitives::PublishedAttestation,
+        mpc_primitives::PublicKey,
+    )>,
 ) -> anyhow::Result<()> {
     let sign_id = entry.sign_id();
     // An unviable transaction is never mined, so no execution event would retire its watch.
     ctx.backlog.unwatch_execution(WatchKey::of(tx)).await;
     entry.complete().await;
+    // A destination stream may have created leg two since we read the backlog.
+    // Removal prevents a later registration before we resolve the watch.
+    ctx.delay_monitor
+        .responded(tx.source_chain, sign_id, RequestKind::RespondBidirectional);
+    if let Some((published, root_pk)) = midnight {
+        process_nonce_siblings(tx, published, ctx, root_pk).await;
+    }
     tracing::info!(
         ?sign_id,
         "bidirectional tx completed without an observed outcome"
     );
     // Sent even during catchup: unlike a request, nothing requeues it later.
     ctx.sign_tx
-        .send(SignCommand::Completion(sign_id))
+        .send(SignCommand::Retire(sign_id))
         .await
         .context("sign command channel closed")?;
 
@@ -688,12 +709,24 @@ async fn mark_nonce_siblings(
         tracing::warn!(?sign_id, "cannot derive the nonce a Response used");
         return;
     };
+    process_nonce_siblings(&taker, published, ctx, root_pk).await;
+}
+
+async fn process_nonce_siblings(
+    taker: &BidirectionalTx,
+    published: &mpc_primitives::PublishedAttestation,
+    ctx: &StreamContext,
+    root_pk: mpc_primitives::PublicKey,
+) {
+    if published.outcome_kind == AttestationOutcomeKind::Unviable {
+        return;
+    }
     ctx.backlog
-        .mark_unviable(event.chain, &taker, published.block_height)
+        .mark_unviable(taker.source_chain, taker, published.block_height)
         .await;
     // A node that is behind or was rebased answers from the entry at catchup.
     if ctx.caught_up {
-        answer_unviable(event.chain, ctx, root_pk).await;
+        answer_unviable(taker.source_chain, ctx, root_pk).await;
     }
 }
 
@@ -727,9 +760,9 @@ async fn answer_execution(
         entry.park().await?;
         // Sent even during catchup: nothing requeues a parked request.
         ctx.sign_tx
-            .send(SignCommand::Completion(sign_id))
+            .send(SignCommand::Retire(sign_id))
             .await
-            .context("failed to send completion into queue")?;
+            .context("failed to retire parked signing task")?;
         return Ok(());
     }
     let execution_failed = matches!(
@@ -738,7 +771,13 @@ async fn answer_execution(
     );
 
     let execution_tx = Arc::clone(entry.execution_tx());
-    let entry = match entry.advance(result, block_height).await {
+    let entry = match entry
+        .advance_observing(result, block_height, |request| {
+            ctx.delay_monitor
+                .watch_if(request, || ctx.backlog.is_caught_up(source_chain));
+        })
+        .await
+    {
         Ok(entry) => entry,
         Err(err) if matches!(err.downcast_ref(), Some(BacklogError::AlreadyAnswered)) => {
             tracing::info!(?sign_id, ?tx_id, "request was answered by another path");
@@ -763,7 +802,7 @@ async fn answer_execution(
             }
             if ctx
                 .sign_tx
-                .send(SignCommand::Completion(sign_id))
+                .send(SignCommand::Retire(sign_id))
                 .await
                 .is_err()
             {

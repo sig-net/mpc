@@ -45,7 +45,7 @@ use mpc_chain_near::{NearClient, NearRpcGates};
 use mpc_chain_solana::{SolConfig, SolanaClient, SolanaIndexer};
 use mpc_chain_tron::{TronConfig, TronWatcher};
 use mpc_keys::hpke;
-use mpc_primitives::{Chain, CheckpointDigest};
+use mpc_primitives::{Chain, CheckpointDigest, RequestKind};
 use near_account_id::AccountId;
 use near_crypto::{InMemorySigner, SecretKey};
 use tokio::sync::{mpsc, watch};
@@ -216,6 +216,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             // SignCommand channel: sign requests and completions from the
             // indexers/streams into the SignatureSpawner.
             let (sign_tx, sign_rx) = mpsc::channel(MAX_SIGN_COMMANDS);
+            let delay_monitor = crate::stream::DelayMonitor::spawn();
 
             let StorageHandles {
                 keystore,
@@ -230,12 +231,19 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             if cfg!(feature = "test-feature") {
                 let rpc_client = near_fetch::Client::new(near_rpc.as_str());
                 let near_sign_tx = SignCommand::forward_near(sign_tx.clone(), backlog.clone());
+                let monitor = delay_monitor.clone();
                 mpc_chain_near::run(
                     &mpc_contract_id,
                     &account_id,
                     near_sign_tx,
                     rpc_client,
                     backlog.clone(),
+                    move |cmd| match cmd {
+                        mpc_chain_near::SignCommand::Request(req) => monitor.watch(req),
+                        mpc_chain_near::SignCommand::Completion(id) => {
+                            monitor.responded(Chain::NEAR, *id, RequestKind::Sign)
+                        }
+                    },
                 )?;
             }
 
@@ -350,6 +358,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             spawn_indexers(
                 &mut tasks,
                 stack,
+                delay_monitor,
                 sign_tx,
                 rpc_channel.clone(),
                 backlog.clone(),
@@ -813,6 +822,7 @@ impl ProtocolHandles {
 async fn spawn_indexers(
     tasks: &mut JoinSet<anyhow::Result<()>>,
     stack: ChainStack,
+    delay_monitor: crate::stream::DelayMonitor,
     sign_tx: mpsc::Sender<SignCommand>,
     rpc_channel: RpcChannel,
     backlog: Backlog,
@@ -872,6 +882,7 @@ async fn spawn_indexers(
             eth_indexer,
             StreamContext::new(
                 backlog.clone(),
+                delay_monitor.clone(),
                 sign_tx.clone(),
                 rpc_channel.clone(),
                 contract_watcher.clone(),
@@ -898,6 +909,7 @@ async fn spawn_indexers(
             sol_indexer,
             StreamContext::new(
                 backlog.clone(),
+                delay_monitor.clone(),
                 sign_tx.clone(),
                 rpc_channel.clone(),
                 contract_watcher.clone(),
@@ -925,6 +937,7 @@ async fn spawn_indexers(
             canton_indexer,
             StreamContext::new(
                 backlog.clone(),
+                delay_monitor.clone(),
                 sign_tx.clone(),
                 rpc_channel.clone(),
                 contract_watcher.clone(),
@@ -946,6 +959,7 @@ async fn spawn_indexers(
         let mut contract_watcher = contract_watcher.clone();
         let ctx = StreamContext::new(
             backlog.clone(),
+            delay_monitor.clone(),
             sign_tx.clone(),
             rpc_channel.clone(),
             contract_watcher.clone(),
@@ -987,6 +1001,7 @@ async fn spawn_indexers(
             watcher,
             StreamContext::new(
                 backlog.clone(),
+                delay_monitor.clone(),
                 sign_tx.clone(),
                 rpc_channel.clone(),
                 contract_watcher.clone(),

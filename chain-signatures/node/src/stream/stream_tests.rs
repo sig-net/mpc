@@ -114,6 +114,7 @@ async fn a_supervised_restart_publishes_a_stored_signature() {
         indexer,
         crate::stream::StreamContext::new(
             restarted.clone(),
+            crate::stream::DelayMonitor::spawn(),
             sign_tx,
             rpc,
             contract_watcher,
@@ -182,6 +183,7 @@ async fn test_stream_handles_sign_and_respond() {
         indexer,
         crate::stream::StreamContext::new(
             backlog.clone(),
+            crate::stream::DelayMonitor::spawn(),
             sign_tx.clone(),
             rpc,
             contract_watcher,
@@ -194,7 +196,7 @@ async fn test_stream_handles_sign_and_respond() {
     .await
     .expect("supervisor should exit cleanly");
 
-    // We should have received the Request then Completion
+    // We should have received the Request then the response
     let msg1 = timeout(Duration::from_secs(1), sign_rx.recv())
         .await
         .unwrap()
@@ -209,8 +211,8 @@ async fn test_stream_handles_sign_and_respond() {
         .unwrap()
         .unwrap();
     match msg2 {
-        SignCommand::Completion(id) => assert_eq!(id, sign_id),
-        _ => panic!("expected completion"),
+        SignCommand::Retire(id) => assert_eq!(id, sign_id),
+        _ => panic!("expected the response"),
     }
 }
 
@@ -298,6 +300,7 @@ async fn test_bidirectional_sign_request_enqueues_command() {
         indexer,
         crate::stream::StreamContext::new(
             backlog.clone(),
+            crate::stream::DelayMonitor::spawn(),
             sign_tx,
             rpc,
             contract_watcher,
@@ -380,6 +383,7 @@ async fn test_respond_event_advances_to_pending_execution() {
         indexer,
         crate::stream::StreamContext::new(
             backlog.clone(),
+            crate::stream::DelayMonitor::spawn(),
             sign_tx,
             rpc,
             contract_watcher,
@@ -497,7 +501,7 @@ async fn test_execution_confirmation_advances_to_respond_bidirectional() {
 /// The completed entry leaves the backlog, so nothing requeues its completion
 /// on `CatchupCompleted`; it has to reach the sign loop during catchup.
 #[tokio::test]
-async fn test_stream_sends_pre_catchup_ethereum_completion() {
+async fn test_stream_retires_pre_catchup_ethereum_completion() {
     let storage = CheckpointStorage::in_memory();
     let seeded_backlog = Backlog::persisted(storage.clone());
     let sign_id = SignId::new([99u8; 32]);
@@ -528,8 +532,8 @@ async fn test_stream_sends_pre_catchup_ethereum_completion() {
     run_stream_with_two_node_mesh(indexer, sign_tx, backlog.clone(), root_pk).await;
 
     match timeout(Duration::from_secs(1), sign_rx.recv()).await {
-        Ok(Some(SignCommand::Completion(id))) => assert_eq!(id, sign_id),
-        other => panic!("expected the completion during catchup, got {other:?}"),
+        Ok(Some(SignCommand::Retire(id))) => assert_eq!(id, sign_id),
+        other => panic!("expected the retire during catchup, got {other:?}"),
     }
     assert!(backlog.get(Chain::Ethereum, &sign_id).await.is_none());
 }
@@ -636,6 +640,7 @@ async fn test_stream_resumes_pending_publish_after_catchup() {
             indexer,
             crate::stream::StreamContext::new(
                 backlog,
+                crate::stream::DelayMonitor::spawn(),
                 sign_tx,
                 rpc,
                 contract_watcher,
@@ -704,6 +709,7 @@ async fn test_stream_does_not_resume_non_proposer_pending_publish_after_catchup(
             indexer,
             crate::stream::StreamContext::new(
                 backlog,
+                crate::stream::DelayMonitor::spawn(),
                 sign_tx,
                 rpc,
                 contract_watcher,

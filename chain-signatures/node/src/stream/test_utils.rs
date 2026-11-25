@@ -149,6 +149,7 @@ pub fn make_test_stream_context(
     let (rpc, rpc_rx) = test_rpc_channel(8);
     let mut ctx = StreamContext::new(
         backlog,
+        crate::stream::DelayMonitor::spawn(),
         sign_tx,
         rpc,
         contract_watcher,
@@ -175,6 +176,7 @@ pub fn make_test_stream_context_with_rpc(
     let (rpc, rpc_rx) = test_rpc_channel(8);
     let mut ctx = StreamContext::new(
         backlog,
+        crate::stream::DelayMonitor::spawn(),
         sign_tx,
         rpc,
         contract_watcher,
@@ -251,6 +253,7 @@ pub async fn run_stream_with_two_node_mesh<I: ChainIndexer>(
         indexer,
         StreamContext::new(
             backlog,
+            crate::stream::DelayMonitor::spawn(),
             sign_tx,
             rpc,
             contract_watcher,

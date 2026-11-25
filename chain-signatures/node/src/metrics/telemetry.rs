@@ -1,8 +1,7 @@
 use mpc_chain_integration_core::{
     ChainTelemetry, ExtractionFailureKind, PublishAction, PublisherTelemetry,
 };
-use mpc_primitives::{Chain, ChainConfig as _, RequestKind};
-use mpc_utils::time::unix_elapsed;
+use mpc_primitives::{Chain, RequestKind};
 
 use super::{
     indexers::{BIDIRECTIONAL_EXTRACTION_FAILURES, LATEST_BLOCK_NUMBER, TRON_EXPIRY_SCAN_DEFERRED},
@@ -24,13 +23,9 @@ impl NodeTelemetry {
 
 impl PublisherTelemetry for NodeTelemetry {
     fn record_publish_metrics(&self, action: &PublishAction) {
+        // The total step is recorded when the response is observed on chain.
         let chain = action.request.chain;
         let kind = action.request.request_kind();
-        if let Some(indexed) = action.request.unix_timestamp_indexed {
-            let in_time = unix_elapsed(indexed).as_secs() <= chain.expected_response_time_secs();
-            let outcome = if in_time { "in_time" } else { "expired" };
-            record_request_latency_since(chain, SignRequestStep::Total, outcome, kind, indexed);
-        }
         record_request_latency_since(
             chain,
             SignRequestStep::Responding,

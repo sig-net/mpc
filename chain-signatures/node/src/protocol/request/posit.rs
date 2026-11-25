@@ -475,7 +475,6 @@ pub(crate) mod tests {
             msg: msg_channel,
             rpc: RpcChannel { tx: rpc_tx },
             signature_timeout: crate::config::Timeouts::default().signature_generation,
-            is_proposer: Arc::new(AtomicBool::new(false)),
             round: Arc::new(AtomicUsize::new(0)),
             limiter: SignLimiter::new(1),
             node_account_id: account_id,

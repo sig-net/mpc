@@ -290,7 +290,7 @@ async fn process_execution_confirmed_failed_advance_parks_the_entry() {
     );
     assert_matches!(
         sign_rx.try_recv(),
-        Ok(SignCommand::Completion(id)) if id == tx.sign_id()
+        Ok(SignCommand::Retire(id)) if id == tx.sign_id()
     );
 }
 
@@ -2273,8 +2273,8 @@ async fn process_respond_bidirectional_event_duplicate_is_idempotent() {
         .unwrap()
         .unwrap();
     match first {
-        SignCommand::Completion(id) => assert_eq!(id, sign_id),
-        other => panic!("expected completion, got {other:?}"),
+        SignCommand::Retire(id) => assert_eq!(id, sign_id),
+        other => panic!("expected the response, got {other:?}"),
     }
 
     let no_second = timeout(Duration::from_millis(100), sign_rx.recv()).await;
@@ -2340,8 +2340,8 @@ async fn process_respond_event_duplicate_ethereum_is_idempotent() {
         .unwrap()
         .unwrap();
     match msg {
-        SignCommand::Completion(id) => assert_eq!(id, sign_id),
-        _ => panic!("expected completion"),
+        SignCommand::Retire(id) => assert_eq!(id, sign_id),
+        _ => panic!("expected the response"),
     }
 
     // Duplicate events should be ignored, not treated as an error.
@@ -2904,7 +2904,7 @@ async fn process_respond_bidirectional_event_sends_completion_before_catchup() {
         .await
         .unwrap()
         .unwrap();
-    assert_matches!(msg, SignCommand::Completion(id) if id == sign_id);
+    assert_matches!(msg, SignCommand::Retire(id) if id == sign_id);
 }
 
 #[tokio::test]
@@ -3113,7 +3113,7 @@ async fn decode_failure_parks_request_and_preserves_source_checkpoint() {
             );
             assert_matches!(
                 sign_rx.try_recv().expect("parked request must stop its signing task"),
-                SignCommand::Completion(id) if id == tx.sign_id()
+                SignCommand::Retire(id) if id == tx.sign_id()
             );
             assert!(sign_rx.try_recv().is_err(), "no response should be signed");
             assert_matches!(
@@ -3296,7 +3296,7 @@ async fn midnight_response_settles_entries_that_missed_the_outcome() {
             assert!(
                 matches!(
                     sign_rx.try_recv(),
-                    Ok(SignCommand::Completion(id)) if id == tx.sign_id()
+                    Ok(SignCommand::Retire(id)) if id == tx.sign_id()
                 ),
                 "{case}, {node}"
             );
@@ -3560,7 +3560,7 @@ async fn unobserved_response_settles_when_it_verifies() {
             "{case}"
         );
         assert_eq!(
-            matches!(sign_rx.try_recv(), Ok(SignCommand::Completion(id)) if id == tx.sign_id()),
+            matches!(sign_rx.try_recv(), Ok(SignCommand::Retire(id)) if id == tx.sign_id()),
             settles,
             "{case}"
         );
@@ -3767,4 +3767,158 @@ async fn catching_up_deletes_records_without_an_entry() {
 
     let records = storage.load_local(chain).await.unwrap();
     assert_eq!(records, vec![(kept.id, record)]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn indexed_leg_counts_delayed_while_sign_queue_is_full() {
+    use mpc_primitives::ChainConfig as _;
+    let chain = Chain::Bitcoin;
+    let (sign_tx, _rx) = mpsc::channel(1);
+    let id = SignId::new([81; 32]);
+    sign_tx.try_send(SignCommand::Retire(id)).unwrap();
+    let ctx = make_test_stream_context_with_generator_pk(Backlog::new(), sign_tx, true);
+    let mut req = mock_sign_request(id, chain);
+    Arc::make_mut(&mut req).unix_timestamp_indexed = Some(current_unix_timestamp());
+    let delayed = || crate::metrics::requests::delayed_count(chain, RequestKind::Sign);
+    let before = delayed();
+    let mut indexing = Box::pin(process_sign_request(req, &ctx, test_root_pk(), None));
+    assert!(futures_util::poll!(&mut indexing).is_pending());
+    tokio::time::sleep(Duration::from_secs(chain.expected_response_time_secs() + 1)).await;
+    assert_eq!(delayed() - before, 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn observed_response_counts_in_time_while_sign_queue_is_full() {
+    let chain = Chain::Bitcoin;
+    let (sign_tx, _rx) = mpsc::channel(1);
+    let ctx = make_test_stream_context_with_generator_pk(Backlog::new(), sign_tx, true);
+    let id = SignId::new([82; 32]);
+    let mut req = mock_sign_request(id, chain);
+    Arc::make_mut(&mut req).unix_timestamp_indexed = Some(current_unix_timestamp());
+    let sk = k256::SecretKey::random(&mut rand::thread_rng());
+    let pk = sk.public_key().into();
+    let event = SignatureRespondedEvent {
+        request_id: id.request_id,
+        signature: mpc_crypto::generate_signature(&sk, &req.args),
+        chain,
+    };
+    process_sign_request(req, &ctx, pk, None).await.unwrap();
+    let in_time = || {
+        crate::metrics::requests::request_latency_count(
+            chain,
+            SignRequestStep::Total,
+            "in_time",
+            RequestKind::Sign,
+        )
+    };
+    let before = in_time();
+    let mut response = Box::pin(process_respond_event(event, &ctx, pk));
+    assert!(futures_util::poll!(&mut response).is_pending());
+    assert_eq!(in_time() - before, 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn catchup_watches_all_pending_legs_before_requeue_blocks() {
+    use mpc_primitives::ChainConfig as _;
+    let chain = Chain::Tron;
+    let sk = k256::SecretKey::random(&mut rand::thread_rng());
+    let pk = sk.public_key().into();
+    let (sign_tx, _rx) = mpsc::channel(1);
+    let mut ctx = make_test_stream_context_with_generator_pk(Backlog::new(), sign_tx, false);
+    let in_time = || {
+        crate::metrics::requests::request_latency_count(
+            chain,
+            SignRequestStep::Total,
+            "in_time",
+            RequestKind::Sign,
+        )
+    };
+    let delayed = || crate::metrics::requests::delayed_count(chain, RequestKind::Sign);
+    let before = (in_time(), delayed());
+    for byte in 1..=4 {
+        let id = SignId::new([byte; 32]);
+        let mut req = mock_sign_request(id, chain);
+        Arc::make_mut(&mut req).unix_timestamp_indexed = Some(current_unix_timestamp());
+        process_sign_request(req.clone(), &ctx, pk, None)
+            .await
+            .unwrap();
+        if byte == 4 {
+            // Another node will publish this signature. This leg never enters the sign queue again.
+            let entry = crate::backlog::SignEntry::generating(req.clone(), &ctx.backlog);
+            let (public_key, output) = mock_signature_output(&req.args);
+            entry
+                .advance(public_key, &output, mock_participants(), false)
+                .await
+                .unwrap();
+        }
+        if byte == 1 {
+            let event = SignatureRespondedEvent {
+                request_id: id.request_id,
+                signature: mpc_crypto::generate_signature(&sk, &req.args),
+                chain,
+            };
+            // The response command fills the queue while still catching up.
+            process_respond_event(event, &ctx, pk).await.unwrap();
+        }
+    }
+    ctx.caught_up = true;
+    ctx.backlog.set_caught_up(chain, true);
+    let mut replay = Box::pin(requeue_pending_sign_requests(&ctx, chain));
+    assert!(futures_util::poll!(&mut replay).is_pending());
+    tokio::time::sleep(Duration::from_secs(chain.expected_response_time_secs() + 1)).await;
+    assert_eq!((in_time() - before.0, delayed() - before.1), (0, 3));
+}
+
+#[tokio::test(start_paused = true)]
+async fn midnight_counts_response_before_enqueueing_a_nonce_sibling() {
+    let chain = Chain::Midnight;
+    let taker = nonce_request(81, chain, "p", 7, 1);
+    let backlog = Backlog::new();
+    seed_executing_entry(&backlog, taker.clone(), signed_tx(&taker, 7)).await;
+    let entry = backlog
+        .get(chain, &taker.id)
+        .await
+        .unwrap()
+        .cast::<Bidirectional<Executing>>()
+        .unwrap();
+    let (tx, _rx) = mpsc::channel(1);
+    let ctx = make_test_stream_context_with_generator_pk(backlog, tx, true);
+    // Creating the taker's final leg fills the queue.
+    answer_execution(
+        entry,
+        signed_tx(&taker, 7).id,
+        500,
+        ExecutionOutcome::Success { output: vec![] },
+        &ctx,
+    )
+    .await
+    .unwrap();
+    let sibling = nonce_request(82, chain, "p", 7, 2);
+    ctx.backlog.insert_bidirectional(sibling.clone()).await;
+    let response = midnight_response(&taker, AttestationOutcomeKind::Executed, 500);
+    let count = || {
+        crate::metrics::requests::request_latency_count(
+            chain,
+            SignRequestStep::Total,
+            "in_time",
+            RequestKind::RespondBidirectional,
+        )
+    };
+    let before = count();
+    let mut handling = Box::pin(process_respond_bidirectional_event(
+        response,
+        &ctx,
+        test_root_pk(),
+    ));
+    assert!(futures_util::poll!(&mut handling).is_pending());
+    assert!(matches!(
+        ctx.backlog
+            .get(chain, &sibling.id)
+            .await
+            .unwrap()
+            .request()
+            .kind,
+        SignKind::RespondBidirectional(_)
+    ));
+    assert!(count() > before);
 }
