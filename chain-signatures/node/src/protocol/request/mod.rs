@@ -711,6 +711,7 @@ mod tests {
 
     use cait_sith::protocol::Participant;
     use deadpool_redis::Runtime;
+    use std::mem::DropGuard;
     use tokio::sync::Notify;
 
     struct SpawnerSetup {
@@ -881,13 +882,7 @@ mod tests {
         let probe_id = SignId::new([43u8; 32]);
         let probe_request = crate::backlog::mock::mock_sign_request(probe_id, Chain::Solana);
         let dropped = Arc::new(Notify::new());
-        struct DropProbe(Arc<Notify>);
-        impl Drop for DropProbe {
-            fn drop(&mut self) {
-                self.0.notify_one();
-            }
-        }
-        let probe = DropProbe(Arc::clone(&dropped));
+        let probe = DropGuard::new(Arc::clone(&dropped), |notify| notify.notify_one());
         let entry = backlog::SignEntry::generating(probe_request, &spawner.backlog);
         spawner.requests.insert(
             probe_id,
