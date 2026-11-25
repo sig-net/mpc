@@ -501,7 +501,7 @@ async fn test_execution_confirmation_advances_to_respond_bidirectional() {
 /// The completed entry leaves the backlog, so nothing requeues its completion
 /// on `CatchupCompleted`; it has to reach the sign loop during catchup.
 #[tokio::test]
-async fn test_stream_sends_pre_catchup_ethereum_completion() {
+async fn test_stream_retires_pre_catchup_ethereum_completion() {
     let storage = CheckpointStorage::in_memory();
     let seeded_backlog = Backlog::persisted(storage.clone());
     let sign_id = SignId::new([99u8; 32]);
@@ -533,7 +533,7 @@ async fn test_stream_sends_pre_catchup_ethereum_completion() {
 
     match timeout(Duration::from_secs(1), sign_rx.recv()).await {
         Ok(Some(SignCommand::Retire(id))) => assert_eq!(id, sign_id),
-        other => panic!("expected the response during catchup, got {other:?}"),
+        other => panic!("expected the retire during catchup, got {other:?}"),
     }
     assert!(backlog.get(Chain::Ethereum, &sign_id).await.is_none());
 }
