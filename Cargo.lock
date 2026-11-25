@@ -6998,7 +6998,7 @@ dependencies = [
 
 [[package]]
 name = "mpc-chain-canton"
-version = "1.23.0"
+version = "1.24.0"
 dependencies = [
  "alloy",
  "anyhow",
@@ -7026,7 +7026,7 @@ dependencies = [
 
 [[package]]
 name = "mpc-chain-ethereum"
-version = "1.23.0"
+version = "1.24.0"
 dependencies = [
  "alloy",
  "anyhow",
@@ -7051,7 +7051,7 @@ dependencies = [
 
 [[package]]
 name = "mpc-chain-integration-core"
-version = "1.23.0"
+version = "1.24.0"
 dependencies = [
  "alloy",
  "anyhow",
@@ -7075,7 +7075,7 @@ dependencies = [
 
 [[package]]
 name = "mpc-chain-midnight"
-version = "1.23.0"
+version = "1.24.0"
 dependencies = [
  "alloy",
  "anyhow",
@@ -7128,7 +7128,7 @@ dependencies = [
 
 [[package]]
 name = "mpc-chain-near"
-version = "1.23.0"
+version = "1.24.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -7150,7 +7150,7 @@ dependencies = [
 
 [[package]]
 name = "mpc-chain-solana"
-version = "1.23.0"
+version = "1.24.0"
 dependencies = [
  "alloy",
  "anchor-client",
@@ -7183,7 +7183,7 @@ dependencies = [
 
 [[package]]
 name = "mpc-chain-tron"
-version = "1.23.0"
+version = "1.24.0"
 dependencies = [
  "alloy",
  "anyhow",
@@ -7210,7 +7210,7 @@ dependencies = [
 
 [[package]]
 name = "mpc-compact-hashing"
-version = "1.23.0"
+version = "1.24.0"
 dependencies = [
  "hex",
  "midnight-transient-crypto 3.1.0",
@@ -7220,7 +7220,7 @@ dependencies = [
 
 [[package]]
 name = "mpc-contract"
-version = "1.23.0"
+version = "1.24.0"
 dependencies = [
  "anyhow",
  "borsh",
@@ -7245,7 +7245,7 @@ dependencies = [
 
 [[package]]
 name = "mpc-crypto"
-version = "1.23.0"
+version = "1.24.0"
 dependencies = [
  "alloy",
  "anyhow",
@@ -7261,7 +7261,7 @@ dependencies = [
 
 [[package]]
 name = "mpc-evm-common"
-version = "1.23.0"
+version = "1.24.0"
 dependencies = [
  "alloy",
  "anyhow",
@@ -7274,7 +7274,7 @@ dependencies = [
 
 [[package]]
 name = "mpc-keys"
-version = "1.23.0"
+version = "1.24.0"
 dependencies = [
  "hex",
  "hpke",
@@ -7284,7 +7284,7 @@ dependencies = [
 
 [[package]]
 name = "mpc-midnight-respond-codec"
-version = "1.23.0"
+version = "1.24.0"
 dependencies = [
  "alloy",
  "anyhow",
@@ -7296,7 +7296,7 @@ dependencies = [
 
 [[package]]
 name = "mpc-node"
-version = "1.23.0"
+version = "1.24.0"
 dependencies = [
  "alloy",
  "anyhow",
@@ -7373,7 +7373,7 @@ dependencies = [
 
 [[package]]
 name = "mpc-primitives"
-version = "1.23.0"
+version = "1.24.0"
 dependencies = [
  "borsh",
  "ciborium",
@@ -7388,7 +7388,7 @@ dependencies = [
 
 [[package]]
 name = "mpc-tron-wire"
-version = "1.23.0"
+version = "1.24.0"
 dependencies = [
  "alloy",
  "anyhow",
@@ -7405,7 +7405,7 @@ dependencies = [
 
 [[package]]
 name = "mpc-utils"
-version = "1.23.0"
+version = "1.24.0"
 dependencies = [
  "tokio",
  "tokio-util",
@@ -10819,7 +10819,7 @@ dependencies = [
 
 [[package]]
 name = "signet-crypto"
-version = "1.23.0"
+version = "1.24.0"
 dependencies = [
  "getrandom 0.2.17",
  "hex",
@@ -10841,7 +10841,7 @@ dependencies = [
 
 [[package]]
 name = "signet-primitives"
-version = "1.23.0"
+version = "1.24.0"
 dependencies = [
  "borsh",
  "enum-map",
