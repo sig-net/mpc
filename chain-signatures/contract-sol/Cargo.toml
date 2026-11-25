@@ -12,3 +12,12 @@ name = "signet_program"
 [dependencies]
 anchor-lang = { workspace = true, features = ["event-cpi"] }
 serde.workspace = true
+
+[lints.cargo]
+# Cargo 1.100 forces rustc's `unused_crate_dependencies` lint and reports
+# `anchor-lang` as unused here. False positive: this crate gets everything
+# from Anchor's `prelude::*` glob and its proc-macros (`#[program]`, `#[event]`,
+# `#[event_cpi]`), which the lint cannot attribute to the dependency. The
+# dependency is genuinely required (removing it fails with E0433 and missing
+# `event`/`account` attributes); `cargo machete` also confirms no unused deps.
+unused_dependencies = "allow"

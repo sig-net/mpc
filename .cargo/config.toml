@@ -1,3 +1,15 @@
+# Supply-chain hygiene (Cargo 1.100+): when resolving *new* dependencies,
+# ignore crates published less than 7 days ago. Versions already pinned in
+# Cargo.lock remain usable, so this does not disturb existing builds.
+[registry]
+global-min-publish-age = "7 days"
+
+[resolver]
+# `deny` (the default) skips too-new versions unless they are already in the
+# lockfile. Set explicitly so the policy is visible and enforced if the
+# default ever changes.
+incompatible-publish-age = "deny"
+
 [target.x86_64-apple-darwin]
 rustflags = [
   "-L", "/opt/homebrew/lib",
