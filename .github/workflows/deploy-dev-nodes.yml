@@ -15,7 +15,7 @@ jobs:
   # The dev nodes poll this image repository, so pushing the image is the deployment.
   build-image:
     name: Build & Push Dev Image
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 

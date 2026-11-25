@@ -72,7 +72,9 @@ sha2.workspace = true                                # M1
   workflows and the `Dockerfile` repeat it and change in the same PR. *(review)*
 - **T2. Exact versions.** A tool that a workflow downloads names an exact
   version, and `scripts/setup-deps.sh` installs the same ones. An image names
-  its tag and digest: `redis:7.4.12@sha256:…`. *(review)*
+  its tag and digest: `redis:7.4.12@sha256:…`. A runner label names its
+  Ubuntu release (`ubuntu-24.04`); `apt-get` packages come from that release
+  or the pinned base image. *(review)*
 - **T3. Actions by commit.** An action is referenced by its full commit SHA,
   with the version in a comment (`actions/checkout@<sha> # v6`). A tag can be
   moved to other code, a commit cannot. *(review)*

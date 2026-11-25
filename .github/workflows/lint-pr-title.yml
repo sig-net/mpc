@@ -17,7 +17,7 @@ permissions:
 jobs:
   lint:
     name: Conventional PR Title
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       # Using default settings:
       # types: feat, fix, chore, docs, style, refactor, perf, test, build, ci, revert
@@ -32,7 +32,7 @@ jobs:
 
   breaking-changes:
     name: Breaking Changes Section
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     if: github.event_name == 'pull_request_target'
     steps:
       # Breaking changes must have one state: `None`, or one or more types. A
