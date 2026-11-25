@@ -636,7 +636,7 @@ class VaultRun {
   private async executeTron(request: SentRequest): Promise<ExecutedRequest> {
     const tron = this.tronChain();
     const reader = this.reader(request.action);
-    const record = await reader.getTronSignatureRequest(request.requestId);
+    const record = await reader.getTronTriggerSmartContractSignatureRequest(request.requestId);
     const unsigned = signBidirectionalEventToUnsignedTronTransaction(
       record,
       this.input.mpcPublicKey,

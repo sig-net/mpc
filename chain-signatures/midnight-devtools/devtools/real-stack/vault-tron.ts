@@ -6,7 +6,7 @@ import {
   hexToBytes,
   numericAbiWord,
   tronAddressFromEvm,
-  type TronTransactionReceipt,
+  type TronTransactionInfo,
 } from "@sig-net/midnight";
 import { computeAddress, SigningKey } from "ethers";
 
@@ -99,7 +99,7 @@ export class TronChain {
   }
 
   /** Waits for `txid`'s solidified receipt, which is what the MPC reads. */
-  async receipt(txid: Uint8Array): Promise<TronTransactionReceipt> {
+  async receipt(txid: Uint8Array): Promise<TronTransactionInfo> {
     const deadline = Date.now() + RECEIPT_TIMEOUT_MS;
     while (Date.now() < deadline) {
       const receipt = await getSolidifiedTronTransactionInfo(this.rpcUrl, txid);
@@ -109,7 +109,7 @@ export class TronChain {
     throw new Error(`Tron transaction ${bytesToHex(txid)} did not solidify`);
   }
 
-  private async succeeded(txid: Uint8Array, what: string): Promise<TronTransactionReceipt> {
+  private async succeeded(txid: Uint8Array, what: string): Promise<TronTransactionInfo> {
     const receipt = await this.receipt(txid);
     const result = receipt.receiptResult ?? receipt.result ?? "SUCCESS";
     if (result !== "SUCCESS") throw new Error(`${what} ran ${result}`);

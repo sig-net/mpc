@@ -38,7 +38,7 @@
     "@midnight-ntwrk/midnight-js-level-private-state-provider": "5.0.0",
     "@midnight-ntwrk/midnight-js-node-zk-config-provider": "5.0.0",
     "@midnightntwrk/wallet-sdk-facade": "5.0.0",
-    "@sig-net/midnight": "0.27.0-rc.5",
+    "@sig-net/midnight": "0.27.0-rc.6",
     "@sig-net/midnight-respond-oracle": "npm:@sig-net/midnight@0.24.0-rc.10",
     "@types/node": "^22.20.1",
     "eslint": "^10.8.0",
