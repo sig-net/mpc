@@ -1775,7 +1775,7 @@ async fn process_sign_request_rejects_a_window_beyond_the_cap() {
     assert!(backlog.get(Chain::Solana, &EXPIRY_SIGN_ID).await.is_none());
 }
 
-/// No block time (Canton, Hydration, or a Solana block whose estimate is
+/// No block time (Canton, or a Solana block whose estimate is
 /// absent): the bound skips; M6 answers at expiry where the walk spans
 /// the window.
 #[tokio::test]

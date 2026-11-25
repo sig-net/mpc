@@ -104,12 +104,7 @@ mod tests {
     #[test]
     fn midnight_observe_lag_outlasts_a_publish_and_others_keep_finality() {
         assert_eq!(observe_lag(Chain::Midnight, LAG), Duration::from_secs(120));
-        for chain in [
-            Chain::Ethereum,
-            Chain::Solana,
-            Chain::Hydration,
-            Chain::Canton,
-        ] {
+        for chain in [Chain::Ethereum, Chain::Solana, Chain::Canton] {
             assert_eq!(
                 observe_lag(chain, LAG),
                 Duration::from_secs(chain.expected_finality_time_secs()) + DEFAULT_OBSERVE_MARGIN

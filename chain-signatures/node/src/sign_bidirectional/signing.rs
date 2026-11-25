@@ -329,7 +329,7 @@ mod tests {
         let bounded = enum_map::enum_map! {
             Chain::Tron => true,
             Chain::NEAR | Chain::Ethereum | Chain::Solana | Chain::Bitcoin
-                | Chain::Hydration | Chain::Canton | Chain::Midnight => false,
+                | Chain::Canton | Chain::Midnight => false,
         };
         for (chain, wants_some) in bounded {
             let expiry = destination_expiry(chain, &tron).expect("the Tron arm parses");

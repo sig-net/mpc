@@ -47,12 +47,9 @@ pub fn bidirectional_payload_scalar(target: Chain, serialized: &[u8]) -> anyhow:
             };
             Ok(payload)
         }
-        Chain::NEAR
-        | Chain::Solana
-        | Chain::Bitcoin
-        | Chain::Hydration
-        | Chain::Canton
-        | Chain::Midnight => anyhow::bail!("no bidirectional signing scheme for {target}"),
+        Chain::NEAR | Chain::Solana | Chain::Bitcoin | Chain::Canton | Chain::Midnight => {
+            anyhow::bail!("no bidirectional signing scheme for {target}")
+        }
     }
 }
 
@@ -93,7 +90,6 @@ mod tests {
             Chain::NEAR,
             Chain::Solana,
             Chain::Bitcoin,
-            Chain::Hydration,
             Chain::Canton,
             Chain::Midnight,
         ] {

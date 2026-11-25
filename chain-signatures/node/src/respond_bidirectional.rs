@@ -325,15 +325,9 @@ fn calculate_respond_bidirectional_hash_message_for_chain(
                 serialized_output,
             )?)
         }
-        Chain::NEAR
-        | Chain::Ethereum
-        | Chain::Solana
-        | Chain::Bitcoin
-        | Chain::Hydration
-        | Chain::Canton => Ok(calculate_respond_bidirectional_hash_message(
-            request_id,
-            serialized_output,
-        )),
+        Chain::NEAR | Chain::Ethereum | Chain::Solana | Chain::Bitcoin | Chain::Canton => Ok(
+            calculate_respond_bidirectional_hash_message(request_id, serialized_output),
+        ),
         Chain::Tron => anyhow::bail!("Tron is not a supported source chain"),
     }
 }
