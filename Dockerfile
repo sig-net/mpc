@@ -44,6 +44,7 @@ ARG GIT_COMMIT_HASH
 ENV GIT_COMMIT_HASH=$GIT_COMMIT_HASH
 ARG BUILD_TIMESTAMP
 ENV BUILD_TIMESTAMP=$BUILD_TIMESTAMP
+ENV JEMALLOC_SYS_WITH_MALLOC_CONF="dirty_decay_ms:1000,muzzy_decay_ms:1000"
 COPY chain-signatures/ ./chain-signatures
 COPY integration-tests/ ./integration-tests
 COPY signet-primitives/ ./signet-primitives

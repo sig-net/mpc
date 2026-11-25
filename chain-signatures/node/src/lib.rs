@@ -30,6 +30,7 @@ macro_rules! assert_matches {
     };
 }
 
+pub mod alloc;
 pub mod backlog;
 pub mod build;
 pub mod cli;

@@ -108,4 +108,5 @@ path = "benches/store.rs"
 harness = false
 
 [features]
-default = []
+default = ["jemalloc"]
+jemalloc = ["mpc-node/jemalloc"]
