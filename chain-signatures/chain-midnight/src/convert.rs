@@ -236,7 +236,7 @@ mod tests {
         // `owned_by_requester` recomputes the owner from the same public
         // inputs; pinning it here keeps the two crates on one formula.
         let epsilon = signet_crypto::derive_epsilon(
-            1,
+            mpc_primitives::LATEST_MPC_KEY_VERSION,
             Chain::Midnight,
             signet_crypto::KeyPurpose::Bidirectional {
                 sender: &READ_ADDRESS.to_hex(),
@@ -289,7 +289,7 @@ mod tests {
             "the event carries the record's own unsigned transaction bytes"
         );
         assert_eq!(event.caip2_id, "eip155:1");
-        assert_eq!(event.key_version, 1);
+        assert_eq!(event.key_version, mpc_primitives::LATEST_MPC_KEY_VERSION);
         assert_eq!(event.deposit, 0, "Midnight V1 has no payment");
         assert_eq!(
             event.path, "63616c6c65722d70617468000000000000000000000000000000000000000000",
@@ -317,6 +317,7 @@ mod tests {
     fn reserved_response_key_path_is_rejected_exactly() {
         let reserved = "midnight response key";
         let mut record = caller_record();
+        record.key_version = u8::try_from(mpc_primitives::LEGACY_MPC_KEY_VERSION_1).unwrap();
         record.path = ascii_padded(reserved.as_bytes());
         let error = generate_sign_request(
             &record,

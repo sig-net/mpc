@@ -33,7 +33,7 @@ pub fn test_bidirectional_tx(id: u8, source_chain: Chain, target_chain: Chain) -
         source_chain,
         target_chain,
         caip2_id: target_chain.caip2_chain_id().to_string(),
-        key_version: 1,
+        key_version: mpc_primitives::LATEST_MPC_KEY_VERSION,
         deposit: 1000,
         path: "test_path".to_string(),
         algo: "ECDSA".to_string(),
@@ -54,7 +54,7 @@ pub fn test_sign_args(id: u8) -> SignArgs {
         epsilon: Scalar::from(1u64),
         payload: Scalar::from(2u64),
         path: "test".to_string(),
-        key_version: 1,
+        key_version: mpc_primitives::LATEST_MPC_KEY_VERSION,
     }
 }
 
@@ -76,7 +76,7 @@ pub fn test_canton_sign_bidirectional_request(
             sender: [7u8; 32],
             serialized_transaction: vec![1, 2, 3],
             caip2_id: Chain::Ethereum.caip2_chain_id().to_string(),
-            key_version: 1,
+            key_version: mpc_primitives::LATEST_MPC_KEY_VERSION,
             deposit: 0,
             path: "test_path".to_string(),
             algo: "ECDSA".to_string(),

@@ -121,7 +121,7 @@ mod tests {
             AttestationOutcomeKind::Unviable,
         ] {
             let metadata = AttestationMetadata {
-                key_version: 1,
+                key_version: crate::LATEST_MPC_KEY_VERSION,
                 block_height: 42,
                 outcome_kind: outcome,
             };

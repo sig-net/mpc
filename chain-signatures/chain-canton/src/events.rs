@@ -239,7 +239,7 @@ mod tests {
             sig_network: "testnet".to_string(),
             tx_params: sample_tx_params(),
             caip2_id: Chain::Ethereum.caip2_chain_id().to_string(),
-            key_version: 0,
+            key_version: mpc_primitives::LATEST_MPC_KEY_VERSION,
             path: "m/0".to_string(),
             algo: "secp256k1".to_string(),
             dest: Chain::Ethereum.to_string(),

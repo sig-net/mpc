@@ -263,7 +263,7 @@ mod tests {
             epsilon,
             payload,
             path: "test/path".to_string(),
-            key_version: 0,
+            key_version: mpc_primitives::LATEST_MPC_KEY_VERSION,
         };
 
         let mpc_sig = generate_signature(&root_sk, &args);
@@ -365,7 +365,7 @@ mod tests {
             epsilon,
             payload,
             path: "test/path".to_string(),
-            key_version: 0,
+            key_version: mpc_primitives::LATEST_MPC_KEY_VERSION,
         };
 
         // ECDSA signatures with the same key and payload should be completely deterministic.

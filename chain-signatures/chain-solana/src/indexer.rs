@@ -1169,7 +1169,7 @@ mod tests {
         let request = SignatureRequestedEvent {
             sender: Pubkey::new_unique(),
             payload: [1; 32],
-            key_version: 0,
+            key_version: mpc_primitives::LATEST_MPC_KEY_VERSION,
             deposit: 1,
             chain_id: "solana".to_string(),
             path: "test".to_string(),
@@ -1254,7 +1254,7 @@ mod tests {
         let request = SignatureRequestedEvent {
             sender: Pubkey::new_unique(),
             payload: [1; 32],
-            key_version: 0,
+            key_version: mpc_primitives::LATEST_MPC_KEY_VERSION,
             deposit: 1,
             chain_id: "solana".to_string(),
             path: "test".to_string(),
@@ -1288,7 +1288,7 @@ mod tests {
         let request = SignatureRequestedEvent {
             sender: Pubkey::new_unique(),
             payload: [1; 32],
-            key_version: 0,
+            key_version: mpc_primitives::LATEST_MPC_KEY_VERSION,
             deposit: 1,
             chain_id: "solana".to_string(),
             path: "test".to_string(),
@@ -1433,7 +1433,7 @@ mod tests {
         let request = SignatureRequestedEvent {
             sender: Pubkey::new_unique(),
             payload: [1; 32],
-            key_version: 0,
+            key_version: mpc_primitives::LATEST_MPC_KEY_VERSION,
             deposit: 1,
             chain_id: "solana".to_string(),
             path: "test".to_string(),
@@ -1475,7 +1475,7 @@ mod tests {
         let req_a = SignatureRequestedEvent {
             sender: Pubkey::new_unique(),
             payload: [1; 32],
-            key_version: 0,
+            key_version: mpc_primitives::LATEST_MPC_KEY_VERSION,
             deposit: 1,
             chain_id: "solana".to_string(),
             path: "test".to_string(),

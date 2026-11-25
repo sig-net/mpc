@@ -241,7 +241,7 @@ fn build_solana_to_ethereum_bidirectional_request(
         sender: Default::default(),
         serialized_transaction: unsigned_rlp,
         caip2_id: Chain::Ethereum.caip2_chain_id().to_string(),
-        key_version: 1,
+        key_version: mpc_primitives::LATEST_MPC_KEY_VERSION,
         deposit: 0,
         path: "".to_string(),
         algo: SDK_ALGO.to_string(),

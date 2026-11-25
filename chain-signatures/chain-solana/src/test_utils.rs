@@ -37,7 +37,7 @@ pub(crate) fn sign_bidirectional_ix_data(caip2_id: &str) -> String {
         sender: solana_sdk::pubkey::Pubkey::new_from_array([0x11; 32]),
         serialized_transaction: vec![1, 2, 3],
         caip2_id: caip2_id.to_string(),
-        key_version: 1,
+        key_version: mpc_primitives::LATEST_MPC_KEY_VERSION,
         deposit: 0,
         path: "path".to_string(),
         algo: "secp256k1".to_string(),

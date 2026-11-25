@@ -362,7 +362,7 @@ pub(crate) fn sample_evm_params() -> EvmType2TxParams {
 pub(crate) fn sample_record() -> SignBidirectionalRecord {
     SignBidirectionalRecord {
         sender: MidnightAddress::from_bytes([0xab; 32]),
-        key_version: u8::try_from(mpc_primitives::LEGACY_MPC_KEY_VERSION_1).unwrap(),
+        key_version: u8::try_from(mpc_primitives::LATEST_MPC_KEY_VERSION).unwrap(),
         path: ascii_padded(b"caller-path"),
         algo: MpcSignatureAlgorithm::Ecdsa,
         signature_dest: MpcDestination::Unused,
@@ -399,12 +399,21 @@ pub(crate) fn sample_tron_params() -> TronTxParams {
     }
 }
 
+/// [`sample_record`] at key version 1, as the compiled Compact and SDK golden
+/// vectors were generated.
+pub(crate) fn legacy_sample_record() -> SignBidirectionalRecord {
+    SignBidirectionalRecord {
+        key_version: u8::try_from(mpc_primitives::LEGACY_MPC_KEY_VERSION_1).unwrap(),
+        ..sample_record()
+    }
+}
+
 /// The tron counterpart of [`sample_record`], with `execution_dest` naming
 /// Tron and empty schemas.
 pub(crate) fn tron_record(params: TronTxParams) -> SignBidirectionalRecord {
     SignBidirectionalRecord {
         sender: MidnightAddress::from_bytes([0xab; 32]),
-        key_version: u8::try_from(mpc_primitives::LEGACY_MPC_KEY_VERSION_1).unwrap(),
+        key_version: u8::try_from(mpc_primitives::LATEST_MPC_KEY_VERSION).unwrap(),
         path: ascii_padded(b"caller-path"),
         algo: MpcSignatureAlgorithm::Ecdsa,
         signature_dest: MpcDestination::Unused,

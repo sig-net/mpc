@@ -102,7 +102,7 @@ async fn test_poll_pending_requests() -> anyhow::Result<()> {
     let request = SignRequest {
         payload: payload_hash,
         path: path.into(),
-        key_version: 0,
+        key_version: signet_primitives::LATEST_MPC_KEY_VERSION,
     };
 
     let _status = contract

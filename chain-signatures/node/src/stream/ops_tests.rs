@@ -156,7 +156,7 @@ async fn recovered_midnight_requests_require_current_attestation_semantics_befor
         Chain::Midnight,
     );
     let metadata = mpc_primitives::AttestationMetadata {
-        key_version: 1,
+        key_version: mpc_primitives::LATEST_MPC_KEY_VERSION,
         block_height: 456,
         outcome_kind: mpc_primitives::AttestationOutcomeKind::Executed,
     };
@@ -607,7 +607,7 @@ fn midnight_response(
 ) -> RespondBidirectionalEvent {
     let output_hash = mpc_compact_hashing::compute_attested_output_hash(&[]);
     let metadata = mpc_primitives::AttestationMetadata {
-        key_version: 0,
+        key_version: mpc_primitives::LATEST_MPC_KEY_VERSION,
         block_height: height,
         outcome_kind: kind,
     };
@@ -1421,7 +1421,7 @@ async fn process_respond_event_quarantines_invalid_bidirectional_target_chain() 
         epsilon: Scalar::from(1u64),
         payload: Scalar::from(2u64),
         path: "test".to_string(),
-        key_version: 1,
+        key_version: mpc_primitives::LATEST_MPC_KEY_VERSION,
     };
 
     let mut rlp_s = rlp::RlpStream::new_list(9);
@@ -1447,7 +1447,7 @@ async fn process_respond_event_quarantines_invalid_bidirectional_target_chain() 
                 serialized_transaction: unsigned_rlp,
                 dest: SDK_DEST.to_string(),
                 caip2_id: "not-a-chain".to_string(),
-                key_version: 1,
+                key_version: mpc_primitives::LATEST_MPC_KEY_VERSION,
                 deposit: 0,
                 path: "m/0".to_string(),
                 algo: SDK_ALGO.to_string(),
@@ -1545,7 +1545,7 @@ fn bidirectional_event(serialized_transaction: Vec<u8>) -> SignBidirectionalEven
         sender: [0u8; 32],
         serialized_transaction,
         caip2_id: Chain::Ethereum.caip2_chain_id().to_string(),
-        key_version: 1,
+        key_version: mpc_primitives::LATEST_MPC_KEY_VERSION,
         deposit: 0,
         path: String::new(),
         algo: SDK_ALGO.to_string(),

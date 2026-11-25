@@ -20,7 +20,7 @@ pub(crate) fn dummy_indexed_sign_request(id: u8, chain: Chain) -> Arc<IndexedSig
             epsilon: k256::Scalar::ONE,
             payload: k256::Scalar::ONE,
             path: "m/0".to_string(),
-            key_version: 0,
+            key_version: mpc_primitives::LATEST_MPC_KEY_VERSION,
         },
         chain,
         0,

@@ -88,7 +88,7 @@ pub(crate) fn watcher_tx(seed: u8) -> (BidirectionalTxId, SignId, Arc<Bidirectio
         source_chain: mpc_primitives::Chain::Midnight,
         target_chain: mpc_primitives::Chain::Tron,
         caip2_id: "tron:mainnet".to_string(),
-        key_version: 0,
+        key_version: mpc_primitives::LATEST_MPC_KEY_VERSION,
         deposit: 0,
         path: String::new(),
         algo: "secp256k1".to_string(),

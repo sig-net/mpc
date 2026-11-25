@@ -1485,7 +1485,7 @@ mod tests {
         assert_eq!(
             request.args.epsilon,
             signet_crypto::derive_epsilon(
-                1,
+                mpc_primitives::LATEST_MPC_KEY_VERSION,
                 Chain::Midnight,
                 signet_crypto::KeyPurpose::Bidirectional {
                     sender: &hex::encode(CALLER),
