@@ -25,7 +25,7 @@ alias s := setup
 # Run GitHub workflows locally via act (needs Docker; pulls runner images on first run)
 # Usage: just run-ci [args] (e.g. just run-ci "-l" to list, just run-ci "-j lint-and-test")
 run-ci args="": (setup "act")
-    act -P warp-ubuntu-2404-x64-4x=catthehacker/ubuntu:act-latest -P ubuntu-24.04=catthehacker/ubuntu:act-latest {{args}}
+    act -P warp-ubuntu-2404-x64-4x=catthehacker/ubuntu:act-24.04-20261122@sha256:ebfc2752875ebb29fbfa360db9dcd2f76bc160147ec6bd1b035bba0ef8b38fbe -P ubuntu-24.04=catthehacker/ubuntu:act-24.04-20261122@sha256:ebfc2752875ebb29fbfa360db9dcd2f76bc160147ec6bd1b035bba0ef8b38fbe {{args}}
 
 # Run all integration tests
 # Usage: just t [filter]
