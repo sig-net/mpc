@@ -78,7 +78,8 @@ Every second Tuesday is a **release day**. On it, in this order:
 1. [Promote to mainnet](#step-1-promote-to-mainnet) the release that soaked on testnet.
 2. [Cut the next release](#step-2-cut-the-release) on `develop`.
 3. [Promote it to testnet](#step-3-promote-to-testnet).
-4. [Soak](#step-4-soak) it there until the next release day.
+4. [Update dependencies](#step-4-update-dependencies) on `develop`, for the next release.
+5. [Soak](#step-5-soak) the release on testnet until the next release day.
 
 ### Step 1: Promote to mainnet
 
@@ -117,7 +118,11 @@ Every second Tuesday is a **release day**. On it, in this order:
    ```
    Don't open it from `develop`: the PR would pick up anything merged to `develop` while it is open.
 
-### Step 4: Soak
+### Step 4: Update dependencies
+
+Open the routine dependency update PR ([U2](dependencies.md#updating)) against `develop`. It is not part of the release just cut: it ships with the next one.
+
+### Step 5: Soak
 
 The release stays on testnet until the next release day, at least 7 days. It is ready for mainnet when no open issue labeled `regression` points at it. Anyone who sees a regression on testnet, from alerts, dashboards or reports, opens such an issue. A [hotfix](#hotfixes) closes it. A hotfix that changes what runs on testnet, the node binary or the contract, restarts the 7 days. A hotfix that changes only CI, tests, tooling or docs does not touch what is running, so the soak continues from the original promotion and the testnet image is not rebuilt. The promotion PR to mainnet still names the hotfix version, since `mainnet` gets the branch.
 
