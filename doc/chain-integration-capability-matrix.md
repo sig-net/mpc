@@ -1,7 +1,7 @@
 # Chain integration capability and ownership matrix
 
-Current chain-integration roles and settings ownership. Labels apply to each
-role, not to the chain itself.
+Current and planned chain-integration roles and settings ownership. Labels
+apply to each role, not to the chain itself; planned rows list required work.
 
 - **Config-gated:** the role is implemented and constructed when its chain
   configuration is present.
@@ -11,7 +11,7 @@ role, not to the chain itself.
 
 - **S — static protocol semantics:** [chain identity](account-derivation.md#chain-identification),
   reused across dev/test networks, and deterministic request/response rules,
-  including target and `Unviable` support.
+  including target signing schemes and `Unviable` support.
 - **D — deployment-wide values:** values shared by every node, including
   contracts/programs, execution networks, [`checkpoint_interval`](checkpoints.md#7-implementation-status),
   and finality/observation/response expectations.
@@ -52,20 +52,24 @@ CLI/env is a delivery mechanism, not independent ownership.
 
 ## Matrix
 
-| Chain | Integration role | Source events | Response publisher | Target preparation | Target watcher | Networks / selection | Network-wide settings | Local settings |
-|---|---|---|---|---|---|---|---|---|
-| **NEAR** | Governance + test-only source | **Test-only [plain](glossary.md#plain-sign-request):** `mpc_chain_near::run` → sign queue, outside C1. **Production: not implemented.** | **Always:** `NearClient` → C4; currently serves the test-only source. | **Not implemented:** C2 rejects. | **Not implemented.** | Implicit: RPC **L** + `mpc_contract_id` **D**; local sandbox in tests. | **S:** `near:mainnet`; no checkpoints. **D · CLI/env:** `mpc_contract_id`. | **L · CLI/env:** NEAR node parameters. |
-| **Ethereum** | Source + target | **Config-gated plain:** `EthereumIndexer` → C1. | **Config-gated:** `EthClient` → C4; batches responses; shares `EthConfig` with indexing. | **Implemented:** unsigned validation and `sign_and_hash_ethereum` → C2. | **Config-gated:** `ExecutionWatcher` inside `EthereumIndexer` → C1/C3; watches every source's Ethereum targets. No `EthConfig`: no watcher or EIP-155 admission check. | Explicit: `EthNetwork` **D · CLI/env** — Mainnet/Sepolia; Anvil in tests. | **S:** `eip155:1` target identity and signing semantics. **D · CLI/env:** `contract_address`. **D · constant:** checkpoints every 20 blocks. | **L · CLI/env:** local `EthConfig` fields. **L · constant:** `chain-ethereum` defaults. |
-| **Solana** | Source-only | **Config-gated plain + [bidirectional](glossary.md#bidirectional-request):** `SolanaIndexer` → C1. | **Config-gated plain + bidirectional:** `SolanaClient` → C4. | **Not implemented:** C2 rejects. | **Not implemented.** | Implicit: RPC **L** + `program_address` **D**; local validator in tests. | **S:** fixed mainnet identity; Borsh responses. **D · CLI/env:** `program_address`. **D · constant:** checkpoints every 1200 slots. | **L · CLI/env:** local `SolConfig` fields. **L · constant:** `chain-solana` defaults. |
-| **Hydration** | Source-only | **Config-gated plain + bidirectional:** `HydrationIndexer` → C1. | **Config-gated plain + bidirectional:** `HydrationClient` → C4. | **Not implemented:** C2 rejects. | **Not implemented.** | Implicit: RPC **L**; no network validation or integration harness. | **S:** `polkadot:2034`; Borsh responses. **D · constant:** checkpoints every 240 blocks. | **L · CLI/env:** `HydrationConfig`. |
-| **Canton** | Source-only | **Config-gated bidirectional only:** `CantonIndexer` → C1. | **Config-gated bidirectional only:** `CantonClient` → C4; rejects plain `Sign`. | **Not implemented:** C2 rejects. | **Not implemented.** | Implicit: ledger APIs **L** + signer IDs **D**; local sandbox in tests. | **S:** synthetic `canton:global`; ABI responses. **D · CLI/env:** `signer_contract_id`, `signer_template_id`. **D · constant:** checkpoints every 50 offsets. | **L · CLI/env:** local `CantonConfig` fields. |
-| **Midnight** | Source-only | **Config-gated bidirectional only:** `MidnightIndexer` → C1 after the root key is available. | **Config-gated bidirectional only:** `RecoveringMidnightPublisher`/`MidnightPublisher` → C4; rejects plain `Sign`. | **Not implemented:** C2 rejects. | **Not implemented.** | Node-reported `NetworkId`: Mainnet/Preprod/Preview/Stagenet; `Undeployed` in local tests. | **S:** `midnight:mainnet`; Fab responses, attestation hashing, [`Unviable`](bidirectional-calls.md#2-vocabulary). **D · CLI/env:** `central_address`, `responder_address`. **D · constant:** checkpoints every 120 blocks. | **L · CLI/env:** local `MidnightConfig` fields and DUST storage. **L · constant:** `chain-midnight` defaults. |
-| **Tron** | **Target-only; includes Midnight → Tron** | **Not implemented:** no source indexer; response hashing rejects Tron sources. | **Not implemented:** no registration. | **Implemented:** raw validation, SHA-256 txID, owner/expiry checks → C2. | **Config-gated target-only:** `TronWatcher` → C1/C3; watches every source's Tron targets. Without config, admitted/signed requests remain `Executing`. | Implicit: endpoint **L**; recorded Nile fixtures, no live local harness. | **S:** `tron:mainnet` target identity and transaction/expiry semantics; no checkpoints. | **L · CLI/env:** `TronConfig` fields. **L · constant:** `chain-tron` defaults. |
+| Chain | Integration role | Request types | Target signing | Execution watcher | Networks / selection | Network-wide settings |
+|---|---|---|---|---|---|---|
+| **NEAR** | Governance + test-only source | Test-only [plain](glossary.md#plain-sign-request); production not implemented. | Not implemented. | Not implemented. | Implicit: RPC **L** + `mpc_contract_id` **D**; local sandbox in tests. | **S:** `near:mainnet`; no checkpoints. **D · CLI/env:** `mpc_contract_id`. |
+| **Ethereum** | Source + target | Plain | secp256k1/ECDSA; Keccak-256; EIP-155 transaction semantics via C2. | Config-gated; no `EthConfig` also skips the EIP-155 admission check. | Explicit: `EthNetwork` **D · CLI/env** — Mainnet/Sepolia; Anvil in tests. | **S:** `eip155:1` target identity and signing semantics. **D · CLI/env:** `contract_address`. **D · constant:** checkpoints every 20 blocks. |
+| **Solana** | Source-only | Plain + [bidirectional](glossary.md#bidirectional-request) | Not implemented. | Not implemented. | Implicit: RPC **L** + `program_address` **D**; local validator in tests. | **S:** fixed mainnet identity; Borsh responses. **D · CLI/env:** `program_address`. **D · constant:** checkpoints every 1200 slots. |
+| **Canton** | Source-only | Bidirectional only | Not implemented. | Not implemented. | Implicit: ledger APIs **L** + signer IDs **D**; local sandbox in tests. | **S:** synthetic `canton:global`; ABI responses. **D · CLI/env:** `signer_contract_id`, `signer_template_id`. **D · constant:** checkpoints every 50 offsets. |
+| **Midnight** | Source-only | Bidirectional only | Not implemented. | Not implemented. | Node-reported `NetworkId`: Mainnet/Preprod/Preview/Stagenet; `Undeployed` in local tests. | **S:** `midnight:mainnet`; Fab responses, attestation hashing, [`Unviable`](bidirectional-calls.md#2-vocabulary). **D · CLI/env:** `central_address`, `responder_address`. **D · constant:** checkpoints every 120 blocks. |
+| **Tron** | **Target-only; includes Midnight → Tron** | Not implemented. | secp256k1/ECDSA; SHA-256 txID; owner/expiry semantics via C2. | Config-gated; without it, admitted/signed requests remain `Executing`. | Implicit: endpoint **L**; recorded Nile fixtures, no live local harness. | **S:** `tron:mainnet` target identity and transaction/expiry semantics; no checkpoints. |
+| **Zcash** | **Planned target-only; Midnight → Zcash** | Not implemented. | **TBD:** transaction family, curve/signing scheme, sighash/txID, replay/expiry, and network binding. | **Planned:** target watcher and disabled-watcher behavior. | **TBD:** Mainnet/Testnet/local selection. | **S:** CAIP-2 identity TBD. **D:** finality/observation expectations TBD; no source checkpoints. |
 
-- Ethereum, Solana, Hydration, Canton, and Midnight share one config gate
-  between source indexing and publishing; the roles cannot be enabled separately.
+- Source indexing and C4 publishing share one config gate on Ethereum, Solana,
+  Canton, and Midnight. NEAR's publisher is always registered for its test-only
+  source.
 - Ethereum watching also shares the source indexer/config. Tron configures only
   its watcher.
 - NEAR governance is always on: `NearGovernanceClient` reads protocol
   state/config/checkpoints and submits governance/checkpoint votes through
   `RpcExecutor`. It is neither a production source nor a target role.
+- Remaining configuration is **L**: per-node endpoints, credentials, enablement,
+  storage, and worker timing/retry policy. These live in the chain config and
+  chain-crate defaults; Midnight also has node-local DUST storage.
