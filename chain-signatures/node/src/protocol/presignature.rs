@@ -330,8 +330,9 @@ pub struct PresignatureSpawner {
     posits_debug_view: crate::web::debug::DebugPageTaskHandle,
 }
 
+#[bon::bon]
 impl PresignatureSpawner {
-    #[allow(clippy::too_many_arguments)]
+    #[builder]
     pub fn new(
         me: Participant,
         threshold: usize,
@@ -851,17 +852,17 @@ impl PresignatureSpawnerTask {
         public_key: &PublicKey,
     ) -> Self {
         let (ongoing_gen_tx, ongoing_gen_rx) = watch::channel(0);
-        let spawner = PresignatureSpawner::new(
-            me,
-            threshold,
-            epoch,
-            private_share,
-            public_key,
-            &ctx.triple_storage.to_ready(me),
-            &ctx.presignature_storage.to_ready(me),
-            ctx.msg_channel.clone(),
-            ctx.my_account_id.to_string(),
-        );
+        let spawner = PresignatureSpawner::builder()
+            .me(me)
+            .threshold(threshold)
+            .epoch(epoch)
+            .private_share(private_share)
+            .public_key(public_key)
+            .triples(&ctx.triple_storage.to_ready(me))
+            .presignatures(&ctx.presignature_storage.to_ready(me))
+            .msg(ctx.msg_channel.clone())
+            .node_account_id(ctx.my_account_id.to_string())
+            .build();
 
         Self {
             ongoing_gen_rx,

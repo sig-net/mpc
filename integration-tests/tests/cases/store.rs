@@ -195,17 +195,17 @@ async fn test_presignature_persistence() -> anyhow::Result<()> {
     let redis = containers::Redis::run(&spawner).await;
     let triple_storage = redis.triple_storage(&node0_id, node0);
     let presignature_storage = redis.presignature_storage(&node0_id, node0);
-    let presignature_spawner = PresignatureSpawner::new(
-        Participant::from(0),
-        5,
-        123,
-        &SecretKeyShare::default(),
-        &PublicKey::default(),
-        &triple_storage,
-        &presignature_storage,
-        msg,
-        node0_id.to_string(),
-    );
+    let presignature_spawner = PresignatureSpawner::builder()
+        .me(Participant::from(0))
+        .threshold(5)
+        .epoch(123)
+        .private_share(&SecretKeyShare::default())
+        .public_key(&PublicKey::default())
+        .triples(&triple_storage)
+        .presignatures(&presignature_storage)
+        .msg(msg)
+        .node_account_id(node0_id.to_string())
+        .build();
 
     let id = 1;
     let presignature = dummy_presignature(id);

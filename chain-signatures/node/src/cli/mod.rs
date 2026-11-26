@@ -295,37 +295,37 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 near_governance_client,
                 rpc_channel,
                 rpc_executor,
-            } = RpcHandles::new(
-                &near_rpc,
-                &my_address,
-                &network,
-                &mpc_contract_id,
-                signer,
-                &stack,
-                backlog.clone(),
-            )
-            .await?;
+            } = RpcHandles::builder()
+                .near_rpc_url(&near_rpc)
+                .my_address(&my_address)
+                .network(&network)
+                .mpc_contract_id(&mpc_contract_id)
+                .signer(signer)
+                .stack(&stack)
+                .backlog(backlog.clone())
+                .build()
+                .await?;
 
-            let sync_task = SyncTask::new(
-                &node_client,
-                triple_storage.clone(),
-                presignature_storage.clone(),
-                mesh_state.clone(),
-                contract_watcher.clone(),
-                sync_report_tx.clone(),
-                network.clone(),
-            );
+            let sync_task = SyncTask::builder()
+                .client(&node_client)
+                .triples(triple_storage.clone())
+                .presignatures(presignature_storage.clone())
+                .mesh_state(mesh_state.clone())
+                .contract(contract_watcher.clone())
+                .sync_report_tx(sync_report_tx.clone())
+                .network(network.clone())
+                .build();
 
-            log_startup(
-                &mpc_contract_id,
-                &account_id,
-                &account_pk,
-                &my_address,
-                &cipher_pk_hex,
-                &network,
-                &near_rpc,
-                &stack.configs,
-            );
+            log_startup()
+                .mpc_contract_id(&mpc_contract_id)
+                .account_id(&account_id)
+                .account_pk(&account_pk)
+                .my_address(&my_address)
+                .cipher_pk_hex(&cipher_pk_hex)
+                .network(&network)
+                .near_rpc(&near_rpc)
+                .chains(&stack.configs)
+                .call();
 
             let ProtocolHandles {
                 protocol,
@@ -335,20 +335,20 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 config_tx,
                 checkpoints_tx,
                 checkpoints_rx,
-            } = ProtocolHandles::new(
-                &account_id,
-                network.clone(),
-                sign_rx,
-                &node_client,
-                &contract_watcher,
-                keystore,
-                triple_storage.clone(),
-                presignature_storage.clone(),
-                mesh_state.clone(),
-                rpc_channel.clone(),
-                sync_report_tx,
-            )
-            .await;
+            } = ProtocolHandles::builder()
+                .account_id(&account_id)
+                .network(network.clone())
+                .sign_rx(sign_rx)
+                .node_client(&node_client)
+                .contract_watcher(&contract_watcher)
+                .keystore(keystore)
+                .triple_storage(triple_storage.clone())
+                .presignature_storage(presignature_storage.clone())
+                .mesh_state(mesh_state.clone())
+                .rpc_channel(rpc_channel.clone())
+                .sync_report_tx(sync_report_tx)
+                .build()
+                .await;
 
             tracing::info!("protocol initialized");
             let mut tasks = JoinSet::new();
@@ -369,30 +369,32 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 contract_watcher.clone(),
                 mesh_state.clone(),
             ));
-            tasks.spawn(web::run(
-                web_port,
-                message_channel,
-                node_watcher,
-                triple_storage,
-                presignature_storage,
-                contract_watcher.clone(),
-                network.clone(),
-                account_id,
-                backlog.clone(),
-            ));
+            tasks.spawn(
+                web::run()
+                    .port(web_port)
+                    .msg_channel(message_channel)
+                    .node(node_watcher)
+                    .triple_storage(triple_storage)
+                    .presignature_storage(presignature_storage)
+                    .contract(contract_watcher.clone())
+                    .network(network.clone())
+                    .my_account_id(account_id)
+                    .backlog(backlog.clone())
+                    .call(),
+            );
 
-            spawn_indexers(
-                &mut tasks,
-                stack,
-                sign_tx,
-                rpc_channel.clone(),
-                backlog.clone(),
-                contract_watcher.clone(),
-                mesh_state.clone(),
-                node_client.clone(),
-                checkpoints_rx,
-            )
-            .await?;
+            spawn_indexers()
+                .tasks(&mut tasks)
+                .stack(stack)
+                .sign_tx(sign_tx)
+                .rpc_channel(rpc_channel.clone())
+                .backlog(backlog.clone())
+                .contract_watcher(contract_watcher.clone())
+                .mesh_state(mesh_state.clone())
+                .node_client(node_client.clone())
+                .checkpoints_rx(checkpoints_rx)
+                .call()
+                .await?;
             tracing::info!("node tasks spawned");
 
             // A core task never returns in normal operation, so the first to
@@ -600,7 +602,7 @@ fn host_of(url: &Url) -> &str {
 
 /// Emit the single structured "starting node" banner describing this node's identity
 /// and which chains it is configured to index.
-#[allow(clippy::too_many_arguments)]
+#[bon::builder]
 fn log_startup(
     mpc_contract_id: &AccountId,
     account_id: &AccountId,
@@ -676,7 +678,9 @@ struct RpcHandles {
     rpc_executor: RpcExecutor,
 }
 
+#[bon::bon]
 impl RpcHandles {
+    #[builder]
     async fn new(
         near_rpc_url: &Url,
         my_address: &Url,
@@ -698,15 +702,15 @@ impl RpcHandles {
             near_gates.clone(),
             publisher_telemetry,
         );
-        let near_governance_client = NearGovernanceClient::new(
-            near_rpc,
-            my_address,
-            &network.sign_sk,
-            &network.cipher_sk,
-            mpc_contract_id,
-            signer,
-            near_gates,
-        );
+        let near_governance_client = NearGovernanceClient::builder()
+            .client(near_rpc)
+            .my_addr(my_address)
+            .sign_sk(&network.sign_sk)
+            .cipher_sk(&network.cipher_sk)
+            .contract_id(mpc_contract_id)
+            .signer(signer)
+            .gates(near_gates)
+            .build();
         let publishers = stack.publishers(near_client, backlog).await?;
         let (rpc_channel, rpc_executor) =
             RpcExecutor::new(near_governance_client.clone(), publishers).await;
@@ -780,8 +784,9 @@ struct ProtocolHandles {
     checkpoints_rx: EnumMap<Chain, watch::Receiver<Option<CheckpointDigest>>>,
 }
 
+#[bon::bon]
 impl ProtocolHandles {
-    #[allow(clippy::too_many_arguments)]
+    #[builder]
     async fn new(
         account_id: &AccountId,
         network: NetworkConfig,
@@ -807,15 +812,15 @@ impl ProtocolHandles {
             contract_watcher.clone(),
         )
         .await;
-        let spawner = SignatureSpawner::new(
-            account_id.clone(),
-            contract_watcher.clone(),
-            presignature_storage.clone(),
-            mesh_state.clone(),
-            message_channel.clone(),
-            rpc_channel,
-            sync_report_tx,
-        );
+        let spawner = SignatureSpawner::builder()
+            .node_account_id(account_id.clone())
+            .contract(contract_watcher.clone())
+            .presignatures(presignature_storage.clone())
+            .mesh_state(mesh_state.clone())
+            .msg(message_channel.clone())
+            .rpc(rpc_channel)
+            .sync_report_tx(sync_report_tx)
+            .build();
         let sign_task = SignatureSpawnerTask::run(spawner, sign_rx, config_rx.clone());
         let protocol = MpcSignProtocol {
             my_account_id: account_id.clone(),
@@ -843,7 +848,7 @@ impl ProtocolHandles {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+#[bon::builder]
 async fn spawn_indexers(
     tasks: &mut JoinSet<anyhow::Result<()>>,
     stack: ChainStack,
@@ -904,16 +909,16 @@ async fn spawn_indexers(
         tracing::info!("ethereum indexer created successfully");
         tasks.spawn(run_supervised(
             eth_indexer,
-            StreamContext::new(
-                backlog.clone(),
-                sign_tx.clone(),
-                rpc_channel.clone(),
-                contract_watcher.clone(),
-                mesh_state.clone(),
-                node_client.clone(),
-                checkpoints_rx[Chain::Ethereum].clone(),
-            )
-            .with_ethereum_chain_id(ethereum_chain_id),
+            StreamContext::builder()
+                .backlog(backlog.clone())
+                .sign_tx(sign_tx.clone())
+                .rpc(rpc_channel.clone())
+                .contract_watcher(contract_watcher.clone())
+                .mesh_state(mesh_state.clone())
+                .node_client(node_client.clone())
+                .checkpoints_rx(checkpoints_rx[Chain::Ethereum].clone())
+                .maybe_ethereum_chain_id(ethereum_chain_id)
+                .build(),
             eth_telemetry,
         ));
     }
@@ -930,16 +935,16 @@ async fn spawn_indexers(
         tracing::info!("solana indexer created successfully");
         tasks.spawn(run_supervised(
             sol_indexer,
-            StreamContext::new(
-                backlog.clone(),
-                sign_tx.clone(),
-                rpc_channel.clone(),
-                contract_watcher.clone(),
-                mesh_state.clone(),
-                node_client.clone(),
-                checkpoints_rx[Chain::Solana].clone(),
-            )
-            .with_ethereum_chain_id(ethereum_chain_id),
+            StreamContext::builder()
+                .backlog(backlog.clone())
+                .sign_tx(sign_tx.clone())
+                .rpc(rpc_channel.clone())
+                .contract_watcher(contract_watcher.clone())
+                .mesh_state(mesh_state.clone())
+                .node_client(node_client.clone())
+                .checkpoints_rx(checkpoints_rx[Chain::Solana].clone())
+                .maybe_ethereum_chain_id(ethereum_chain_id)
+                .build(),
             sol_telemetry,
         ));
     }
@@ -957,16 +962,16 @@ async fn spawn_indexers(
         tracing::info!("canton indexer created successfully");
         tasks.spawn(run_supervised(
             canton_indexer,
-            StreamContext::new(
-                backlog.clone(),
-                sign_tx.clone(),
-                rpc_channel.clone(),
-                contract_watcher.clone(),
-                mesh_state.clone(),
-                node_client.clone(),
-                checkpoints_rx[Chain::Canton].clone(),
-            )
-            .with_ethereum_chain_id(ethereum_chain_id),
+            StreamContext::builder()
+                .backlog(backlog.clone())
+                .sign_tx(sign_tx.clone())
+                .rpc(rpc_channel.clone())
+                .contract_watcher(contract_watcher.clone())
+                .mesh_state(mesh_state.clone())
+                .node_client(node_client.clone())
+                .checkpoints_rx(checkpoints_rx[Chain::Canton].clone())
+                .maybe_ethereum_chain_id(ethereum_chain_id)
+                .build(),
             canton_telemetry,
         ));
     }
@@ -978,16 +983,16 @@ async fn spawn_indexers(
         // Waits for the network public key inside the task, so a stop signal or
         // a failed core task during the wait still ends the node.
         let mut contract_watcher = contract_watcher.clone();
-        let ctx = StreamContext::new(
-            backlog.clone(),
-            sign_tx.clone(),
-            rpc_channel.clone(),
-            contract_watcher.clone(),
-            mesh_state.clone(),
-            node_client.clone(),
-            checkpoints_rx[Chain::Midnight].clone(),
-        )
-        .with_ethereum_chain_id(ethereum_chain_id);
+        let ctx = StreamContext::builder()
+            .backlog(backlog.clone())
+            .sign_tx(sign_tx.clone())
+            .rpc(rpc_channel.clone())
+            .contract_watcher(contract_watcher.clone())
+            .mesh_state(mesh_state.clone())
+            .node_client(node_client.clone())
+            .checkpoints_rx(checkpoints_rx[Chain::Midnight].clone())
+            .maybe_ethereum_chain_id(ethereum_chain_id)
+            .build();
         let backlog = backlog.clone();
         tasks.spawn(async move {
             tracing::info!("Midnight indexer waiting for the network public key");
@@ -1019,16 +1024,16 @@ async fn spawn_indexers(
         tracing::info!("tron execution watcher created successfully");
         tasks.spawn(run_supervised(
             watcher,
-            StreamContext::new(
-                backlog.clone(),
-                sign_tx.clone(),
-                rpc_channel.clone(),
-                contract_watcher.clone(),
-                mesh_state.clone(),
-                node_client.clone(),
-                checkpoints_rx[Chain::Tron].clone(),
-            )
-            .with_ethereum_chain_id(ethereum_chain_id),
+            StreamContext::builder()
+                .backlog(backlog.clone())
+                .sign_tx(sign_tx.clone())
+                .rpc(rpc_channel.clone())
+                .contract_watcher(contract_watcher.clone())
+                .mesh_state(mesh_state.clone())
+                .node_client(node_client.clone())
+                .checkpoints_rx(checkpoints_rx[Chain::Tron].clone())
+                .maybe_ethereum_chain_id(ethereum_chain_id)
+                .build(),
             tron_telemetry,
         ));
     }
