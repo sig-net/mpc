@@ -134,10 +134,9 @@ mpc-utils = { path = "./chain-signatures/utils" }
 mpc-node = { path = "./chain-signatures/node" }
 mpc-primitives = { path = "./chain-signatures/primitives" }
 signet-crypto = { path = "./signet-crypto" }
-# The response encoding must match what the deployed Midnight contract decodes.
-# The midnight-respond-codec test vectors check it; they are generated from the
-# `@sig-net/midnight-respond-oracle` alias in midnight-devtools/package.json.
-# Bumping this pin means bumping that alias to match and regenerating them.
+# Pinned to the Midnight serialization the deployed contract was compiled with,
+# not the latest contract packages. midnight-respond-codec's
+# `replays_every_typescript_oracle_vector` fails if a bump changes the encoding.
 signet-midnight-serde = "=0.24.0"
 signet-primitives = { path = "./signet-primitives" }
 signet-program = { path = "./chain-signatures/contract-sol" }
