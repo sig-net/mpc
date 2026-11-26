@@ -57,7 +57,7 @@ Key versions 0, 1 and 2 derive from the same MPC root key, so keys of two of the
 
 These formats do not encode the key's purpose. A [system account](glossary.md#system-account) derives with the sender `%admin#`.
 
-Bidirectional requests need key version 2 or later ([bidirectional-calls.md §7.1](bidirectional-calls.md#71-request-signbidirectionaleventv1)), so key versions 0 and 1 have no bidirectional or attestation key. Before that, a contract's attestation key was a key version 1 plain key under its source chain's reserved path (`<chain> response key`, for example `solana response key` on Solana). Contracts may still trust that key, so below key version 2 no request from a chain may name that chain's reserved path ([bidirectional-calls.md §4.3](bidirectional-calls.md#43-mpc-network), M1).
+Bidirectional requests need key version 2 or later ([bidirectional-calls.md §7.1](bidirectional-calls.md#71-request-signbidirectionaleventv1)), so key versions 0 and 1 have no bidirectional or attestation key.
 
 ### Contract-Based Derivation
 

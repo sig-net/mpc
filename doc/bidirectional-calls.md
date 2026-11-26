@@ -545,10 +545,7 @@ Properties:
   replay protection unnoticed (Section 6). The MPC picks a key's purpose
   from the signing API a request comes on, never from its fields (Distinct
   keys, Section 5). Bidirectional requests need key version 2, the first
-  whose derivation paths name the purpose. Below it the attestation key lay
-  under a reserved path that contracts may still trust, so the MPC refuses
-  a request below key version 2 naming that path on every signing API
-  (account-derivation.md).
+  whose derivation paths name the purpose.
 * M2 The MPC drops a request that is not authentic, that it cannot
   process, or whose rid is already in the backlog, and keeps nothing for
   it. A rid already in the backlog is the same transaction, already being
