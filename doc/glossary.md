@@ -51,14 +51,13 @@ its [digest](#digest). See [bidirectional-calls.md
 
 ## Backlog
 
-Each node keeps one backlog per [source chain](#source-chain), with one entry
-per [admitted](#admitted-request) [request](#request) that is not finished. An
+A node's record of the [admitted](#admitted-request) [requests](#request) on
+one [source chain](#source-chain) that are not finished, one entry each. An
 entry holds the [request id](#request-id), the request and, for a
 [bidirectional request](#bidirectional-request), the ids of the transactions
 that the signatures [published](#publish) for it give and the height at which
-another request's response left it [unviable](#outcome). Only final source
-chain events change it; anything else a node keeps about a request stays out of
-it (`Backlog`, `BacklogEntry`, `backlog/`). See [checkpoints.md
+another request's response left it [unviable](#outcome) (`Backlog`,
+`BacklogEntry`, `backlog/`). See [checkpoints.md
 §1](checkpoints.md#1-background).
 
 *Code today:* `BacklogEntry` also holds the node's progress on the request.
@@ -75,13 +74,10 @@ chain](#source-chain) (`SignKind::SignBidirectional`,
 ## Caught up
 
 A node is caught up on a chain once it has processed every block up to the
-finalized head its [indexer](#indexer) read at startup: one bounded pass,
-without chasing blocks finalized meanwhile. Until then it starts no new
-signing, attesting or publishing for that chain. The per-chain flag is set when
-the indexer reports `ChainEvent::CatchupCompleted`
-(`chain-signatures/primitives/src/events.rs`) and cleared by every restart of
-the indexer or the node; a node that falls behind without a restart keeps
-signing. See [checkpoints.md
+finalized head its [indexer](#indexer) read when it last started. Until then
+it starts no new signing, attesting or publishing for that chain. Falling
+behind later does not undo it (`ChainEvent::CatchupCompleted`,
+`chain-signatures/primitives/src/events.rs`). See [checkpoints.md
 §1](checkpoints.md#1-background).
 
 ## Checkpoint
@@ -127,12 +123,10 @@ A short hash that stands for a larger structure. The docs use two:
 
 ## Entropy
 
-A value from the block that holds a [request](#request). The requester cannot
-know or influence it before that block is validated. Nodes read it from a final
-block, so every node derives the same delta (`SignArgs::entropy`,
-`chain-signatures/primitives/src/crypto.rs`). A response has no such block: its
-entropy hashes the first leg's with the message it signs and its key. It also seeds the
-[proposer](#proposer) election. See
+A value from the block that holds a [request](#request) that the requester
+cannot know or influence before that block is validated. Nodes derive the
+signature's delta and the request's [proposers](#proposer) from it
+(`SignArgs::entropy`, `chain-signatures/primitives/src/crypto.rs`). See
 [delta-derivation.md](delta-derivation.md).
 
 ## Epoch
@@ -156,10 +150,9 @@ faulty. Compare [correct node](#correct-node). See
 
 ## Final block
 
-A block the network treats as final, so it will stay in the chain unchanged
-(called solidified on Tron). Nodes read [requests](#request) and attest
-[outcomes](#outcome) only from final blocks; what counts as finalized differs
-per chain. See [bidirectional-calls.md
+A block the network relies on to stay in its chain unchanged (called
+solidified on Tron). What counts as final differs per chain. See
+[bidirectional-calls.md
 §3.3](bidirectional-calls.md#33-assumptions) and
 [system-model.md](system-model.md).
 
@@ -193,7 +186,7 @@ One attempt to run a protocol to completion over a specific
 [artifact](#artifact), named by the artifact's id, together with the sign id
 for a signature: (sign id, [presignature](#presignature) id). The sign id
 (`SignId`, `signet-primitives/src/crypto.rs`) wraps the [request
-id](#request-id), the same 32 bytes.
+id](#request-id).
 
 ## Key version
 
@@ -249,8 +242,7 @@ members).
 ## Plain sign request
 
 A [request](#request) for a signature with nothing to report back
-(`SignKind::Sign`, `chain-signatures/primitives/src/requests.rs`). Its first
-[published](#publish) signature finishes it. See
+(`SignKind::Sign`, `chain-signatures/primitives/src/requests.rs`). See
 [checkpoints.md §1](checkpoints.md#1-background).
 
 ## Posit
@@ -288,18 +280,14 @@ chain](#source-chain). See
 What a key signs: [plain sign requests](#plain-sign-request),
 [bidirectional requests](#bidirectional-request),
 [attestations](#attestation) or a [system account](#system-account)'s
-transactions. The signing API a request comes on sets it, never the
-request's fields. From [key version](#key-version) 2 the derivation path
-names the purpose, so keys of different purposes differ. See
+transactions. It applies from [key version](#key-version) 2. See
 [account-derivation.md](account-derivation.md#derivation-path-structure).
 
 ## Request
 
 What a contract asks the network to sign. A [bidirectional
 request](#bidirectional-request) is the tuple (sender, transaction, target,
-key, schema), where the sender is the requesting contract. It is made when
-the contract calls `sign_bidirectional` with the other four fields, which
-sets the sender to the calling contract and accepts the call
+key, schema), where the sender is the requesting contract
 (`IndexedSignRequest`, `SignKind`,
 `chain-signatures/primitives/src/requests.rs`; `SignBidirectionalEvent`,
 `chain-signatures/primitives/src/bidirectional.rs`). See
