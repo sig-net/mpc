@@ -13,8 +13,8 @@ use mpc_chain_integration_core::utils::retry::RpcFailure;
 use mpc_chain_integration_core::{ChainPublisher, PublishAction, PublisherTelemetry};
 use mpc_primitives::{Chain, SignKind, Signature};
 use mpc_utils::time::current_unix_timestamp;
-use tokio_util::task::AbortOnDropHandle;
 use secrecy::ExposeSecret as _;
+use tokio_util::task::AbortOnDropHandle;
 
 use crate::attestation::validate_attestation_response;
 use crate::config::{MidnightConfig, PublisherConfig};
