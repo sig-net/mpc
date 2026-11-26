@@ -1865,7 +1865,7 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(error, SubmitError::Ambiguous(_)), "{error}");
-        
+
         let client = client_over(
             managed_dir(|_, bytes| bytes),
             ScriptedChain::new(10, 20, None),
@@ -1881,9 +1881,9 @@ mod tests {
             )
             .await
             .unwrap_err();
-        
+
         assert!(matches!(error, SubmitError::StateConflict(_)), "{error}");
-        
+
         let client = client_over(
             managed_dir(|_, bytes| bytes),
             ScriptedChain::new(10, 20, None).failing_read_with(13, scan_read_rejected(403)),
@@ -1899,9 +1899,9 @@ mod tests {
             )
             .await
             .unwrap_err();
-        
+
         assert!(matches!(error, SubmitError::Node { .. }), "{error:#}");
-        
+
         let settles: Vec<RecordedFields> = recorder
             .snapshot()
             .into_iter()
