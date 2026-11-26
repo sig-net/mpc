@@ -675,7 +675,7 @@ mod tests {
     use crate::records::{RecordDiscriminantError, SignBidirectionalEventNotification};
     use crate::test_utils::{
         aligned_cell, alignment_of, array_of, atoms_from_record, cell_from_atoms, cell_from_record,
-        hex_32, key_of, map_of, minimal_record, sample_record,
+        hex_32, key_of, legacy_sample_record, map_of, minimal_record, sample_record,
         sample_record_with_partial_access_list, sample_record_with_unused_access_list,
         sample_tron_record, widths_from_record,
     };
@@ -1020,11 +1020,11 @@ mod tests {
         let (reference_cell, _) = crate::test_utils::api_reference_cell();
         assert_eq!(
             decode_record(&StateValue::from(reference_cell.clone())).unwrap(),
-            sample_record()
+            legacy_sample_record()
         );
         assert_eq!(
             reference_cell,
-            crate::test_utils::aligned_value_from_record(&sample_record()),
+            crate::test_utils::aligned_value_from_record(&legacy_sample_record()),
             "test cells must use the compiled constructor's layout and trimmed atoms"
         );
 
@@ -1280,7 +1280,7 @@ mod tests {
 
     #[test]
     fn resolve_verified_record_accepts_v1_id_and_rejects_previous_ids() {
-        let record = sample_record();
+        let record = legacy_sample_record();
         let (reference_cell, rid) = crate::test_utils::api_reference_cell();
         let cell = StateValue::from(reference_cell);
 

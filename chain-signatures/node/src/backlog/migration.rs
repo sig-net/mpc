@@ -236,7 +236,7 @@ mod tests {
                 epsilon: Scalar::ONE,
                 payload: Scalar::ONE,
                 path: String::new(),
-                key_version: 0,
+                key_version: mpc_primitives::LATEST_MPC_KEY_VERSION,
             },
             Chain::Ethereum,
             0,

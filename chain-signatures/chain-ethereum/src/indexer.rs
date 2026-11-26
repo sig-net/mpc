@@ -537,7 +537,7 @@ mod tests {
         let event = ChainSignatures::SignatureRequested {
             sender: Address::from([0x11; 20]),
             payload: FixedBytes::from([0x22; 32]),
-            keyVersion: 1,
+            keyVersion: mpc_primitives::LATEST_MPC_KEY_VERSION,
             deposit: U256::from(1000u64),
             chainId: U256::from(31337u64),
             path: "m/44'/60'/0'/0/0".to_string(),

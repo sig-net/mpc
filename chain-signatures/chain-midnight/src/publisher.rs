@@ -751,7 +751,7 @@ mod tests {
             sender: [0; 32],
             serialized_transaction: vec![],
             caip2_id: "eip155:31337".to_string(),
-            key_version: 1,
+            key_version: mpc_primitives::LATEST_MPC_KEY_VERSION,
             deposit: 0,
             path: String::new(),
             algo: String::new(),
@@ -773,7 +773,7 @@ mod tests {
     }
 
     const METADATA: AttestationMetadata = AttestationMetadata {
-        key_version: 1,
+        key_version: mpc_primitives::LATEST_MPC_KEY_VERSION,
         block_height: 42,
         outcome_kind: mpc_primitives::AttestationOutcomeKind::Executed,
     };

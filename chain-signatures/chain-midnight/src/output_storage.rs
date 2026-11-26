@@ -220,7 +220,7 @@ mod tests {
     use mockito::{Matcher, Server};
 
     const METADATA: AttestationMetadata = AttestationMetadata {
-        key_version: 1,
+        key_version: mpc_primitives::LATEST_MPC_KEY_VERSION,
         block_height: 42,
         outcome_kind: mpc_primitives::AttestationOutcomeKind::Executed,
     };

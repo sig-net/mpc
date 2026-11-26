@@ -10,7 +10,7 @@ async fn test_solana_signature_basic() -> anyhow::Result<()> {
     let cluster = cluster::spawn().solana().await?;
     let payload = [42u8; 32];
     let path = "test/integration/path";
-    let key_version = 0;
+    let key_version = mpc_primitives::LATEST_MPC_KEY_VERSION;
 
     let outcome = cluster
         .sign()

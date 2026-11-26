@@ -339,7 +339,7 @@ mod tests {
             serialized_transaction: bytes,
             dest: String::new(),
             caip2_id: Chain::Tron.caip2_chain_id().to_string(),
-            key_version: 1,
+            key_version: mpc_primitives::LATEST_MPC_KEY_VERSION,
             deposit: 0,
             path: "m/0".to_string(),
             algo: "ECDSA".to_string(),
@@ -430,7 +430,7 @@ mod tests {
 
     #[test]
     fn to_bidirectional_tx_pins_the_tron_placeholder() {
-        const FROM_ADDRESS_HEX: &str = "f0e7701dff7663ad180b34ff9f32b937a166f481";
+        const FROM_ADDRESS_HEX: &str = "1e3d6c85011bc2773136f29ffb33f3af4f915c18";
 
         let mpc_key = hex::decode("045b4fa179e005361fd858f8a6f896d7afc23a53d3f95d6566a88cde954e7b2f1cb77c554705c35d4ffced67aeafbcda46d9d89d6f200c3a3d109f92872863b3dc").unwrap();
         let encoded = EncodedPoint::from_bytes(mpc_key).unwrap();

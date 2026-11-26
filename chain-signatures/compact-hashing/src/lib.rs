@@ -117,7 +117,7 @@ mod tests {
                 .try_into()
                 .unwrap();
         let metadata = AttestationMetadata {
-            key_version: 1,
+            key_version: mpc_primitives::LATEST_MPC_KEY_VERSION,
             block_height: 42,
             outcome_kind: AttestationOutcomeKind::Executed,
         };
@@ -141,7 +141,7 @@ mod tests {
             compute_attested_output_hash(&[1, 0])
         );
         let metadata = AttestationMetadata {
-            key_version: 1,
+            key_version: mpc_primitives::LATEST_MPC_KEY_VERSION,
             block_height: 42,
             outcome_kind: AttestationOutcomeKind::Executed,
         };
@@ -155,7 +155,7 @@ mod tests {
     fn attestation_hash_binds_every_field_and_output_length() {
         use mpc_primitives::{AttestationMetadata, AttestationOutcomeKind};
         let metadata = AttestationMetadata {
-            key_version: 1,
+            key_version: mpc_primitives::LATEST_MPC_KEY_VERSION,
             block_height: 42,
             outcome_kind: AttestationOutcomeKind::Executed,
         };

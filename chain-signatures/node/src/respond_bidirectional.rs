@@ -739,7 +739,7 @@ mod tests {
         )
         .is_err());
         let metadata = AttestationMetadata {
-            key_version: 1,
+            key_version: mpc_primitives::LATEST_MPC_KEY_VERSION,
             block_height: 456,
             outcome_kind: AttestationOutcomeKind::Executed,
         };
@@ -780,7 +780,7 @@ mod tests {
             mpc_compact_hashing::compute_attestation_hash(
                 &request_id,
                 &AttestationMetadata {
-                    key_version: 0,
+                    key_version: mpc_primitives::LATEST_MPC_KEY_VERSION,
                     block_height: 456,
                     outcome_kind: AttestationOutcomeKind::Executed,
                 },

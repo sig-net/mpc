@@ -808,7 +808,9 @@ mod tests {
 
         fn reserved_entry(&self, sign_id: SignId) -> backlog::SignEntry<Generating> {
             let mut req = crate::backlog::mock::mock_sign_request(sign_id, Chain::Solana);
-            Arc::make_mut(&mut req).args.path = "solana response key".to_string();
+            let args = &mut Arc::make_mut(&mut req).args;
+            args.key_version = mpc_primitives::LEGACY_MPC_KEY_VERSION_1;
+            args.path = "solana response key".to_string();
             backlog::SignEntry::generating(req, &self.backlog)
         }
 
@@ -1369,9 +1371,7 @@ mod tests {
         assert!(spawner.test_posit_mailboxes_contains(&sign_id, RequestKind::RespondBidirectional));
 
         // Refuse the request via attestation path
-        let mut req = crate::backlog::mock::mock_bidi_request(sign_id, Chain::Solana);
-        Arc::make_mut(&mut req).args.path = "solana response key".to_string();
-        spawner.request(backlog::SignEntry::generating(req, &spawner.backlog));
+        spawner.request_reserved(sign_id);
 
         // All mailboxes must be cleared
         assert!(!spawner.test_posit_mailboxes_contains(&sign_id, RequestKind::Sign));
