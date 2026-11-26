@@ -438,7 +438,7 @@ impl<W: FeePayer, C: SubmitChain + 'static> NativeIntentClient<W, C> {
                 "transaction {tx_hash} was not seen finalized within the submit budget; it may \
                  still land, and a later publisher retry may post the response again"
             ))),
-            WatchEnd::TerminalRead(error) => Err(node(error)),
+            WatchEnd::TerminalRead(error) => Err(SubmitError::ReadRefused { source: error }),
         }
     }
 }
@@ -622,6 +622,7 @@ mod tests {
     use crate::landing_watch::LANDING_POLL;
     use crate::rpc::publisher::PinnedReads;
     use crate::rpc::submit::Landing;
+    use crate::submit_error::refusal_code;
     use crate::test_utils::{rejected_http, EventRecorder, RecordedFields};
     use minocrab_publisher::{Attestation, EcdsaSignature};
 
@@ -1900,7 +1901,10 @@ mod tests {
             .await
             .unwrap_err();
 
-        assert!(matches!(error, SubmitError::Node { .. }), "{error:#}");
+        assert!(
+            matches!(error, SubmitError::ReadRefused { .. }),
+            "{error:#}"
+        );
 
         let settles: Vec<RecordedFields> = recorder
             .snapshot()
@@ -1962,7 +1966,10 @@ mod tests {
             )
             .await
             .unwrap_err();
-        assert!(matches!(error, SubmitError::Node { .. }), "{error:#}");
+        assert!(
+            matches!(error, SubmitError::ReadRefused { .. }),
+            "{error:#}"
+        );
         assert!(client.wallet.released.lock().unwrap().is_empty());
         assert!(
             client.wallet.reports.lock().unwrap().is_empty(),
@@ -1975,6 +1982,11 @@ mod tests {
         );
         let published = SubmitError::into_publish_error(error);
         assert!(!is_retryable(&published), "{published:#}");
+        assert_eq!(
+            refusal_code(&published),
+            Some("read_refused"),
+            "{published:#}"
+        );
         let carrier = published
             .chain()
             .find_map(|cause| cause.downcast_ref::<RpcFailure>())
@@ -2005,7 +2017,10 @@ mod tests {
             )
             .await
             .unwrap_err();
-        assert!(matches!(error, SubmitError::Node { .. }), "{error:#}");
+        assert!(
+            matches!(error, SubmitError::ReadRefused { .. }),
+            "{error:#}"
+        );
         tokio::time::sleep(Duration::from_secs(20)).await;
         assert_eq!(
             client.chain.submits().len(),

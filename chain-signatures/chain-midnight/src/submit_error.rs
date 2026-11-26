@@ -59,6 +59,13 @@ pub(crate) enum SubmitError {
         #[source]
         source: anyhow::Error,
     },
+    /// A scan read after the submit was sent failed on a classic client error —
+    /// the post-submit counterpart of `Node`'s pre-send failures.
+    #[error("[read_refused] a post-submit scan read failed")]
+    ReadRefused {
+        #[source]
+        source: anyhow::Error,
+    },
 }
 
 impl SubmitError {
@@ -76,6 +83,7 @@ impl SubmitError {
             Self::StateConflict(_) => "state_conflict",
             Self::Ambiguous(_) => "ambiguous_submit",
             Self::Internal(_) | Self::Node { .. } => "internal",
+            Self::ReadRefused { .. } => "read_refused",
         }
     }
 
@@ -108,7 +116,8 @@ impl SubmitError {
             | Self::ProvingTimeout(_)
             | Self::StateConflict(_)
             | Self::Ambiguous(_)
-            | Self::Node { .. } => false,
+            | Self::Node { .. }
+            | Self::ReadRefused { .. } => false,
         }
     }
 
@@ -120,6 +129,10 @@ impl SubmitError {
             Self::Node { source } => {
                 let failure = read_verdict(&source);
                 anyhow::Error::new(failure).context(Self::Node { source })
+            }
+            Self::ReadRefused { source } => {
+                let failure = read_verdict(&source);
+                anyhow::Error::new(failure).context(Self::ReadRefused { source })
             }
             Self::GateRefusal { source } => {
                 let failure = RpcFailure::terminal(format!("{source:#}"));
@@ -151,7 +164,7 @@ mod tests {
     #[test]
     fn every_class_is_counted_with_its_code_and_verdicts() {
         type Class = (fn() -> SubmitError, bool, bool);
-        let classes: [Class; 12] = [
+        let classes: [Class; 13] = [
             (
                 || SubmitError::BadRequest("reason".to_string()),
                 false,
@@ -203,6 +216,13 @@ mod tests {
             (|| SubmitError::Internal("reason".to_string()), true, true),
             (
                 || SubmitError::Node {
+                    source: anyhow::anyhow!("reason"),
+                },
+                true,
+                false,
+            ),
+            (
+                || SubmitError::ReadRefused {
                     source: anyhow::anyhow!("reason"),
                 },
                 true,
