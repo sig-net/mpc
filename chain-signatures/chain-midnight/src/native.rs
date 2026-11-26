@@ -12,7 +12,6 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::Context as _;
 use async_trait::async_trait;
 use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode, BASE_URL};
 use midnight_base_crypto::hash::HashOutput;
@@ -32,9 +31,9 @@ use tokio_util::task::AbortOnDropHandle;
 
 use crate::funding::{dust_deficit, FeePayer, SealedTx, UnprovenTx};
 use crate::intent::{IntentRequest, RespondCircuit, Submitted};
+use crate::landing_watch::{watch_landing, WatchEnd};
 use crate::publisher::IntentClient;
-use crate::rpc::publisher::PinnedReads;
-use crate::rpc::submit::{Landing, SubmitRefusal};
+use crate::rpc::submit::{SubmitChain, SubmitRefusal};
 use crate::submit_error::SubmitError;
 use crate::types::{BlockHash, LedgerTxHash, NetworkId};
 
@@ -48,28 +47,11 @@ const MIN_FEE_TTL: Duration = Duration::from_secs(30);
 const WORK_RESERVE: Duration = Duration::from_secs(120);
 /// How long past its TTL a landed transaction may take to finalize.
 const FINALITY_SLACK: Duration = Duration::from_secs(60);
-const LANDING_POLL: Duration = Duration::from_secs(2);
 /// How long after a submit went unanswered the transaction is first sent again. Each
 /// further unanswered attempt doubles the wait, up to `MAX_RESEND_DELAY`, so a node
 /// shedding load is not asked again at a fixed pace.
 const RESEND_DELAY: Duration = Duration::from_secs(6);
 const MAX_RESEND_DELAY: Duration = Duration::from_secs(60);
-
-/// What the submit path needs from the node, beyond the pinned reads.
-#[async_trait]
-pub(crate) trait SubmitChain: PinnedReads {
-    async fn block_number(&self, at: &BlockHash) -> anyhow::Result<u64>;
-    async fn block_hash_at(&self, number: u64) -> anyhow::Result<Option<BlockHash>>;
-    /// The block's `Timestamp::Now`, in whole seconds.
-    async fn block_time(&self, at: &BlockHash) -> anyhow::Result<Timestamp>;
-    async fn submit(&self, transaction: &[u8]) -> Result<(), SubmitRefusal>;
-    /// The status the block reports for the ledger transaction `tx_hash`, if it holds it.
-    async fn landing(
-        &self,
-        at: &BlockHash,
-        tx_hash: LedgerTxHash,
-    ) -> anyhow::Result<Option<Landing>>;
-}
 
 /// What a submit spent before it asked the wallet to pay, for its log line.
 struct SubmitTimings {
@@ -354,13 +336,17 @@ impl<W: FeePayer, C: SubmitChain + 'static> NativeIntentClient<W, C> {
         Ok(proven.seal(StdRng::from_entropy()))
     }
 
-    /// Posts a paid transaction and waits for it: the UTXOs it spends stay reserved
-    /// until it lands, the node refuses the first submit or it could not be sent, a
-    /// finalized block past its TTL does not hold it, or a minute past its TTL. An ambiguous outcome comes
-    /// no earlier than that minute, so the retry may plan the same UTXOs; if this
-    /// transaction landed after all, the node refuses that spend.
-    /// Only here does a failure strike the restored wallet: `post` runs once the
-    /// fee was planned, so a conflict raised before paying can never strike.
+    /// Posts a paid transaction and waits for it: the UTXOs it spends stay
+    /// reserved until it lands, the node refuses the first submit or it could
+    /// not be sent, a finalized block past its TTL does not hold it, or the
+    /// budget ends the wait, never before a minute past its TTL.
+    /// The deadline's ambiguous exit finds that reservation expired — the fee's
+    /// TTL leaves the budget that slack — so the retry may plan the same UTXOs,
+    /// and if this transaction landed after all, the node refuses that spend.
+    /// A read verdict ending the watch earlier holds the reservation: the
+    /// retry plans other UTXOs, or stops at a busy wallet until they expire.
+    /// Only here does a failure strike the restored wallet: `post` runs once
+    /// the fee was planned, so a conflict raised before paying can never strike.
     async fn post(
         &self,
         bytes: &[u8],
@@ -410,6 +396,9 @@ impl<W: FeePayer, C: SubmitChain + 'static> NativeIntentClient<W, C> {
         };
         let submitted = started.elapsed();
         // Ends with the wait, so a resend held up by the node never delays the scan.
+        // TODO: abort-and-await the resend before returning if an exit must also
+        // quiesce the task; an RPC already in flight cannot be recalled, and the
+        // same-intent resend is idempotent either way.
         let _resending = unanswered.then(|| {
             AbortOnDropHandle::new(tokio::spawn(resend(
                 self.chain.clone(),
@@ -417,96 +406,40 @@ impl<W: FeePayer, C: SubmitChain + 'static> NativeIntentClient<W, C> {
                 tx_hash,
             )))
         });
-        let landing = self.await_landing(tx_hash, after, ttl, deadline).await;
+        let end = watch_landing(self.chain.as_ref(), tx_hash, after, ttl, deadline).await;
+        let landed = match &end {
+            WatchEnd::Landed(landing) => Some(landing),
+            WatchEnd::Expired | WatchEnd::Budget | WatchEnd::TerminalRead(_) => None,
+        };
         tracing::info!(
             tx_hash = %tx_hash,
             ?submitted,
             settled = ?started.elapsed(),
-            outcome = ?landing,
+            ?landed,
+            outcome = %end,
             "midnight: respond settled"
         );
-        match landing? {
+        match end {
             // The respond's only transcript and the DUST spends are guaranteed, which
             // a partial success commits and readers read; the reservation ends when
             // the replay sees the spends.
-            Landing::Applied | Landing::PartialSuccess => Ok(tx_hash),
-            Landing::Expired => {
+            WatchEnd::Landed(_) => Ok(tx_hash),
+            WatchEnd::Expired => {
                 self.wallet.release(spent);
                 // Expiry strikes with the refusal: after an unanswered first
                 // submit, `resend` only logs the node's refusal, so a stale spend
-                // surfaces here as `Landing::Expired`.
+                // surfaces here as `WatchEnd::Expired`.
                 self.wallet.struck();
                 Err(SubmitError::StateConflict(format!(
                     "transaction {tx_hash} expired without landing"
                 )))
             }
+            WatchEnd::Budget => Err(SubmitError::Ambiguous(format!(
+                "transaction {tx_hash} was not seen finalized within the submit budget; it may \
+                 still land, and a later publisher retry may post the response again"
+            ))),
+            WatchEnd::TerminalRead(error) => Err(SubmitError::ReadRefused { source: error }),
         }
-    }
-
-    /// Scans each finalized block after `after` for `tx_hash` until it lands, until a
-    /// finalized block is past `ttl` without it (`Landing::Expired`), or until
-    /// `deadline`, when the outcome is unknown.
-    async fn await_landing(
-        &self,
-        tx_hash: LedgerTxHash,
-        after: u64,
-        ttl: Timestamp,
-        deadline: Instant,
-    ) -> Result<Landing, SubmitError> {
-        let mut scanned = after;
-        // The head a scan last finished at: while it stands, no block is new and its
-        // time was already compared with the TTL.
-        let mut scanned_head: Option<BlockHash> = None;
-        loop {
-            let scan = async {
-                let head = self.chain.finalized_head().await?;
-                if scanned_head.as_ref() == Some(&head) {
-                    return anyhow::Ok(None);
-                }
-                let head_number = self.chain.block_number(&head).await?;
-                while scanned < head_number {
-                    let number = scanned + 1;
-                    let hash = if number == head_number {
-                        head
-                    } else {
-                        self.chain
-                            .block_hash_at(number)
-                            .await?
-                            .with_context(|| format!("the node has no finalized block {number}"))?
-                    };
-                    if let Some(landing) = self.chain.landing(&hash, tx_hash).await? {
-                        return Ok(Some(landing));
-                    }
-                    scanned = number;
-                }
-                if self.chain.block_time(&head).await? > ttl {
-                    return Ok(Some(Landing::Expired));
-                }
-                scanned_head = Some(head);
-                Ok(None)
-            };
-            match tokio::time::timeout_at(deadline, scan).await {
-                Ok(Ok(Some(landing))) => return Ok(landing),
-                Ok(Ok(None)) => {}
-                Ok(Err(error)) => {
-                    tracing::warn!(
-                        ?error,
-                        "midnight: watching for the respond transaction failed; retrying"
-                    );
-                }
-                Err(_) => break,
-            }
-            if tokio::time::timeout_at(deadline, tokio::time::sleep(LANDING_POLL))
-                .await
-                .is_err()
-            {
-                break;
-            }
-        }
-        Err(SubmitError::Ambiguous(format!(
-            "transaction {tx_hash} was not seen finalized within the submit budget; it may still \
-             land, and a later publisher retry may post the response again"
-        )))
     }
 }
 
@@ -674,17 +607,23 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Mutex;
 
+    use http::StatusCode;
     use midnight_ledger_v9::structure::{
         ContractAction, ContractCall, Intent, ProofPreimageMarker, Signature, INITIAL_PARAMETERS,
     };
     use midnight_transient_crypto::commitment::PedersenRandomness;
-    use mpc_chain_integration_core::utils::retry::is_retryable;
+    use mpc_chain_integration_core::utils::retry::{is_retryable, RpcFailure};
 
     use super::*;
+    use crate::chain_mock::scan_read_rejected;
     use crate::emissions::{emissions_of_call, Emission, EmissionKind, MISC_PAYLOAD_LEN};
     use crate::funding::tests::{base, funded_key, replayed};
     use crate::funding::{plan_fee, FeePlan};
-    use crate::test_utils::rejected_http;
+    use crate::landing_watch::LANDING_POLL;
+    use crate::rpc::publisher::PinnedReads;
+    use crate::rpc::submit::Landing;
+    use crate::submit_error::refusal_code;
+    use crate::test_utils::{rejected_http, EventRecorder, RecordedFields};
     use minocrab_publisher::{Attestation, EcdsaSignature};
 
     /// The responder's initial state with the package's verifier keys
@@ -777,6 +716,8 @@ mod tests {
 
     /// A chain whose finalized head moves `step` blocks (one by default) per ask, from
     /// `head` up to `last`, with blocks six seconds apart from time 1000.
+    // TODO: retire onto `crate::chain_mock::ScriptedChain` when the native tests
+    // relocate, so one mock serves every scan suite.
     pub(super) struct ScriptedChain {
         head: Mutex<u64>,
         last: u64,
@@ -791,8 +732,8 @@ mod tests {
         submitted: Mutex<Vec<Instant>>,
         landing: Option<(u64, Landing)>,
         landing_reads: Mutex<VecDeque<u64>>,
-        /// A block whose first landing read fails.
-        failing_read: Mutex<Option<u64>>,
+        /// When set, the landing read at that height fails once with this error.
+        failing_read: Mutex<Option<(u64, anyhow::Error)>>,
         /// A block whose first time read fails.
         failing_time: Mutex<Option<u64>>,
     }
@@ -821,7 +762,14 @@ mod tests {
         }
 
         fn failing_once_at(self, number: u64) -> Self {
-            *self.failing_read.lock().unwrap() = Some(number);
+            self.failing_read_with(
+                number,
+                anyhow::anyhow!("the node dropped the read of block {number}"),
+            )
+        }
+
+        fn failing_read_with(self, number: u64, error: anyhow::Error) -> Self {
+            *self.failing_read.lock().unwrap() = Some((number, error));
             self
         }
 
@@ -913,9 +861,8 @@ mod tests {
             let number = block_number_of(at);
             self.landing_reads.lock().unwrap().push_back(number);
             let mut failing = self.failing_read.lock().unwrap();
-            if *failing == Some(number) {
-                *failing = None;
-                anyhow::bail!("the node dropped the read of block {number}");
+            if let Some((_, error)) = failing.take_if(|(at, _)| *at == number) {
+                return Err(error);
             }
             Ok(self
                 .landing
@@ -1871,6 +1818,217 @@ mod tests {
         );
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn the_settle_log_names_which_landing_the_watch_ended_in() {
+        let recorder = EventRecorder::default();
+        // Keep a second scoped dispatch registered so callsites first reached by a
+        // parallel test register against the live dispatches, not that thread's default.
+        let _registration_guard = tracing::subscriber::set_default(tracing_subscriber::registry());
+        let subscriber = tracing_subscriber::layer::SubscriberExt::with(
+            tracing_subscriber::registry(),
+            recorder.clone(),
+        );
+        let _subscriber_guard = tracing::subscriber::set_default(subscriber);
+        for landing in [Landing::Applied, Landing::PartialSuccess] {
+            let client = client_over(
+                managed_dir(|_, bytes| bytes),
+                ScriptedChain::new(10, 20, Some((12, landing))),
+            );
+            assert_eq!(
+                client
+                    .post(
+                        b"tx",
+                        LedgerTxHash::from_bytes(TX_HASH),
+                        &spent(),
+                        10,
+                        Timestamp::from_secs(5000),
+                        deadline(),
+                    )
+                    .await
+                    .unwrap(),
+                LedgerTxHash::from_bytes(TX_HASH)
+            );
+        }
+        // The budget exit logs the same event with no landing to name.
+        let client = client_over(
+            managed_dir(|_, bytes| bytes),
+            ScriptedChain::new(10, 12, None),
+        );
+        let error = client
+            .post(
+                b"tx",
+                LedgerTxHash::from_bytes(TX_HASH),
+                &spent(),
+                10,
+                Timestamp::from_secs(5000),
+                Instant::now() + Duration::from_secs(30),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(error, SubmitError::Ambiguous(_)), "{error}");
+
+        let client = client_over(
+            managed_dir(|_, bytes| bytes),
+            ScriptedChain::new(10, 20, None),
+        );
+        let error = client
+            .post(
+                b"tx",
+                LedgerTxHash::from_bytes(TX_HASH),
+                &spent(),
+                10,
+                Timestamp::from_secs(1080),
+                deadline(),
+            )
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, SubmitError::StateConflict(_)), "{error}");
+
+        let client = client_over(
+            managed_dir(|_, bytes| bytes),
+            ScriptedChain::new(10, 20, None).failing_read_with(13, scan_read_rejected(403)),
+        );
+        let error = client
+            .post(
+                b"tx",
+                LedgerTxHash::from_bytes(TX_HASH),
+                &spent(),
+                10,
+                Timestamp::from_secs(5000),
+                deadline(),
+            )
+            .await
+            .unwrap_err();
+
+        assert!(
+            matches!(error, SubmitError::ReadRefused { .. }),
+            "{error:#}"
+        );
+
+        let settles: Vec<RecordedFields> = recorder
+            .snapshot()
+            .into_iter()
+            .filter(|fields| fields.contains_key("settled"))
+            .collect();
+        assert_eq!(settles.len(), 5, "{settles:?}");
+        for (fields, landed, outcome) in [
+            (&settles[0], "Some(Applied)", "Landed(Applied)"),
+            (
+                &settles[1],
+                "Some(PartialSuccess)",
+                "Landed(PartialSuccess)",
+            ),
+            (&settles[2], "None", "Budget"),
+            (&settles[3], "None", "Expired"),
+        ] {
+            assert_eq!(
+                fields.get("landed").map(String::as_str),
+                Some(landed),
+                "{fields:?}"
+            );
+            assert_eq!(
+                fields.get("outcome").map(String::as_str),
+                Some(outcome),
+                "{fields:?}"
+            );
+        }
+        assert_eq!(
+            settles[4].get("landed").map(String::as_str),
+            Some("None"),
+            "{:?}",
+            settles[4]
+        );
+        assert!(
+            settles[4].get("outcome").is_some_and(
+                |outcome| outcome.starts_with("TerminalRead") && outcome.contains("403")
+            ),
+            "{:?}",
+            settles[4]
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_terminal_scan_read_holds_reservations_and_is_not_retryable() {
+        let client = client_over(
+            managed_dir(|_, bytes| bytes),
+            ScriptedChain::new(10, 20, Some((13, Landing::Applied)))
+                .failing_read_with(13, scan_read_rejected(403)),
+        );
+        let error = client
+            .post(
+                b"tx",
+                LedgerTxHash::from_bytes(TX_HASH),
+                &spent(),
+                10,
+                Timestamp::from_secs(5000),
+                deadline(),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, SubmitError::ReadRefused { .. }),
+            "{error:#}"
+        );
+        assert!(client.wallet.released.lock().unwrap().is_empty());
+        assert!(
+            client.wallet.reports.lock().unwrap().is_empty(),
+            "the read exit strikes and reports nothing"
+        );
+        assert_eq!(
+            *client.wallet.reserved_until.lock().unwrap(),
+            vec![Timestamp::from_secs(5000 + FINALITY_SLACK.as_secs())],
+            "the reservation keeps its original lifetime"
+        );
+        let published = SubmitError::into_publish_error(error);
+        assert!(!is_retryable(&published), "{published:#}");
+        assert_eq!(
+            refusal_code(&published),
+            Some("read_refused"),
+            "{published:#}"
+        );
+        let carrier = published
+            .chain()
+            .find_map(|cause| cause.downcast_ref::<RpcFailure>())
+            .unwrap_or_else(|| panic!("the exit carries its carrier: {published:#}"));
+        assert_eq!(
+            carrier.status(),
+            StatusCode::from_u16(403).ok(),
+            "{published:#}"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_early_exit_stops_the_resends_of_an_unanswered_submit() {
+        let client = client_over(
+            managed_dir(|_, bytes| bytes),
+            ScriptedChain::new(10, 20, None)
+                .refusing(SubmitRefusal::Unanswered(anyhow::anyhow!("no answer")))
+                .failing_read_with(13, scan_read_rejected(403)),
+        );
+        let error = client
+            .post(
+                b"tx",
+                LedgerTxHash::from_bytes(TX_HASH),
+                &spent(),
+                10,
+                Timestamp::from_secs(5000),
+                deadline(),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, SubmitError::ReadRefused { .. }),
+            "{error:#}"
+        );
+        tokio::time::sleep(Duration::from_secs(20)).await;
+        assert_eq!(
+            client.chain.submits().len(),
+            1,
+            "the resend task died with the watch, not with the budget"
+        );
+    }
+
     #[test]
     fn the_fee_ctime_is_a_time_the_replay_has_fully_seen() {
         let at = Timestamp::from_secs;
@@ -2271,7 +2429,7 @@ mod live {
     use crate::config::{MidnightConfig, PublisherConfig};
     use crate::dust_feed::IndexerDustEvents;
     use crate::funding::{dust_secret_key, parse_seed, FundingWallet};
-    use crate::rpc::publisher::MidnightPublisherRpc;
+    use crate::rpc::publisher::{MidnightPublisherRpc, PinnedReads};
     use crate::types::MidnightAddress;
     use minocrab_publisher::{Attestation, EcdsaSignature};
     use mpc_chain_integration_core::NoopPublisherTelemetry;
