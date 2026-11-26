@@ -138,7 +138,7 @@ pub(crate) async fn handle_chain_event<T: ChainTelemetry>(
             if is_new {
                 if let Some(ts) = block_timestamp {
                     // Ethereum, Solana, and Midnight report block timestamps;
-                    // Canton and Hydration do not yet.
+                    // Canton does not yet.
                     telemetry.request_indexed_at(ts, kind);
                 } else {
                     telemetry.request_indexed(kind);

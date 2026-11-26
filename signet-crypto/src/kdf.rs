@@ -68,7 +68,6 @@ pub const fn reserved_path(key_version: KeyVersion, chain: Chain) -> Option<&'st
     }
     match chain {
         Chain::Solana => Some("solana response key"),
-        Chain::Hydration => Some("hydration response key"),
         Chain::Canton => Some("canton response key"),
         Chain::Midnight => Some("midnight response key"),
         _ => None,
@@ -641,7 +640,6 @@ mod tests {
     fn requests_below_key_version_2_cannot_name_the_reserved_path() {
         for (chain, path) in [
             (Chain::Solana, "solana response key"),
-            (Chain::Hydration, "hydration response key"),
             (Chain::Canton, "canton response key"),
             (Chain::Midnight, "midnight response key"),
         ] {
@@ -669,16 +667,12 @@ mod tests {
             path: "solana response key",
         };
         assert!(derive_epsilon(1, Chain::Ethereum, other_chains).is_ok());
-        assert!(derive_epsilon(1, Chain::Hydration, other_chains).is_ok());
+        assert!(derive_epsilon(1, Chain::Canton, other_chains).is_ok());
     }
 
     #[test]
     fn reserved_paths_are_reserved_below_key_version_2() {
         assert_eq!(reserved_path(0, Chain::Solana), Some("solana response key"));
-        assert_eq!(
-            reserved_path(1, Chain::Hydration),
-            Some("hydration response key")
-        );
         assert_eq!(reserved_path(1, Chain::Canton), Some("canton response key"));
         assert_eq!(
             reserved_path(1, Chain::Midnight),

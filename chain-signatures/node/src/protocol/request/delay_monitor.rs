@@ -306,7 +306,7 @@ mod tests {
     #[tokio::test]
     async fn test_delay_monitor_counts_each_kind_separately() {
         let monitor = DelayMonitor::spawn();
-        let chain = Chain::Hydration;
+        let chain = Chain::Midnight;
         let leg1 = RequestKind::SignBidirectional;
         let leg2 = RequestKind::RespondBidirectional;
         let initial_leg1 = read_delayed_metric(chain, leg1);

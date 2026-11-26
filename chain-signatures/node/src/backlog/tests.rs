@@ -958,12 +958,7 @@ async fn test_bidirectional_executing_advance_outcomes() {
 
 #[tokio::test]
 async fn extraction_failure_cannot_advance_into_response_signing() {
-    for chain in [
-        Chain::Midnight,
-        Chain::Solana,
-        Chain::Canton,
-        Chain::Hydration,
-    ] {
+    for chain in [Chain::Midnight, Chain::Solana, Chain::Canton] {
         let backlog = Backlog::new();
         let tx = mock_bidirectional_tx(SignId::from_u8(22), chain);
         let entry = backlog.insert_mock_executing(&tx).await;
@@ -1309,7 +1304,7 @@ async fn pending_executions_targeting_spans_sources() {
     assert_eq!(tron[0].sign_id, tx1.sign_id());
     assert_eq!(tron[1].sign_id, tx2.sign_id());
     assert!(backlog
-        .get_pending_executions(Chain::Hydration)
+        .get_pending_executions(Chain::Canton)
         .await
         .is_empty());
 }

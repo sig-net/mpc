@@ -24,7 +24,6 @@ pub enum Chain {
     Ethereum,
     Solana,
     Bitcoin,
-    Hydration,
     Canton,
     Midnight,
     Tron,
@@ -45,20 +44,18 @@ impl Chain {
             Chain::Ethereum => "Ethereum",
             Chain::Solana => "Solana",
             Chain::Bitcoin => "Bitcoin",
-            Chain::Hydration => "Hydration",
             Chain::Canton => "Canton",
             Chain::Midnight => "Midnight",
             Chain::Tron => "Tron",
         }
     }
 
-    pub const fn iter() -> [Chain; 8] {
+    pub const fn iter() -> [Chain; 7] {
         [
             Chain::NEAR,
             Chain::Ethereum,
             Chain::Solana,
             Chain::Bitcoin,
-            Chain::Hydration,
             Chain::Canton,
             Chain::Midnight,
             Chain::Tron,
@@ -71,7 +68,6 @@ impl Chain {
             Chain::Ethereum => "0x1",
             Chain::Solana => "0x800001f5",
             Chain::Bitcoin => "bip122:000000000019d6689c085ae165831e93",
-            Chain::Hydration => "polkadot:2034",
             Chain::Canton => "canton:global",
             Chain::Midnight => "midnight:mainnet",
             Chain::Tron => "tron:mainnet",
@@ -84,7 +80,6 @@ impl Chain {
             Chain::Ethereum => "eip155:1",
             Chain::Solana => "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
             Chain::Bitcoin => "bip122:000000000019d6689c085ae165831e93",
-            Chain::Hydration => "polkadot:2034",
             // Synthetic — Canton has no registered CAIP-2 namespace in
             // ChainAgnostic/namespaces. "canton:global" follows the
             // namespace:reference format as a project-local identifier.
@@ -122,7 +117,6 @@ impl FromStr for Chain {
             "ethereum" | "eth" => Ok(Chain::Ethereum),
             "solana" | "sol" => Ok(Chain::Solana),
             "bitcoin" | "btc" => Ok(Chain::Bitcoin),
-            "hydration" | "hyd" => Ok(Chain::Hydration),
             "canton" | "ctn" => Ok(Chain::Canton),
             "midnight" => Ok(Chain::Midnight),
             "tron" | "trx" => Ok(Chain::Tron),

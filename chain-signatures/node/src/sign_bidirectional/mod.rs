@@ -270,17 +270,8 @@ mod tests {
     #[test]
     fn check_request_fields_accepts_only_the_sdk_fields() {
         type Edit = fn(&mut SignBidirectionalEvent);
-        let cases: [(&str, Edit, bool); 11] = [
+        let cases: [(&str, Edit, bool); 9] = [
             ("as the SDKs send it", |_| {}, true),
-            ("from Hydration", |e| e.chain = Chain::Hydration, true),
-            (
-                "from Hydration, algo lowercase",
-                |e| {
-                    e.chain = Chain::Hydration;
-                    e.algo = "ecdsa".to_string();
-                },
-                false,
-            ),
             ("from Canton", |e| e.chain = Chain::Canton, true),
             (
                 "algo secp256k1",
@@ -318,7 +309,6 @@ mod tests {
         for (chain, key_version, accepted) in [
             (Chain::Solana, LATEST_MPC_KEY_VERSION, true),
             (Chain::Solana, 0, false),
-            (Chain::Hydration, 0, false),
             (Chain::Canton, 0, false),
             (Chain::Solana, LATEST_MPC_KEY_VERSION + 1, false),
         ] {

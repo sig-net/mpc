@@ -41,7 +41,6 @@ impl ChainConfig for Chain {
             Chain::NEAR | Chain::Bitcoin | Chain::Tron => None,
             Chain::Ethereum => Some(20),
             Chain::Solana => Some(1200),
-            Chain::Hydration => Some(240),
             Chain::Canton => Some(50),
             Chain::Midnight => Some(120),
         }
@@ -61,8 +60,6 @@ impl ChainConfig for Chain {
             // ~20 missed blocks at ~6s cadence; headroom for slow catchup
             // blocks (large contract-state reads).
             Chain::Midnight => 120,
-            // ~10x the 12s finality cadence.
-            Chain::Hydration => 120,
             _ => derived,
         }
     }
@@ -80,7 +77,6 @@ impl ChainConfig for Chain {
             // by up to ~13s.
             Chain::Solana => 15,
             Chain::Bitcoin => 60 * 60 + 20 * 60, // 6 confirmations at 10 minutes each, plus some buffer
-            Chain::Hydration => 12,
             Chain::Canton => 15,
             Chain::Midnight => 15,
             // Tron solidification: >=19 active SRs at/above a height, ~1 min
@@ -107,7 +103,7 @@ impl ChainConfig for Chain {
         match self {
             Chain::Midnight => SerDeserFormat::Fab,
             Chain::Canton => SerDeserFormat::Abi,
-            // Solana and Hydration use Borsh for bidirectional responses.
+            // Solana uses Borsh for bidirectional responses.
             _ => SerDeserFormat::Borsh,
         }
     }
@@ -125,7 +121,6 @@ impl ChainConfig for Chain {
             | Chain::Ethereum
             | Chain::Solana
             | Chain::Bitcoin
-            | Chain::Hydration
             | Chain::Canton
             | Chain::Tron => false,
         }
@@ -140,7 +135,6 @@ mod tests {
     #[test]
     fn stall_timeouts_track_block_cadence() {
         assert_eq!(Chain::Midnight.stall_timeout_secs(), 120);
-        assert_eq!(Chain::Hydration.stall_timeout_secs(), 120);
         assert_eq!(Chain::Canton.stall_timeout_secs(), 315);
         assert_eq!(Chain::Solana.stall_timeout_secs(), 315);
         assert_eq!(Chain::Ethereum.stall_timeout_secs(), 30 * 60 + 300);
@@ -160,7 +154,6 @@ mod tests {
     fn checkpoint_intervals_pin_the_production_cadence() {
         assert_eq!(Chain::Ethereum.checkpoint_interval(), Some(20));
         assert_eq!(Chain::Solana.checkpoint_interval(), Some(1200));
-        assert_eq!(Chain::Hydration.checkpoint_interval(), Some(240));
         assert_eq!(Chain::Canton.checkpoint_interval(), Some(50));
         assert_eq!(Chain::Midnight.checkpoint_interval(), Some(120));
         assert_eq!(Chain::NEAR.checkpoint_interval(), None);

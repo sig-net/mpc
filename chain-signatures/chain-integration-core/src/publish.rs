@@ -19,7 +19,7 @@ pub trait ChainPublisher: Send + Sync + 'static {
 /// publishers without internal gating: each attempt waits out the gate, a
 /// throttled error (429/402) extends the window for everyone sharing it, and a
 /// successful publish resets the penalty. `operation` labels the throttle
-/// warn (e.g. "hydration publish") so shared-gate events stay attributable
+/// warn (e.g. "solana publish") so shared-gate events stay attributable
 /// per chain. Single-attempt like the inner publisher — the caller's retry
 /// loop still owns retries.
 ///
@@ -108,7 +108,7 @@ mod tests {
     }
 
     fn action() -> PublishAction {
-        make_publish_action(Chain::Hydration, SignKind::Sign, SignId::new([0u8; 32]))
+        make_publish_action(Chain::Solana, SignKind::Sign, SignId::new([0u8; 32]))
     }
 
     #[tokio::test]

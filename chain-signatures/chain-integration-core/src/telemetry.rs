@@ -19,7 +19,7 @@ pub trait ChainTelemetry: Send + Sync + Clone + 'static {
     fn request_indexed_at(&self, block_timestamp: u64, kind: RequestKind);
 
     /// Report that a request was indexed without a block timestamp —
-    /// Canton and Hydration report no chain time, as does a Solana block
+    /// Canton reports no chain time, as does a Solana block
     /// whose `blockTime` estimate is absent.
     fn request_indexed(&self, kind: RequestKind);
 

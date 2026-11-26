@@ -214,7 +214,7 @@ fn mock_checkpoint_interval(chain: Chain) -> Option<u64> {
     match chain {
         Chain::NEAR | Chain::Bitcoin | Chain::Tron => None,
         Chain::Ethereum => Some(2),
-        Chain::Solana | Chain::Hydration | Chain::Canton | Chain::Midnight => Some(5),
+        Chain::Solana | Chain::Canton | Chain::Midnight => Some(5),
     }
 }
 
