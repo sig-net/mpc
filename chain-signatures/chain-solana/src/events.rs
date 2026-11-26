@@ -9,11 +9,11 @@ use k256::{AffinePoint, Scalar};
 use mpc_chain_integration_core::utils::hashing::compute_request_id;
 use mpc_chain_integration_core::utils::payload::bidirectional_payload_scalar;
 use mpc_primitives::{
-    Chain, ChainEvent, IndexedSignRequest, SignArgs, SignId, SignKind, MAX_SECP256K1_SCALAR,
+    Chain, ChainEvent, IndexedSignRequest, MAX_SECP256K1_SCALAR, SignArgs, SignId, SignKind,
 };
 use mpc_utils::time::current_unix_timestamp;
 use sha3::Digest as _;
-use signet_crypto::{derive_epsilon, KeyPurpose, ScalarExt as _};
+use signet_crypto::{KeyPurpose, ScalarExt as _, derive_epsilon};
 use signet_program::{
     RespondBidirectionalEvent, SignBidirectionalEvent, SignatureRequestedEvent,
     SignatureRespondedEvent,

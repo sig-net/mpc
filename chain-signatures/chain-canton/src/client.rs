@@ -1,4 +1,5 @@
 use crate::{
+    CantonChainCtx,
     auth::CantonAuthProvider,
     config::CantonConfig,
     daml::{CantonSignature, EcdsaSigData},
@@ -9,9 +10,8 @@ use crate::{
         TemplateFilterValue,
     },
     signing::der_encode_signature,
-    CantonChainCtx,
 };
-use mpc_chain_integration_core::utils::retry::{retry_rpc, RetryConfig, RpcFailure, SharedBackoff};
+use mpc_chain_integration_core::utils::retry::{RetryConfig, RpcFailure, SharedBackoff, retry_rpc};
 use mpc_chain_integration_core::{ChainPublisher, PublishAction, PublisherTelemetry};
 use mpc_primitives::{Chain, SignKind};
 use std::{sync::Arc, time::Duration};
@@ -444,7 +444,7 @@ mod tests {
     use crate::config::{CantonAuthConfig, CantonConfig};
     use mockito::{Matcher, Server, ServerGuard};
     use mpc_chain_integration_core::utils::retry::{is_retryable, retry_op};
-    use mpc_chain_integration_core::{utils::test::make_publish_action, NoopPublisherTelemetry};
+    use mpc_chain_integration_core::{NoopPublisherTelemetry, utils::test::make_publish_action};
     use mpc_primitives::{Chain, RespondBidirectionalTx, SignBidirectionalEvent, SignId, SignKind};
     use serde_json::json;
 
@@ -765,20 +765,22 @@ mod tests {
         .unwrap()
         .with_retry_strategy(fast_retry_strategy());
 
-        assert!(client
-            .submit_and_wait(
-                JsCommands {
-                    command_id: "command".to_string(),
-                    user_id: "test-user".to_string(),
-                    act_as: vec!["test-party".to_string()],
-                    read_as: vec![],
-                    commands: vec![],
-                    disclosed_contracts: vec![],
-                },
-                "command"
-            )
-            .await
-            .is_err());
+        assert!(
+            client
+                .submit_and_wait(
+                    JsCommands {
+                        command_id: "command".to_string(),
+                        user_id: "test-user".to_string(),
+                        act_as: vec!["test-party".to_string()],
+                        read_as: vec![],
+                        commands: vec![],
+                        disclosed_contracts: vec![],
+                    },
+                    "command"
+                )
+                .await
+                .is_err()
+        );
         response.assert_async().await;
     }
 

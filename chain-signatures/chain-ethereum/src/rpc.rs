@@ -1,7 +1,7 @@
 #[cfg(feature = "bench")]
 use alloy::eips::BlockNumberOrTag;
 use alloy::primitives::hex;
-use alloy::primitives::{Address, Bytes, B256};
+use alloy::primitives::{Address, B256, Bytes};
 use alloy::rpc::client::{ClientBuilder, RpcClient};
 use alloy::rpc::types::{Block, BlockId, Log, Transaction, TransactionReceipt};
 use serde_json::json;
@@ -11,7 +11,7 @@ use mpc_chain_integration_core::utils::retry::RpcFailure;
 
 #[cfg(feature = "bench")]
 use crate::bench;
-use crate::client::{logs_filter, MaybeBlock};
+use crate::client::{MaybeBlock, logs_filter};
 
 // This is more than likely limited by the RPC provider, but alchemy
 // supports archive nodes, so we effectively can go as far back as needed.
@@ -332,12 +332,12 @@ fn trace_output_to_bytes(
             Some(reason) => {
                 return Err(anyhow::Error::new(RpcFailure::retryable(format!(
                     "debug_traceTransaction reports transaction {tx_hash:#x} reverted: {error} ({reason})"
-                ))))
+                ))));
             }
             None => {
                 return Err(anyhow::Error::new(RpcFailure::retryable(format!(
                     "debug_traceTransaction reports transaction {tx_hash:#x} errored: {error}"
-                ))))
+                ))));
             }
         }
     }

@@ -1,11 +1,11 @@
 //! Tests checkpoint consensus alignment via peer-to-peer HTTP fetch.
 
-use integration_tests::mpc_fixture::{mock_stream::MockStream, MpcFixtureBuilder};
-use mpc_node::backlog::consensus::align_backlog_with_consensus;
-use mpc_node::backlog::mock::{mock_root_pk, BacklogTestExt};
+use integration_tests::mpc_fixture::{MpcFixtureBuilder, mock_stream::MockStream};
 use mpc_node::backlog::Backlog;
-use mpc_node::mesh::connection::NodeStatus;
+use mpc_node::backlog::consensus::align_backlog_with_consensus;
+use mpc_node::backlog::mock::{BacklogTestExt, mock_root_pk};
 use mpc_node::mesh::MeshState;
+use mpc_node::mesh::connection::NodeStatus;
 use mpc_node::node_client::NodeClient;
 use mpc_node::protocol::ParticipantInfo;
 use mpc_node::storage::CheckpointStorage;
@@ -279,12 +279,14 @@ async fn test_consensus_alignment_consensus_changes_while_fetching() {
         "should return None when consensus digest changes to None"
     );
 
-    assert!(fresh_backlog
-        .checkpoints()
-        .latest(chain)
-        .await
-        .unwrap()
-        .is_none());
+    assert!(
+        fresh_backlog
+            .checkpoints()
+            .latest(chain)
+            .await
+            .unwrap()
+            .is_none()
+    );
     let persisted = fresh_storage.load_latest(chain).await.unwrap();
     assert!(persisted.is_none());
 }

@@ -6,7 +6,7 @@
 
 #![allow(clippy::disallowed_methods)]
 
-use anyhow::{bail, Context};
+use anyhow::{Context, bail};
 use k256::ecdsa::SigningKey;
 use mpc_chain_integration_core::{ChainIndexer, MockStateManager, StateManager};
 use mpc_chain_tron::{
@@ -16,9 +16,8 @@ use mpc_primitives::{
     BidirectionalTx, BidirectionalTxId, Chain, ChainEvent, ExecutionOutcome, SignId,
 };
 use mpc_tron_wire::{
-    parse_hex,
+    NowBlock, TronAddress, parse_hex,
     pb::{Contract, ContractType, Message, RawTransaction, TriggerSmartContract},
-    NowBlock, TronAddress,
 };
 use prost_types::Any;
 use sha2::{Digest, Sha256};

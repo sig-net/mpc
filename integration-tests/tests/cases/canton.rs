@@ -1,12 +1,12 @@
 use alloy::consensus::{SignableTransaction, TxEip1559};
 use alloy::eips::eip2718::Encodable2718;
-use alloy::primitives::{Address, Bytes, FixedBytes, Signature, B256, U256};
+use alloy::primitives::{Address, B256, Bytes, FixedBytes, Signature, U256};
 use alloy::providers::ext::AnvilApi;
 use alloy::providers::{Provider, ProviderBuilder};
 use anyhow::{Context as _, Result};
 use integration_tests::canton::{
-    test_evm_type2_anvil_cases, test_sign_request_event, EvmType2AnvilCase,
-    EVM_TYPE2_TEST_CONTRACT_ADDRESS,
+    EVM_TYPE2_TEST_CONTRACT_ADDRESS, EvmType2AnvilCase, test_evm_type2_anvil_cases,
+    test_sign_request_event,
 };
 use integration_tests::cluster;
 use mpc_chain_canton::{

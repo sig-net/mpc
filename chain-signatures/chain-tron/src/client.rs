@@ -1,17 +1,17 @@
 use std::time::Duration;
 
-use alloy::primitives::{Bytes, Log, B256};
-use anyhow::{anyhow, Context};
+use alloy::primitives::{B256, Bytes, Log};
+use anyhow::{Context, anyhow};
 use serde::{Deserialize, Serialize};
 use url::Url;
 
-use mpc_chain_integration_core::utils::retry::{retry_rpc, RetryConfig, SharedBackoff};
 use mpc_chain_integration_core::ExtractionFailure;
+use mpc_chain_integration_core::utils::retry::{RetryConfig, SharedBackoff, retry_rpc};
 use secrecy::{ExposeSecret as _, SecretString};
 
 use crate::config::TronConfig;
 use crate::types::{BroadcastOutcome, NowBlock, SolidifiedBlock, TronLog, TronReceipt};
-use mpc_tron_wire::{encoding::decode_bytes, parse_hex, TronAddress};
+use mpc_tron_wire::{TronAddress, encoding::decode_bytes, parse_hex};
 
 /// Tron HTTP client for interacting with the Tron blockchain.
 pub struct TronHttp {
@@ -454,7 +454,7 @@ where
 mod tests {
     use std::time::Duration;
 
-    use alloy::primitives::{address, Address};
+    use alloy::primitives::{Address, address};
     use mockito::Matcher;
 
     use super::*;
@@ -760,11 +760,13 @@ mod tests {
             .await;
 
         let tx_id = test_hash(9);
-        assert!(client
-            .get_transaction_info_solidity(&tx_id)
-            .await
-            .unwrap()
-            .is_none());
+        assert!(
+            client
+                .get_transaction_info_solidity(&tx_id)
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[tokio::test]

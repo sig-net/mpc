@@ -414,10 +414,12 @@ mod tests {
                 expected
             );
             tx.calldata.value.words.push([0x11; 32]);
-            assert!(compute_evm_type2_tx_params_digest_v1(&tx)
-                .unwrap_err()
-                .to_string()
-                .contains("calldata capacity"));
+            assert!(
+                compute_evm_type2_tx_params_digest_v1(&tx)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("calldata capacity")
+            );
         }
     }
 
@@ -452,10 +454,12 @@ mod tests {
                 expected
             );
             tx.access_list.push(entry);
-            assert!(compute_evm_type2_tx_params_digest_v1(&tx)
-                .unwrap_err()
-                .to_string()
-                .contains("access-list capacity"));
+            assert!(
+                compute_evm_type2_tx_params_digest_v1(&tx)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("access-list capacity")
+            );
         }
     }
 
@@ -489,10 +493,12 @@ mod tests {
                 expected
             );
             tx.access_list[0].storage_keys.push([0x22; 32]);
-            assert!(compute_evm_type2_tx_params_digest_v1(&tx)
-                .unwrap_err()
-                .to_string()
-                .contains("storage-key capacity"));
+            assert!(
+                compute_evm_type2_tx_params_digest_v1(&tx)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("storage-key capacity")
+            );
             tx.access_list_entry_count = 0;
             assert_eq!(
                 hex::encode(compute_evm_type2_tx_params_digest_v1(&tx).unwrap()),

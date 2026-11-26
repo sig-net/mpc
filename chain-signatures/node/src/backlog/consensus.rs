@@ -230,10 +230,10 @@ pub(crate) async fn find_consensus_checkpoint(
 #[cfg(test)]
 mod tests {
     use crate::backlog::consensus::{align_backlog_with_consensus, query_peers_checkpoint};
-    use crate::backlog::mock::{mock_sign_request, BacklogTestExt};
+    use crate::backlog::mock::{BacklogTestExt, mock_sign_request};
     use crate::backlog::{Backlog, BacklogEntry, Checkpoint};
-    use crate::mesh::connection::NodeStatus;
     use crate::mesh::MeshState;
+    use crate::mesh::connection::NodeStatus;
     use crate::node_client::NodeClient;
     use crate::protocol::ParticipantInfo;
     use cait_sith::protocol::Participant;
@@ -525,7 +525,8 @@ mod tests {
                         .unwrap()
                         .unwrap();
                     assert_eq!(
-                        latest.digest(), remote_digest.unwrap(),
+                        latest.digest(),
+                        remote_digest.unwrap(),
                         "Test case failed: {}, expected local backlog latest checkpoint digest to match consensus digest",
                         case.name
                     );
@@ -626,12 +627,14 @@ mod tests {
         // cursor to match.
         fixture.backlog.set_processed_block(chain, 100).await;
         let stale = fixture.backlog.checkpoint(chain).await.unwrap();
-        assert!(fixture
-            .backlog
-            .checkpoints()
-            .confirm(chain, stale.digest())
-            .await
-            .unwrap());
+        assert!(
+            fixture
+                .backlog
+                .checkpoints()
+                .confirm(chain, stale.digest())
+                .await
+                .unwrap()
+        );
 
         // The contract settles the canonical reset checkpoint for height 42.
         // The mesh is empty, so any attempt to fetch this from a peer would

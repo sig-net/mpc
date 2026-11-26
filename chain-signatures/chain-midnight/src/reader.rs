@@ -671,7 +671,7 @@ fn decode_tron_tx_params(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::emissions::{emissions_in, DecodedTransaction, Emission, EmissionKind};
+    use crate::emissions::{DecodedTransaction, Emission, EmissionKind, emissions_in};
     use crate::records::{RecordDiscriminantError, SignBidirectionalEventNotification};
     use crate::test_utils::{
         aligned_cell, alignment_of, array_of, atoms_from_record, cell_from_atoms, cell_from_record,
@@ -755,16 +755,20 @@ mod tests {
         );
 
         // A missing index at any level becomes our error rather than a panic.
-        assert!(signet_field_node_by_path(&nested, &[1, 9])
-            .unwrap_err()
-            .to_string()
-            .contains("out of range"));
+        assert!(
+            signet_field_node_by_path(&nested, &[1, 9])
+                .unwrap_err()
+                .to_string()
+                .contains("out of range")
+        );
 
         // An empty path resolves nothing.
-        assert!(signet_field_node_by_path(&nested, &[])
-            .unwrap_err()
-            .to_string()
-            .contains("empty"));
+        assert!(
+            signet_field_node_by_path(&nested, &[])
+                .unwrap_err()
+                .to_string()
+                .contains("empty")
+        );
 
         // A leaf (non-array) node is addressable only as the whole state at a
         // final [0]; any other step into it is refused.
@@ -773,10 +777,12 @@ mod tests {
             marker_of(signet_field_node_by_path(&single, &[0]).unwrap()),
             9
         );
-        assert!(signet_field_node_by_path(&single, &[1])
-            .unwrap_err()
-            .to_string()
-            .contains("non-array"));
+        assert!(
+            signet_field_node_by_path(&single, &[1])
+                .unwrap_err()
+                .to_string()
+                .contains("non-array")
+        );
     }
 
     #[test]
@@ -981,9 +987,11 @@ mod tests {
         for tag in 0..=2 {
             let mut valid = payload;
             valid[40] = tag;
-            assert!(decode_bidirectional_response_payload(&valid)
-                .response
-                .is_ok());
+            assert!(
+                decode_bidirectional_response_payload(&valid)
+                    .response
+                    .is_ok()
+            );
         }
         for (name, start, end, byte) in [
             ("output kind", 40, 41, 3),

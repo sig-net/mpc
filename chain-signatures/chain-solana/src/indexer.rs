@@ -6,11 +6,11 @@ use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use async_trait::async_trait;
-use futures_util::stream::{self, StreamExt};
 use futures_util::Stream;
+use futures_util::stream::{self, StreamExt};
 use mpc_chain_integration_core::{
-    utils::retry::{is_retryable_typed, retry_until_ok_or_terminal, SharedBackoff},
     ChainIndexer, ChainTelemetry, NoopPublisherTelemetry, StateManager,
+    utils::retry::{SharedBackoff, is_retryable_typed, retry_until_ok_or_terminal},
 };
 use mpc_primitives::{Chain, ChainConfig as _, ChainEvent};
 use solana_sdk::{pubkey::Pubkey, signature::Signature};
@@ -18,7 +18,7 @@ use solana_transaction_status::{EncodedTransactionWithStatusMeta, UiConfirmedBlo
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use crate::client::{skipped_code, SolanaCatchupBlock, CATCHUP_PAGE_SIZE};
+use crate::client::{CATCHUP_PAGE_SIZE, SolanaCatchupBlock, skipped_code};
 use crate::config::SolIndexerConfig;
 use crate::events::emit_events;
 use crate::{SolConfig, SolanaClient};
@@ -422,7 +422,7 @@ impl<S: StateManager, T: ChainTelemetry> SolanaIndexer<S, T> {
         match self.process_catchup_item(events_tx, slot, block).await {
             Ok(()) => return Ok(()),
             Err(err) if !is_retryable_typed(&err) => {
-                return Err(err.context(format!("slot {slot}")))
+                return Err(err.context(format!("slot {slot}")));
             }
             Err(_) => {}
         }
@@ -633,8 +633,8 @@ mod tests {
     use crate::test_utils::sign_bidirectional_ix_data;
     use anchor_lang::{AnchorSerialize, Discriminator};
     use mpc_chain_integration_core::{
-        utils::retry::{is_retryable, SharedBackoff},
         MockStateManager, NoopChainTelemetry,
+        utils::retry::{SharedBackoff, is_retryable},
     };
     use mpc_primitives::SignId;
     use signet_program::{SignatureRequestedEvent, SignatureRespondedEvent};

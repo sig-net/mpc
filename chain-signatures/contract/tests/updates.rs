@@ -1,5 +1,5 @@
 pub mod common;
-use common::{contract_file_path, init_env, vote_update_till_completion, INVALID_CONTRACT};
+use common::{INVALID_CONTRACT, contract_file_path, init_env, vote_update_till_completion};
 
 use mpc_contract::config::ProtocolConfig;
 use mpc_contract::errors;
@@ -73,11 +73,13 @@ async fn test_propose_update_config() {
         .await
         .unwrap();
     dbg!(&execution);
-    assert!(execution
-        .into_result()
-        .unwrap_err()
-        .to_string()
-        .contains(&errors::VoteError::VoterNotParticipant.to_string()));
+    assert!(
+        execution
+            .into_result()
+            .unwrap_err()
+            .to_string()
+            .contains(&errors::VoteError::VoterNotParticipant.to_string())
+    );
 
     // have each participant propose a new update:
     let new_config = ProtocolConfig {

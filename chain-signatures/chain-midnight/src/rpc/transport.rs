@@ -200,30 +200,30 @@ mod tests {
     use super::*;
     use crate::rpc::support::*;
     use std::net::SocketAddr;
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
-    use crate::rpc::reads::{is_oversized_contract_state, Reads, NETWORK_ID_ENTRY};
+    use crate::rpc::reads::{NETWORK_ID_ENTRY, Reads, is_oversized_contract_state};
     use crate::types::BlockHash;
-    use jsonrpsee::server::ServerBuilder;
-    use jsonrpsee::types::error::INVALID_PARAMS_CODE;
-    use jsonrpsee::types::ErrorObjectOwned;
     use jsonrpsee::RpcModule;
+    use jsonrpsee::server::ServerBuilder;
+    use jsonrpsee::types::ErrorObjectOwned;
+    use jsonrpsee::types::error::INVALID_PARAMS_CODE;
     use serde_json::json;
-    use subxt::backend::legacy::rpc_methods::NumberOrHex;
+    use subxt::SubstrateConfig;
     use subxt::backend::legacy::LegacyRpcMethods;
+    use subxt::backend::legacy::rpc_methods::NumberOrHex;
     use subxt::ext::subxt_rpcs::rpc_params;
     use subxt::utils::H256;
-    use subxt::SubstrateConfig;
 
     /// A keep-alive HTTP server whose first connection reaches a node that has fallen
     /// out of sync: every request on that connection fails as such a node fails, and
     /// every later connection answers like a healthy node. A load balancer keeps one
     /// connection on one backend, as this server does.
-    async fn stale_first_backend_server(
-    ) -> (SocketAddr, Arc<AtomicUsize>, tokio::task::JoinHandle<()>) {
+    async fn stale_first_backend_server()
+    -> (SocketAddr, Arc<AtomicUsize>, tokio::task::JoinHandle<()>) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind keep-alive HTTP server");

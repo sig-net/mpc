@@ -1,14 +1,14 @@
 use alloy::eips::BlockNumberOrTag;
 use alloy::primitives::{Address, B256};
 use alloy::rpc::types::{Block, BlockId, Log, TransactionReceipt};
-use futures_util::{stream, Stream, StreamExt};
+use futures_util::{Stream, StreamExt, stream};
 
+use crate::EthConfig;
 use crate::config::RpcConfig;
 use crate::rpc::RpcEthereumClient;
-use crate::EthConfig;
 #[cfg(test)]
 use mpc_chain_integration_core::utils::retry::RetryConfig;
-use mpc_chain_integration_core::utils::retry::{retry_rpc, SharedBackoff};
+use mpc_chain_integration_core::utils::retry::{SharedBackoff, retry_rpc};
 
 /// Block number alias shared by the client and indexer.
 pub type BlockNumber = u64;

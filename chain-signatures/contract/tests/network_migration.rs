@@ -11,7 +11,7 @@ const VIEW_STATE_PAGE_SIZE: u64 = 1000;
 
 #[path = "support/sandbox.rs"]
 mod sandbox;
-use sandbox::{contract_file_path, SANDBOX_VERSION};
+use sandbox::{SANDBOX_VERSION, contract_file_path};
 
 #[derive(Deserialize)]
 struct ViewStateResponse {

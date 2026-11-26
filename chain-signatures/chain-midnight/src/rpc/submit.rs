@@ -4,10 +4,10 @@
 use anyhow::Context as _;
 use subxt::backend::legacy::rpc_methods::NumberOrHex;
 use subxt::ext::codec::DecodeAll as _;
-use subxt::ext::subxt_rpcs::{rpc_params, Error as RawRpcError};
+use subxt::ext::subxt_rpcs::{Error as RawRpcError, rpc_params};
 use subxt::utils::H256;
 
-use super::publisher::{recall, remember, MidnightPublisherRpc};
+use super::publisher::{MidnightPublisherRpc, recall, remember};
 use super::statics::{TxApplied, TxPartialSuccess};
 use crate::types::{BlockHash, LedgerTxHash};
 
@@ -151,15 +151,15 @@ impl crate::native::SubmitChain for MidnightPublisherRpc {
             .context("failed to fetch midnight block events")?;
         for event in events.iter() {
             let event = event.context("Midnight block events did not match metadata")?;
-            if let Some(TxApplied(details)) = event.as_event::<TxApplied>()? {
-                if details.tx_hash == *tx_hash.as_bytes() {
-                    return Ok(Some(Landing::Applied));
-                }
+            if let Some(TxApplied(details)) = event.as_event::<TxApplied>()?
+                && details.tx_hash == *tx_hash.as_bytes()
+            {
+                return Ok(Some(Landing::Applied));
             }
-            if let Some(TxPartialSuccess(details)) = event.as_event::<TxPartialSuccess>()? {
-                if details.tx_hash == *tx_hash.as_bytes() {
-                    return Ok(Some(Landing::PartialSuccess));
-                }
+            if let Some(TxPartialSuccess(details)) = event.as_event::<TxPartialSuccess>()?
+                && details.tx_hash == *tx_hash.as_bytes()
+            {
+                return Ok(Some(Landing::PartialSuccess));
             }
         }
         Ok(None)
@@ -171,8 +171,8 @@ mod tests {
     use crate::rpc::support::*;
     use crate::submit_error::SubmitError;
     use jsonrpsee::server::ServerBuilder;
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use jsonrpsee::RpcModule;
     use mpc_chain_integration_core::utils::retry::{is_provider_throttled, is_retryable};

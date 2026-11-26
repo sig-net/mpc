@@ -2,15 +2,15 @@ use crate::backlog::{self, Generating};
 use crate::config::Config;
 use crate::mesh::MeshState;
 use crate::metrics::requests::{
-    record_request_latency, record_request_latency_since, SignRequestStep, SIGN_REQUEST_LOOPS,
+    SIGN_REQUEST_LOOPS, SignRequestStep, record_request_latency, record_request_latency_since,
 };
+use crate::protocol::Chain;
 use crate::protocol::contract::primitives::intersect_vec;
 use crate::protocol::message::{MessageChannel, PositMessage, PositProtocolId};
 use crate::protocol::posit::{PositAction, PositCounter, PositRejectReason};
 use crate::protocol::presignature::PresignatureId;
 use crate::protocol::signature::{GenerateCtx, SignError, SignGenerator};
 use crate::protocol::sync::{SyncKind, SyncReportSender};
-use crate::protocol::Chain;
 use crate::respond_bidirectional::claims_attestation_key;
 use crate::rpc::{ContractStateWatcher, GovernanceInfo, RpcChannel};
 use crate::storage::presignature_storage::{PresignatureReservation, PresignatureTaken};
@@ -19,7 +19,7 @@ use crate::types::SignCommand;
 
 use mpc_utils::{
     task::JoinMap,
-    time::{unix_elapsed, TimeoutBudget},
+    time::{TimeoutBudget, unix_elapsed},
 };
 
 use cait_sith::protocol::Participant;
@@ -28,10 +28,10 @@ use lru::LruCache;
 use mpc_primitives::{ChainConfig as _, IndexedSignRequest, RequestKind, SignId};
 use std::collections::{BTreeSet, HashMap};
 use std::num::NonZeroUsize;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
-use tokio::sync::{mpsc, watch, OwnedSemaphorePermit, Semaphore};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, watch};
 use tokio::task::JoinHandle;
 
 mod delay_monitor;
@@ -468,11 +468,11 @@ impl SignatureSpawner {
     fn retire_task(&mut self, sign_id: SignId, kind: RequestKind, reason: &'static str) -> bool {
         self.mark_dead(sign_id, kind);
         let aborted = self.tasks.abort((sign_id, kind));
-        if let Some(tracked) = self.requests.get(&sign_id) {
-            if tracked.entry.request().request_kind() == kind {
-                self.requests.remove(&sign_id);
-                self.delay_monitor.unwatch(sign_id, reason);
-            }
+        if let Some(tracked) = self.requests.get(&sign_id)
+            && tracked.entry.request().request_kind() == kind
+        {
+            self.requests.remove(&sign_id);
+            self.delay_monitor.unwatch(sign_id, reason);
         }
         self.posit_mailboxes.remove(&(sign_id, kind));
         aborted
@@ -1251,7 +1251,9 @@ mod tests {
         spawner.request_bidi(sign_id, Chain::Solana);
         assert!(spawner.test_tasks_contains(sign_id, RequestKind::SignBidirectional));
         assert!(spawner.test_posit_mailboxes_contains(&sign_id, RequestKind::SignBidirectional));
-        assert!(!spawner.test_posit_mailboxes_contains(&sign_id, RequestKind::RespondBidirectional));
+        assert!(
+            !spawner.test_posit_mailboxes_contains(&sign_id, RequestKind::RespondBidirectional)
+        );
 
         // 2. Deliver a second leg Propose while first leg is still running.
         // It must NOT be routed into first leg's mailbox. It buffers into second leg's mailbox.
@@ -1300,7 +1302,9 @@ mod tests {
         assert!(!spawner.test_tasks_contains(sign_id, RequestKind::SignBidirectional));
         assert!(!spawner.test_requests_contains(&sign_id));
         assert!(!spawner.test_posit_mailboxes_contains(&sign_id, RequestKind::SignBidirectional));
-        assert!(!spawner.test_posit_mailboxes_contains(&sign_id, RequestKind::RespondBidirectional));
+        assert!(
+            !spawner.test_posit_mailboxes_contains(&sign_id, RequestKind::RespondBidirectional)
+        );
         assert!(spawner.test_dead_ids_contains(&sign_id, RequestKind::SignBidirectional));
         assert!(spawner.test_dead_ids_contains(&sign_id, RequestKind::RespondBidirectional));
         assert_eq!(spawner.test_dead_ids_len(), 1);
@@ -1324,7 +1328,9 @@ mod tests {
         assert!(!spawner.test_tasks_contains(sign_id, RequestKind::SignBidirectional));
         assert!(!spawner.test_requests_contains(&sign_id));
         assert!(!spawner.test_posit_mailboxes_contains(&sign_id, RequestKind::SignBidirectional));
-        assert!(!spawner.test_posit_mailboxes_contains(&sign_id, RequestKind::RespondBidirectional));
+        assert!(
+            !spawner.test_posit_mailboxes_contains(&sign_id, RequestKind::RespondBidirectional)
+        );
         assert!(spawner.test_dead_ids_contains(&sign_id, RequestKind::SignBidirectional));
         assert!(spawner.test_dead_ids_contains(&sign_id, RequestKind::RespondBidirectional));
         assert!(spawner.test_dead_ids_contains(&sign_id, RequestKind::Sign));
@@ -1374,7 +1380,9 @@ mod tests {
         // All mailboxes must be cleared
         assert!(!spawner.test_posit_mailboxes_contains(&sign_id, RequestKind::Sign));
         assert!(!spawner.test_posit_mailboxes_contains(&sign_id, RequestKind::SignBidirectional));
-        assert!(!spawner.test_posit_mailboxes_contains(&sign_id, RequestKind::RespondBidirectional));
+        assert!(
+            !spawner.test_posit_mailboxes_contains(&sign_id, RequestKind::RespondBidirectional)
+        );
         assert_eq!(spawner.test_dead_ids_len(), 1);
 
         // Late posits for any kind must be dropped and cannot reopen a mailbox
@@ -1383,6 +1391,8 @@ mod tests {
         spawner.handle_posit(sign_id, RequestKind::RespondBidirectional, propose(0));
         assert!(!spawner.test_posit_mailboxes_contains(&sign_id, RequestKind::Sign));
         assert!(!spawner.test_posit_mailboxes_contains(&sign_id, RequestKind::SignBidirectional));
-        assert!(!spawner.test_posit_mailboxes_contains(&sign_id, RequestKind::RespondBidirectional));
+        assert!(
+            !spawner.test_posit_mailboxes_contains(&sign_id, RequestKind::RespondBidirectional)
+        );
     }
 }

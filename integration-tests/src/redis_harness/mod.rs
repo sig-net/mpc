@@ -4,8 +4,8 @@ pub mod gate;
 pub mod participant;
 pub mod scenarios;
 
-use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 use anyhow::Context as _;
 use cait_sith::protocol::Participant;
@@ -231,8 +231,10 @@ mod tests {
             Ok(_) => panic!("external Redis should require explicit opt-in"),
             Err(error) => error,
         };
-        assert!(error
-            .to_string()
-            .contains("external Redis requires explicit opt-in"));
+        assert!(
+            error
+                .to_string()
+                .contains("external Redis requires explicit opt-in")
+        );
     }
 }

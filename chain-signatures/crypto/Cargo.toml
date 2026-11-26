@@ -1,7 +1,7 @@
 [package]
 name = "mpc-crypto"
 version.workspace = true
-edition = "2021"
+edition.workspace = true
 description = "Node-internal cryptography for the MPC network (not published; see signet-crypto for the public key-derivation primitives)"
 readme = "README.md"
 publish = false

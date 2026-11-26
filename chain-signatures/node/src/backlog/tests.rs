@@ -4,10 +4,11 @@ use super::{
     Executing, ExecutionWatch, Final, Generating, Initial, PendingRequests, Publishing, Sign,
 };
 use crate::backlog::mock::{
-    bidi_initial_status, mock_bidi_request, mock_bidi_response, mock_bidirectional_tx,
-    mock_execution_entry, mock_execution_entry_with_timestamp, mock_participants, mock_publishing,
-    mock_publishing_with_proposer, mock_root_pk, mock_sign_request, mock_signature_output, mock_tx,
-    pending_execution_status, single_entry_checkpoint, BacklogTestExt,
+    BacklogTestExt, bidi_initial_status, mock_bidi_request, mock_bidi_response,
+    mock_bidirectional_tx, mock_execution_entry, mock_execution_entry_with_timestamp,
+    mock_participants, mock_publishing, mock_publishing_with_proposer, mock_root_pk,
+    mock_sign_request, mock_signature_output, mock_tx, pending_execution_status,
+    single_entry_checkpoint,
 };
 use crate::sign_bidirectional::{BidirectionalProgress, SignProgress, SignStatus};
 use crate::storage::checkpoint_storage::CheckpointStorage;
@@ -264,10 +265,12 @@ async fn test_automatic_checkpoint_on_interval() {
         assert_eq!(cp.pending_requests.len(), 1);
 
         // Next block does not trigger
-        assert!(backlog
-            .set_processed_block(chain, interval + 1)
-            .await
-            .is_none());
+        assert!(
+            backlog
+                .set_processed_block(chain, interval + 1)
+                .await
+                .is_none()
+        );
 
         // At 2 * interval, creates next checkpoint
         let cp2 = backlog
@@ -348,10 +351,12 @@ async fn a_checkpoint_that_cannot_be_stored_is_retried() {
         backlog.checkpoints().count(Chain::Solana),
         super::MAX_PENDING_CHECKPOINTS
     );
-    assert!(backlog
-        .set_processed_block_interval(Chain::Solana, (cap + 1) * 120, 120)
-        .await
-        .is_none());
+    assert!(
+        backlog
+            .set_processed_block_interval(Chain::Solana, (cap + 1) * 120, 120)
+            .await
+            .is_none()
+    );
 }
 
 /// A boundary where storage holds a different checkpoint keeps the stored one
@@ -369,10 +374,12 @@ async fn a_conflicting_stored_checkpoint_is_kept() {
         .unwrap();
 
     let backlog = Backlog::persisted(storage.clone());
-    assert!(backlog
-        .set_processed_block_interval(Chain::Solana, 120, 120)
-        .await
-        .is_none());
+    assert!(
+        backlog
+            .set_processed_block_interval(Chain::Solana, 120, 120)
+            .await
+            .is_none()
+    );
     let pending = storage.load_pending(Chain::Solana).await.unwrap();
     assert_eq!(
         pending.iter().map(Checkpoint::digest).collect::<Vec<_>>(),
@@ -460,10 +467,11 @@ const OLD_FORMAT_DIGEST: &str = "449d3cbc30e57ae4964916e0366dc88c8b6d9678d4011f9
 async fn an_old_format_body_keeps_its_digest() {
     let body = old_format_body().await;
     assert_eq!(body.digest(), digest_hex(OLD_FORMAT_DIGEST));
-    assert!(body
-        .pending_requests
-        .iter()
-        .all(|entry| entry.tx_ids.len() == 1));
+    assert!(
+        body.pending_requests
+            .iter()
+            .all(|entry| entry.tx_ids.len() == 1)
+    );
 
     let mut bytes = Vec::new();
     ciborium::into_writer(&body, &mut bytes).unwrap();
@@ -566,11 +574,13 @@ async fn loading_an_old_format_body_rebuilds_its_progress() {
         SignStatus::Bidirectional(BidirectionalProgress::Initial(_))
     ));
     drop(pending);
-    assert!(restarted
-        .requeueable_requests(Chain::Solana)
-        .await
-        .iter()
-        .all(|queued| queued.sign_id() != sign_id));
+    assert!(
+        restarted
+            .requeueable_requests(Chain::Solana)
+            .await
+            .iter()
+            .all(|queued| queued.sign_id() != sign_id)
+    );
 }
 
 #[test]
@@ -745,10 +755,12 @@ async fn test_plain_sign_typestate_lifecycle() {
     assert_eq!(entry.state(), &Sign(Generating));
 
     // Verify querying with wrong state returns None
-    assert!(backlog
-        .get_by::<Sign<Publishing>>(Chain::Ethereum, &sign_id)
-        .await
-        .is_none());
+    assert!(
+        backlog
+            .get_by::<Sign<Publishing>>(Chain::Ethereum, &sign_id)
+            .await
+            .is_none()
+    );
 
     // 2. Advance to publishing
     let (pk, output) = mock_signature_output(&req.args);
@@ -839,14 +851,18 @@ async fn test_bidirectional_typestate_lifecycle() {
     assert_eq!(exec_entry.execution_tx().id, tx.id);
 
     // Verify get_by can retrieve Executing state directly from backlog
-    assert!(backlog
-        .get_by::<Bidirectional<Executing>>(Chain::Solana, &sign_id)
-        .await
-        .is_some());
-    assert!(backlog
-        .get_by::<Bidirectional<Initial<Generating>>>(Chain::Solana, &sign_id)
-        .await
-        .is_none());
+    assert!(
+        backlog
+            .get_by::<Bidirectional<Executing>>(Chain::Solana, &sign_id)
+            .await
+            .is_some()
+    );
+    assert!(
+        backlog
+            .get_by::<Bidirectional<Initial<Generating>>>(Chain::Solana, &sign_id)
+            .await
+            .is_none()
+    );
 
     // 4. Advance to Final Generating
     let final_entry = exec_entry
@@ -856,10 +872,12 @@ async fn test_bidirectional_typestate_lifecycle() {
     assert_eq!(final_entry.request().id, sign_id);
 
     // Verify get_by can retrieve Final<Generating> state directly from backlog
-    assert!(backlog
-        .get_by::<Bidirectional<Final<Generating>>>(Chain::Solana, &sign_id)
-        .await
-        .is_some());
+    assert!(
+        backlog
+            .get_by::<Bidirectional<Final<Generating>>>(Chain::Solana, &sign_id)
+            .await
+            .is_some()
+    );
 
     // 5. Advance to Final Publishing & verify phase 2 signature
     let (pk2, output2) = mock_signature_output(&final_entry.request().args);
@@ -968,20 +986,24 @@ async fn extraction_failure_cannot_advance_into_response_signing() {
         let tx = mock_bidirectional_tx(SignId::from_u8(22), chain);
         let entry = backlog.insert_mock_executing(&tx).await;
         let before = backlog.checkpoint(chain).await.unwrap();
-        assert!(entry
-            .advance(ExecutionOutcome::ExtractionFailed, 456)
-            .await
-            .is_err());
+        assert!(
+            entry
+                .advance(ExecutionOutcome::ExtractionFailed, 456)
+                .await
+                .is_err()
+        );
         assert_eq!(
             before.digest(),
             backlog.checkpoint(chain).await.unwrap().digest()
         );
-        assert!(backlog
-            .get(chain, &tx.sign_id())
-            .await
-            .unwrap()
-            .state()
-            .is_pending_execution());
+        assert!(
+            backlog
+                .get(chain, &tx.sign_id())
+                .await
+                .unwrap()
+                .state()
+                .is_pending_execution()
+        );
         assert_eq!(
             backlog.get_execution_watchers(tx.target_chain).await.len(),
             1
@@ -1023,10 +1045,12 @@ async fn test_watch_unwatch_and_respond() {
         .advance(ExecutionOutcome::Success { output: vec![] }, 456)
         .await
         .expect("respond should transition to final generating");
-    assert!(backlog
-        .get_by::<Bidirectional<Final<Generating>>>(tx.source_chain, &sign_id)
-        .await
-        .is_some());
+    assert!(
+        backlog
+            .get_by::<Bidirectional<Final<Generating>>>(tx.source_chain, &sign_id)
+            .await
+            .is_some()
+    );
 }
 
 // =========================================================================
@@ -1283,10 +1307,12 @@ async fn test_initial_any_progress_advance() {
         .await
         .expect("advances to executing");
     assert_eq!(exec_entry.execution_tx().id, tx.id);
-    assert!(backlog
-        .get_by::<Bidirectional<Executing>>(Chain::Solana, &sign_id)
-        .await
-        .is_some());
+    assert!(
+        backlog
+            .get_by::<Bidirectional<Executing>>(Chain::Solana, &sign_id)
+            .await
+            .is_some()
+    );
 }
 
 #[tokio::test]
@@ -1308,10 +1334,12 @@ async fn pending_executions_targeting_spans_sources() {
     assert_eq!(tron.len(), 2);
     assert_eq!(tron[0].sign_id, tx1.sign_id());
     assert_eq!(tron[1].sign_id, tx2.sign_id());
-    assert!(backlog
-        .get_pending_executions(Chain::Hydration)
-        .await
-        .is_empty());
+    assert!(
+        backlog
+            .get_pending_executions(Chain::Hydration)
+            .await
+            .is_empty()
+    );
 }
 
 #[tokio::test]
@@ -1664,10 +1692,12 @@ async fn live_regress_preserves_only_matching_execution_wait_starts() {
         .await
         .expect("checkpoint execution must be re-watched");
     assert_eq!(entry.respond_observed_at(), None);
-    assert!(backlog
-        .unwatch_execution(WatchKey::of(&stale))
-        .await
-        .is_none());
+    assert!(
+        backlog
+            .unwatch_execution(WatchKey::of(&stale))
+            .await
+            .is_none()
+    );
     let entry = backlog
         .unwatch_execution(WatchKey::of(&unrelated))
         .await
@@ -2084,18 +2114,18 @@ fn a_record_applies_only_to_an_entry_behind_it() {
     let execution = Arc::new(tx.clone());
     let record = || SignProgress::Publishing(mock_publishing());
     let held = || SignProgress::Publishing(mock_publishing_with_proposer(false));
-    let gen = || SignProgress::Generating;
+    let generating = || SignProgress::Generating;
     let fin = |progress| Final {
         respond_request: mock_bidi_response(&tx),
         progress,
     };
     let statuses = [
-        SignStatus::Sign(gen()),
+        SignStatus::Sign(generating()),
         SignStatus::Sign(held()),
-        SignStatus::Bidirectional(Initial(gen())),
+        SignStatus::Bidirectional(Initial(generating())),
         SignStatus::Bidirectional(Initial(held())),
         SignStatus::Bidirectional(Executing(Arc::clone(&execution))),
-        SignStatus::Bidirectional(fin(gen())),
+        SignStatus::Bidirectional(fin(generating())),
         SignStatus::Bidirectional(fin(held())),
         SignStatus::Bidirectional(Parked(execution)),
     ];

@@ -10,8 +10,8 @@ use alloy::providers::fillers::{
 };
 use alloy::providers::{Provider, ProviderBuilder, RootProvider};
 use alloy::rpc::types::Filter;
-use alloy::signers::local::PrivateKeySigner;
 use alloy::signers::Signer;
+use alloy::signers::local::PrivateKeySigner;
 use alloy::sol_types::SolEvent;
 use anyhow::{Context, Result};
 use mpc_chain_ethereum::abi::ChainSignatures;

@@ -1,6 +1,6 @@
 [package]
 name = "mpc-midnight-respond-codec"
-edition = "2021"
+edition.workspace = true
 version.workspace = true
 description = "Midnight respond attestation for executed EVM transactions"
 publish = false

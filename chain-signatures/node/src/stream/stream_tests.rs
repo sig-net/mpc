@@ -1,5 +1,5 @@
 use super::supervisor::run_supervised;
-use crate::backlog::mock::{mock_sign_request, mock_signature_output, BacklogTestExt};
+use crate::backlog::mock::{BacklogTestExt, mock_sign_request, mock_signature_output};
 use crate::backlog::{Backlog, Bidirectional, Executing};
 use crate::mesh::MeshState;
 use crate::node_client::NodeClient;
@@ -134,12 +134,14 @@ async fn a_supervised_restart_publishes_a_stored_signature() {
         "the proposer publishes it"
     );
     assert_eq!(restarted.publishable_requests(chain).await.len(), 1);
-    assert!(storage
-        .load_local(chain)
-        .await
-        .unwrap()
-        .iter()
-        .any(|(id, _)| *id == request.id));
+    assert!(
+        storage
+            .load_local(chain)
+            .await
+            .unwrap()
+            .iter()
+            .any(|(id, _)| *id == request.id)
+    );
 }
 
 #[tokio::test]

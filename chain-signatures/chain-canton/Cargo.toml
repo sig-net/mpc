@@ -1,6 +1,6 @@
 [package]
 name = "mpc-chain-canton"
-edition = "2021"
+edition.workspace = true
 version.workspace = true
 publish.workspace = true
 description = "Canton chain integration for MPC"

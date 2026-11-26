@@ -1,8 +1,8 @@
 use cait_sith::protocol::Participant;
 
 use crate::mesh::connection::NodeStatus;
-use crate::protocol::contract::primitives::Participants;
 use crate::protocol::ParticipantInfo;
+use crate::protocol::contract::primitives::Participants;
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct MeshState {

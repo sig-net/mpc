@@ -17,7 +17,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::containers::{self, DockerClient};
 use crate::utils::dev_gen_indexed;
-use crate::{execute, NodeBinarySource, NodeConfig, Nodes};
+use crate::{NodeBinarySource, NodeConfig, Nodes, execute};
 
 use crate::cluster::Cluster;
 use mpc_primitives::SANDBOX_VERSION;

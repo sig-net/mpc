@@ -3,7 +3,7 @@ use std::str::FromStr;
 
 #[path = "support/sandbox.rs"]
 mod sandbox;
-pub use sandbox::{contract_file_path, SANDBOX_VERSION};
+pub use sandbox::{SANDBOX_VERSION, contract_file_path};
 
 use digest::{Digest, FixedOutput};
 use ecdsa::signature::Verifier;
@@ -14,12 +14,12 @@ use k256::{AffinePoint, FieldBytes, Secp256k1};
 use mpc_contract::primitives::{CandidateInfo, ParticipantInfo, Participants, SignRequest};
 use mpc_contract::update::UpdateId;
 use mpc_crypto::kdf::{check_ec_signature, derive_secret_key};
-use mpc_crypto::{derive_epsilon, derive_key, KeyPurpose};
+use mpc_crypto::{KeyPurpose, derive_epsilon, derive_key};
 use near_workspaces::network::Sandbox;
 use near_workspaces::types::{AccountId, NearToken};
 use near_workspaces::{Account, Contract, Worker};
 use signature::DigestSigner;
-use signet_primitives::{Chain, SignId, Signature, LATEST_MPC_KEY_VERSION};
+use signet_primitives::{Chain, LATEST_MPC_KEY_VERSION, SignId, Signature};
 
 /// A minimal NEAR contract whose only method, `migrate`, panics.
 /// `test_invalid_contract_deploy` proposes it to check that a failed migration

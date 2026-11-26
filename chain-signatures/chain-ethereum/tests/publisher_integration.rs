@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use alloy::primitives::B256;
-use common::{submit_sign_request, wait_for_responded, EthTestEnv};
+use common::{EthTestEnv, submit_sign_request, wait_for_responded};
 use mpc_chain_ethereum::publisher::EthClient;
 use mpc_chain_integration_core::utils::{retry::SharedBackoff, test::make_publish_action};
 use mpc_chain_integration_core::{ChainPublisher, NoopPublisherTelemetry};

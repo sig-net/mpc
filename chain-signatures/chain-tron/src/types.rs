@@ -3,11 +3,11 @@
 //! Receipt fields mirror java-tron's `TransactionInfo`/`ResourceReceipt`
 //! JSON (protocol/core/Tron.proto@4e8389f).
 
-use alloy::primitives::{Bytes, Log, LogData, B256};
+use alloy::primitives::{B256, Bytes, Log, LogData};
 
-use anyhow::{bail, Context};
+use anyhow::{Context, bail};
 use mpc_chain_integration_core::ExtractionFailure;
-use mpc_evm_common::{build_serialized_output, is_contract_call, TraceOutput};
+use mpc_evm_common::{TraceOutput, build_serialized_output, is_contract_call};
 use mpc_primitives::{BidirectionalTx, ChainConfig as _, ExecutionOutcome};
 use mpc_tron_wire::pb::RawTransaction;
 

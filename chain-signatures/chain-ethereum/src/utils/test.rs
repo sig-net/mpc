@@ -4,12 +4,12 @@
 use crate::abi::{ChainSignatures, ChainSignaturesConstructor};
 use crate::event_parsing::parse_filtered_logs;
 use alloy::network::{Ethereum, TransactionBuilder};
-use alloy::primitives::{Address, Bytes, B256, U256};
+use alloy::primitives::{Address, B256, Bytes, U256};
 use alloy::providers::{Provider, WalletProvider};
-use alloy::rpc::types::{request::TransactionRequest, Filter};
+use alloy::rpc::types::{Filter, request::TransactionRequest};
 use alloy::sol_types::{SolEvent, SolValue};
 use anyhow::{Context, Result};
-use mpc_primitives::{SignId, LATEST_MPC_KEY_VERSION};
+use mpc_primitives::{LATEST_MPC_KEY_VERSION, SignId};
 use serde_json::Value;
 use std::time::Duration;
 

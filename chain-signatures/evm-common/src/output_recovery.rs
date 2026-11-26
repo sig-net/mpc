@@ -1,7 +1,7 @@
 use alloy::dyn_abi::{DynSolType, DynSolValue};
-use alloy::primitives::{Address, Bytes, B256, I256, U256};
+use alloy::primitives::{Address, B256, Bytes, I256, U256};
 use borsh::BorshSerialize;
-use mpc_midnight_respond_codec::{executed_output, validate_output_schema, TracedReturn};
+use mpc_midnight_respond_codec::{TracedReturn, executed_output, validate_output_schema};
 use mpc_primitives::SerDeserFormat;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -157,7 +157,9 @@ pub fn build_serialized_output(
         SerDeserFormat::Abi if is_contract_call => {
             let expects_no_output = output_schema_is_empty(output_deserialization_schema)?;
             match trace_output {
-                TraceOutput::Output(trace_output) if trace_output.is_empty() && expects_no_output => {
+                TraceOutput::Output(trace_output)
+                    if trace_output.is_empty() && expects_no_output =>
+                {
                     TransactionOutput::non_contract_call_output()
                 }
                 TraceOutput::Output(_) if expects_no_output => anyhow::bail!(
@@ -171,7 +173,9 @@ pub fn build_serialized_output(
                     TransactionOutput::non_contract_call_output()
                 }
                 TraceOutput::NoReturnData => {
-                    anyhow::bail!("contract-call trace has no return data for non-empty output schema")
+                    anyhow::bail!(
+                        "contract-call trace has no return data for non-empty output schema"
+                    )
                 }
                 TraceOutput::NotTraced => {
                     anyhow::bail!("contract-call output extraction requires trace output")
@@ -399,8 +403,10 @@ fn parse_schema_fields(schema_json_bytes: &[u8]) -> anyhow::Result<Vec<AbiField>
             })
             .collect::<Result<Vec<_>, anyhow::Error>>()?,
         Value::Object(obj) => {
-            vec![serde_json::from_value(Value::Object(obj))
-                .map_err(|e| anyhow::anyhow!("invalid single object schema: {e:?}"))?]
+            vec![
+                serde_json::from_value(Value::Object(obj))
+                    .map_err(|e| anyhow::anyhow!("invalid single object schema: {e:?}"))?,
+            ]
         }
         Value::String(s) => vec![AbiField {
             name: String::new(),

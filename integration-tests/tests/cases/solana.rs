@@ -1,7 +1,7 @@
 use elliptic_curve::ops::Reduce;
 use integration_tests::cluster;
 use mpc_crypto::kdf::check_ec_signature;
-use mpc_crypto::{derive_epsilon, derive_key, near_public_key_to_affine_point, KeyPurpose};
+use mpc_crypto::{KeyPurpose, derive_epsilon, derive_key, near_public_key_to_affine_point};
 use mpc_primitives::Chain;
 use test_log::test;
 

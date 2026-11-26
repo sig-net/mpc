@@ -1,8 +1,8 @@
 use crate::protocol::posit::PositAction;
 use crate::protocol::presignature::PresignatureId;
 
-use std::collections::hash_map::Entry;
 use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use std::sync::Arc;
 
 use cait_sith::protocol::Participant;

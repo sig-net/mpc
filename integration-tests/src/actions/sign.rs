@@ -14,9 +14,8 @@ use mpc_crypto::ScalarExt as _;
 use mpc_primitives::LATEST_MPC_KEY_VERSION;
 use near_crypto::InMemorySigner;
 use near_fetch::ops::AsyncTransactionStatus;
-use near_workspaces::types::{Gas, NearToken};
 use near_workspaces::Account;
-use rand::Rng;
+use near_workspaces::types::{Gas, NearToken};
 use solana_client::nonblocking::{pubsub_client::PubsubClient, rpc_client::RpcClient};
 use solana_client::rpc_config::{
     RpcTransactionConfig, RpcTransactionLogsConfig, RpcTransactionLogsFilter,
@@ -900,7 +899,7 @@ impl SignAction<'_> {
     }
 
     pub fn payload_or_random(&mut self) -> [u8; 32] {
-        let payload = self.payload.unwrap_or_else(|| rand::thread_rng().gen());
+        let payload = self.payload.unwrap_or_else(rand::random);
         self.payload = Some(payload);
         payload
     }

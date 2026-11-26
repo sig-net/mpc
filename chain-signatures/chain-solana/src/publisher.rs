@@ -2,7 +2,7 @@ use std::error::Error as _;
 
 use anchor_client::ClientError as AnchorClientError;
 use k256::elliptic_curve::sec1::ToEncodedPoint;
-use mpc_chain_integration_core::{utils::retry::RpcFailure, ChainPublisher, PublishAction};
+use mpc_chain_integration_core::{ChainPublisher, PublishAction, utils::retry::RpcFailure};
 use mpc_primitives::SignKind;
 use reqwest::StatusCode;
 use signet_program::accounts::{

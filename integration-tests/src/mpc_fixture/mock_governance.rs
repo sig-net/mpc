@@ -36,9 +36,9 @@ impl Governance for MockGovernance {
     async fn vote_public_key(&self, public_key: &near_crypto::PublicKey) -> anyhow::Result<bool> {
         tracing::debug!(me = ?self.me, ?public_key, "vote_public_key");
         let mut result = false;
-        self.protocol_state_tx.send_if_modified(|protocol_state| {
-            let modified = match protocol_state {
-                Some(ProtocolState::Initializing(ref mut state)) => {
+        self.protocol_state_tx
+            .send_if_modified(|protocol_state| match protocol_state {
+                Some(ProtocolState::Initializing(state)) => {
                     let entry = state
                         .pk_votes
                         .pk_votes
@@ -77,9 +77,7 @@ impl Governance for MockGovernance {
                     );
                     false
                 }
-            };
-            modified
-        });
+            });
         Ok(result)
     }
 
@@ -87,8 +85,8 @@ impl Governance for MockGovernance {
         tracing::debug!(me = ?self.me, new_threshold, "vote_threshold");
         let mut result = false;
         self.protocol_state_tx.send_if_modified(|protocol_state| {
-            let modified = match protocol_state {
-                Some(ProtocolState::Running(ref mut state)) => {
+            match protocol_state {
+                Some(ProtocolState::Running(state)) => {
                     if new_threshold == state.threshold {
                         state.threshold_votes.remove(&self.me);
                         return true;
@@ -137,8 +135,7 @@ impl Governance for MockGovernance {
                     );
                     false
                 }
-            };
-            modified
+            }
         });
         Ok(result)
     }

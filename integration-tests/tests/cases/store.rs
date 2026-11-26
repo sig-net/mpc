@@ -3,9 +3,9 @@ use integration_tests::cluster::spawner::ClusterSpawner;
 use integration_tests::containers;
 use mpc_crypto::PublicKey;
 use mpc_node::backlog::Checkpoint;
+use mpc_node::protocol::MessageChannel;
 use mpc_node::protocol::presignature::PresignatureSpawner;
 use mpc_node::protocol::triple::TripleSpawner;
-use mpc_node::protocol::MessageChannel;
 use mpc_node::storage::checkpoint_storage::CheckpointStorage;
 use mpc_node::types::SecretKeyShare;
 use test_log::test;
@@ -78,14 +78,18 @@ async fn test_triple_persistence() -> anyhow::Result<()> {
     assert!(triple_storage.contains_using(triple_id2).await);
 
     // Attempt to re-create slot for in-use triples and check that it fails
-    assert!(triple_storage
-        .create_slot(triple_id1, node1)
-        .await
-        .is_none());
-    assert!(triple_storage
-        .create_slot(triple_id2, node1)
-        .await
-        .is_none());
+    assert!(
+        triple_storage
+            .create_slot(triple_id1, node1)
+            .await
+            .is_none()
+    );
+    assert!(
+        triple_storage
+            .create_slot(triple_id2, node1)
+            .await
+            .is_none()
+    );
 
     let id3 = 3;
     let id4: u64 = 4;
@@ -490,10 +494,12 @@ async fn test_pending_checkpoint_persistence() -> anyhow::Result<()> {
         ));
     assert_eq!(restarted.persist_pending(&conflicting).await?, None);
     assert_eq!(restarted.persist_pending(&second).await?, Some(1));
-    assert!(restarted
-        .promote_pending(Chain::Solana, [99; 32])
-        .await?
-        .is_none());
+    assert!(
+        restarted
+            .promote_pending(Chain::Solana, [99; 32])
+            .await?
+            .is_none()
+    );
     assert_eq!(restarted.load_latest(Chain::Solana).await?, Some(first));
     assert_eq!(
         restarted.load_pending(Chain::Solana).await?,

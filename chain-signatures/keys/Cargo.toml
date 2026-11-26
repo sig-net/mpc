@@ -2,7 +2,7 @@
 name = "mpc-keys"
 version.workspace = true
 publish.workspace = true
-edition = "2021"
+edition.workspace = true
 
 [dependencies]
 hex.workspace = true

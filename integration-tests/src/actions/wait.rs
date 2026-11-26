@@ -235,12 +235,16 @@ async fn require_contract_state(nodes: &Cluster, state: ContractState) -> anyhow
                     .await?
                     .json()?;
                 if *present != info.is_some() {
-                    anyhow::bail!("candidate invalid in contract state: expect_present={present} for {candidate:?}");
+                    anyhow::bail!(
+                        "candidate invalid in contract state: expect_present={present} for {candidate:?}"
+                    );
                 }
             }
             ContractState::Participant(participant, present) => {
                 if *present != current_state.participants.contains_key(participant) {
-                    anyhow::bail!("participant invalid in contract state: expect_present={present} for {participant:?}");
+                    anyhow::bail!(
+                        "participant invalid in contract state: expect_present={present} for {participant:?}"
+                    );
                 }
             }
         }

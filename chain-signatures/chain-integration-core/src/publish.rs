@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::time::Instant;
 
-use crate::utils::retry::{run_gated, SharedBackoff};
+use crate::utils::retry::{SharedBackoff, run_gated};
 
 use cait_sith::protocol::Participant;
 use mpc_primitives::{IndexedSignRequest, Signature};

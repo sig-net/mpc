@@ -10,19 +10,19 @@ use errors::{
     CheckpointError, ConversionError, InitError, InvalidParameters, InvalidState, JoinError,
     PublicKeyError, RespondError, SignError, VoteError,
 };
-use k256::elliptic_curve::sec1::ToEncodedPoint;
 use k256::Scalar;
+use k256::elliptic_curve::sec1::ToEncodedPoint;
 use mpc_crypto::{
-    derive_epsilon, derive_key, kdf::check_ec_signature, near_public_key_to_affine_point,
-    KeyPurpose, ScalarExt as _,
+    KeyPurpose, ScalarExt as _, derive_epsilon, derive_key, kdf::check_ec_signature,
+    near_public_key_to_affine_point,
 };
 use mpc_primitives::CheckpointDigest;
 use near_sdk::env::panic_str;
 use near_sdk::json_types::U128;
 use near_sdk::store::IterableMap;
 use near_sdk::{
-    env, log, near, AccountId, CryptoHash, Gas, GasWeight, NearToken, Promise, PromiseError,
-    PublicKey,
+    AccountId, CryptoHash, Gas, GasWeight, NearToken, Promise, PromiseError, PublicKey, env, log,
+    near,
 };
 use primitives::{
     CandidateEntry, CandidateInfo, Candidates, CheckpointReset, CheckpointVotes,
@@ -296,19 +296,19 @@ impl MpcContract {
         match protocol_state {
             ProtocolContractState::Running(RunningContractState {
                 participants,
-                ref mut candidates,
+                candidates,
                 ..
             }) => {
                 let signer_account_id = env::signer_account_id();
                 if participants.contains_key(&signer_account_id) {
                     return Err(JoinError::JoinAlreadyParticipant.into());
                 }
-                if let Some(diff) = deposit.checked_sub(REQUIRED_JOIN_DEPOSIT) {
-                    if diff > NearToken::from_yoctonear(0) {
-                        Promise::new(signer_account_id.clone())
-                            .transfer(diff)
-                            .detach();
-                    }
+                if let Some(diff) = deposit.checked_sub(REQUIRED_JOIN_DEPOSIT)
+                    && diff > NearToken::from_yoctonear(0)
+                {
+                    Promise::new(signer_account_id.clone())
+                        .transfer(diff)
+                        .detach();
                 }
                 candidates.insert(
                     signer_account_id.clone(),
@@ -689,10 +689,10 @@ impl MpcContract {
         };
 
         // Refund the difference if the propser attached more than required.
-        if let Some(diff) = attached.checked_sub(required) {
-            if diff > NearToken::from_yoctonear(0) {
-                Promise::new(proposer).transfer(diff).detach();
-            }
+        if let Some(diff) = attached.checked_sub(required)
+            && diff > NearToken::from_yoctonear(0)
+        {
+            Promise::new(proposer).transfer(diff).detach();
         }
 
         Ok(id)
@@ -1076,12 +1076,12 @@ impl MpcContract {
     fn refund_on_success(request: &InternalSignRequest) {
         let deposit = request.deposit;
         let required = request.required_deposit;
-        if let Some(diff) = deposit.checked_sub(required) {
-            if diff > NearToken::from_yoctonear(0) {
-                let to = request.requester.clone();
-                log!("refund more than required deposit {diff} to {to}");
-                Promise::new(to).transfer(diff).detach();
-            }
+        if let Some(diff) = deposit.checked_sub(required)
+            && diff > NearToken::from_yoctonear(0)
+        {
+            let to = request.requester.clone();
+            log!("refund more than required deposit {diff} to {to}");
+            Promise::new(to).transfer(diff).detach();
         }
     }
 
@@ -1396,10 +1396,12 @@ mod tests {
     fn running_contract(threshold: usize) -> MpcContract {
         use std::str::FromStr;
 
-        testing_env!(VMContextBuilder::new()
-            .current_account_id("contract.near".parse().unwrap())
-            .signer_account_id("alice.near".parse().unwrap())
-            .build());
+        testing_env!(
+            VMContextBuilder::new()
+                .current_account_id("contract.near".parse().unwrap())
+                .signer_account_id("alice.near".parse().unwrap())
+                .build()
+        );
 
         let public_key =
             PublicKey::from_str("ed25519:J75xXmF7WUPS3xCm3hy2tgwLCKdYM1iJd4BWF8sWVnae").unwrap();
@@ -1503,11 +1505,13 @@ mod tests {
 
         // Below the reset height the ordinary "behind" rule already rejects.
         let behind = CheckpointDigest::new(Chain::Solana, resume_at_height - 2, [1u8; 32]);
-        assert!(contract
-            .vote_checkpoint(behind)
-            .unwrap_err()
-            .to_string()
-            .contains(&CheckpointError::CheckpointBehind.to_string()));
+        assert!(
+            contract
+                .vote_checkpoint(behind)
+                .unwrap_err()
+                .to_string()
+                .contains(&CheckpointError::CheckpointBehind.to_string())
+        );
         assert!(contract.checkpoint_votes(Chain::Solana).is_empty());
 
         // Re-submitting the reset checkpoint itself is an idempotent no-op,
@@ -1522,11 +1526,13 @@ mod tests {
         // A competing digest at the reset height is a conflict, not a silent
         // overwrite of the state the network was told to restart from.
         let conflicting = CheckpointDigest::new(Chain::Solana, resume_at_height - 1, [2u8; 32]);
-        assert!(contract
-            .vote_checkpoint(conflicting)
-            .unwrap_err()
-            .to_string()
-            .contains(&CheckpointError::ConflictingCheckpoint.to_string()));
+        assert!(
+            contract
+                .vote_checkpoint(conflicting)
+                .unwrap_err()
+                .to_string()
+                .contains(&CheckpointError::ConflictingCheckpoint.to_string())
+        );
 
         // Above it, voting resumes normally and settles past the reset.
         let above = CheckpointDigest::new(Chain::Solana, resume_at_height, [3u8; 32]);
@@ -1563,10 +1569,12 @@ mod tests {
     }
 
     fn act_as(account: &AccountId) {
-        testing_env!(VMContextBuilder::new()
-            .current_account_id("contract.near".parse().unwrap())
-            .signer_account_id(account.clone())
-            .build());
+        testing_env!(
+            VMContextBuilder::new()
+                .current_account_id("contract.near".parse().unwrap())
+                .signer_account_id(account.clone())
+                .build()
+        );
     }
 
     const THRESHOLD: usize = 3;

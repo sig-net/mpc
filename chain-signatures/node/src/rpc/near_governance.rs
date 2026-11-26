@@ -1,5 +1,5 @@
 use crate::protocol::Governance;
-use mpc_chain_integration_core::utils::retry::{retry_rpc, RetryConfig, RpcFailure, SharedBackoff};
+use mpc_chain_integration_core::utils::retry::{RetryConfig, RpcFailure, SharedBackoff, retry_rpc};
 use mpc_chain_near::NearRpcGates;
 use mpc_contract::errors::CheckpointError;
 pub use mpc_contract::primitives::{Read, View};

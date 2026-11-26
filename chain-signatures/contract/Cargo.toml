@@ -2,7 +2,7 @@
 name = "mpc-contract"
 version.workspace = true
 publish.workspace = true
-edition = "2021"
+edition.workspace = true
 
 [lib]
 crate-type = ["cdylib", "lib"]

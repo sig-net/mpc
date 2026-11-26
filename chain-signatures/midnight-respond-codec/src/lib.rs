@@ -265,7 +265,7 @@ mod tests {
     use alloy::primitives::Bytes;
     use serde::Deserialize;
 
-    use super::{executed_output, TracedReturn};
+    use super::{TracedReturn, executed_output};
 
     #[derive(Deserialize)]
     struct OracleFixture {

@@ -1,4 +1,4 @@
-use k256::{elliptic_curve::sec1::ToEncodedPoint, AffinePoint};
+use k256::{AffinePoint, elliptic_curve::sec1::ToEncodedPoint};
 
 /// Extension trait for formatting a secp256k1 `AffinePoint` as a NEAR public key.
 pub trait AffinePointExt {
@@ -20,8 +20,8 @@ impl AffinePointExt for AffinePoint {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use k256::elliptic_curve::sec1::FromEncodedPoint;
     use k256::ProjectivePoint;
+    use k256::elliptic_curve::sec1::FromEncodedPoint;
     use near_crypto::PublicKey;
     use std::str::FromStr;
 

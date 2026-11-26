@@ -1,12 +1,12 @@
-use super::{BacklogEntry, PendingRequests, MAX_PENDING_CHECKPOINTS};
+use super::{BacklogEntry, MAX_PENDING_CHECKPOINTS, PendingRequests};
 use crate::storage::checkpoint_storage::CheckpointStorage;
 
 use enum_map::EnumMap;
 use mpc_primitives::{BidirectionalTxId, Chain, SignArgs, SignId, SignKind};
 use sha3::Digest;
 use std::fmt;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// One request as nodes send it to each other. The digest hashes every field.
 /// A new field breaks the build until `digest_bytes` hashes it too.
@@ -428,10 +428,12 @@ mod tests {
     async fn concurrent_persistence_respects_pending_checkpoint_cap() {
         let checkpoints = Checkpoints::new(CheckpointStorage::in_memory());
         for height in 0..MAX_PENDING_CHECKPOINTS as u64 - 1 {
-            assert!(checkpoints
-                .persist_pending(&checkpoint(height))
-                .await
-                .is_ok());
+            assert!(
+                checkpoints
+                    .persist_pending(&checkpoint(height))
+                    .await
+                    .is_ok()
+            );
         }
 
         let barrier = Arc::new(Barrier::new(2));
@@ -513,10 +515,12 @@ mod tests {
             Ok(true)
         ));
         assert!(checkpoints.has_slot(latest.chain));
-        assert!(checkpoints
-            .persist_pending(&checkpoint(MAX_PENDING_CHECKPOINTS as u64))
-            .await
-            .is_ok());
+        assert!(
+            checkpoints
+                .persist_pending(&checkpoint(MAX_PENDING_CHECKPOINTS as u64))
+                .await
+                .is_ok()
+        );
     }
 
     #[tokio::test]

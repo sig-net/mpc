@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
 use crate::{
-    bidirectional::RespondBidirectionalEvent, BidirectionalTxId, Chain, IndexedSignRequest, SignId,
-    Signature,
+    BidirectionalTxId, Chain, IndexedSignRequest, SignId, Signature,
+    bidirectional::RespondBidirectionalEvent,
 };
 
 /// Unified event produced by a chain stream

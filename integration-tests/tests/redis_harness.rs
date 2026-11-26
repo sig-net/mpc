@@ -1,9 +1,9 @@
-use integration_tests::redis_harness::participant::ChurnState;
 use integration_tests::redis_harness::RedisDiagnosticsClient;
+use integration_tests::redis_harness::participant::ChurnState;
 use integration_tests::redis_harness::{ArtifactKind, RedisHarness, RedisHarnessConfig};
+use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 async fn wait_for_blocked_ping(
@@ -143,18 +143,22 @@ async fn blocking_spike_delays_other_connections_for_requested_duration() -> any
         let ports = info.network_settings.unwrap().ports.unwrap();
         let bindings = ports.get("6379/tcp").unwrap().as_ref().unwrap();
         assert!(!bindings.is_empty());
-        assert!(bindings
-            .iter()
-            .all(|binding| binding.host_ip.as_deref() == Some("127.0.0.1")));
+        assert!(
+            bindings
+                .iter()
+                .all(|binding| binding.host_ip.as_deref() == Some("127.0.0.1"))
+        );
     }
     let mut anonymous_url = url::Url::parse(&harness.redis_url)?;
     anonymous_url.set_password(None).unwrap();
     let anonymous_pool = RedisDiagnosticsClient::build_pool(anonymous_url.as_str(), Some(1), None)?;
     let mut anonymous = anonymous_pool.get().await?;
-    assert!(deadpool_redis::redis::cmd("PING")
-        .query_async::<()>(&mut anonymous)
-        .await
-        .is_err());
+    assert!(
+        deadpool_redis::redis::cmd("PING")
+            .query_async::<()>(&mut anonymous)
+            .await
+            .is_err()
+    );
 
     // The probe and spike use distinct pools, so the delay is at Redis, not a pool wait.
     let probe_pool = RedisDiagnosticsClient::build_pool(&harness.redis_url, Some(1), None)?;

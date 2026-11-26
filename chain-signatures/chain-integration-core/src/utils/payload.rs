@@ -1,7 +1,7 @@
 //! The signing payload of a bidirectional request, per target chain, and the
 //! key derivation the owner binding rests on.
 
-use alloy::primitives::{keccak256, Address};
+use alloy::primitives::{Address, keccak256};
 use k256::elliptic_curve::{
     bigint::U256, ops::Reduce, sec1::FromEncodedPoint, sec1::ToEncodedPoint,
 };

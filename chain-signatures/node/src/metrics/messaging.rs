@@ -1,7 +1,7 @@
 use std::sync::LazyLock;
 use tokio::sync::mpsc;
 
-use prometheus::{exponential_buckets, Counter, Histogram, HistogramVec, IntGaugeVec};
+use prometheus::{Counter, Histogram, HistogramVec, IntGaugeVec, exponential_buckets};
 
 use super::{
     try_create_counter_vec_with_node_account_id, try_create_histogram_vec_with_node_account_id,

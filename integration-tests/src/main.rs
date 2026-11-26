@@ -1,6 +1,6 @@
 use clap::Parser;
-use integration_tests::cluster::spawner::ClusterSpawner;
 use integration_tests::NodeConfig;
+use integration_tests::cluster::spawner::ClusterSpawner;
 use mpc_chain_ethereum::EthConfig;
 use tokio::signal;
 

@@ -9,8 +9,8 @@ use midnight_onchain_runtime::ops::{LogEventType, Op, VersionedLogItem};
 use midnight_onchain_runtime::result_mode::ResultModeVerify;
 use midnight_onchain_runtime::state::{ChargedState, StateValue};
 use midnight_onchain_runtime::transcript::Transcript;
-use midnight_storage::storage::Array;
 use midnight_storage::DefaultDB;
+use midnight_storage::storage::Array;
 
 const MISC_NAME_LEN: usize = 32;
 pub const MISC_PAYLOAD_LEN: usize = 256;
@@ -76,7 +76,7 @@ fn direct_caller(
     let mut claimers = all_calls
         .iter()
         .filter(|(segment, call)| *segment == physical_segment && call.calls(callee))
-        .map(|(_, call)| call.address.0 .0);
+        .map(|(_, call)| call.address.0.0);
     let caller = claimers.next()?;
     claimers.next().is_none().then_some(caller)
 }
@@ -259,7 +259,7 @@ fn decode_contract_calls(
     let mut calls = all_calls
         .iter()
         .enumerate()
-        .filter(|(_, (_, call))| call.address.0 .0 == *contract)
+        .filter(|(_, (_, call))| call.address.0.0 == *contract)
         .map(|(call_index, (physical_segment, call))| {
             Ok((
                 *physical_segment,
@@ -355,9 +355,9 @@ mod tests {
     use midnight_onchain_runtime::result_mode::ResultModeVerify;
     use midnight_onchain_runtime::state::{AlignedValueChecked, EntryPointBuf, StateValue};
     use midnight_onchain_runtime::transcript::Transcript;
+    use midnight_storage::DefaultDB;
     use midnight_storage::arena::Sp;
     use midnight_storage::storage::{Array, HashMap};
-    use midnight_storage::DefaultDB;
     use midnight_transient_crypto::commitment::PureGeneratorPedersen;
     use midnight_transient_crypto::curve::{EmbeddedFr, Fr};
     use midnight_transient_crypto::proofs::Proof;
@@ -451,7 +451,7 @@ mod tests {
             communication_commitment: Fr::default(),
             proof: ProofVersioned::V2(Proof(Vec::new())),
         };
-        call.address.0 .0 = address;
+        call.address.0.0 = address;
         call
     }
 
@@ -586,7 +586,7 @@ mod tests {
             let (_, singleton_call) = tx.calls().nth(1).unwrap();
             assert!(singleton_call.guaranteed_transcript.is_none());
             assert!(singleton_call.fallible_transcript.is_some());
-            let calls = emissions_in(&tx, &singleton_call.address.0 .0).unwrap();
+            let calls = emissions_in(&tx, &singleton_call.address.0.0).unwrap();
             assert_eq!(calls.len(), 1);
             assert_eq!(calls[0].call_index, 1);
             assert_eq!(calls[0].phase, TranscriptPhase::Fallible);
@@ -688,7 +688,7 @@ mod tests {
         let native = tx
             .calls()
             .enumerate()
-            .filter(|(_, (_, call))| call.address.0 .0 == SINGLETON)
+            .filter(|(_, (_, call))| call.address.0.0 == SINGLETON)
             .map(|(index, (segment, _))| (segment, index as u32))
             .collect::<Vec<_>>();
         let mut expected = native.clone();
@@ -1268,9 +1268,11 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![(0, 1), (1, 1)]
         );
-        assert!(skipped
-            .iter()
-            .all(|s| format!("{:#}", s.reason).contains("response")));
+        assert!(
+            skipped
+                .iter()
+                .all(|s| format!("{:#}", s.reason).contains("response"))
+        );
         assert_eq!(
             emissions_in(&tx, &SINGLETON).unwrap().len(),
             3,
@@ -1306,10 +1308,12 @@ mod tests {
             panic!("expected one skipped phase, got {skipped:?}");
         };
         assert_eq!((skipped.call_index, skipped.physical_segment), (0, 1));
-        assert!(skipped
-            .reason
-            .downcast_ref::<DeclaredEffectsMismatch>()
-            .is_some());
+        assert!(
+            skipped
+                .reason
+                .downcast_ref::<DeclaredEffectsMismatch>()
+                .is_some()
+        );
         assert!(emissions_in(&tx, &SINGLETON).is_err());
 
         let mut committed = call(SINGLETON, None, None);

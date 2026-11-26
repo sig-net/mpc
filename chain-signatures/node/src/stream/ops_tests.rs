@@ -1,13 +1,13 @@
 use super::*;
 use crate::backlog::mock::{
-    mock_bidi_request, mock_bidi_response_request, mock_participants, mock_sign_request,
-    mock_signature_output, mock_tx, BacklogTestExt,
+    BacklogTestExt, mock_bidi_request, mock_bidi_response_request, mock_participants,
+    mock_sign_request, mock_signature_output, mock_tx,
 };
 use crate::backlog::{
     Backlog, BacklogEntry, Bidirectional, Executing, ExecutionWatch, Final, Generating,
 };
 use crate::mesh::connection::NodeStatus;
-use crate::mesh::{wait_threshold_active, MeshState};
+use crate::mesh::{MeshState, wait_threshold_active};
 use crate::metrics::requests::EXECUTION_WAIT_UNMEASURED;
 use crate::protocol::contract::primitives::ParticipantInfo;
 use crate::rpc::{ContractStateWatcher, RpcAction};
@@ -32,8 +32,8 @@ use mpc_primitives::{
     SignKind, Signature,
 };
 use mpc_tron_wire::{
+    MAX_EXPIRATION_SPAN_MS, TronAddress,
     pb::{Message as _, RawTransaction, TriggerSmartContract},
-    TronAddress, MAX_EXPIRATION_SPAN_MS,
 };
 use mpc_utils::time::current_unix_timestamp;
 use near_primitives::types::AccountId;
@@ -220,11 +220,12 @@ async fn recovered_midnight_requests_require_current_attestation_semantics_befor
         assert!(!entry.state().is_pending_execution());
         assert!(entry.state().publishing().is_none());
     }
-    assert!(ctx
-        .backlog
-        .get(Chain::Midnight, &current_final.id)
-        .await
-        .is_some());
+    assert!(
+        ctx.backlog
+            .get(Chain::Midnight, &current_final.id)
+            .await
+            .is_some()
+    );
 }
 
 fn undecodable_bidi_request(sign_id: SignId) -> Arc<IndexedSignRequest> {
@@ -688,11 +689,12 @@ async fn a_response_answers_the_requests_it_left_unexecutable() {
     let mut answered = queued_requests(&mut sign_rx);
     answered.sort_by_key(|id| id.request_id);
     assert_eq!(answered, vec![unsigned.id, signed.id]);
-    assert!(ctx
-        .backlog
-        .unwatch_unviable(Chain::Midnight, test_root_pk())
-        .await
-        .is_empty());
+    assert!(
+        ctx.backlog
+            .unwatch_unviable(Chain::Midnight, test_root_pk())
+            .await
+            .is_empty()
+    );
 }
 
 /// Matching needs no key derivation, and picks the requests derivation says share the account.
@@ -737,11 +739,12 @@ async fn a_response_removes_an_entry_without_a_signature() {
     process_respond_bidirectional_event(response, &ctx, test_root_pk())
         .await
         .unwrap();
-    assert!(ctx
-        .backlog
-        .get(Chain::Midnight, &request.id)
-        .await
-        .is_none());
+    assert!(
+        ctx.backlog
+            .get(Chain::Midnight, &request.id)
+            .await
+            .is_none()
+    );
 }
 
 /// A signed sibling keeps the time this node started waiting on it, for the latency sample.
@@ -1009,11 +1012,12 @@ async fn a_signature_after_a_sibling_answer() {
         entry.status,
         SignStatus::Bidirectional(BidirectionalProgress::Final { .. })
     );
-    assert!(ctx
-        .backlog
-        .get_execution_watchers(Chain::Ethereum)
-        .await
-        .is_empty());
+    assert!(
+        ctx.backlog
+            .get_execution_watchers(Chain::Ethereum)
+            .await
+            .is_empty()
+    );
 }
 
 /// A later signature's transaction is watched too; finding either ends the wait on both.
@@ -1047,10 +1051,12 @@ async fn an_execution_under_a_later_signature_is_found() {
         .unwrap();
     assert_eq!(found.execution_tx().id, later.id, "the response names it");
     assert_eq!(found.respond_observed_at(), Some(observed_at));
-    assert!(backlog
-        .get_execution_watchers(Chain::Ethereum)
-        .await
-        .is_empty());
+    assert!(
+        backlog
+            .get_execution_watchers(Chain::Ethereum)
+            .await
+            .is_empty()
+    );
 }
 
 /// A signature read again, as on a replay, is no new source fact: the digest stays.
@@ -1205,11 +1211,12 @@ async fn a_later_signature_past_execution_only_records_its_id() {
         );
         let entry = ctx.backlog.get(Chain::Solana, &request.id).await.unwrap();
         assert_eq!(entry.status(), &status, "parked: {parked}");
-        assert!(ctx
-            .backlog
-            .get_execution_watchers(Chain::Ethereum)
-            .await
-            .is_empty());
+        assert!(
+            ctx.backlog
+                .get_execution_watchers(Chain::Ethereum)
+                .await
+                .is_empty()
+        );
         assert!(queued_requests(&mut sign_rx).is_empty());
     }
 }
@@ -1287,10 +1294,12 @@ async fn adopting_a_body_ignores_its_progress() {
         SignStatus::Bidirectional(BidirectionalProgress::Executing(_))
     );
     assert_eq!(entry.request().unix_timestamp_indexed, None);
-    assert!(adopter
-        .get_execution_watchers(Chain::Ethereum)
-        .await
-        .contains_key(&tx.id));
+    assert!(
+        adopter
+            .get_execution_watchers(Chain::Ethereum)
+            .await
+            .contains_key(&tx.id)
+    );
 }
 
 #[tokio::test]
@@ -1334,11 +1343,12 @@ async fn process_execution_confirmed_is_idempotent_after_first_processing() {
     let no_second = timeout(Duration::from_millis(100), sign_rx.recv()).await;
     assert_matches!(no_second, Err(_) | Ok(None));
 
-    assert!(ctx
-        .backlog
-        .get_execution_watchers(tx.target_chain)
-        .await
-        .is_empty());
+    assert!(
+        ctx.backlog
+            .get_execution_watchers(tx.target_chain)
+            .await
+            .is_empty()
+    );
 }
 
 #[tokio::test]
@@ -1669,10 +1679,12 @@ async fn process_sign_request_rejects_a_duplicate_tron_destination_id() {
         .await
         .expect("the first Tron request is admitted");
 
-    assert!(backlog
-        .get(Chain::Solana, &SignId::new([19; 32]))
-        .await
-        .is_some());
+    assert!(
+        backlog
+            .get(Chain::Solana, &SignId::new([19; 32]))
+            .await
+            .is_some()
+    );
 
     // Process the second request, which should be rejected due to a duplicate Tron destination ID.
     let err = process_sign_request(request(20), &ctx, root_pk, None)
@@ -1686,10 +1698,12 @@ async fn process_sign_request_rejects_a_duplicate_tron_destination_id() {
     );
 
     // Ensure that the second request is not present in the backlog.
-    assert!(backlog
-        .get(Chain::Solana, &SignId::new([20; 32]))
-        .await
-        .is_none());
+    assert!(
+        backlog
+            .get(Chain::Solana, &SignId::new([20; 32]))
+            .await
+            .is_none()
+    );
 }
 
 /// A source block time for the expiry-bound tests, in unix seconds.
@@ -1851,10 +1865,12 @@ async fn process_sign_request_ignores_block_time_for_targets_without_an_expiry()
     process_sign_request(request, &ctx, test_root_pk(), Some(SOURCE_BLOCK_S))
         .await
         .expect("Ethereum's transactions carry no expiry to bound");
-    assert!(backlog
-        .get(Chain::Solana, &SignId::new([0x7f; 32]))
-        .await
-        .is_some());
+    assert!(
+        backlog
+            .get(Chain::Solana, &SignId::new([0x7f; 32]))
+            .await
+            .is_some()
+    );
 }
 
 /// A Tron request must name its own derived key as owner - copied or misbuilt
@@ -1881,19 +1897,23 @@ async fn process_sign_request_rejects_unowned_tron_bytes() {
         .await
         .expect_err("bytes naming a foreign owner must be rejected");
     assert!(format!("{err:#}").contains("owner_address"));
-    assert!(backlog
-        .get(Chain::Solana, &SignId::new([21; 32]))
-        .await
-        .is_none());
+    assert!(
+        backlog
+            .get(Chain::Solana, &SignId::new([21; 32]))
+            .await
+            .is_none()
+    );
 
     let owned = tron_bidirectional_event(owned_tron_bytes(root_pk, &unowned));
     process_sign_request(request(22, owned), &ctx, root_pk, None)
         .await
         .expect("bytes naming the request's own derived key are admitted");
-    assert!(backlog
-        .get(Chain::Solana, &SignId::new([22; 32]))
-        .await
-        .is_some());
+    assert!(
+        backlog
+            .get(Chain::Solana, &SignId::new([22; 32]))
+            .await
+            .is_some()
+    );
 }
 
 #[test]
@@ -1999,10 +2019,12 @@ async fn process_sign_request_rejects_another_networks_chain_id() {
         .await
         .expect_err("another network's chain id should be rejected at ingestion");
     assert!(format!("{err:#}").contains("this node executes on 1"));
-    assert!(backlog
-        .get(Chain::Solana, &SignId::new([18; 32]))
-        .await
-        .is_none());
+    assert!(
+        backlog
+            .get(Chain::Solana, &SignId::new([18; 32]))
+            .await
+            .is_none()
+    );
 
     // 2^64: valid on Ethereum, but no network this node can watch.
     let wide = Arc::new(IndexedSignRequest::sign_bidirectional(
@@ -2016,18 +2038,22 @@ async fn process_sign_request_rejects_another_networks_chain_id() {
         .await
         .expect_err("a chain id wider than u64 should be rejected at ingestion");
     assert!(format!("{err:#}").contains("chain id None"), "{err:#}");
-    assert!(backlog
-        .get(Chain::Solana, &SignId::new([20; 32]))
-        .await
-        .is_none());
+    assert!(
+        backlog
+            .get(Chain::Solana, &SignId::new([20; 32]))
+            .await
+            .is_none()
+    );
 
     process_sign_request(request(19, 1), &ctx, test_root_pk(), None)
         .await
         .expect("the configured network's chain id should be admitted");
-    assert!(backlog
-        .get(Chain::Solana, &SignId::new([19; 32]))
-        .await
-        .is_some());
+    assert!(
+        backlog
+            .get(Chain::Solana, &SignId::new([19; 32]))
+            .await
+            .is_some()
+    );
 }
 
 /// A non-empty but undecodable transaction is the same poison pill as an empty one,
@@ -2479,11 +2505,12 @@ async fn process_execution_confirmed_failed_creates_error_respond_request() {
     assert!(watchers.is_empty());
 
     // Source chain should now wait for final bidirectional response.
-    assert!(ctx
-        .backlog
-        .get_by::<Bidirectional<Final<Generating>>>(tx.source_chain, &sign_id)
-        .await
-        .is_some());
+    assert!(
+        ctx.backlog
+            .get_by::<Bidirectional<Final<Generating>>>(tx.source_chain, &sign_id)
+            .await
+            .is_some()
+    );
 
     let tx_after = ctx.backlog.get(tx.source_chain, &sign_id).await.unwrap();
     assert_matches!(tx_after.request().kind, SignKind::RespondBidirectional(_));
@@ -2581,11 +2608,12 @@ async fn process_execution_confirmed_carries_canton_chain_ctx_to_final_request()
         assert_eq!(decoded.sign_event_contract_id, sign_event_contract_id);
     };
 
-    assert!(ctx
-        .backlog
-        .get_execution_watchers(tx.target_chain)
-        .await
-        .is_empty());
+    assert!(
+        ctx.backlog
+            .get_execution_watchers(tx.target_chain)
+            .await
+            .is_empty()
+    );
     let tx_after = ctx.backlog.get(tx.source_chain, &sign_id).await.unwrap();
     assert_matches!(
         tx_after.status(),
@@ -2695,9 +2723,11 @@ async fn catchup_blocks_vote_for_checkpoints() {
     process_block_event(chain, interval + 1, &ctx, &telemetry)
         .await
         .unwrap();
-    assert!(timeout(Duration::from_millis(100), rpc_rx.recv())
-        .await
-        .is_err());
+    assert!(
+        timeout(Duration::from_millis(100), rpc_rx.recv())
+            .await
+            .is_err()
+    );
     assert_eq!(ctx.backlog.checkpoints().count(chain), 1);
 }
 
@@ -2731,9 +2761,11 @@ async fn live_block_votes_for_checkpoint() {
         _ => panic!("unexpected rpc action"),
     }
 
-    assert!(timeout(Duration::from_millis(100), sign_rx.recv())
-        .await
-        .is_err());
+    assert!(
+        timeout(Duration::from_millis(100), sign_rx.recv())
+            .await
+            .is_err()
+    );
 }
 
 /// The sweep fires each entry once, and the two legs share a sign id, so only
@@ -2949,11 +2981,12 @@ async fn midnight_execution_response_binds_receipt_height_and_outcome() {
                 outcome_kind: kind,
             })
         );
-        assert!(ctx
-            .backlog
-            .get_execution_watchers(Chain::Ethereum)
-            .await
-            .is_empty());
+        assert!(
+            ctx.backlog
+                .get_execution_watchers(Chain::Ethereum)
+                .await
+                .is_empty()
+        );
     }
 }
 
@@ -3186,11 +3219,13 @@ async fn decode_failure_parks_request_and_preserves_source_checkpoint() {
                 .await
                 .unwrap();
             assert!(sign_rx.try_recv().is_err());
-            assert!(restored_ctx
-                .backlog
-                .get_execution_watchers(Chain::Ethereum)
-                .await
-                .is_empty());
+            assert!(
+                restored_ctx
+                    .backlog
+                    .get_execution_watchers(Chain::Ethereum)
+                    .await
+                    .is_empty()
+            );
         }
     }
 }

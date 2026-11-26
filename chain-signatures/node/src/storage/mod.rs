@@ -66,7 +66,7 @@ fn owner_key(base: &str, owner: Participant) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_redis_url, Options};
+    use super::{Options, parse_redis_url};
     use clap::Parser as _;
     use secrecy::ExposeSecret as _;
     use std::error::Error as _;

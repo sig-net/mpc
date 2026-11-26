@@ -1,4 +1,4 @@
-use super::contract::{primitives::Participants, ResharingContractState};
+use super::contract::{ResharingContractState, primitives::Participants};
 use super::triple::TripleSpawnerTask;
 use crate::protocol::presignature::PresignatureSpawnerTask;
 use crate::types::{KeygenProtocol, ReshareProtocol, SecretKeyShare};

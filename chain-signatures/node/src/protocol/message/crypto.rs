@@ -116,14 +116,14 @@ pub(crate) const fn cbor_name(value: &ciborium::Value) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocol::ParticipantInfo;
     use crate::protocol::contract::primitives::{ParticipantMap, Participants};
     use crate::protocol::message::{GeneratingMessage, Message, SignatureMessage, TripleMessage};
-    use crate::protocol::ParticipantInfo;
 
     use cait_sith::protocol::Participant;
     use mpc_keys::hpke::{self, Ciphered};
     use mpc_primitives::SignId;
-    use serde::{de::DeserializeOwned, Deserialize, Serialize};
+    use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
     #[test]
     fn test_sending_encrypted_message() {

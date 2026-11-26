@@ -5,7 +5,7 @@ use crate::daml::{
     SignatureRespondedEventPayload,
 };
 use crate::ledger_api;
-use crate::signing::{parse_canton_signature, CantonSignBidirectionalRequestedEvent};
+use crate::signing::{CantonSignBidirectionalRequestedEvent, parse_canton_signature};
 use mpc_primitives::{Chain, ChainEvent, RespondBidirectionalEvent, SignatureRespondedEvent};
 use mpc_utils::time::current_unix_timestamp;
 use std::collections::HashSet;

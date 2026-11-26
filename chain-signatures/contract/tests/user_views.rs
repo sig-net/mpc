@@ -6,8 +6,8 @@ use mpc_contract::primitives::{PendingRequest, SignRequest};
 use near_sdk::{CurveType, PublicKey};
 use near_workspaces::types::NearToken;
 use serde_json::json;
-use signet_primitives::SignId;
 use signet_primitives::LATEST_MPC_KEY_VERSION;
+use signet_primitives::SignId;
 use std::str::FromStr;
 #[tokio::test]
 async fn test_public_key() -> anyhow::Result<()> {

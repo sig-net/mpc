@@ -2,10 +2,10 @@ use std::time::Duration;
 
 use crate::mesh::connection::NodeStatus;
 use crate::node_client::NodeClient;
-use crate::protocol::contract::primitives::Participants;
-use crate::protocol::sync::{SyncKind, SyncReportReceiver};
 use crate::protocol::ParticipantInfo;
 use crate::protocol::ProtocolState;
+use crate::protocol::contract::primitives::Participants;
+use crate::protocol::sync::{SyncKind, SyncReportReceiver};
 use crate::rpc::ContractStateWatcher;
 use cait_sith::protocol::Participant;
 use near_account_id::AccountId;
@@ -143,8 +143,8 @@ mod tests {
 
     use super::*;
     use crate::mesh::connection::Pool;
-    use crate::protocol::contract::RunningContractState;
     use crate::protocol::ProtocolState;
+    use crate::protocol::contract::RunningContractState;
     use crate::util::NearPublicKeyExt as _;
     use crate::web::mock::MockServers;
     use tokio::sync::mpsc;

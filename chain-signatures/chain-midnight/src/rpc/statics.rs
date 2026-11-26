@@ -2,8 +2,8 @@
 //! applied-status events every reader decodes, and their status gate.
 
 use anyhow::Context as _;
-use subxt::ext::scale_decode::DecodeAsType;
 use subxt::SubstrateConfig;
+use subxt::ext::scale_decode::DecodeAsType;
 
 use crate::emissions::DecodedTransaction;
 use crate::types::LedgerTxHash;
@@ -104,7 +104,7 @@ pub(super) fn decode_applied_transaction(
     let tx: DecodedTransaction = midnight_serialize::tagged_deserialize(&mut &bytes[..])
         .context("candidate ledger transaction did not decode")?;
     anyhow::ensure!(
-        tx.transaction_hash().0 .0 == *expected_hash.as_bytes(),
+        tx.transaction_hash().0.0 == *expected_hash.as_bytes(),
         "status hash does not match the candidate ledger transaction"
     );
     Ok(tx)
@@ -142,13 +142,15 @@ mod tests {
         );
         let mut wrong_hash = *hash.as_bytes();
         wrong_hash[0] ^= 1;
-        assert!(decode_applied_transaction(
-            include_bytes!("../../fixtures/fallible-deposit-tx-432.mn"),
-            LedgerTxHash::from_bytes(wrong_hash),
-        )
-        .unwrap_err()
-        .to_string()
-        .contains("hash does not match"));
+        assert!(
+            decode_applied_transaction(
+                include_bytes!("../../fixtures/fallible-deposit-tx-432.mn"),
+                LedgerTxHash::from_bytes(wrong_hash),
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("hash does not match")
+        );
     }
 
     #[test]

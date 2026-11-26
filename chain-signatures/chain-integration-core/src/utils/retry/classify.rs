@@ -377,7 +377,10 @@ mod tests {
             "HTTP status client error (408 Request Timeout)",
             "HTTP status client error (429 Too Many Requests)",
         ] {
-            assert!(is_retryable(&anyhow::anyhow!(msg)), "{msg:?} should be retryable");
+            assert!(
+                is_retryable(&anyhow::anyhow!(msg)),
+                "{msg:?} should be retryable"
+            );
         }
     }
 
@@ -678,10 +681,11 @@ mod tests {
 
         // no status seen (connection refused): no typed signal, no gate
         let err = anyhow::Error::new(client.get("http://127.0.0.1:1").send().await.unwrap_err());
-        assert!(err
-            .downcast_ref::<reqwest::Error>()
-            .and_then(|e| e.status())
-            .is_none());
+        assert!(
+            err.downcast_ref::<reqwest::Error>()
+                .and_then(|e| e.status())
+                .is_none()
+        );
         assert!(!is_provider_throttled(&err));
     }
 }

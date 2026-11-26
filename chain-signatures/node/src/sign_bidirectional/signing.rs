@@ -7,13 +7,13 @@ use crate::protocol::Chain;
 use k256::elliptic_curve::point::AffineCoordinates as _;
 use k256::elliptic_curve::scalar::IsHigh as _;
 use mpc_primitives::{BidirectionalTxId, SignBidirectionalEvent, Signature};
-use mpc_tron_wire::{pb::RawTransaction, TronAddress, MAX_EXPIRATION_SPAN_MS};
+use mpc_tron_wire::{MAX_EXPIRATION_SPAN_MS, TronAddress, pb::RawTransaction};
 use rlp::Rlp;
 
+use super::SignBidirectionalEventExt as _;
 use super::eth_tx::{
     derive_user_address, sign_and_hash_eip1559_from_unsigned, sign_and_hash_legacy_from_unsigned,
 };
-use super::SignBidirectionalEventExt as _;
 
 /// Checks the unsigned bytes against the target chain's signing rules,
 /// returning the calldata the schema checks run on. Admission calls

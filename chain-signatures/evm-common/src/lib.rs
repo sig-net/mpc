@@ -8,5 +8,5 @@
 mod output_recovery;
 
 pub use output_recovery::{
-    build_serialized_output, is_contract_call, validate_schemas, TraceOutput,
+    TraceOutput, build_serialized_output, is_contract_call, validate_schemas,
 };

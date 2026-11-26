@@ -14,8 +14,8 @@ pub mod triple;
 #[cfg(feature = "test-feature")]
 pub mod test_setup;
 
-pub use contract::primitives::ParticipantInfo;
 pub use contract::ProtocolState;
+pub use contract::primitives::ParticipantInfo;
 pub use message::{Message, MessageChannel};
 pub use mpc_primitives::{Chain, CheckpointDigest, IndexedSignRequest, RespondBidirectionalTx};
 pub use state::{Node, NodeState};
@@ -28,10 +28,10 @@ use crate::protocol::message::{GeneratingMessage, ReadyMessage, ResharingMessage
 use crate::protocol::request::SignatureSpawnerTask;
 use crate::protocol::state::StartedState;
 use crate::rpc::ContractStateWatcher;
+use crate::storage::Initializing;
 use crate::storage::keystore::Keystore;
 use crate::storage::presignature_storage::PresignatureStorage;
 use crate::storage::triple_storage::TripleStorage;
-use crate::storage::Initializing;
 
 use anyhow::Context as _;
 use near_account_id::AccountId;

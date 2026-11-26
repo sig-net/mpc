@@ -12,22 +12,22 @@ use mpc_chain_ethereum::abi::ChainSignatures::{self, SignRequest};
 use mpc_chain_ethereum::utils::test::deploy_chain_signatures;
 use mpc_chain_ethereum::{EthConfig, EthereumIndexer};
 use mpc_chain_integration_core::{
-    utils::{retry::SharedBackoff, test::ChainIndexerStream},
     NoopChainTelemetry, StateManager,
+    utils::{retry::SharedBackoff, test::ChainIndexerStream},
 };
 use mpc_crypto::kdf::generate_signature;
-use mpc_node::backlog::mock::{mock_bidi_request, mock_unsigned_eth_tx, BacklogTestExt};
 use mpc_node::backlog::Backlog;
-use mpc_node::mesh::{connection::NodeStatus, MeshState};
+use mpc_node::backlog::mock::{BacklogTestExt, mock_bidi_request, mock_unsigned_eth_tx};
+use mpc_node::mesh::{MeshState, connection::NodeStatus};
 use mpc_node::node_client::NodeClient;
 use mpc_node::protocol::ParticipantInfo;
 use mpc_node::rpc::{ContractStateWatcher, RpcChannel};
 
 use mpc_node::storage::checkpoint_storage::CheckpointStorage;
-use mpc_node::stream::{supervisor::run_supervised, StreamContext};
+use mpc_node::stream::{StreamContext, supervisor::run_supervised};
 use mpc_node::types::SignCommand;
 use mpc_primitives::{
-    BidirectionalTx, Chain, ChainEvent, SignArgs, SignId, SignKind, LATEST_MPC_KEY_VERSION,
+    BidirectionalTx, Chain, ChainEvent, LATEST_MPC_KEY_VERSION, SignArgs, SignId, SignKind,
 };
 use mpc_utils::time::current_unix_timestamp;
 use near_primitives::types::AccountId;

@@ -6,8 +6,8 @@ use anyhow::anyhow;
 use futures_util::StreamExt;
 use mpc_chain_ethereum::{EthConfig, EthereumIndexer};
 use mpc_chain_integration_core::{
-    utils::{retry::SharedBackoff, stream::chain_event_channel},
     MockStateManager, NoopChainTelemetry,
+    utils::{retry::SharedBackoff, stream::chain_event_channel},
 };
 use tokio_util::sync::CancellationToken;
 

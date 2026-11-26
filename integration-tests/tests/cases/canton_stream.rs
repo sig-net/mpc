@@ -1,19 +1,20 @@
 use anyhow::{Context as _, Result};
 use integration_tests::canton::{
-    test_evm_type2_anvil_cases, test_sign_request_event, CantonSandbox,
+    CantonSandbox, test_evm_type2_anvil_cases, test_sign_request_event,
 };
 use mpc_chain_canton::{
+    CantonChainCtx, CantonIndexer,
     daml::{CantonSignature, EcdsaSigData},
-    der_encode_signature, CantonChainCtx, CantonIndexer,
+    der_encode_signature,
 };
 use mpc_chain_integration_core::{
-    utils::hashing::hash_payload, utils::retry::SharedBackoff, utils::test::ChainIndexerStream,
-    NoopChainTelemetry, StateManager,
+    NoopChainTelemetry, StateManager, utils::hashing::hash_payload, utils::retry::SharedBackoff,
+    utils::test::ChainIndexerStream,
 };
 use mpc_node::backlog::Backlog;
 use mpc_node::protocol::{Chain, IndexedSignRequest};
 use mpc_node::sign_bidirectional::SignBidirectionalEventExt;
-use mpc_primitives::{ChainEvent, ScalarExt, SignKind, Signature, LATEST_MPC_KEY_VERSION};
+use mpc_primitives::{ChainEvent, LATEST_MPC_KEY_VERSION, ScalarExt, SignKind, Signature};
 use serde_json::json;
 use serial_test::serial;
 use std::collections::HashSet;
@@ -260,10 +261,10 @@ async fn test_canton_stream_checkpoint_persistence() -> Result<()> {
                     if let Some(persisted_checkpoint) = backlog
                         .set_processed_block_interval(Chain::Canton, height, INTERVAL)
                         .await
+                        && saw_sign_request
+                        && !persisted_checkpoint.pending_requests.is_empty()
                     {
-                        if saw_sign_request && !persisted_checkpoint.pending_requests.is_empty() {
-                            break Some(persisted_checkpoint);
-                        }
+                        break Some(persisted_checkpoint);
                     }
                 }
                 _ => {}

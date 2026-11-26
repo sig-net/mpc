@@ -1,11 +1,11 @@
 use std::future::Future;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use rand::Rng;
 
-use super::classify::{is_provider_throttled, RpcFailure};
+use super::classify::{RpcFailure, is_provider_throttled};
 
 const RATE_LIMIT_BASE_COOLDOWN: Duration = Duration::from_secs(1);
 const RATE_LIMIT_MAX_COOLDOWN: Duration = Duration::from_secs(60);

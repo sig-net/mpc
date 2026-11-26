@@ -1,10 +1,11 @@
 use crate::canton_auth::{
-    OidcTestProvider, LOCAL_OIDC_AUDIENCE, LOCAL_OIDC_CLIENT_SECRET, LOCAL_OIDC_SCOPE,
+    LOCAL_OIDC_AUDIENCE, LOCAL_OIDC_CLIENT_SECRET, LOCAL_OIDC_SCOPE, OidcTestProvider,
 };
 use alloy::primitives::keccak256;
 use anyhow::{Context as _, Result};
 use async_process::{Child, Command};
 use mpc_chain_canton::{
+    CantonAuthConfig, CantonClient, CantonConfig,
     daml::{
         EvmAccessListEntry, EvmType2TransactionParams, SignBidirectionalRequestedEvent, TxParams,
     },
@@ -12,13 +13,12 @@ use mpc_chain_canton::{
         self, AllocatePartyRequest, AllocatePartyResponse, ContractEntry, CreateUserRequest,
         DisclosedContract, JsCommands, SubmitAndWaitForTransactionResponse, UserInfo,
     },
-    CantonAuthConfig, CantonClient, CantonConfig,
 };
-use mpc_chain_integration_core::{utils::retry::SharedBackoff, NoopPublisherTelemetry};
+use mpc_chain_integration_core::{NoopPublisherTelemetry, utils::retry::SharedBackoff};
 use mpc_node::protocol::Chain;
 use mpc_primitives::LATEST_MPC_KEY_VERSION;
 use serde::de::DeserializeOwned;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -804,19 +804,19 @@ impl CantonTestClient {
             .fetch_active_contracts(parties, Some(template_id), true)
             .await?;
         for entry in &entries {
-            if let Some(ContractEntry::JsActiveContract(ac)) = &entry.contract_entry {
-                if ac.created_event.contract_id == contract_id {
-                    return Ok(DisclosedContract {
-                        template_id: ac.created_event.template_id.clone(),
-                        contract_id: ac.created_event.contract_id.clone(),
-                        created_event_blob: ac
-                            .created_event
-                            .created_event_blob
-                            .clone()
-                            .unwrap_or_default(),
-                        synchronizer_id: ac.synchronizer_id.clone(),
-                    });
-                }
+            if let Some(ContractEntry::JsActiveContract(ac)) = &entry.contract_entry
+                && ac.created_event.contract_id == contract_id
+            {
+                return Ok(DisclosedContract {
+                    template_id: ac.created_event.template_id.clone(),
+                    contract_id: ac.created_event.contract_id.clone(),
+                    created_event_blob: ac
+                        .created_event
+                        .created_event_blob
+                        .clone()
+                        .unwrap_or_default(),
+                    synchronizer_id: ac.synchronizer_id.clone(),
+                });
             }
         }
         anyhow::bail!("disclosed contract not found for {contract_id}")
@@ -846,14 +846,12 @@ impl CantonTestClient {
                 .fetch_active_contracts(parties, Some(template_id), false)
                 .await?;
             for entry in &entries {
-                if let Some(ContractEntry::JsActiveContract(ac)) = &entry.contract_entry {
-                    if let Ok(payload) =
+                if let Some(ContractEntry::JsActiveContract(ac)) = &entry.contract_entry
+                    && let Ok(payload) =
                         serde_json::from_value::<T>(ac.created_event.payload.clone())
-                    {
-                        if predicate(&payload) {
-                            return Ok(payload);
-                        }
-                    }
+                    && predicate(&payload)
+                {
+                    return Ok(payload);
                 }
             }
             tokio::time::sleep(Duration::from_secs(3)).await;
@@ -901,10 +899,10 @@ pub fn find_created_contract(
     suffix: &str,
 ) -> Result<(String, String)> {
     for event in &resp.transaction.events {
-        if let ledger_api::Event::CreatedEvent(created) = event {
-            if ledger_api::template_suffix_matches(&created.template_id, suffix) {
-                return Ok((created.contract_id.clone(), created.template_id.clone()));
-            }
+        if let ledger_api::Event::CreatedEvent(created) = event
+            && ledger_api::template_suffix_matches(&created.template_id, suffix)
+        {
+            return Ok((created.contract_id.clone(), created.template_id.clone()));
         }
     }
     anyhow::bail!("no CreatedEvent for {suffix}")

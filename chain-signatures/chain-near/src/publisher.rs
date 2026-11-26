@@ -4,7 +4,7 @@ use std::time::Duration;
 use crate::gates::NearRpcGates;
 use crate::util::AffinePointExt as _;
 
-use mpc_chain_integration_core::utils::retry::{retry_rpc, RetryConfig};
+use mpc_chain_integration_core::utils::retry::{RetryConfig, retry_rpc};
 use mpc_chain_integration_core::{ChainPublisher, PublishAction, PublisherTelemetry};
 use mpc_primitives::{SignId, Signature};
 

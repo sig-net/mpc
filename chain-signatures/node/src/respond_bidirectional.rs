@@ -725,13 +725,15 @@ mod tests {
     #[test]
     fn response_hash_policy_requires_midnight_metadata() {
         let rid = [0x2f; 32];
-        assert!(calculate_respond_bidirectional_hash_message_for_chain(
-            Chain::Midnight,
-            &rid,
-            &[],
-            None
-        )
-        .is_err());
+        assert!(
+            calculate_respond_bidirectional_hash_message_for_chain(
+                Chain::Midnight,
+                &rid,
+                &[],
+                None
+            )
+            .is_err()
+        );
         let metadata = AttestationMetadata {
             key_version: 1,
             block_height: 456,

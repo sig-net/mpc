@@ -3,10 +3,10 @@ use crate::backlog::{
     Initial, PendingRequests, Publishing, Sign, SignEntry,
 };
 use crate::sign_bidirectional::{
-    BidirectionalProgress, SignProgress, SignStatus, SDK_ALGO, SDK_DEST, SDK_PARAMS,
+    BidirectionalProgress, SDK_ALGO, SDK_DEST, SDK_PARAMS, SignProgress, SignStatus,
 };
-use cait_sith::protocol::Participant;
 use cait_sith::FullSignature;
+use cait_sith::protocol::Participant;
 use k256::{AffinePoint, Scalar, Secp256k1};
 use mpc_primitives::{
     BidirectionalTx, BidirectionalTxId, Chain, ExecutionOutcome, IndexedSignRequest, PublicKey,

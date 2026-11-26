@@ -144,8 +144,8 @@ impl<T, U> Drop for JoinMap<T, U> {
 mod tests {
     use super::*;
     use std::sync::{
-        atomic::{AtomicU32, Ordering},
         Arc,
+        atomic::{AtomicU32, Ordering},
     };
 
     #[tokio::test]

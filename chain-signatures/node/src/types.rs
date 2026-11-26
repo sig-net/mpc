@@ -1,7 +1,7 @@
 use cait_sith::protocol::{Action, InitializationError, MessageData, Participant, ProtocolError};
-use cait_sith::{protocol::Protocol, KeygenOutput};
 use cait_sith::{FullSignature, PresignOutput};
-use k256::{elliptic_curve::CurveArithmetic, Secp256k1};
+use cait_sith::{KeygenOutput, protocol::Protocol};
+use k256::{Secp256k1, elliptic_curve::CurveArithmetic};
 use mpc_primitives::{Chain, CheckpointDigest, RequestKind, SignId};
 use tokio::sync::watch;
 

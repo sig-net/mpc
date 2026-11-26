@@ -1,11 +1,11 @@
 use crate::KeyVersion;
 use k256::{
-    ecdsa::{RecoveryId, VerifyingKey},
-    elliptic_curve::{point::AffineCoordinates, sec1::ToEncodedPoint, CurveArithmetic},
     AffinePoint, Scalar, Secp256k1,
+    ecdsa::{RecoveryId, VerifyingKey},
+    elliptic_curve::{CurveArithmetic, point::AffineCoordinates, sec1::ToEncodedPoint},
 };
 use sha3::{Digest, Keccak256, Sha3_256};
-use signet_primitives::{Chain, PublicKey, ScalarExt, Signature, LATEST_MPC_KEY_VERSION};
+use signet_primitives::{Chain, LATEST_MPC_KEY_VERSION, PublicKey, ScalarExt, Signature};
 
 /// Prefix of a derivation path at key version 0.
 const DERIVATION_PREFIX_V0: &str = "sig.network v1.0.0 epsilon derivation";

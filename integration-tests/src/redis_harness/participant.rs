@@ -1,11 +1,11 @@
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::Context;
+use cait_sith::PresignOutput;
 use cait_sith::protocol::Participant;
 use cait_sith::triples::{TriplePub, TripleShare};
-use cait_sith::PresignOutput;
 use deadpool_redis::Pool;
 use elliptic_curve::CurveArithmetic;
 use k256::Secp256k1;

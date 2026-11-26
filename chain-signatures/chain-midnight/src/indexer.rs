@@ -8,8 +8,8 @@ use crate::config::MidnightConfig;
 use crate::convert::generate_sign_request;
 use crate::emissions::{ContractCallEmissions, EmissionKind, TranscriptPhase};
 use crate::reader::{
-    decode_bidirectional_response_payload, decode_notification, decode_response_payload,
-    resolve_verified_record, signet_field_node_by_path, unpack_notification_v1, Resolved,
+    Resolved, decode_bidirectional_response_payload, decode_notification, decode_response_payload,
+    resolve_verified_record, signet_field_node_by_path, unpack_notification_v1,
 };
 use crate::records::SignBidirectionalEventNotification;
 use crate::rpc::reader::BlockRef;
@@ -760,11 +760,11 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for MidnightIndexer<S, T> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::emissions::{emissions_in, DecodedTransaction, Emission, EmissionKind};
+    use crate::emissions::{DecodedTransaction, Emission, EmissionKind, emissions_in};
     use crate::source::{BlockProofSeed, CandidateTransactionEmissions};
     use crate::test_utils::{
-        array_of, ascii_padded, cell_from_record, hex_32, key_of, map_of, notification_payload,
-        response_payload, sample_record, test_root_pk, EventRecorder,
+        EventRecorder, array_of, ascii_padded, cell_from_record, hex_32, key_of, map_of,
+        notification_payload, response_payload, sample_record, test_root_pk,
     };
     use crate::types::LedgerTxHash;
     use midnight_onchain_state::state::StateValue;
@@ -1007,12 +1007,11 @@ mod tests {
                 Some(HeadSample::Park) => self.park("finalized_head".to_string()).await,
                 None => {}
             }
-            if successful_call > 0 {
-                if let Some(rx) = self.live.lock().await.as_mut() {
-                    if let Ok(block) = rx.try_recv() {
-                        return Ok(block);
-                    }
-                }
+            if successful_call > 0
+                && let Some(rx) = self.live.lock().await.as_mut()
+                && let Ok(block) = rx.try_recv()
+            {
+                return Ok(block);
             }
             Ok(block_ref(self.head))
         }
@@ -1056,11 +1055,10 @@ mod tests {
                 .lock()
                 .expect("emission errors")
                 .get_mut(&block.number)
+                && *remaining > 0
             {
-                if *remaining > 0 {
-                    *remaining -= 1;
-                    anyhow::bail!("{message}");
-                }
+                *remaining -= 1;
+                anyhow::bail!("{message}");
             }
             Ok(self.emissions.get(&block.number).cloned().flatten())
         }
@@ -2646,8 +2644,8 @@ mod tests {
 
     #[tokio::test]
     async fn emit_block_does_not_double_count_requests() {
-        use std::sync::atomic::{AtomicUsize, Ordering};
         use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
 
         #[derive(Clone, Default)]
         struct CountingTelemetry(Arc<AtomicUsize>);

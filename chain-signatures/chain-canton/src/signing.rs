@@ -3,7 +3,7 @@
 use alloy::consensus::SignableTransaction;
 use alloy::consensus::TxEip1559;
 use alloy::eips::eip2930::{AccessList, AccessListItem};
-use alloy::primitives::{keccak256, Address, Bytes, TxKind, B256, U256};
+use alloy::primitives::{Address, B256, Bytes, TxKind, U256, keccak256};
 use alloy::sol_types::SolValue;
 use borsh::{BorshDeserialize, BorshSerialize};
 use mpc_chain_integration_core::utils::payload::bidirectional_payload_scalar;

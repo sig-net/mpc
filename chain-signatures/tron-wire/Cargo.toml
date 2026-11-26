@@ -1,6 +1,6 @@
 [package]
 name = "mpc-tron-wire"
-edition = "2021"
+edition.workspace = true
 version.workspace = true
 publish.workspace = true
 description = "Tron transaction wire format for MPC"

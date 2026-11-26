@@ -2,11 +2,11 @@
 //! the read-verdict carrier every read error carries.
 
 use anyhow::Context as _;
+use subxt::SubstrateConfig;
 use subxt::backend::legacy::LegacyRpcMethods;
 use subxt::backend::rpc::RpcClient;
 use subxt::client::OnlineClient;
 use subxt::utils::H256;
-use subxt::SubstrateConfig;
 
 use super::reads::{
     attach_read_carrier, network_id, publisher_contract_state, unwrap_runtime_api_result,
@@ -283,18 +283,18 @@ mod tests {
     use super::*;
     use crate::rpc::support::*;
     use jsonrpsee::server::ServerBuilder;
-    use std::sync::atomic::Ordering;
     use std::sync::Arc;
+    use std::sync::atomic::Ordering;
 
     use crate::rpc::reads::is_oversized_contract_state;
     use crate::rpc::submit::Landing;
     use crate::rpc::support::captured_applied_status_record;
     use crate::types::LedgerTxHash;
     use http::StatusCode;
-    use jsonrpsee::types::error::OVERSIZED_RESPONSE_CODE;
     use jsonrpsee::RpcModule;
+    use jsonrpsee::types::error::OVERSIZED_RESPONSE_CODE;
     use mpc_chain_integration_core::utils::retry::{
-        is_provider_throttled, is_retryable, RpcFailure,
+        RpcFailure, is_provider_throttled, is_retryable,
     };
     use serde_json::json;
     use std::time::Duration;

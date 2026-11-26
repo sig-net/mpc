@@ -1,6 +1,6 @@
+use cait_sith::PresignOutput;
 use cait_sith::protocol::Participant;
 use cait_sith::triples::{TriplePub, TripleShare};
-use cait_sith::PresignOutput;
 use elliptic_curve::CurveArithmetic;
 use k256::Secp256k1;
 use mpc_node::backlog::BacklogEntry;
@@ -8,7 +8,7 @@ use mpc_node::protocol::presignature::Presignature;
 use mpc_node::protocol::triple::Triple;
 use mpc_node::storage::triple_storage::TriplePair;
 use mpc_node::storage::{PresignatureStorage, TripleStorage};
-use mpc_primitives::{Chain, IndexedSignRequest, SignArgs, SignId, LATEST_MPC_KEY_VERSION};
+use mpc_primitives::{Chain, IndexedSignRequest, LATEST_MPC_KEY_VERSION, SignArgs, SignId};
 use sha2::Digest;
 use std::sync::Arc;
 
