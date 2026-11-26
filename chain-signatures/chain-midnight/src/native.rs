@@ -396,6 +396,9 @@ impl<W: FeePayer, C: SubmitChain + 'static> NativeIntentClient<W, C> {
         };
         let submitted = started.elapsed();
         // Ends with the wait, so a resend held up by the node never delays the scan.
+        // TODO: abort-and-await the resend before returning if an exit must also
+        // quiesce the task; an RPC already in flight cannot be recalled, and the
+        // same-intent resend is idempotent either way.
         let _resending = unanswered.then(|| {
             AbortOnDrop(tokio::spawn(resend(
                 self.chain.clone(),
@@ -406,7 +409,7 @@ impl<W: FeePayer, C: SubmitChain + 'static> NativeIntentClient<W, C> {
         let end = watch_landing(self.chain.as_ref(), tx_hash, after, ttl, deadline).await;
         let landed = match &end {
             WatchEnd::Landed(landing) => Some(landing),
-            _ => None,
+            WatchEnd::Expired | WatchEnd::Budget | WatchEnd::TerminalRead(_) => None,
         };
         tracing::info!(
             tx_hash = %tx_hash,
@@ -712,6 +715,8 @@ mod tests {
 
     /// A chain whose finalized head moves `step` blocks (one by default) per ask, from
     /// `head` up to `last`, with blocks six seconds apart from time 1000.
+    // TODO: retire onto `crate::chain_mock::ScriptedChain` when the native tests
+    // relocate, so one mock serves every scan suite.
     pub(super) struct ScriptedChain {
         head: Mutex<u64>,
         last: u64,
@@ -1860,12 +1865,49 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(error, SubmitError::Ambiguous(_)), "{error}");
+        
+        let client = client_over(
+            managed_dir(|_, bytes| bytes),
+            ScriptedChain::new(10, 20, None),
+        );
+        let error = client
+            .post(
+                b"tx",
+                LedgerTxHash::from_bytes(TX_HASH),
+                &spent(),
+                10,
+                Timestamp::from_secs(1080),
+                deadline(),
+            )
+            .await
+            .unwrap_err();
+        
+        assert!(matches!(error, SubmitError::StateConflict(_)), "{error}");
+        
+        let client = client_over(
+            managed_dir(|_, bytes| bytes),
+            ScriptedChain::new(10, 20, None).failing_read_with(13, scan_read_rejected(403)),
+        );
+        let error = client
+            .post(
+                b"tx",
+                LedgerTxHash::from_bytes(TX_HASH),
+                &spent(),
+                10,
+                Timestamp::from_secs(5000),
+                deadline(),
+            )
+            .await
+            .unwrap_err();
+        
+        assert!(matches!(error, SubmitError::Node { .. }), "{error:#}");
+        
         let settles: Vec<RecordedFields> = recorder
             .snapshot()
             .into_iter()
             .filter(|fields| fields.contains_key("settled"))
             .collect();
-        assert_eq!(settles.len(), 3, "{settles:?}");
+        assert_eq!(settles.len(), 5, "{settles:?}");
         for (fields, landed, outcome) in [
             (&settles[0], "Some(Applied)", "Landed(Applied)"),
             (
@@ -1874,6 +1916,7 @@ mod tests {
                 "Landed(PartialSuccess)",
             ),
             (&settles[2], "None", "Budget"),
+            (&settles[3], "None", "Expired"),
         ] {
             assert_eq!(
                 fields.get("landed").map(String::as_str),
@@ -1886,6 +1929,19 @@ mod tests {
                 "{fields:?}"
             );
         }
+        assert_eq!(
+            settles[4].get("landed").map(String::as_str),
+            Some("None"),
+            "{:?}",
+            settles[4]
+        );
+        assert!(
+            settles[4]
+                .get("outcome")
+                .is_some_and(|outcome| outcome.starts_with("TerminalRead")),
+            "{:?}",
+            settles[4]
+        );
     }
 
     #[tokio::test(start_paused = true)]

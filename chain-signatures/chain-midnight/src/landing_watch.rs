@@ -93,7 +93,8 @@ pub(crate) async fn watch_landing<C: SubmitChain>(
                 // outcome, escape to the publisher's gate as a retryable end
                 // instead of polling the watch to the budget.
                 tracing::warn!(
-                    ?error,
+                    error = %format_args!("{error:#}"),
+                    tx_hash = %tx_hash,
                     "midnight: watching for the respond transaction failed; retrying"
                 );
             }
