@@ -40,6 +40,59 @@ impl std::fmt::Display for WatchEnd {
     }
 }
 
+/// The watch's scan cursor. `through` is the highest block a landing read
+/// cleared: a failed read leaves it short, so the retry re-reads that block.
+/// `head` is the head a scan last completed at, time read included: while it
+/// stands, no block is new and no read is spent on it.
+struct ScanCursor {
+    through: u64,
+    head: Option<BlockHash>,
+}
+
+/// What one scan concluded. Never `Budget` or `TerminalRead`: only the loop
+/// around the scans can conclude those.
+enum ScanOutcome {
+    Landed(Landing),
+    Expired,
+}
+
+impl ScanCursor {
+    /// Scans the blocks after `through` up to the finalized head for `tx_hash`,
+    /// then compares the head's time with `ttl`; `Ok(None)` when the head stands.
+    async fn scan<C: SubmitChain>(
+        &mut self,
+        chain: &C,
+        tx_hash: LedgerTxHash,
+        ttl: Timestamp,
+    ) -> anyhow::Result<Option<ScanOutcome>> {
+        let head = chain.finalized_head().await?;
+        if self.head == Some(head) {
+            return Ok(None);
+        }
+        let head_number = chain.block_number(&head).await?;
+        while self.through < head_number {
+            let number = self.through + 1;
+            let hash = if number == head_number {
+                head
+            } else {
+                chain
+                    .block_hash_at(number)
+                    .await?
+                    .with_context(|| format!("the node has no finalized block {number}"))?
+            };
+            if let Some(landing) = chain.landing(&hash, tx_hash).await? {
+                return Ok(Some(ScanOutcome::Landed(landing)));
+            }
+            self.through = number;
+        }
+        if chain.block_time(&head).await? > ttl {
+            return Ok(Some(ScanOutcome::Expired));
+        }
+        self.head = Some(head);
+        Ok(None)
+    }
+}
+
 /// Scans each finalized block after `after` for `tx_hash` until one holds it,
 /// until a finalized block past `ttl` holds none of it (`WatchEnd::Expired`),
 /// or until `deadline`, when the outcome is unknown. A terminal read verdict
@@ -51,56 +104,19 @@ pub(crate) async fn watch_landing<C: SubmitChain>(
     ttl: Timestamp,
     deadline: Instant,
 ) -> WatchEnd {
-    let mut scanned = after;
-    // The head a scan last finished at: while it stands, no block is new and its
-    // time was already compared with the TTL.
-    let mut scanned_head: Option<BlockHash> = None;
-
-    // A block scan either finds the transaction in a finalized block or finds
-    // the chain has passed the intent's TTL. Kept separate from `WatchEnd` so
-    // `Landing` cannot carry the contradictory `Expired` state.
-    enum ScanOutcome {
-        Landed(Landing),
-        Expired,
-    }
-
+    let mut cursor = ScanCursor {
+        through: after,
+        head: None,
+    };
     loop {
-        let scan = async {
-            let head = chain.finalized_head().await?;
-            if scanned_head.as_ref() == Some(&head) {
-                return anyhow::Ok(None);
-            }
-            let head_number = chain.block_number(&head).await?;
-            while scanned < head_number {
-                let number = scanned + 1;
-                let hash = if number == head_number {
-                    head
-                } else {
-                    chain
-                        .block_hash_at(number)
-                        .await?
-                        .with_context(|| format!("the node has no finalized block {number}"))?
-                };
-                if let Some(landing) = chain.landing(&hash, tx_hash).await? {
-                    return Ok(Some(ScanOutcome::Landed(landing)));
-                }
-                scanned = number;
-            }
-            if chain.block_time(&head).await? > ttl {
-                return Ok(Some(ScanOutcome::Expired));
-            }
-            scanned_head = Some(head);
-            Ok(None)
-        };
-        match tokio::time::timeout_at(deadline, scan).await {
-            Ok(Ok(Some(ScanOutcome::Expired))) => return WatchEnd::Expired,
+        match tokio::time::timeout_at(deadline, cursor.scan(chain, tx_hash, ttl)).await {
             Ok(Ok(Some(ScanOutcome::Landed(landing)))) => return WatchEnd::Landed(landing),
+            Ok(Ok(Some(ScanOutcome::Expired))) => return WatchEnd::Expired,
             Ok(Ok(None)) => {}
+            Ok(Err(error)) if read_verdict(&error).is_terminal() => {
+                return WatchEnd::TerminalRead(error)
+            }
             Ok(Err(error)) => {
-                let failure = read_verdict(&error);
-                if failure.is_terminal() {
-                    return WatchEnd::TerminalRead(error);
-                }
                 // TODO: three consecutive throttled scans, reset by any other
                 // outcome, escape to the publisher's gate as a retryable end
                 // instead of polling the watch to the budget.
@@ -113,16 +129,15 @@ pub(crate) async fn watch_landing<C: SubmitChain>(
                     );
                 }
             }
-            Err(_) => break,
+            Err(_) => return WatchEnd::Budget,
         }
         if tokio::time::timeout_at(deadline, tokio::time::sleep(LANDING_POLL))
             .await
             .is_err()
         {
-            break;
+            return WatchEnd::Budget;
         }
     }
-    WatchEnd::Budget
 }
 
 #[cfg(test)]
