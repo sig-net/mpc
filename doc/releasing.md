@@ -67,7 +67,7 @@ Because existing nodes are still running the previous release when the contract 
   - *Exception*: If a future release intentionally introduces a hard, non-rolling break requiring coordinated downtime, the CI check can be explicitly modified or disabled for that release with team alignment.
 - **Two-phase deprecation (expand-and-contract)**:
   1. **Phase 1 (Release $N$):** Introduce the new schema while keeping the legacy format (or wire emulation) intact and marked `#[deprecated]`. The contract/node accepts and/or emits both formats.
-  2. **Phase 2 (Release $N+1$):** Once release $N$ is deployed on testnet and mainnet, release $N+1$'s compatibility test baseline advances to release $N$. The legacy format and its deprecated code can then be safely removed.
+  2. **Phase 2 (Release $N+1$):** Once release $N$ is deployed on dev, testnet and mainnet, release $N+1$'s compatibility test baseline advances to release $N$. The legacy format, its deprecated code and the contract migration from it are then removed, see [Step 1](#step-1-promote-to-mainnet).
 
 *Exception: an entropy change must not be a rolling upgrade unless it activates at a fixed height.*
 
@@ -93,6 +93,11 @@ Every second Tuesday is a **release day**. On it, in this order:
    gh pr create --base mainnet --title "chore: release X.Y.Z to mainnet" --body "Promotes X.Y.Z to mainnet after N days on testnet with no open regression issue. Release notes: https://github.com/sig-net/mpc/releases/tag/X.Y.Z"
    ```
    Never promote from `develop` or open the PR from `testnet` directly, so `mainnet` gets exactly what was soaked.
+3. Once the mainnet contract runs X.Y.Z and its `migrate` call succeeded, open a PR against `develop` that drops what X.Y.Z kept for older releases:
+   - Set each `Previous*` struct in [migration.rs](../chain-signatures/contract/src/migration.rs) to the state layout its network now runs.
+   - Remove every `#[deprecated(since = …)]` item whose `since` is X.Y.Z or older.
+
+   The network migration tests check the result against the live state of every network.
 
 ### Step 2: Cut the release
 
