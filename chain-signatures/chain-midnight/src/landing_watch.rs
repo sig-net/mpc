@@ -31,8 +31,7 @@ pub(crate) enum WatchEnd {
 impl std::fmt::Display for WatchEnd {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Landed(Landing::Applied) => write!(f, "Landed(Applied)"),
-            Self::Landed(Landing::PartialSuccess) => write!(f, "Landed(PartialSuccess)"),
+            Self::Landed(landing) => write!(f, "Landed({landing:?})"),
             Self::Expired => write!(f, "Expired"),
             Self::Budget => write!(f, "Budget"),
             Self::TerminalRead(error) => write!(f, "TerminalRead({error:#})"),
