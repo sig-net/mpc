@@ -166,7 +166,7 @@ test-tron-tre:
 test-midnight test="": (setup "")
     cargo nextest run -p integration-tests --test lib --run-ignored only --no-capture -E '{{ if test == "" { "test(/^cases::midnight_stream::/)" } else { "test(=cases::midnight_stream::" + test + ")" } }}'
 
-# Midnight real-stack vault test of a Tron withdraw beside an ETH withdraw (ignored by default);
+# Midnight real-stack vault test of Tron deposits, withdraws and lend beside ETH ones (ignored by default);
 # the cluster also starts a TRE chain (tronbox/tre:2.0.0) and points every MPC node at it.
 # Usage: just test-midnight-tron
 test-midnight-tron: (test-midnight "midnight_vault_tron_withdraw_with_real_mpc")

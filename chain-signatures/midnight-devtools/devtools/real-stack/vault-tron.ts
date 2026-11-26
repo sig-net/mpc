@@ -10,6 +10,9 @@ import {
 } from "@sig-net/midnight";
 import { computeAddress, SigningKey } from "ethers";
 
+// The lend targets' compiled hardhat artifacts, committed beside their source.
+const LEND_ARTIFACTS = new URL("../../../../integration-tests/fixtures/evm/", import.meta.url);
+
 // What the funder's own transactions may burn; TRE prices energy, so the deploy needs room.
 const FUNDER_FEE_LIMIT = 1_000_000_000;
 const RECEIPT_TIMEOUT_MS = 120_000;
@@ -35,10 +38,52 @@ interface BroadcastAnswer {
   message?: string;
 }
 
-interface TokenArtifact {
+/** A contract deploycontract takes: its `name`, `abi` and creation `bytecode`. */
+export interface TronArtifact {
   name: string;
   abi: unknown[];
   bytecode: string;
+}
+
+/** Reads a `{ name, abi, bytecode }` artifact. */
+export async function readTronArtifact(path: string): Promise<TronArtifact> {
+  return JSON.parse(await readFile(path, "utf8")) as TronArtifact;
+}
+
+/** Reads one of the lend targets' hardhat artifacts: `{ contractName, abi, bytecode }`. */
+export async function readLendArtifact(contractName: string): Promise<TronArtifact> {
+  const url = new URL(`${contractName}.json`, LEND_ARTIFACTS);
+  let text: string;
+  try {
+    text = await readFile(url, "utf8");
+  } catch (error) {
+    throw new Error(`reading ${url.pathname}`, { cause: error });
+  }
+  const artifact = JSON.parse(text) as Omit<TronArtifact, "name">;
+  return { name: contractName, abi: artifact.abi, bytecode: artifact.bytecode };
+}
+
+/** What a solidified receipt says the transaction cost. */
+export interface TronCost {
+  /** `receipt.result`: SUCCESS, REVERT, OUT_OF_ENERGY, ... */
+  result: string;
+  energy: number;
+  /** Sun burned in total. */
+  fee: number;
+}
+
+interface ReceiptBody {
+  receipt?: { energy_usage_total?: number };
+}
+
+/** The result, energy and burned sun of a solidified receipt. */
+export function tronCost(receipt: TronTransactionInfo): TronCost {
+  const body = receipt.body as ReceiptBody;
+  return {
+    result: receipt.receiptResult ?? receipt.result ?? "SUCCESS",
+    energy: body.receipt?.energy_usage_total ?? 0,
+    fee: Number(receipt.fee),
+  };
 }
 
 /**
@@ -126,15 +171,20 @@ export class TronChain {
     await this.succeeded(txid, "TRX transfer");
   }
 
-  /** Deploys the artifact's contract from the funder, returning its 21-byte address. */
-  async deploy(artifactPath: string): Promise<Uint8Array> {
-    const artifact = JSON.parse(await readFile(artifactPath, "utf8")) as TokenArtifact;
+  /**
+   * Deploys `artifact` from the funder with the ABI-encoded constructor `parameter`,
+   * returning its 21-byte address.
+   */
+  async deploy(
+    artifact: TronArtifact,
+    parameter: Uint8Array = new Uint8Array(),
+  ): Promise<Uint8Array> {
     const { txid, built } = await this.submit("/wallet/deploycontract", {
       owner_address: bytesToHex(this.funder),
       name: artifact.name,
       abi: JSON.stringify(artifact.abi),
       bytecode: artifact.bytecode.replace(/^0x/i, ""),
-      parameter: "",
+      parameter: bytesToHex(parameter),
       call_value: 0,
       fee_limit: FUNDER_FEE_LIMIT,
       consume_user_resource_percent: 100,
@@ -147,33 +197,60 @@ export class TronChain {
     return hexToBytes(built.contract_address);
   }
 
-  /** Transfers `amount` of the 21-byte `token` from the funder to the 21-byte `to`. */
-  async sendToken(token: Uint8Array, to: Uint8Array, amount: bigint): Promise<void> {
+  /**
+   * Calls `selector` on the 21-byte `contract` from the funder with the ABI-encoded
+   * `parameter`, and waits for it to succeed.
+   */
+  async trigger(
+    contract: Uint8Array,
+    selector: string,
+    parameter: Uint8Array,
+  ): Promise<TronTransactionInfo> {
     const { txid } = await this.submit("/wallet/triggersmartcontract", {
       owner_address: bytesToHex(this.funder),
-      contract_address: bytesToHex(token),
-      function_selector: "transfer(address,uint256)",
-      parameter: `${bytesToHex(evmAddressAbiWord(to.subarray(1)))}${bytesToHex(numericAbiWord(amount))}`,
+      contract_address: bytesToHex(contract),
+      function_selector: selector,
+      parameter: bytesToHex(parameter),
       fee_limit: FUNDER_FEE_LIMIT,
       call_value: 0,
     });
-    await this.succeeded(txid, "TRC-20 funding transfer");
+    return this.succeeded(txid, selector);
+  }
+
+  /** Transfers `amount` of the 21-byte `token` from the funder to the 21-byte `to`. */
+  async sendToken(token: Uint8Array, to: Uint8Array, amount: bigint): Promise<void> {
+    await this.trigger(
+      token,
+      "transfer(address,uint256)",
+      new Uint8Array([...evmAddressAbiWord(to.subarray(1)), ...numericAbiWord(amount)]),
+    );
+  }
+
+  /** The first word `selector` on the 21-byte `contract` returns to a constant call. */
+  async read(
+    contract: Uint8Array,
+    selector: string,
+    parameter: Uint8Array = new Uint8Array(),
+  ): Promise<bigint> {
+    const answer = await this.post<{ constant_result?: string[] }>(
+      "/wallet/triggerconstantcontract",
+      {
+        owner_address: bytesToHex(this.funder),
+        contract_address: bytesToHex(contract),
+        function_selector: selector,
+        parameter: bytesToHex(parameter),
+      },
+    );
+    const word = answer.constant_result?.[0];
+    if (word === undefined || word === "") {
+      throw new Error(`${selector} returned ${JSON.stringify(answer)}`);
+    }
+    return BigInt(`0x${word}`);
   }
 
   /** The TRC-20 balance of the 21-byte `owner`. */
   async balanceOf(token: Uint8Array, owner: Uint8Array): Promise<bigint> {
-    const answer = await this.post<{ constant_result?: string[] }>(
-      "/wallet/triggerconstantcontract",
-      {
-        owner_address: bytesToHex(owner),
-        contract_address: bytesToHex(token),
-        function_selector: "balanceOf(address)",
-        parameter: bytesToHex(evmAddressAbiWord(owner.subarray(1))),
-      },
-    );
-    const word = answer.constant_result?.[0];
-    if (word === undefined) throw new Error(`balanceOf returned ${JSON.stringify(answer)}`);
-    return BigInt(`0x${word}`);
+    return this.read(token, "balanceOf(address)", evmAddressAbiWord(owner.subarray(1)));
   }
 
   /** The solidified head's number. */

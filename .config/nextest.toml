@@ -6,8 +6,13 @@ filter = 'test(=cases::midnight_stream::midnight_to_ethereum_to_midnight_consume
 slow-timeout = { period = "60s", terminate-after = 30 }
 
 [[profile.default.overrides]]
-filter = 'test(=cases::midnight_stream::midnight_vault_operations_complete_with_real_mpc) | test(=cases::midnight_stream::midnight_vault_tron_withdraw_with_real_mpc) | test(=cases::midnight_stream::midnight_partial_success_review_shapes)'
+filter = 'test(=cases::midnight_stream::midnight_vault_operations_complete_with_real_mpc) | test(=cases::midnight_stream::midnight_partial_success_review_shapes)'
 slow-timeout = { period = "60s", terminate-after = 60 }
+
+# The Tron vault run waits out Tron validity windows for its unviable and unsent requests.
+[[profile.default.overrides]]
+filter = 'test(=cases::midnight_stream::midnight_vault_tron_withdraw_with_real_mpc)'
+slow-timeout = { period = "60s", terminate-after = 180 }
 
 [test-groups]
 cluster = { max-threads = "num-cpus" }

@@ -42,12 +42,14 @@ import {
   deriveEvmAddress,
   deriveMidnightResponseKey,
   deserializeEvmOutput,
+  evmAddressAbiWord,
   EvmTraceOutputKind,
   evmTraceOutputFromTronReceipt,
   executedEvmRespondOutput,
   getSolidifiedTronReferenceBlock,
   hexToBytes,
   isEvmContractCall,
+  numericAbiWord,
   OutputKind,
   requestIdHex,
   respondBidirectionalEventToCircuitInput,
@@ -82,22 +84,38 @@ import {
 } from "./vault-contract.js";
 import { deployVault } from "./vault-deploy.js";
 import { VaultEvm, type VaultTargets } from "./vault-evm.js";
-import { TronChain } from "./vault-tron.js";
+import {
+  readLendArtifact,
+  readTronArtifact,
+  TronChain,
+  tronCost,
+  type TronCost,
+} from "./vault-tron.js";
 
 type VaultHandle = FoundContract<VaultContract>;
 type VaultLedger = ReturnType<typeof ledger>;
 
 /** Each action's request map: its ledger field and compiled ledger path. */
 const REQUEST_MAPS = {
-  [Action.approve]: { field: "bidirectionalApproveMap", path: [1, 13] },
-  [Action.deposit]: { field: "bidirectionalDepositMap", path: [2, 0] },
-  [Action.tronDeposit]: { field: "bidirectionalTronDepositMap", path: [2, 2] },
-  [Action.withdraw]: { field: "bidirectionalWithdrawMap", path: [2, 4] },
-  [Action.swap]: { field: "bidirectionalSwapMap", path: [2, 6] },
-  [Action.supply]: { field: "bidirectionalSupplyMap", path: [2, 8] },
-  [Action.redeem]: { field: "bidirectionalRedeemMap", path: [2, 10] },
-  [Action.tronWithdraw]: { field: "bidirectionalTronWithdrawMap", path: [2, 13] },
+  [Action.approve]: { field: "bidirectionalApproveMap", path: [2, 4] },
+  [Action.deposit]: { field: "bidirectionalDepositMap", path: [2, 6] },
+  [Action.tronDeposit]: { field: "bidirectionalTronDepositMap", path: [2, 8] },
+  [Action.withdraw]: { field: "bidirectionalWithdrawMap", path: [2, 10] },
+  [Action.swap]: { field: "bidirectionalSwapMap", path: [2, 12] },
+  [Action.supply]: { field: "bidirectionalSupplyMap", path: [2, 14] },
+  [Action.redeem]: { field: "bidirectionalRedeemMap", path: [3, 1] },
+  [Action.tronWithdraw]: { field: "bidirectionalTronWithdrawMap", path: [3, 4] },
+  [Action.tronApprove]: { field: "bidirectionalTronApproveMap", path: [3, 9] },
+  [Action.tronSupply]: { field: "bidirectionalTronSupplyMap", path: [3, 11] },
+  [Action.tronRedeem]: { field: "bidirectionalTronRedeemMap", path: [3, 13] },
 } as const;
+const TRON_ACTIONS: readonly VaultAction[] = [
+  Action.tronDeposit,
+  Action.tronWithdraw,
+  Action.tronApprove,
+  Action.tronSupply,
+  Action.tronRedeem,
+];
 type VaultAction = keyof typeof REQUEST_MAPS;
 
 const FLUSH_WIDTH = 10;
@@ -129,9 +147,37 @@ const TRON_DEPOSIT_FEE_LIMIT = 100_000_000n;
 const TRON_ACCOUNT_TRX = 2_000_000_000n;
 const TRON_WINDOW_MS = 3_600_000n;
 // Two minutes above the start's 600 s minimum, which the block including the start must
-// still clear after proving; the unsent withdraw's refund opens about eleven minutes after
-// its start, mostly while the other withdraws run.
+// still clear after proving; the unsent requests' refunds open about eleven minutes after
+// their start, while the other requests run.
 const TRON_UNSENT_WINDOW_MS = 720_000n;
+// The Tron lend pair: a USDT-like underlying listed unshifted, and an ERC-4626 over it with
+// 18-decimal shares listed with factor 10^12, so one share coin unit is 10^12 shares.
+const SHARE_FACTOR = 10n ** 12n;
+const TRON_USDT_SUPPLY = 10n ** 15n;
+// The funder's own deposit and donation give the shares an exchange rate under which a
+// supply leaves a remainder below one share coin unit.
+const LEND_SEED = 60_000_000n;
+const LEND_SEED_DONATION = 123_457n;
+const TRON_USDT_DEPOSIT = 300_000_000n;
+// 100 USDT, whose shares exceed 2^64 base units.
+const TRON_SUPPLY_AMOUNT = 100_000_000n;
+const TRON_MIN_SUPPLY = 1_000_000n;
+const TRON_SUPPLY_FEE = 1_000n;
+// What each refused, unviable and unsent supply and redeem surrenders.
+const TRON_SMALL_SUPPLY = 10_000_000n;
+const TRON_SMALL_REDEEM = 5_000_000n;
+const TRON_REDEEM_FEE = 1_000n;
+// Share coin units the user deposits from Tron, and withdraws back to Tron.
+const TRON_SHARE_DEPOSIT = 50_000_000n;
+const TRON_SHARE_WITHDRAW = 20_000_000n;
+// Donated to the share token before the redeem, so the redeemed assets exceed the supply.
+const TRON_LEND_YIELD = 10_000_000n;
+// 1 TRX: TRE refuses a supply's broadcast at this limit, in pre-execution.
+const TRON_STARVED_FEE_LIMIT = 1_000_000n;
+// The starved supply's and the unbroadcast redeem's windows, sent first after their starts;
+// the MPC attests them unviable once they close.
+const TRON_SHORT_WINDOW_MS = 1_200_000n;
+const UNVIABLE_TIMEOUT_MS = 30 * 60_000;
 
 export interface VaultRunInput {
   config: MidnightNodeConfig;
@@ -171,8 +217,12 @@ export interface VaultOperation {
   transaction: string;
   /** The block height the attestation commits to. */
   blockHeight: number;
-  /** Serialized output the attestation signs, hex. */
+  /** The attested verdict: `executed`, `failed` or `unviable`. */
+  outcome: string;
+  /** Serialized output the attestation signs, hex (empty unless executed). */
   output: string;
+  /** What the Tron transaction cost, when TRE included it. */
+  tronCost?: TronCost;
   /** From the notifying send's finalisation to the MPC signature's first read. */
   sendToSignatureMs: number;
   /** From the transaction's broadcast to the verified attestation's first read. */
@@ -183,6 +233,85 @@ export interface VaultOperation {
 interface LastSeen {
   ethereum: number;
   tron: number;
+}
+
+/** The Tron lend pair: 21-byte addresses. */
+interface TronLend {
+  underlying: Uint8Array;
+  share: Uint8Array;
+}
+
+/** A Tron request's TaPoS reference and validity window. */
+interface TronWindow {
+  refBlockBytes: Uint8Array;
+  refBlockHash: Uint8Array;
+  timestamp: bigint;
+  expiration: bigint;
+}
+
+/** A Tron request to execute, between optional steps on TRE. */
+interface TronStep {
+  request: SentRequest;
+  before?: () => Promise<void>;
+  after?: () => Promise<void>;
+}
+
+/** One scenario's verdict, for the report. */
+export interface TronScenario {
+  name: string;
+  expected: string;
+  observed: string;
+  /** From the scenario's first start to its settlement. */
+  wallMs: number;
+}
+
+/** The Tron lend legs' amounts, base units as decimal strings. */
+export interface TronLendResult {
+  /** 21-byte hex. */
+  underlying: string;
+  shareToken: string;
+  shareFactor: string;
+  supply: {
+    amount: string;
+    calldataAmount: string;
+    shares: string;
+    minted: string;
+    remainder: string;
+    /** The trailing calldata word after `deposit`'s two arguments: the request's binding, 32-byte hex. */
+    binding: string;
+    /** `ownershipCommitment(inIndex, user secret)` of the request's start, 32-byte hex. */
+    expectedBinding: string;
+  };
+  redeem: {
+    shares: string;
+    calldataShares: string;
+    assets: string;
+    /** The trailing calldata word after `redeem`'s three arguments, as the supply's. */
+    binding: string;
+    /** `ownershipCommitment(inIndex, user secret)` of the request's start, 32-byte hex. */
+    expectedBinding: string;
+  };
+  shareDeposit: { amount: string; calldataAmount: string };
+  shareWithdraw: {
+    amount: string;
+    calldataAmount: string;
+    received: string;
+    /** The trailing calldata word after `transfer`'s two arguments, as the supply's. */
+    binding: string;
+    /** `ownershipCommitment(inIndex, user secret)` of the request's start, 32-byte hex. */
+    expectedBinding: string;
+  };
+  starvedSupply: { feeLimit: string; broadcastRefusal: string };
+  /**
+   * The vault's Tron balances and the coins of each colour, the fee recipient's included,
+   * at the end.
+   */
+  backing: {
+    underlyingVault: string;
+    underlyingCoins: string;
+    shareVault: string;
+    shareCoins: string;
+  };
 }
 
 /** The outcome of {@link runVaultPartialSend}. */
@@ -215,17 +344,23 @@ export interface VaultTronRunResult {
   tronToken: string;
   operations: VaultOperation[];
   /**
-   * The last-seen heights before the withdraw attestations, after the ETH one alone is
-   * flushed, and after the Tron one is flushed too.
+   * The last-seen heights before the second round's attestations, after its ETH ones alone
+   * are flushed, and after its Tron ones are flushed too.
    */
-  lastSeen: { before: LastSeen; afterEthereum: LastSeen; afterTron: LastSeen };
+  lastSeen: {
+    before: LastSeen;
+    afterEthereum: LastSeen;
+    afterTron: LastSeen;
+    ethereumFlushed: string[];
+    tronFlushed: string[];
+  };
   /** The refusals of each chain's attestation presented to the other chain's complete. */
   crossChainRefusals: { tronCompleteOfEthereum: string; ethereumCompleteOfTron: string };
   /** The withdraw recipient's TRC-20 balance around the withdraw. */
   recipient: { address: string; before: number; after: number };
   /**
-   * A Tron withdraw left unsent until its window closed to sends: the late send's refusal,
-   * and the refund that re-minted its amount.
+   * A Tron withdraw, supply and redeem left unsent until their windows closed to sends: the
+   * late sends' refusals, and the refunds that re-minted their amounts.
    */
   unsentRefund: { lateSendRefusal: string; waitedMs: number };
   /**
@@ -233,6 +368,22 @@ export interface VaultTronRunResult {
    * and the ownership commitment of its start, which it must equal: 32-byte hex each.
    */
   withdrawBinding: { binding: string; expectedBinding: string };
+  tronLend: TronLendResult;
+  scenarios: TronScenario[];
+}
+
+/** What a Tron request's transaction does on TRE, which fixes the verdict the MPC attests. */
+enum TronFate {
+  /** Executes and returns true, or the data its schema names. */
+  Executes = "executes",
+  /** Executes, and the token reports success as false, as Tron USDT does. */
+  ExecutesReturningFalse = "executesReturningFalse",
+  /** Reverts: attested failed. */
+  Reverts = "reverts",
+  /** The node refuses the broadcast: attested unviable once the window closes. */
+  BroadcastRefused = "broadcastRefused",
+  /** Signed and never broadcast: attested unviable once the window closes. */
+  NeverBroadcast = "neverBroadcast",
 }
 
 /** A request its start circuit queued under `inIndex`. */
@@ -243,6 +394,8 @@ interface StartedRequest {
   /** The account the MPC signs the request's transaction with: EVM hex, or Tron 21-byte hex. */
   signer: string;
   outputSchema: Uint8Array;
+  /** A Tron request's fate; Executes when absent. */
+  fate?: TronFate;
 }
 
 interface SentRequest extends StartedRequest {
@@ -252,14 +405,19 @@ interface SentRequest extends StartedRequest {
   sentAt: number;
 }
 
-/** A request whose transaction executed, with the output the MPC must attest. */
+/** A request whose transaction reached its fate, with the verdict and output the MPC must attest. */
 interface ExecutedRequest extends SentRequest {
   transaction: string;
+  /** The including block; for an unviable request, set from its attestation. */
   blockHeight: number;
+  outcome: OutputKind;
   decoded: Record<string, unknown>;
   output: Uint8Array;
   /** The signed transaction's calldata, hex. */
   calldata: string;
+  tronCost?: TronCost;
+  /** The node's refusal of a BroadcastRefused request's broadcast. */
+  broadcastRefusal?: string;
   signedAt: number;
   broadcastAt: number;
 }
@@ -269,6 +427,20 @@ interface AttestedRequest extends ExecutedRequest {
 }
 
 const diagnostics = (message: string) => process.stderr.write(`vault: ${message}\n`);
+
+// JSON.stringify replacer for ledger values.
+const bigintJson = (_: string, value: unknown): unknown =>
+  typeof value === "bigint" ? String(value) : value;
+
+function concat(...parts: Uint8Array[]): Uint8Array {
+  const out = new Uint8Array(parts.reduce((length, part) => length + part.length, 0));
+  let offset = 0;
+  for (const part of parts) {
+    out.set(part, offset);
+    offset += part.length;
+  }
+  return out;
+}
 
 // The ABI word `index` of hex calldata, after its 4-byte selector.
 function calldataWord(calldata: string, index: number): bigint {
@@ -311,8 +483,12 @@ function flushSlots(inIndexes: readonly bigint[], requestIds: readonly Uint8Arra
   ];
 }
 
-async function poll<T>(description: string, read: () => Promise<T | undefined>): Promise<T> {
-  const deadline = Date.now() + 480_000;
+async function poll<T>(
+  description: string,
+  read: () => Promise<T | undefined>,
+  timeoutMs = 480_000,
+): Promise<T> {
+  const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     const value = await read();
     if (value !== undefined) return value;
@@ -334,6 +510,11 @@ class VaultRun {
   private vaultEvm!: string;
   private userEvm!: string;
   private readonly tron: TronChain | undefined;
+  /** The vault's Tron USDT, which initialise records; 21-byte. */
+  private tronUsdt: Uint8Array | undefined;
+  /** Each listed Tron token's coin colour (domain separator), keyed by its 21-byte hex. */
+  private readonly tronColours = new Map<string, Uint8Array>();
+  private readonly scenarios: TronScenario[] = [];
 
   constructor(private readonly input: VaultRunInput) {
     this.evm = new VaultEvm(
@@ -355,11 +536,18 @@ class VaultRun {
     return ledger(state.contractState.deserialize({ v9: RuntimeContractState }).data);
   }
 
+  // A listed TRC-20's coin colour (domain separator) as hex: the one its listing stored.
+  private tronColour(token: string): string {
+    const colour = this.tronColours.get(token);
+    if (colour === undefined) throw new Error(`Tron token ${token} is not listed`);
+    return bytesToHex(colour);
+  }
+
   // An ERC20's vault coin colour, or a TRC-20's (`token` then 21-byte hex) on the Tron chain.
   private tokenType(token: string, chain = TargetChain.Ethereum): string {
     return rawTokenType(
       chain === TargetChain.Tron
-        ? pureCircuits.vaultTronTokenDomainSeparator(hexToBytes(token).subarray(1))
+        ? hexToBytes(this.tronColour(token))
         : pureCircuits.vaultTokenDomainSeparator(hexToBytes(token)),
       this.vaultAddress,
     );
@@ -400,6 +588,13 @@ class VaultRun {
   async deployAndInitialise(): Promise<void> {
     const { config } = this.input;
     this.targets = await this.evm.deployTargets();
+    // initialise records the Tron USDT, whose transfer reports success as false.
+    this.tronUsdt =
+      this.tron &&
+      (await this.tron.deploy(
+        await readLendArtifact("MidnightVaultTronUsdt"),
+        numericAbiWord(TRON_USDT_SUPPLY),
+      ));
     const deployerKeys = deriveAccountKeys(this.input.deployerSeed, config.networkId);
     await withSyncedWalletFacade(deployerKeys, config, async (facade) => {
       const providers = this.providersFor(facade, deployerKeys, "vault-deployer.leveldb");
@@ -431,7 +626,7 @@ class VaultRun {
       initialPrivateState: { secretKey: this.userSecret },
     });
     diagnostics("initialising the vault");
-    // Fees are taken on Tron withdrawals only; their fee coins go to the deployer wallet.
+    // Fees are taken on Tron requests only; their fee coins go to the deployer wallet.
     const feeRecipient = deployerKeys.shieldedSecretKeys;
     await this.vault.callTx.initialise(
       hexToBytes(this.vaultEvm),
@@ -443,8 +638,7 @@ class VaultRun {
       1n,
       BigInt(await this.evm.provider.getBlockNumber()),
       (await this.tron?.solidifiedHeight()) ?? 0n,
-      // No TRC-20 of the run reports success as false.
-      new Uint8Array(20),
+      this.tronUsdt?.subarray(1) ?? new Uint8Array(20),
       NO_FEES,
       NO_FEES,
       { bytes: hexToBytes(feeRecipient.coinPublicKey) },
@@ -560,6 +754,12 @@ class VaultRun {
         return calls.sendRedeem;
       case Action.tronWithdraw:
         return calls.sendTronWithdraw;
+      case Action.tronApprove:
+        return calls.sendTronApprove;
+      case Action.tronSupply:
+        return calls.sendTronSupply;
+      case Action.tronRedeem:
+        return calls.sendTronRedeem;
     }
   }
 
@@ -633,12 +833,13 @@ class VaultRun {
         ...request,
         transaction: receipt.hash,
         blockHeight: receipt.blockNumber,
+        outcome: OutputKind.executed,
+        calldata: transaction.data,
         decoded,
         output: executedEvmRespondOutput(request.outputSchema, true, {
           kind: EvmTraceOutputKind.Output,
           returnData,
         }),
-        calldata: transaction.data,
         signedAt,
         broadcastAt,
       });
@@ -647,10 +848,11 @@ class VaultRun {
   }
 
   // Waits for the MPC signature of a Tron request, checks it recovers to the request's
-  // derived owner, broadcasts the transaction and rebuilds the output the MPC attests from
-  // its solidified receipt.
+  // derived owner, then brings about the request's fate: broadcasts the transaction (unless
+  // it must never be) and rebuilds the output the MPC attests from its solidified receipt.
   private async executeTron(request: SentRequest): Promise<ExecutedRequest> {
     const tron = this.tronChain();
+    const fate = request.fate ?? TronFate.Executes;
     const reader = this.reader(request.action);
     const record = await reader.getTronTriggerSmartContractSignatureRequest(request.requestId);
     const unsigned = signBidirectionalEventToUnsignedTronTransaction(
@@ -679,16 +881,53 @@ class VaultRun {
     if (bytesToHex(tronAddressFromEvm(recovered)) !== request.signer) {
       throw new Error(`${request.operation}'s signature recovers to ${recovered}`);
     }
-    const broadcastAt = Date.now();
-    const outcome = await broadcastTronTransaction(tron.rpcUrl, signedTransaction);
-    diagnostics(
-      `${request.operation} broadcast ${bytesToHex(unsigned.txId)}: ${TronBroadcastOutcome[outcome]}`,
-    );
-    const receipt = await tron.receipt(unsigned.txId);
-    if (tronReceiptExecutionResult(receipt) !== TronExecutionResult.Succeeded) {
-      throw new Error(`${request.operation} ran ${String(receipt.receiptResult)}`);
-    }
     const calldata = assembleCalldata(record.txParams.calldata);
+    const pending = {
+      ...request,
+      transaction: bytesToHex(unsigned.txId),
+      blockHeight: 0,
+      outcome: OutputKind.unviable,
+      decoded: {},
+      output: new Uint8Array(),
+      calldata,
+      signedAt,
+    };
+    const broadcastAt = Date.now();
+    if (fate === TronFate.NeverBroadcast) {
+      diagnostics(`${request.operation} signed ${pending.transaction}, left unbroadcast`);
+      return { ...pending, broadcastAt };
+    }
+    let broadcast: TronBroadcastOutcome;
+    try {
+      broadcast = await broadcastTronTransaction(tron.rpcUrl, signedTransaction);
+    } catch (error) {
+      const refusal = error instanceof Error ? error.message : String(error);
+      if (fate !== TronFate.BroadcastRefused) throw error;
+      diagnostics(`${request.operation} broadcast refused: ${refusal}`);
+      return { ...pending, broadcastRefusal: refusal, broadcastAt };
+    }
+    diagnostics(
+      `${request.operation} broadcast ${pending.transaction}: ${TronBroadcastOutcome[broadcast]}`,
+    );
+    if (fate === TronFate.BroadcastRefused) {
+      throw new Error(`${request.operation}'s broadcast was not refused`);
+    }
+    const receipt = await tron.receipt(unsigned.txId);
+    const tronCostOf = tronCost(receipt);
+    const result = tronReceiptExecutionResult(receipt);
+    diagnostics(
+      `${request.operation} ran ${tronCostOf.result} in Tron block ${receipt.blockNumber}: ${tronCostOf.energy} energy, ${tronCostOf.fee} sun`,
+    );
+    const executed = { ...pending, blockHeight: Number(receipt.blockNumber), tronCost: tronCostOf };
+    if (fate === TronFate.Reverts) {
+      if (result !== TronExecutionResult.Failed) {
+        throw new Error(`${request.operation} ran ${tronCostOf.result}, not a failure`);
+      }
+      return { ...executed, outcome: OutputKind.failed, broadcastAt };
+    }
+    if (result !== TronExecutionResult.Succeeded) {
+      throw new Error(`${request.operation} ran ${tronCostOf.result}`);
+    }
     const output = executedEvmRespondOutput(
       record.outputDeserializationSchema,
       isEvmContractCall(calldata),
@@ -698,51 +937,55 @@ class VaultRun {
       request.outputSchema,
       receipt.contractResult.at(0) ?? new Uint8Array(),
     );
-    if (decoded.success !== true) throw new Error(`${request.operation} returned false`);
-    diagnostics(`${request.operation} executed in Tron block ${receipt.blockNumber}`);
-    return {
-      ...request,
-      transaction: bytesToHex(unsigned.txId),
-      blockHeight: Number(receipt.blockNumber),
-      decoded,
-      output,
-      calldata,
-      signedAt,
-      broadcastAt,
-    };
+    const returnsFalse = fate === TronFate.ExecutesReturningFalse;
+    if ("success" in decoded && decoded.success !== !returnsFalse) {
+      throw new Error(`${request.operation} returned ${String(decoded.success)}`);
+    }
+    return { ...executed, outcome: OutputKind.executed, decoded, output, broadcastAt };
   }
 
-  // Waits for an attestation that verifies against the response key at the executed height.
-  private async attest(request: ExecutedRequest): Promise<AttestedRequest> {
-    const event = await poll(`${request.operation} attestation`, () =>
-      this.reader(request.action).getVerifiedRespondBidirectionalEvent(
-        request.requestId,
-        request.output,
-        this.responseKey,
-      ),
+  // Waits for an attestation of the request's verdict that verifies against the response
+  // key: at the executed or failed transaction's height, or, for an unviable request, at the
+  // height it names, which then becomes the request's.
+  private async attest(request: ExecutedRequest, timeoutMs?: number): Promise<AttestedRequest> {
+    const event = await poll(
+      `${request.operation} attestation`,
+      () =>
+        this.reader(request.action).getVerifiedRespondBidirectionalEvent(
+          request.requestId,
+          request.output,
+          this.responseKey,
+        ),
+      timeoutMs,
     );
     const attestedAt = Date.now();
-    if (event.outputKind !== OutputKind.executed) {
-      throw new Error(`${request.operation} attested ${OutputKind[event.outputKind]}`);
+    if (event.outputKind !== request.outcome) {
+      throw new Error(
+        `${request.operation} attested ${OutputKind[event.outputKind]}, not ${OutputKind[request.outcome]}`,
+      );
     }
-    if (event.blockHeight !== BigInt(request.blockHeight)) {
+    const blockHeight =
+      request.outcome === OutputKind.unviable ? Number(event.blockHeight) : request.blockHeight;
+    if (event.blockHeight !== BigInt(blockHeight)) {
       throw new Error(`${request.operation} attested height ${event.blockHeight}`);
     }
+    diagnostics(
+      `${request.operation} attested ${OutputKind[event.outputKind]} at height ${blockHeight}`,
+    );
     this.operations.push({
       operation: request.operation,
-      chain:
-        request.action === Action.tronDeposit || request.action === Action.tronWithdraw
-          ? TargetChain.Tron
-          : TargetChain.Ethereum,
+      chain: TRON_ACTIONS.includes(request.action) ? TargetChain.Tron : TargetChain.Ethereum,
       requestId: request.requestId,
       placement: request.placement,
       transaction: request.transaction,
-      blockHeight: request.blockHeight,
+      blockHeight,
+      outcome: OutputKind[event.outputKind],
       output: bytesToHex(request.output),
+      tronCost: request.tronCost,
       sendToSignatureMs: request.signedAt - request.sentAt,
       broadcastToAttestationMs: attestedAt - request.broadcastAt,
     });
-    return { ...request, event };
+    return { ...request, blockHeight, event };
   }
 
   // Queues each attestation, then flushes them in one flush, ready for the complete circuits.
@@ -1063,46 +1306,41 @@ class VaultRun {
     };
   }
 
-  // The ETH request beside the Tron one: the EVM signs and the attestation verifies.
-  private async attestEvm(request: SentRequest): Promise<AttestedRequest> {
-    const [executed] = await this.executeEvm([request]);
-    if (executed === undefined) throw new Error(`${request.operation} did not execute`);
-    return this.attest(executed);
+  // The fee recipient's keys, which a start minting a fee coin needs for its output.
+  private async feeRecipientKeys(): Promise<Map<string, string>> {
+    const configured = await this.readLedger();
+    return new Map([
+      [
+        bytesToHex(configured.feeRecipientCoinPublicKey.bytes),
+        bytesToHex(configured.feeRecipientEncryptionPublicKey),
+      ],
+    ]);
   }
 
-  // Starts a Tron withdraw of TRON_WITHDRAW_AMOUNT of `token` to `recipient` (21-byte) under
-  // a fresh window `windowMs` long, and returns that window.
+  // Starts a Tron withdraw of `amount` units of `token` (plus its withdraw fee) to
+  // `recipient` (21-byte) under a fresh window `windowMs` long, and returns that window.
   private async startTronWithdraw(
     inIndex: bigint,
     token: Uint8Array,
+    amount: bigint,
     recipient: Uint8Array,
     windowMs: bigint,
-  ): Promise<Awaited<ReturnType<VaultRun["tronWindow"]>>> {
+  ): Promise<TronWindow> {
     await this.input.userFacade.waitForSyncedState();
-    const configured = await this.readLedger();
+    const fee = (await this.readLedger()).allowedTronTokens.lookup(token.subarray(1)).fees.withdraw;
     const window = await this.tronWindow(windowMs);
-    // The fee coin goes to the fee recipient, so its output needs that recipient's key.
     await submitCallTx(this.providers, {
       ...createCallTxOptions(
         vaultCompiledContract,
         "startTronWithdraw",
         this.vaultAddress,
         VAULT_PRIVATE_STATE_ID,
-        new Map([
-          [
-            bytesToHex(configured.feeRecipientCoinPublicKey.bytes),
-            bytesToHex(configured.feeRecipientEncryptionPublicKey),
-          ],
-        ]),
+        await this.feeRecipientKeys(),
         [
           inIndex,
-          {
-            tokenAddress: token.subarray(1),
-            amount: TRON_WITHDRAW_AMOUNT,
-            destTronAddress: recipient.subarray(1),
-          },
+          { tokenAddress: token.subarray(1), amount, destTronAddress: recipient.subarray(1) },
           window,
-          this.coin(bytesToHex(token), TRON_WITHDRAW_AMOUNT + TRON_WITHDRAW_FEE, TargetChain.Tron),
+          this.coin(bytesToHex(token), amount + fee, TargetChain.Tron),
         ],
       ),
       privateStateId: VAULT_PRIVATE_STATE_ID,
@@ -1110,12 +1348,63 @@ class VaultRun {
     return window;
   }
 
-  private async tronWindow(windowMs = TRON_WINDOW_MS): Promise<{
-    refBlockBytes: Uint8Array;
-    refBlockHash: Uint8Array;
-    timestamp: bigint;
-    expiration: bigint;
-  }> {
+  // Starts a Tron supply of `amount` underlying units plus the supply fee.
+  private async startTronSupply(
+    inIndex: bigint,
+    lend: TronLend,
+    amount: bigint,
+    windowMs: bigint,
+  ): Promise<TronWindow> {
+    await this.input.userFacade.waitForSyncedState();
+    const window = await this.tronWindow(windowMs);
+    await submitCallTx(this.providers, {
+      ...createCallTxOptions(
+        vaultCompiledContract,
+        "startTronSupply",
+        this.vaultAddress,
+        VAULT_PRIVATE_STATE_ID,
+        await this.feeRecipientKeys(),
+        [
+          inIndex,
+          { amount },
+          window,
+          this.coin(bytesToHex(lend.underlying), amount + TRON_SUPPLY_FEE, TargetChain.Tron),
+        ],
+      ),
+      privateStateId: VAULT_PRIVATE_STATE_ID,
+    });
+    return window;
+  }
+
+  // Starts a Tron redeem of `shares` share units plus the redeem fee.
+  private async startTronRedeem(
+    inIndex: bigint,
+    lend: TronLend,
+    shares: bigint,
+    windowMs: bigint,
+  ): Promise<TronWindow> {
+    await this.input.userFacade.waitForSyncedState();
+    const window = await this.tronWindow(windowMs);
+    await submitCallTx(this.providers, {
+      ...createCallTxOptions(
+        vaultCompiledContract,
+        "startTronRedeem",
+        this.vaultAddress,
+        VAULT_PRIVATE_STATE_ID,
+        await this.feeRecipientKeys(),
+        [
+          inIndex,
+          { shares },
+          window,
+          this.coin(bytesToHex(lend.share), shares + TRON_REDEEM_FEE, TargetChain.Tron),
+        ],
+      ),
+      privateStateId: VAULT_PRIVATE_STATE_ID,
+    });
+    return window;
+  }
+
+  private async tronWindow(windowMs = TRON_WINDOW_MS): Promise<TronWindow> {
     // The solidified head cannot be reorganised away, so its TaPoS reference stays valid.
     const reference = await getSolidifiedTronReferenceBlock(this.tronChain().rpcUrl);
     const timestamp = BigInt(Date.now());
@@ -1132,78 +1421,112 @@ class VaultRun {
     return { ethereum: Number(state.globalLastSeen), tron: Number(state.tronLastSeen) };
   }
 
+  // Lists a Tron token with its fees and factor, and keeps the colour the vault stored for
+  // its coins, which must be tronCoinColour(token, factor).
+  private async listTronToken(token: Uint8Array, fees: TokenFees, factor: bigint): Promise<void> {
+    await this.vault.callTx.addAllowedTronToken(token.subarray(1), fees, factor);
+    const config = (await this.readLedger()).allowedTronTokens.lookup(token.subarray(1));
+    const colour = pureCircuits.tronCoinColour(token.subarray(1), factor);
+    if (config.factor !== factor || bytesToHex(config.colour) !== bytesToHex(colour)) {
+      throw new Error(`the vault listed ${bytesToHex(token)} with another factor or colour`);
+    }
+    this.tronColours.set(bytesToHex(token), config.colour);
+  }
+
+  // The ID the flush gave the request queued under `inIndex` for `action`.
+  private async outIndexOf(action: VaultAction, inIndex: bigint): Promise<Uint8Array> {
+    const outIndex = [...(await this.readLedger()).outputRequestBuffer].find(
+      ([, { entry }]) => entry.action === action && entry.inIndex === inIndex,
+    )?.[0];
+    if (outIndex === undefined) throw new Error(`the flush did not move ${Action[action]}`);
+    return outIndex;
+  }
+
+  // Sets the vault's Tron supply fee limit, keeping every other gas setting, and returns the
+  // limit it replaced.
+  private async setTronSupplyFeeLimit(supply: bigint): Promise<bigint> {
+    const state = await this.readLedger();
+    const limits = state.vaultGasLimits;
+    await this.vault.callTx.setGasParams(
+      state.vaultMaxFeePerGas,
+      state.vaultMaxPriorityFeePerGas,
+      limits.withdraw,
+      limits.approve,
+      limits.swap,
+      limits.supply,
+      limits.redeem,
+      { ...state.vaultTronFeeLimits, supply },
+    );
+    return state.vaultTronFeeLimits.supply;
+  }
+
+  // Executes the ETH requests, and beside them the Tron steps in order, each between its
+  // own before and after steps, while TRE packs blocks. Waits for every attestation except
+  // the unviable ones', which only come once their windows close.
+  private async settleRound(
+    ethereum: readonly SentRequest[],
+    tronSteps: readonly TronStep[],
+  ): Promise<{ attested: Map<string, AttestedRequest>; unviable: ExecutedRequest[] }> {
+    const [ethereumAttested, tron] = await Promise.all([
+      (async () => {
+        const attested: AttestedRequest[] = [];
+        for (const request of ethereum.length > 0 ? await this.executeEvm(ethereum) : []) {
+          attested.push(await this.attest(request));
+        }
+        return attested;
+      })(),
+      this.tronChain().withBlocks(async () => {
+        const executed: ExecutedRequest[] = [];
+        for (const step of tronSteps) {
+          await step.before?.();
+          executed.push(await this.executeTron(step.request));
+          await step.after?.();
+        }
+        const settled = executed.filter((request) => request.outcome !== OutputKind.unviable);
+        return {
+          attested: await Promise.all(settled.map(async (request) => this.attest(request))),
+          unviable: executed.filter((request) => request.outcome === OutputKind.unviable),
+        };
+      }),
+    ]);
+    return {
+      attested: new Map(
+        [...ethereumAttested, ...tron.attested].map((request) => [request.operation, request]),
+      ),
+      unviable: tron.unviable,
+    };
+  }
+
+  // Records a scenario's outcome with its wall time from its first start.
+  private scenario(name: string, expected: string, observed: string, startedAt: number): void {
+    const wallMs = Date.now() - startedAt;
+    diagnostics(`scenario ${name}: ${observed} (${wallMs} ms)`);
+    this.scenarios.push({ name, expected, observed, wallMs });
+  }
+
   /**
-   * An ETH deposit and a Tron deposit fund a vault coin of each colour. Then an ETH withdraw
-   * and a Tron withdraw run side by side: each attestation is queued and flushed while the
-   * other request is still open, and each is offered to the other chain's complete circuit
-   * before the real completes.
+   * Tron lend beside ETH lend, and the Tron deposit and withdraw of an unshifted TRC-20
+   * beside an ETH deposit and withdraw. A USDT-like underlying (listed unshifted, the vault's
+   * Tron USDT) and an ERC-4626 over it with 18-decimal shares (listed with factor 10^12) form
+   * the lend pair. Every Tron verdict is reached: executed supplies, redeems, deposits and
+   * withdraws; a supply against a paused share token and a redeem with no cash left, failed
+   * and refunded; a supply whose fee limit TRE refuses and a redeem signed but never
+   * broadcast, unviable and refunded; a withdraw, a supply and a redeem never sent, refunded
+   * once their windows close to sends. Each chain's attestations fold only into its own
+   * last-seen height, and each chain's attestation is offered to the other chain's complete.
    */
   async runTron(): Promise<VaultTronRunResult> {
     const tron = this.tronChain();
-    const artifact = this.input.tron?.tokenArtifact;
-    if (artifact === undefined) throw new Error("this run has no Tron token artifact");
+    const gateArtifact = this.input.tron?.tokenArtifact;
+    if (gateArtifact === undefined) throw new Error("this run has no Tron token artifact");
+    const usdt = this.tronUsdt;
+    if (usdt === undefined) throw new Error("the vault was initialised without a Tron USDT");
     const transferSchema = pureCircuits.vaultOutputSchema();
-    const { usdc } = this.targets;
-
-    diagnostics("deploying and allowing the TRC-20, funding the Tron accounts");
-    const token = await tron.deploy(artifact);
-    const tokenHex = bytesToHex(token);
-    await this.vault.callTx.addAllowedTronToken(token.subarray(1), {
-      ...NO_FEES,
-      withdraw: TRON_WITHDRAW_FEE,
-    });
+    const { usdc, stata } = this.targets;
+    const wallet = this.input.userFacade;
     const userTron = tronAddressFromEvm(this.userEvm);
     const vaultTron = tronAddressFromEvm(this.vaultEvm);
-    await tron.sendTrx(userTron, TRON_ACCOUNT_TRX);
-    await tron.sendTrx(vaultTron, TRON_ACCOUNT_TRX);
-    await tron.sendToken(token, userTron, TRON_DEPOSIT_AMOUNT);
-
-    diagnostics("queueing the ETH and Tron deposits");
-    const depositStart: StartedRequest = {
-      operation: "deposit",
-      action: Action.deposit,
-      inIndex: newInputIndex(),
-      signer: this.userEvm,
-      outputSchema: transferSchema,
-    };
-    const tronDepositStart: StartedRequest = {
-      operation: "tronDeposit",
-      action: Action.tronDeposit,
-      inIndex: newInputIndex(),
-      signer: bytesToHex(userTron),
-      outputSchema: transferSchema,
-    };
-    await this.vault.callTx.startDeposit(
-      depositStart.inIndex,
-      BigInt(await this.evm.provider.getTransactionCount(this.userEvm)),
-      DEPOSIT_GAS,
-      { erc20Address: hexToBytes(usdc), amount: WITHDRAW_AMOUNT },
-    );
-    await this.vault.callTx.startTronDeposit(
-      tronDepositStart.inIndex,
-      { ...(await this.tronWindow()), feeLimit: TRON_DEPOSIT_FEE_LIMIT },
-      { tokenAddress: token.subarray(1), amount: TRON_DEPOSIT_AMOUNT },
-    );
-    const [depositSent, tronDepositSent] = await this.flushAndSend([
-      depositStart,
-      tronDepositStart,
-    ]);
-    if (depositSent === undefined || tronDepositSent === undefined) {
-      throw new Error("the deposits were not sent");
-    }
-    const vaultUsdcBefore = await this.evm.balanceOf(usdc, this.vaultEvm);
-    const vaultTokenBefore = await tron.balanceOf(token, vaultTron);
-    const [deposit, tronDeposit] = await Promise.all([
-      this.attestEvm(depositSent),
-      tron.withBlocks(async () => this.attest(await this.executeTron(tronDepositSent))),
-    ]);
-    if ((await this.evm.balanceOf(usdc, this.vaultEvm)) - vaultUsdcBefore !== WITHDRAW_AMOUNT) {
-      throw new Error("the ETH deposit did not move the ERC20 into the vault account");
-    }
-    if ((await tron.balanceOf(token, vaultTron)) - vaultTokenBefore !== TRON_DEPOSIT_AMOUNT) {
-      throw new Error("the Tron deposit did not move the TRC-20 into the vault's Tron account");
-    }
-    await this.queueAndFlush([deposit, tronDeposit]);
+    const vaultWord = evmAddressAbiWord(vaultTron.subarray(1));
     const noRecipient = {
       is_some: false,
       value: {
@@ -1212,56 +1535,292 @@ class VaultRun {
         right: { bytes: new Uint8Array(32) },
       },
     };
+    const noOutput = new Uint8Array(32);
+    const started = new Map<string, number>();
+    const start = (
+      operation: string,
+      action: VaultAction,
+      signer: string,
+      outputSchema: Uint8Array,
+      fate?: TronFate,
+    ): StartedRequest => {
+      started.set(operation, Date.now());
+      return { operation, action, inIndex: newInputIndex(), signer, outputSchema, fate };
+    };
+    const startedAt = (operation: string): number => {
+      const at = started.get(operation);
+      if (at === undefined) throw new Error(`${operation} never started`);
+      return at;
+    };
+
+    diagnostics(
+      "deploying the TRC-20 and the share token, listing them, funding the Tron accounts",
+    );
+    const gate = await tron.deploy(await readTronArtifact(gateArtifact));
+    const gateHex = bytesToHex(gate);
+    const share = await tron.deploy(
+      await readLendArtifact("MidnightVaultTronLend"),
+      evmAddressAbiWord(usdt.subarray(1)),
+    );
+    const lend: TronLend = { underlying: usdt, share };
+    const usdtHex = bytesToHex(usdt);
+    const shareHex = bytesToHex(share);
+    await this.listTronToken(gate, { ...NO_FEES, withdraw: TRON_WITHDRAW_FEE }, 1n);
+    await this.listTronToken(usdt, { ...NO_FEES, supply: TRON_SUPPLY_FEE }, 1n);
+    await this.listTronToken(share, { ...NO_FEES, redeem: TRON_REDEEM_FEE }, SHARE_FACTOR);
+    if (
+      this.tronColour(usdtHex) !==
+        bytesToHex(pureCircuits.vaultTronTokenDomainSeparator(usdt.subarray(1))) ||
+      this.tronColour(shareHex) ===
+        bytesToHex(pureCircuits.vaultTronTokenDomainSeparator(share.subarray(1)))
+    ) {
+      throw new Error(
+        "an unshifted token changed colour, or the shifted one kept the unshifted colour",
+      );
+    }
+    await this.vault.callTx.setTronLendPair(usdt.subarray(1), share.subarray(1), TRON_MIN_SUPPLY);
+    await tron.sendTrx(userTron, TRON_ACCOUNT_TRX);
+    await tron.sendTrx(vaultTron, TRON_ACCOUNT_TRX);
+    await tron.sendToken(gate, userTron, TRON_DEPOSIT_AMOUNT);
+    await tron.sendToken(usdt, userTron, TRON_USDT_DEPOSIT);
+    // The funder's own deposit and donation give the shares an exchange rate whose supply
+    // leaves a remainder, and the shares the user deposits.
+    const funderWord = evmAddressAbiWord(tron.funder.subarray(1));
+    await tron.trigger(
+      usdt,
+      "approve(address,uint256)",
+      concat(evmAddressAbiWord(share.subarray(1)), numericAbiWord(TRON_USDT_SUPPLY)),
+    );
+    await tron.trigger(
+      share,
+      "deposit(uint256,address)",
+      concat(numericAbiWord(LEND_SEED), funderWord),
+    );
+    await tron.sendToken(usdt, share, LEND_SEED_DONATION);
+    await tron.sendToken(share, userTron, TRON_SHARE_DEPOSIT * SHARE_FACTOR);
+
+    diagnostics("queueing the ETH deposit and approval, the Tron deposits and approval");
+    const depositStart = start("deposit", Action.deposit, this.userEvm, transferSchema);
+    const approveStart = start("approveStata", Action.approve, this.vaultEvm, transferSchema);
+    const gateDepositStart = start(
+      "tronDeposit",
+      Action.tronDeposit,
+      bytesToHex(userTron),
+      transferSchema,
+    );
+    const usdtDepositStart = start(
+      "tronDepositUsdt",
+      Action.tronDeposit,
+      bytesToHex(userTron),
+      transferSchema,
+      TronFate.ExecutesReturningFalse,
+    );
+    const shareDepositStart = start(
+      "tronDepositShares",
+      Action.tronDeposit,
+      bytesToHex(userTron),
+      transferSchema,
+    );
+    const tronApproveStart = start(
+      "tronApprove",
+      Action.tronApprove,
+      bytesToHex(vaultTron),
+      transferSchema,
+    );
+    await this.vault.callTx.startDeposit(
+      depositStart.inIndex,
+      BigInt(await this.evm.provider.getTransactionCount(this.userEvm)),
+      DEPOSIT_GAS,
+      { erc20Address: hexToBytes(usdc), amount: WITHDRAW_AMOUNT + SUPPLY_AMOUNT },
+    );
+    await this.vault.callTx.startApproveStata(approveStart.inIndex);
+    for (const [request, token, amount] of [
+      [gateDepositStart, gate, TRON_DEPOSIT_AMOUNT],
+      [usdtDepositStart, usdt, TRON_USDT_DEPOSIT],
+      [shareDepositStart, share, TRON_SHARE_DEPOSIT],
+    ] as const) {
+      await this.vault.callTx.startTronDeposit(
+        request.inIndex,
+        { ...(await this.tronWindow()), feeLimit: TRON_DEPOSIT_FEE_LIMIT },
+        { tokenAddress: token.subarray(1), amount },
+      );
+    }
+    await this.vault.callTx.startTronApprove(tronApproveStart.inIndex, await this.tronWindow());
+    const openingSent = await this.flushAndSend([
+      depositStart,
+      approveStart,
+      gateDepositStart,
+      usdtDepositStart,
+      shareDepositStart,
+      tronApproveStart,
+    ]);
+    const sentOf = (sent: readonly SentRequest[], operation: string): SentRequest => {
+      const request = sent.find((candidate) => candidate.operation === operation);
+      if (request === undefined) throw new Error(`${operation} was not sent`);
+      return request;
+    };
+    const vaultUsdcBefore = await this.evm.balanceOf(usdc, this.vaultEvm);
+    const vaultBefore = {
+      gate: await tron.balanceOf(gate, vaultTron),
+      usdt: await tron.balanceOf(usdt, vaultTron),
+      share: await tron.balanceOf(share, vaultTron),
+    };
+    const opening = await this.settleRound(
+      [sentOf(openingSent, "deposit"), sentOf(openingSent, "approveStata")],
+      ["tronDeposit", "tronDepositUsdt", "tronDepositShares", "tronApprove"].map((operation) => ({
+        request: sentOf(openingSent, operation),
+      })),
+    );
+    if (
+      (await this.evm.balanceOf(usdc, this.vaultEvm)) - vaultUsdcBefore !==
+      WITHDRAW_AMOUNT + SUPPLY_AMOUNT
+    ) {
+      throw new Error("the ETH deposit did not move the ERC20 into the vault account");
+    }
+    const shareDeposit = attestedOf(opening.attested, "tronDepositShares");
+    if (
+      (await tron.balanceOf(gate, vaultTron)) - vaultBefore.gate !== TRON_DEPOSIT_AMOUNT ||
+      (await tron.balanceOf(usdt, vaultTron)) - vaultBefore.usdt !== TRON_USDT_DEPOSIT ||
+      (await tron.balanceOf(share, vaultTron)) - vaultBefore.share !==
+        TRON_SHARE_DEPOSIT * SHARE_FACTOR ||
+      calldataWord(shareDeposit.calldata, 1) !== TRON_SHARE_DEPOSIT * SHARE_FACTOR
+    ) {
+      throw new Error("a Tron deposit did not move its base units into the vault's Tron account");
+    }
+    const allowance = await tron.read(
+      usdt,
+      "allowance(address,address)",
+      concat(vaultWord, evmAddressAbiWord(share.subarray(1))),
+    );
+    if (allowance !== pureCircuits.unlimitedAllowance()) {
+      throw new Error(`the Tron approval left an allowance of ${allowance}`);
+    }
+    await this.queueAndFlush([...opening.attested.values()]);
+    const deposit = attestedOf(opening.attested, "deposit");
     await this.vault.callTx.completeDeposit(
       hexToBytes(deposit.requestId),
       deposit.output,
       randomBytes(32),
       noRecipient,
     );
-    await this.vault.callTx.completeTronDeposit(
-      hexToBytes(tronDeposit.requestId),
-      tronDeposit.output,
-      randomBytes(32),
-      noRecipient,
+    const approveStata = attestedOf(opening.attested, "approveStata");
+    await this.vault.callTx.completeApprove(
+      hexToBytes(approveStata.requestId),
+      approveStata.output,
     );
-    await this.removed(deposit);
-    await this.removed(tronDeposit);
-    await this.expectBalance(usdc, WITHDRAW_AMOUNT);
-    await this.expectBalance(tokenHex, TRON_DEPOSIT_AMOUNT, TargetChain.Tron);
+    for (const operation of ["tronDeposit", "tronDepositUsdt", "tronDepositShares"]) {
+      const tronDeposit = attestedOf(opening.attested, operation);
+      await this.vault.callTx.completeTronDeposit(
+        hexToBytes(tronDeposit.requestId),
+        tronDeposit.output,
+        randomBytes(32),
+        noRecipient,
+      );
+    }
+    const tronApprove = attestedOf(opening.attested, "tronApprove");
+    await this.vault.callTx.completeTronApprove(
+      hexToBytes(tronApprove.requestId),
+      tronApprove.output,
+    );
+    for (const request of opening.attested.values()) await this.removed(request);
+    let usdcCoins = WITHDRAW_AMOUNT + SUPPLY_AMOUNT;
+    let gateCoins = TRON_DEPOSIT_AMOUNT;
+    let usdtCoins = TRON_USDT_DEPOSIT;
+    let shareCoins = TRON_SHARE_DEPOSIT;
+    await this.expectBalance(usdc, usdcCoins);
+    await this.expectBalance(gateHex, gateCoins, TargetChain.Tron);
+    await this.expectBalance(usdtHex, usdtCoins, TargetChain.Tron);
+    await this.expectBalance(shareHex, shareCoins, TargetChain.Tron);
+    for (const [operation, request] of opening.attested) {
+      const settles =
+        request.action === Action.approve || request.action === Action.tronApprove
+          ? "executed, request closed"
+          : "executed, deposit minted";
+      this.scenario(operation, settles, settles, startedAt(operation));
+    }
 
-    // Queued and flushed now, never sent: its refund opens while the other withdraws run.
-    diagnostics("queueing and flushing a Tron withdraw nobody will send in time");
-    const unsentInIndex = newInputIndex();
-    const unsentWindow = await this.startTronWithdraw(
-      unsentInIndex,
-      token,
-      tronAddressFromEvm(randomBytes(20)),
-      TRON_UNSENT_WINDOW_MS,
+    // Queued and flushed now, never sent: their refunds open while the other requests run.
+    diagnostics(
+      "queueing and flushing a Tron withdraw, supply and redeem nobody will send in time",
     );
+    const unsent = {
+      withdraw: { inIndex: newInputIndex(), action: Action.tronWithdraw as VaultAction },
+      supply: { inIndex: newInputIndex(), action: Action.tronSupply as VaultAction },
+      redeem: { inIndex: newInputIndex(), action: Action.tronRedeem as VaultAction },
+    };
     const unsentStartedAt = Date.now();
-    await this.flush([unsentInIndex], []);
-    const unsentOutIndex = [...(await this.readLedger()).outputRequestBuffer].find(
-      ([, { entry }]) => entry.action === Action.tronWithdraw && entry.inIndex === unsentInIndex,
-    )?.[0];
-    if (unsentOutIndex === undefined) throw new Error("the flush did not move the unsent withdraw");
+    const unsentWindows = [
+      await this.startTronWithdraw(
+        unsent.withdraw.inIndex,
+        gate,
+        TRON_WITHDRAW_AMOUNT,
+        tronAddressFromEvm(randomBytes(20)),
+        TRON_UNSENT_WINDOW_MS,
+      ),
+      await this.startTronSupply(
+        unsent.supply.inIndex,
+        lend,
+        TRON_SMALL_SUPPLY,
+        TRON_UNSENT_WINDOW_MS,
+      ),
+      await this.startTronRedeem(
+        unsent.redeem.inIndex,
+        lend,
+        TRON_SMALL_REDEEM,
+        TRON_UNSENT_WINDOW_MS,
+      ),
+    ];
+    gateCoins -= TRON_WITHDRAW_AMOUNT + TRON_WITHDRAW_FEE;
+    usdtCoins -= TRON_SMALL_SUPPLY + TRON_SUPPLY_FEE;
+    shareCoins -= TRON_SMALL_REDEEM + TRON_REDEEM_FEE;
+    await this.flush(
+      Object.values(unsent).map((request) => request.inIndex),
+      [],
+    );
+    const unsentOut = {
+      withdraw: await this.outIndexOf(unsent.withdraw.action, unsent.withdraw.inIndex),
+      supply: await this.outIndexOf(unsent.supply.action, unsent.supply.inIndex),
+      redeem: await this.outIndexOf(unsent.redeem.action, unsent.redeem.inIndex),
+    };
 
-    diagnostics("queueing the ETH and Tron withdraws");
+    diagnostics(
+      "queueing the ETH withdraw and supply beside the Tron withdraws, supplies and redeems",
+    );
+    const vaultSigner = bytesToHex(vaultTron);
+    const supplySchema = pureCircuits.supplyOutputSchema();
+    const redeemSchema = pureCircuits.redeemOutputSchema();
+    const withdrawStart = start("withdraw", Action.withdraw, this.vaultEvm, transferSchema);
+    const supplyStart = start("supply", Action.supply, this.vaultEvm, supplySchema);
+    const tronWithdrawStart = start(
+      "tronWithdraw",
+      Action.tronWithdraw,
+      vaultSigner,
+      transferSchema,
+    );
+    const tronSupplyStart = start("tronSupply", Action.tronSupply, vaultSigner, supplySchema);
+    const pausedSupplyStart = start(
+      "tronSupplyPaused",
+      Action.tronSupply,
+      vaultSigner,
+      supplySchema,
+      TronFate.Reverts,
+    );
+    const noCashRedeemStart = start(
+      "tronRedeemNoCash",
+      Action.tronRedeem,
+      vaultSigner,
+      redeemSchema,
+      TronFate.Reverts,
+    );
+    const shareWithdrawStart = start(
+      "tronWithdrawShares",
+      Action.tronWithdraw,
+      vaultSigner,
+      transferSchema,
+    );
     const recipient = tronAddressFromEvm(randomBytes(20));
-    const recipientBefore = await tron.balanceOf(token, recipient);
-    const withdrawStart: StartedRequest = {
-      operation: "withdraw",
-      action: Action.withdraw,
-      inIndex: newInputIndex(),
-      signer: this.vaultEvm,
-      outputSchema: transferSchema,
-    };
-    const tronWithdrawStart: StartedRequest = {
-      operation: "tronWithdraw",
-      action: Action.tronWithdraw,
-      inIndex: newInputIndex(),
-      signer: bytesToHex(vaultTron),
-      outputSchema: transferSchema,
-    };
+    const shareRecipient = tronAddressFromEvm(randomBytes(20));
+    const recipientBefore = await tron.balanceOf(gate, recipient);
     await this.vault.callTx.startWithdraw(
       withdrawStart.inIndex,
       {
@@ -1271,45 +1830,193 @@ class VaultRun {
       },
       this.coin(usdc, WITHDRAW_AMOUNT),
     );
-    await this.startTronWithdraw(tronWithdrawStart.inIndex, token, recipient, TRON_WINDOW_MS);
-    const [withdrawSent, tronWithdrawSent] = await this.flushAndSend([
+    await wallet.waitForSyncedState();
+    await this.vault.callTx.startSupply(
+      supplyStart.inIndex,
+      { amount: SUPPLY_AMOUNT },
+      this.coin(usdc, SUPPLY_AMOUNT),
+    );
+    usdcCoins -= WITHDRAW_AMOUNT + SUPPLY_AMOUNT;
+    await this.startTronWithdraw(
+      tronWithdrawStart.inIndex,
+      gate,
+      TRON_WITHDRAW_AMOUNT,
+      recipient,
+      TRON_WINDOW_MS,
+    );
+    await this.startTronSupply(tronSupplyStart.inIndex, lend, TRON_SUPPLY_AMOUNT, TRON_WINDOW_MS);
+    await this.startTronSupply(pausedSupplyStart.inIndex, lend, TRON_SMALL_SUPPLY, TRON_WINDOW_MS);
+    await this.startTronRedeem(noCashRedeemStart.inIndex, lend, TRON_SMALL_REDEEM, TRON_WINDOW_MS);
+    await this.startTronWithdraw(
+      shareWithdrawStart.inIndex,
+      share,
+      TRON_SHARE_WITHDRAW,
+      shareRecipient,
+      TRON_WINDOW_MS,
+    );
+    gateCoins -= TRON_WITHDRAW_AMOUNT + TRON_WITHDRAW_FEE;
+    usdtCoins -= TRON_SUPPLY_AMOUNT + TRON_SUPPLY_FEE + TRON_SMALL_SUPPLY + TRON_SUPPLY_FEE;
+    shareCoins -= TRON_SMALL_REDEEM + TRON_REDEEM_FEE + TRON_SHARE_WITHDRAW;
+    // Started last and sent first: their windows close soonest. The starved supply keeps the
+    // fee limit it started under, so the limit is restored right after its start.
+    const starvedSupplyStart = start(
+      "tronSupplyStarved",
+      Action.tronSupply,
+      vaultSigner,
+      supplySchema,
+      TronFate.BroadcastRefused,
+    );
+    const supplyFeeLimit = await this.setTronSupplyFeeLimit(TRON_STARVED_FEE_LIMIT);
+    await this.startTronSupply(
+      starvedSupplyStart.inIndex,
+      lend,
+      TRON_SMALL_SUPPLY,
+      TRON_SHORT_WINDOW_MS,
+    );
+    await this.setTronSupplyFeeLimit(supplyFeeLimit);
+    const unbroadcastRedeemStart = start(
+      "tronRedeemUnbroadcast",
+      Action.tronRedeem,
+      vaultSigner,
+      redeemSchema,
+      TronFate.NeverBroadcast,
+    );
+    await this.startTronRedeem(
+      unbroadcastRedeemStart.inIndex,
+      lend,
+      TRON_SMALL_REDEEM,
+      TRON_SHORT_WINDOW_MS,
+    );
+    usdtCoins -= TRON_SMALL_SUPPLY + TRON_SUPPLY_FEE;
+    shareCoins -= TRON_SMALL_REDEEM + TRON_REDEEM_FEE;
+    const legsSent = await this.flushAndSend([
+      starvedSupplyStart,
+      unbroadcastRedeemStart,
       withdrawStart,
+      supplyStart,
       tronWithdrawStart,
+      tronSupplyStart,
+      pausedSupplyStart,
+      noCashRedeemStart,
+      shareWithdrawStart,
     ]);
-    if (withdrawSent === undefined || tronWithdrawSent === undefined) {
-      throw new Error("the withdraws were not sent");
-    }
     const userUsdcBefore = await this.evm.balanceOf(usdc, this.userEvm);
-    const vaultTokenBeforeWithdraw = await tron.balanceOf(token, vaultTron);
-    const [withdraw, tronWithdraw] = await Promise.all([
-      this.attestEvm(withdrawSent),
-      tron.withBlocks(async () => this.attest(await this.executeTron(tronWithdrawSent))),
-    ]);
+    const vaultBeforeLegs = {
+      gate: await tron.balanceOf(gate, vaultTron),
+      usdt: await tron.balanceOf(usdt, vaultTron),
+      share: await tron.balanceOf(share, vaultTron),
+    };
+    let expectedShares = 0n;
+    const setPaused = async (paused: boolean) => {
+      await tron.trigger(share, "setPaused(bool)", numericAbiWord(paused ? 1n : 0n));
+    };
+    let lentCash = 0n;
+    const legs = await this.settleRound(
+      [sentOf(legsSent, "withdraw"), sentOf(legsSent, "supply")],
+      [
+        {
+          request: sentOf(legsSent, "tronSupply"),
+          before: async () => {
+            expectedShares = await tron.read(
+              share,
+              "previewDeposit(uint256)",
+              numericAbiWord(TRON_SUPPLY_AMOUNT),
+            );
+          },
+        },
+        {
+          request: sentOf(legsSent, "tronSupplyPaused"),
+          before: async () => setPaused(true),
+          after: async () => setPaused(false),
+        },
+        {
+          request: sentOf(legsSent, "tronRedeemNoCash"),
+          before: async () => {
+            lentCash = await tron.balanceOf(usdt, share);
+            await tron.trigger(share, "lend(uint256)", numericAbiWord(lentCash));
+          },
+          after: async () => {
+            await tron.sendToken(usdt, share, lentCash);
+            await tron.trigger(share, "repay(uint256)", numericAbiWord(lentCash));
+          },
+        },
+        { request: sentOf(legsSent, "tronWithdrawShares") },
+        { request: sentOf(legsSent, "tronWithdraw") },
+        { request: sentOf(legsSent, "tronSupplyStarved") },
+        { request: sentOf(legsSent, "tronRedeemUnbroadcast") },
+      ],
+    );
     if ((await this.evm.balanceOf(usdc, this.userEvm)) - userUsdcBefore !== WITHDRAW_AMOUNT) {
       throw new Error("the ETH withdraw did not pay the destination");
     }
-    const recipientAfter = await tron.balanceOf(token, recipient);
+    const ethSupply = attestedOf(legs.attested, "supply");
+    if (ethSupply.decoded.shares !== SUPPLY_AMOUNT) {
+      throw new Error(`the ETH supply attested ${String(ethSupply.decoded.shares)} shares`);
+    }
+    const recipientAfter = await tron.balanceOf(gate, recipient);
     if (recipientAfter - recipientBefore !== TRON_WITHDRAW_AMOUNT) {
       throw new Error(`the Tron withdraw paid ${recipientAfter - recipientBefore}`);
     }
-    if (
-      vaultTokenBeforeWithdraw - (await tron.balanceOf(token, vaultTron)) !==
-      TRON_WITHDRAW_AMOUNT
-    ) {
-      throw new Error("the Tron withdraw did not leave the vault's Tron account");
-    }
-
-    // Each chain's attestation folds only into its own last-seen height.
-    const before = await this.lastSeen();
-    if (tronWithdraw.blockHeight <= before.tron) {
+    const tronSupply = attestedOf(legs.attested, "tronSupply");
+    const supplied = tronSupply.decoded.shares;
+    if (typeof supplied !== "bigint" || supplied !== expectedShares || supplied <= 2n ** 64n) {
       throw new Error(
-        `the Tron withdraw attested ${tronWithdraw.blockHeight}, not above ${before.tron}`,
+        `the Tron supply attested ${String(supplied)}, expected ${expectedShares} above 2^64`,
       );
     }
-    await this.queueAndFlush([withdraw]);
-    const afterEthereum = await this.lastSeen();
+    const mintedShares = supplied / SHARE_FACTOR;
+    const remainder = supplied - mintedShares * SHARE_FACTOR;
+    const shareWithdraw = attestedOf(legs.attested, "tronWithdrawShares");
+    const shareReceived = await tron.balanceOf(share, shareRecipient);
     if (
-      afterEthereum.ethereum !== Math.max(before.ethereum, withdraw.blockHeight) ||
+      calldataWord(tronSupply.calldata, 0) !== TRON_SUPPLY_AMOUNT ||
+      calldataWord(shareWithdraw.calldata, 1) !== TRON_SHARE_WITHDRAW * SHARE_FACTOR ||
+      shareReceived !== TRON_SHARE_WITHDRAW * SHARE_FACTOR
+    ) {
+      throw new Error(
+        "a Tron supply or share withdraw moved other base units than its units times the factor",
+      );
+    }
+    const vaultAfterLegs = {
+      gate: await tron.balanceOf(gate, vaultTron),
+      usdt: await tron.balanceOf(usdt, vaultTron),
+      share: await tron.balanceOf(share, vaultTron),
+    };
+    if (
+      vaultBeforeLegs.gate - vaultAfterLegs.gate !== TRON_WITHDRAW_AMOUNT ||
+      vaultBeforeLegs.usdt - vaultAfterLegs.usdt !== TRON_SUPPLY_AMOUNT ||
+      vaultAfterLegs.share - vaultBeforeLegs.share !== supplied - TRON_SHARE_WITHDRAW * SHARE_FACTOR
+    ) {
+      throw new Error(
+        `the vault's Tron account moved ${JSON.stringify(vaultAfterLegs, bigintJson)}`,
+      );
+    }
+
+    // Each chain's attestations fold only into its own last-seen height.
+    const ethereumFlushed = ["withdraw", "supply"];
+    const tronFlushed = [
+      "tronWithdraw",
+      "tronSupply",
+      "tronSupplyPaused",
+      "tronRedeemNoCash",
+      "tronWithdrawShares",
+    ];
+    const heightOf = (operations: readonly string[]) =>
+      Math.max(...operations.map((operation) => attestedOf(legs.attested, operation).blockHeight));
+    const before = await this.lastSeen();
+    if (heightOf(tronFlushed) <= before.tron) {
+      throw new Error(
+        `the Tron requests attested ${heightOf(tronFlushed)}, not above ${before.tron}`,
+      );
+    }
+    await this.queueAndFlush(
+      ethereumFlushed.map((operation) => attestedOf(legs.attested, operation)),
+    );
+    const afterEthereum = await this.lastSeen();
+    const withdraw = attestedOf(legs.attested, "withdraw");
+    const tronWithdraw = attestedOf(legs.attested, "tronWithdraw");
+    if (
+      afterEthereum.ethereum !== Math.max(before.ethereum, heightOf(ethereumFlushed)) ||
       afterEthereum.tron !== before.tron ||
       !(await this.readLedger()).bidirectionalTronWithdrawMap.member(
         hexToBytes(tronWithdraw.requestId),
@@ -1317,10 +2024,10 @@ class VaultRun {
     ) {
       throw new Error(`the ETH flush moved ${JSON.stringify({ before, afterEthereum })}`);
     }
-    await this.queueAndFlush([tronWithdraw]);
+    await this.queueAndFlush(tronFlushed.map((operation) => attestedOf(legs.attested, operation)));
     const afterTron = await this.lastSeen();
     if (
-      afterTron.tron !== Math.max(before.tron, tronWithdraw.blockHeight) ||
+      afterTron.tron !== Math.max(before.tron, heightOf(tronFlushed)) ||
       afterTron.ethereum !== afterEthereum.ethereum ||
       !(await this.readLedger()).bidirectionalWithdrawMap.member(hexToBytes(withdraw.requestId))
     ) {
@@ -1349,39 +2056,271 @@ class VaultRun {
       withdraw.output,
       randomBytes(32),
     );
+    await this.vault.callTx.completeSupply(
+      hexToBytes(ethSupply.requestId),
+      ethSupply.output,
+      randomBytes(32),
+    );
     await this.vault.callTx.completeTronWithdraw(
       hexToBytes(tronWithdraw.requestId),
       tronWithdraw.output,
       randomBytes(32),
     );
-    await this.removed(withdraw);
-    await this.removed(tronWithdraw);
-    // The burns stand: no refund coin is minted back. The unsent withdraw's coin is burned.
-    await this.expectBalance(usdc, 0n);
-    await this.expectBalance(
-      tokenHex,
-      TRON_DEPOSIT_AMOUNT - 2n * (TRON_WITHDRAW_AMOUNT + TRON_WITHDRAW_FEE),
-      TargetChain.Tron,
+    await this.vault.callTx.completeTronWithdraw(
+      hexToBytes(shareWithdraw.requestId),
+      shareWithdraw.output,
+      randomBytes(32),
+    );
+    await this.vault.callTx.completeTronSupply(
+      hexToBytes(tronSupply.requestId),
+      tronSupply.output,
+      randomBytes(32),
+    );
+    const pausedSupply = attestedOf(legs.attested, "tronSupplyPaused");
+    await this.vault.callTx.completeTronSupply(
+      hexToBytes(pausedSupply.requestId),
+      noOutput,
+      randomBytes(32),
+    );
+    const noCashRedeem = attestedOf(legs.attested, "tronRedeemNoCash");
+    await this.vault.callTx.completeTronRedeem(
+      hexToBytes(noCashRedeem.requestId),
+      noOutput,
+      randomBytes(32),
+    );
+    for (const operation of [...ethereumFlushed, ...tronFlushed]) {
+      await this.removed(attestedOf(legs.attested, operation));
+    }
+    // The supply mints its floored shares; the refused supply and redeem re-mint what they
+    // burned, less the fee.
+    shareCoins += mintedShares + TRON_SMALL_REDEEM;
+    usdtCoins += TRON_SMALL_SUPPLY;
+    await this.expectBalance(usdc, usdcCoins);
+    await this.expectBalance(stata, SUPPLY_AMOUNT);
+    await this.expectBalance(gateHex, gateCoins, TargetChain.Tron);
+    await this.expectBalance(usdtHex, usdtCoins, TargetChain.Tron);
+    await this.expectBalance(shareHex, shareCoins, TargetChain.Tron);
+    this.scenario(
+      "withdraw",
+      "executed, burn stands",
+      "executed, burn stands",
+      startedAt("withdraw"),
+    );
+    this.scenario(
+      "supply",
+      "executed, shares minted",
+      `executed, ${SUPPLY_AMOUNT} shares minted`,
+      startedAt("supply"),
+    );
+    this.scenario(
+      "tronWithdraw",
+      "executed, recipient paid",
+      `executed, recipient +${TRON_WITHDRAW_AMOUNT}`,
+      startedAt("tronWithdraw"),
+    );
+    this.scenario(
+      "tronSupply",
+      "executed, floor(shares / 10^12) minted, remainder < 10^12 kept on Tron",
+      `executed, ${supplied} shares, ${mintedShares} minted, remainder ${remainder}`,
+      startedAt("tronSupply"),
+    );
+    this.scenario(
+      "tronSupplyPaused",
+      "failed, underlying refunded, fee kept",
+      `failed (${pausedSupply.tronCost?.result}), ${TRON_SMALL_SUPPLY} refunded, fee ${TRON_SUPPLY_FEE} kept`,
+      startedAt("tronSupplyPaused"),
+    );
+    this.scenario(
+      "tronRedeemNoCash",
+      "failed, shares refunded, fee kept",
+      `failed (${noCashRedeem.tronCost?.result}, ${lentCash} lent out), ${TRON_SMALL_REDEEM} refunded, fee ${TRON_REDEEM_FEE} kept`,
+      startedAt("tronRedeemNoCash"),
+    );
+    this.scenario(
+      "tronWithdrawShares",
+      "executed, recipient paid units x 10^12",
+      `executed, recipient +${shareReceived}`,
+      startedAt("tronWithdrawShares"),
     );
 
-    // From the expiration's whole seconds minus the send margin, the send is refused and
-    // the withdrawer's refund re-mints the amount; the fee stays taken.
-    const refundOpensAt =
-      Number(unsentWindow.expiration / 1000n - pureCircuits.tronWithdrawSendMinRemainingSeconds()) *
-      1000;
-    diagnostics(`waiting for the unsent withdraw's refund to open at ${refundOpensAt}`);
-    await new Promise((resolve) => setTimeout(resolve, Math.max(0, refundOpensAt - Date.now())));
-    const lateSendRefusal = await refusal(() => this.vault.callTx.sendTronWithdraw(unsentOutIndex));
-    if (!lateSendRefusal.includes("too close")) {
-      throw new Error(`the late send failed otherwise: ${lateSendRefusal}`);
-    }
-    await this.vault.callTx.refundUnsentTronWithdraw(unsentInIndex, randomBytes(32));
-    const waitedMs = Date.now() - unsentStartedAt;
-    await this.expectBalance(
-      tokenHex,
-      TRON_DEPOSIT_AMOUNT - TRON_WITHDRAW_AMOUNT - 2n * TRON_WITHDRAW_FEE,
-      TargetChain.Tron,
+    diagnostics("waiting for the starved supply's and the unbroadcast redeem's unviable verdicts");
+    const unviable = await tron.withBlocks(async () =>
+      Promise.all(legs.unviable.map(async (request) => this.attest(request, UNVIABLE_TIMEOUT_MS))),
     );
+    await this.queueAndFlush(unviable);
+    const starvedSupply = attestedOf(
+      new Map(unviable.map((r) => [r.operation, r])),
+      "tronSupplyStarved",
+    );
+    const unbroadcastRedeem = attestedOf(
+      new Map(unviable.map((r) => [r.operation, r])),
+      "tronRedeemUnbroadcast",
+    );
+    await this.vault.callTx.completeTronSupply(
+      hexToBytes(starvedSupply.requestId),
+      noOutput,
+      randomBytes(32),
+    );
+    await this.vault.callTx.completeTronRedeem(
+      hexToBytes(unbroadcastRedeem.requestId),
+      noOutput,
+      randomBytes(32),
+    );
+    await this.removed(starvedSupply);
+    await this.removed(unbroadcastRedeem);
+    usdtCoins += TRON_SMALL_SUPPLY;
+    shareCoins += TRON_SMALL_REDEEM;
+    await this.expectBalance(usdtHex, usdtCoins, TargetChain.Tron);
+    await this.expectBalance(shareHex, shareCoins, TargetChain.Tron);
+    const broadcastRefusal = starvedSupply.broadcastRefusal ?? "";
+    this.scenario(
+      "tronSupplyStarved",
+      "out of energy: failed or unviable, underlying refunded, fee kept",
+      `unviable at Tron ${starvedSupply.blockHeight} (broadcast refused: ${broadcastRefusal}), ${TRON_SMALL_SUPPLY} refunded`,
+      startedAt("tronSupplyStarved"),
+    );
+    this.scenario(
+      "tronRedeemUnbroadcast",
+      "unviable, shares refunded, fee kept",
+      `unviable at Tron ${unbroadcastRedeem.blockHeight}, ${TRON_SMALL_REDEEM} refunded`,
+      startedAt("tronRedeemUnbroadcast"),
+    );
+
+    // From the expiration's whole seconds minus the send margin, each send is refused and the
+    // requester's refund re-mints the amount; the fee stays taken.
+    const refundOpensAt = Math.max(
+      ...unsentWindows.map(
+        (window) =>
+          Number(window.expiration / 1000n - pureCircuits.tronSendMinRemainingSeconds()) * 1000,
+      ),
+    );
+    diagnostics(`waiting for the unsent requests' refunds to open at ${refundOpensAt}`);
+    await new Promise((resolve) => setTimeout(resolve, Math.max(0, refundOpensAt - Date.now())));
+    const lateSendRefusals = [
+      await refusal(() => this.vault.callTx.sendTronWithdraw(unsentOut.withdraw)),
+      await refusal(() => this.vault.callTx.sendTronSupply(unsentOut.supply)),
+      await refusal(() => this.vault.callTx.sendTronRedeem(unsentOut.redeem)),
+    ];
+    if (lateSendRefusals.some((message) => !message.includes("too close"))) {
+      throw new Error(`a late send failed otherwise: ${JSON.stringify(lateSendRefusals)}`);
+    }
+    await this.vault.callTx.refundUnsentTronWithdraw(unsent.withdraw.inIndex, randomBytes(32));
+    await this.vault.callTx.refundUnsentTronSupply(unsent.supply.inIndex, randomBytes(32));
+    await this.vault.callTx.refundUnsentTronRedeem(unsent.redeem.inIndex, randomBytes(32));
+    const waitedMs = Date.now() - unsentStartedAt;
+    gateCoins += TRON_WITHDRAW_AMOUNT;
+    usdtCoins += TRON_SMALL_SUPPLY;
+    shareCoins += TRON_SMALL_REDEEM;
+    await this.expectBalance(gateHex, gateCoins, TargetChain.Tron);
+    await this.expectBalance(usdtHex, usdtCoins, TargetChain.Tron);
+    await this.expectBalance(shareHex, shareCoins, TargetChain.Tron);
+    for (const name of ["tronWithdrawUnsent", "tronSupplyUnsent", "tronRedeemUnsent"]) {
+      this.scenario(
+        name,
+        "late send refused, amount refunded, fee kept",
+        'late send refused "too close", amount refunded',
+        unsentStartedAt,
+      );
+    }
+
+    diagnostics("queueing the ETH and Tron redeems after yield");
+    const redeemStart = start("redeem", Action.redeem, this.vaultEvm, redeemSchema);
+    const tronRedeemStart = start("tronRedeem", Action.tronRedeem, vaultSigner, redeemSchema);
+    await this.vault.callTx.startRedeem(
+      redeemStart.inIndex,
+      { shares: SUPPLY_AMOUNT },
+      this.coin(stata, SUPPLY_AMOUNT),
+    );
+    await this.startTronRedeem(tronRedeemStart.inIndex, lend, mintedShares, TRON_WINDOW_MS);
+    shareCoins -= mintedShares + TRON_REDEEM_FEE;
+    const redeemsSent = await this.flushAndSend([redeemStart, tronRedeemStart]);
+    const vaultBeforeRedeem = {
+      usdt: await tron.balanceOf(usdt, vaultTron),
+      share: await tron.balanceOf(share, vaultTron),
+    };
+    // Yield on both chains before either redeem executes, so both return more than supplied.
+    await this.evm.mint(usdc, stata, REDEEM_YIELD);
+    const assets = await this.evm.previewRedeem(stata, SUPPLY_AMOUNT);
+    await tron.sendToken(usdt, share, TRON_LEND_YIELD);
+    const tronAssets = await tron.read(
+      share,
+      "previewRedeem(uint256)",
+      numericAbiWord(mintedShares * SHARE_FACTOR),
+    );
+    const redeems = await this.settleRound(
+      [sentOf(redeemsSent, "redeem")],
+      [{ request: sentOf(redeemsSent, "tronRedeem") }],
+    );
+    const redeem = attestedOf(redeems.attested, "redeem");
+    const tronRedeem = attestedOf(redeems.attested, "tronRedeem");
+    if (assets <= SUPPLY_AMOUNT || redeem.decoded.assets !== assets) {
+      throw new Error(`the redeem attested ${String(redeem.decoded.assets)}, expected ${assets}`);
+    }
+    if (
+      tronAssets <= TRON_SUPPLY_AMOUNT ||
+      tronRedeem.decoded.assets !== tronAssets ||
+      calldataWord(tronRedeem.calldata, 0) !== mintedShares * SHARE_FACTOR ||
+      (await tron.balanceOf(usdt, vaultTron)) - vaultBeforeRedeem.usdt !== tronAssets ||
+      vaultBeforeRedeem.share - (await tron.balanceOf(share, vaultTron)) !==
+        mintedShares * SHARE_FACTOR
+    ) {
+      throw new Error(
+        `the Tron redeem attested ${String(tronRedeem.decoded.assets)}, expected ${tronAssets}`,
+      );
+    }
+    await this.queueAndFlush([redeem, tronRedeem]);
+    await this.vault.callTx.completeRedeem(
+      hexToBytes(redeem.requestId),
+      redeem.output,
+      randomBytes(32),
+    );
+    await this.vault.callTx.completeTronRedeem(
+      hexToBytes(tronRedeem.requestId),
+      tronRedeem.output,
+      randomBytes(32),
+    );
+    await this.removed(redeem);
+    await this.removed(tronRedeem);
+    usdcCoins += assets;
+    usdtCoins += tronAssets;
+    await this.expectBalance(usdc, usdcCoins);
+    await this.expectBalance(stata, 0n);
+    await this.expectBalance(usdtHex, usdtCoins, TargetChain.Tron);
+    await this.expectBalance(shareHex, shareCoins, TargetChain.Tron);
+    this.scenario(
+      "redeem",
+      "executed, assets above the supply minted",
+      `executed, ${assets} minted`,
+      startedAt("redeem"),
+    );
+    this.scenario(
+      "tronRedeem",
+      "executed, calldata q x 10^12, assets above the supply minted",
+      `executed, calldata ${mintedShares * SHARE_FACTOR}, ${tronAssets} assets minted`,
+      startedAt("tronRedeem"),
+    );
+
+    // Every coin of a Tron colour, the fee recipient's included, is backed by the vault's
+    // Tron account at its factor; the shares also keep the supply's remainder.
+    const feeCoins = {
+      usdt: 4n * TRON_SUPPLY_FEE,
+      share: 4n * TRON_REDEEM_FEE,
+    };
+    const backing = {
+      underlyingVault: await tron.balanceOf(usdt, vaultTron),
+      underlyingCoins: usdtCoins + feeCoins.usdt,
+      shareVault: await tron.balanceOf(share, vaultTron),
+      shareCoins: shareCoins + feeCoins.share,
+    };
+    if (
+      backing.underlyingVault !== backing.underlyingCoins ||
+      backing.shareVault !== backing.shareCoins * SHARE_FACTOR + remainder
+    ) {
+      throw new Error(
+        `the vault's Tron account does not back its coins: ${JSON.stringify(backing, bigintJson)}`,
+      );
+    }
+
     const settled = await this.readLedger();
     const leftovers = Object.entries({
       inputRequestBuffer: settled.inputRequestBuffer.size(),
@@ -1390,25 +2329,30 @@ class VaultRun {
       outputAttestationBuffer: settled.outputAttestationBuffer.size(),
       evictionMap: settled.evictionMap.size(),
       depositArgsMap: settled.depositArgsMap.size(),
-      tronDepositArgsMap: settled.tronDepositArgsMap.size(),
+      approveArgsMap: settled.approveArgsMap.size(),
       withdrawArgsMap: settled.withdrawArgsMap.size(),
+      supplyArgsMap: settled.supplyArgsMap.size(),
+      redeemArgsMap: settled.redeemArgsMap.size(),
+      tronDepositArgsMap: settled.tronDepositArgsMap.size(),
       tronWithdrawArgsMap: settled.tronWithdrawArgsMap.size(),
+      tronApproveArgsMap: settled.tronApproveArgsMap.size(),
+      tronSupplyArgsMap: settled.tronSupplyArgsMap.size(),
+      tronRedeemArgsMap: settled.tronRedeemArgsMap.size(),
       ...Object.fromEntries(
         Object.values(REQUEST_MAPS).map(({ field }) => [field, settled[field].size()]),
       ),
     }).filter(([, size]) => size !== 0n);
-    if (leftovers.length > 0)
-      throw new Error(
-        `the vault kept ${JSON.stringify(leftovers, (_, v: unknown) => (typeof v === "bigint" ? String(v) : v))}`,
-      );
+    if (leftovers.length > 0) {
+      throw new Error(`the vault kept ${JSON.stringify(leftovers, bigintJson)}`);
+    }
 
     return {
       vaultAddress: this.vaultAddress,
-      tronToken: tokenHex,
+      tronToken: gateHex,
       operations: this.operations,
-      lastSeen: { before, afterEthereum, afterTron },
+      lastSeen: { before, afterEthereum, afterTron, ethereumFlushed, tronFlushed },
       crossChainRefusals: { tronCompleteOfEthereum, ethereumCompleteOfTron },
-      unsentRefund: { lateSendRefusal, waitedMs },
+      unsentRefund: { lateSendRefusal: lateSendRefusals.join(" / "), waitedMs },
       recipient: {
         address: bytesToHex(recipient),
         before: Number(recipientBefore),
@@ -1420,6 +2364,55 @@ class VaultRun {
           pureCircuits.ownershipCommitment(tronWithdrawStart.inIndex, this.userSecret),
         ),
       },
+      tronLend: {
+        underlying: usdtHex,
+        shareToken: shareHex,
+        shareFactor: String(SHARE_FACTOR),
+        supply: {
+          amount: String(TRON_SUPPLY_AMOUNT),
+          calldataAmount: String(calldataWord(tronSupply.calldata, 0)),
+          shares: String(supplied),
+          minted: String(mintedShares),
+          remainder: String(remainder),
+          binding: calldataWord(tronSupply.calldata, 2).toString(16).padStart(64, "0"),
+          expectedBinding: bytesToHex(
+            pureCircuits.ownershipCommitment(tronSupplyStart.inIndex, this.userSecret),
+          ),
+        },
+        redeem: {
+          shares: String(mintedShares),
+          calldataShares: String(calldataWord(tronRedeem.calldata, 0)),
+          assets: String(tronAssets),
+          binding: calldataWord(tronRedeem.calldata, 3).toString(16).padStart(64, "0"),
+          expectedBinding: bytesToHex(
+            pureCircuits.ownershipCommitment(tronRedeemStart.inIndex, this.userSecret),
+          ),
+        },
+        shareDeposit: {
+          amount: String(TRON_SHARE_DEPOSIT),
+          calldataAmount: String(calldataWord(shareDeposit.calldata, 1)),
+        },
+        shareWithdraw: {
+          amount: String(TRON_SHARE_WITHDRAW),
+          calldataAmount: String(calldataWord(shareWithdraw.calldata, 1)),
+          received: String(shareReceived),
+          binding: calldataWord(shareWithdraw.calldata, 2).toString(16).padStart(64, "0"),
+          expectedBinding: bytesToHex(
+            pureCircuits.ownershipCommitment(shareWithdrawStart.inIndex, this.userSecret),
+          ),
+        },
+        starvedSupply: {
+          feeLimit: String(TRON_STARVED_FEE_LIMIT),
+          broadcastRefusal,
+        },
+        backing: {
+          underlyingVault: String(backing.underlyingVault),
+          underlyingCoins: String(backing.underlyingCoins),
+          shareVault: String(backing.shareVault),
+          shareCoins: String(backing.shareCoins),
+        },
+      },
+      scenarios: this.scenarios,
     };
   }
 

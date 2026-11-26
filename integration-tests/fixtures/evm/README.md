@@ -4,6 +4,7 @@ Solidity mocks the Midnight tests run against, with their compiled Hardhat artif
 
 - `MidnightConformance.sol`: targets whose return values `tests/cases/midnight_stream.rs` encodes and compares with the SDK vectors.
 - `MidnightVaultTargets.sol`: local USDC, stataUSDC and swap router the vault test deploys (`midnight-devtools/devtools/real-stack/vault-evm.ts`).
+- `MidnightVaultTronTargets.sol`: the USDT-like TRC-20 and the ERC-4626 share token over it that the Tron vault test deploys on TRE as its lend pair (`midnight-devtools/devtools/real-stack/vault-tron.ts`).
 
 ## Regenerate
 
