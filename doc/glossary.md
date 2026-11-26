@@ -1,6 +1,12 @@
 # Glossary
 
-Terms used across the docs.  
+Terms used across the docs. An entry says what the term is and why it
+matters, and leaves out:
+
+- How it works and why it is designed so. The doc it links covers that.
+- Current values of constants and settings. It says what
+  `LATEST_MPC_KEY_VERSION` is, not what it is set to now.
+
 Each entry names the code that implements the term, if any: the symbol and
 its file. Paths are relative to `chain-signatures/node/src/`,
 except those starting with `chain-signatures/` or `signet-`, which are
