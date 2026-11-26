@@ -19,11 +19,11 @@ use midnight_storage::arena::Sp;
 use midnight_storage::DefaultDB;
 use midnight_transient_crypto::commitment::PedersenRandomness;
 use mpc_chain_integration_core::PublisherTelemetry;
-use mpc_utils::task::AbortOnDrop;
 use rand::rngs::StdRng;
 use rand::{CryptoRng, Rng};
 use tokio::sync::watch;
 use tokio::time::Instant;
+use tokio_util::task::AbortOnDropHandle;
 
 use super::checkpoint::DustCheckpointStore;
 use super::keys::owner_of;
@@ -111,7 +111,7 @@ pub(crate) struct Reservation {
 pub(crate) struct FundingWallet {
     pub(super) shared: Arc<Shared>,
     source: Arc<dyn DustEventSource>,
-    _sync: AbortOnDrop,
+    _sync: AbortOnDropHandle<()>,
 }
 
 impl FundingWallet {
@@ -136,7 +136,7 @@ impl FundingWallet {
             telemetry,
             storing: tokio::sync::Mutex::new(()),
         });
-        let sync = AbortOnDrop(tokio::spawn(follow(shared.clone(), source.clone())));
+        let sync = AbortOnDropHandle::new(tokio::spawn(follow(shared.clone(), source.clone())));
         Self {
             shared,
             source,

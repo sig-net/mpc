@@ -25,10 +25,10 @@ use midnight_onchain_state::state::ContractState;
 use midnight_storage::DefaultDB;
 use minocrab_publisher::intent::{build_intent, preimage_tx, PreimageIntent};
 use minocrab_publisher::{Deployment, InProcessProver, ManagedDir, SignerResolver};
-use mpc_utils::task::AbortOnDrop;
 use rand::rngs::StdRng;
 use rand::{Rng as _, SeedableRng as _};
 use tokio::time::Instant;
+use tokio_util::task::AbortOnDropHandle;
 
 use crate::funding::{dust_deficit, FeePayer, SealedTx, UnprovenTx};
 use crate::intent::{IntentRequest, RespondCircuit, Submitted};
@@ -411,7 +411,7 @@ impl<W: FeePayer, C: SubmitChain + 'static> NativeIntentClient<W, C> {
         let submitted = started.elapsed();
         // Ends with the wait, so a resend held up by the node never delays the scan.
         let _resending = unanswered.then(|| {
-            AbortOnDrop(tokio::spawn(resend(
+            AbortOnDropHandle::new(tokio::spawn(resend(
                 self.chain.clone(),
                 bytes.to_vec(),
                 tx_hash,
