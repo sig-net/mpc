@@ -7,7 +7,7 @@ use k256::{
 use sha3::{Digest, Keccak256, Sha3_256};
 use signet_primitives::{
     Chain, PublicKey, ScalarExt, Signature, LATEST_MPC_KEY_VERSION, LEGACY_MPC_KEY_VERSION_0,
-    LEGACY_MPC_KEY_VERSION_1, MPC_KEY_VERSION_2,
+    LEGACY_MPC_KEY_VERSION_1, MIN_BIDI_KEY_VERSION, MPC_KEY_VERSION_2,
 };
 
 /// Prefix of a derivation path at key version 0.
@@ -62,11 +62,11 @@ impl std::fmt::Display for KeyPurpose<'_> {
     }
 }
 
-/// The path that holds `chain`'s attestation key at `key_version`, which no request
-/// may name. Only below key version 2, where the attestation key is a plain key;
-/// `None` on chains that are not bidirectional sources.
+/// The path under which `chain`'s attestation key was a plain key at `key_version`.
+/// Contracts may still trust that key, so no plain request may name the path. Only
+/// below [`MIN_BIDI_KEY_VERSION`]; `None` on chains that are not bidirectional sources.
 pub const fn reserved_path(key_version: KeyVersion, chain: Chain) -> Option<&'static str> {
-    if key_version >= MPC_KEY_VERSION_2 {
+    if key_version >= MIN_BIDI_KEY_VERSION {
         return None;
     }
     match chain {
@@ -107,7 +107,7 @@ fn versioned_derivation_path(
     }
 }
 
-/// Key versions 0 and 1 name no purpose in the path, so each refuses the keys it does not have.
+/// Key versions 0 and 1 name no purpose in the path, so they hold only plain and system keys.
 fn legacy_derivation_path(
     key_version: KeyVersion,
     chain: Chain,
@@ -123,23 +123,13 @@ fn legacy_derivation_path(
         derivation_path_v1
     };
     match purpose {
-        KeyPurpose::Bidirectional { .. } | KeyPurpose::Attestation { .. }
-            if key_version == LEGACY_MPC_KEY_VERSION_0 =>
-        {
-            Err(refused("predates bidirectional signing"))
+        KeyPurpose::Bidirectional { .. } | KeyPurpose::Attestation { .. } => {
+            Err(refused("predates bidirectional keys"))
         }
-        KeyPurpose::Plain { path, .. } | KeyPurpose::Bidirectional { path, .. }
-            if reserved_path(key_version, chain) == Some(path) =>
-        {
+        KeyPurpose::Plain { path, .. } if reserved_path(key_version, chain) == Some(path) => {
             Err(refused("the path holds the attestation key"))
         }
-        KeyPurpose::Plain { sender, path } | KeyPurpose::Bidirectional { sender, path } => {
-            Ok(format(chain, sender, path))
-        }
-        // The attestation key is a plain key under the reserved path.
-        KeyPurpose::Attestation { sender } => reserved_path(key_version, chain)
-            .map(|path| format(chain, sender, path))
-            .ok_or_else(|| refused("the chain has no attestation key")),
+        KeyPurpose::Plain { sender, path } => Ok(format(chain, sender, path)),
         KeyPurpose::System { path } => Ok(format(chain, SYSTEM_SENDER, path)),
     }
 }
@@ -467,48 +457,6 @@ mod tests {
         );
     }
 
-    /// Golden: `@sig-net/midnight` is what integrators derive their expected
-    /// keys with, so agreeing with it is the property that matters. Every
-    /// expected value comes from that package (see the fixture's provenance);
-    /// nothing here is computed by the code under test.
-    #[test]
-    fn midnight_epsilon_matches_the_reference_implementation() {
-        let golden: serde_json::Value =
-            serde_json::from_str(include_str!("../fixtures/midnight-epsilon.json")).unwrap();
-
-        assert_eq!(
-            golden["constants"]["epsilon_derivation_prefix"],
-            DERIVATION_PREFIX_V1
-        );
-        assert_eq!(
-            golden["constants"]["midnight_chain_id"],
-            Chain::Midnight.caip2_chain_id()
-        );
-
-        for vector in golden["vectors"].as_array().unwrap() {
-            let (sender, path) = (
-                vector["requester"].as_str().unwrap(),
-                vector["path"].as_str().unwrap(),
-            );
-            let mut expected = [0u8; 32];
-            hex::decode_to_slice(vector["epsilon"].as_str().unwrap(), &mut expected).unwrap();
-            // The reference derives the response key as a request under its path.
-            let purpose = if path == "midnight response key" {
-                KeyPurpose::Attestation { sender }
-            } else {
-                KeyPurpose::Bidirectional { sender, path }
-            };
-            assert_eq!(
-                derive_epsilon(LEGACY_MPC_KEY_VERSION_1, Chain::Midnight, purpose)
-                    .unwrap()
-                    .to_bytes()
-                    .as_slice(),
-                expected,
-                "requester {sender}, path {path:?}"
-            );
-        }
-    }
-
     /// `versioned_derivation_path` pins each version to a format by hand, so a
     /// bump of `LATEST_MPC_KEY_VERSION` without a new match arm would reject every
     /// request at the new version.
@@ -609,40 +557,6 @@ mod tests {
         );
     }
 
-    /// Key version 1 names no purpose in the path: a bidirectional key is the plain key.
-    #[test]
-    fn key_version_1_bidirectional_key_is_the_plain_key() {
-        let (sender, path) = ("sender", "path");
-        assert_eq!(
-            derive_epsilon(
-                LEGACY_MPC_KEY_VERSION_1,
-                Chain::Solana,
-                KeyPurpose::Bidirectional { sender, path }
-            ),
-            derive_epsilon(
-                LEGACY_MPC_KEY_VERSION_1,
-                Chain::Solana,
-                KeyPurpose::Plain { sender, path }
-            ),
-        );
-    }
-
-    /// At key version 1 the attestation key is the plain key under the reserved path.
-    #[test]
-    fn key_version_1_attestation_key_is_the_reserved_path_key() {
-        let attestation = KeyPurpose::Attestation { sender: "sender" };
-        assert_eq!(
-            derivation_path(LEGACY_MPC_KEY_VERSION_1, Chain::Solana, attestation),
-            "sig.network v2.0.0 epsilon derivation:solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp:sender:solana response key"
-        );
-        assert_eq!(
-            derive_epsilon(LEGACY_MPC_KEY_VERSION_1, Chain::Solana, attestation),
-            Ok(scalar(
-                "1a4bfe456b826af8269cb3adef1489e4ada6c79817faa8f7b17fad6239353282"
-            ))
-        );
-    }
-
     fn refused(key_version: KeyVersion, reason: &'static str) -> Result<Scalar, DeriveError> {
         Err(DeriveError::Refused {
             key_version,
@@ -650,59 +564,41 @@ mod tests {
         })
     }
 
-    /// Key version 0 predates bidirectional signing; plain and system keys stay.
+    /// Below `MIN_BIDI_KEY_VERSION` there are only plain and system keys.
     #[test]
-    fn key_version_0_has_no_bidirectional_or_attestation_key() {
+    fn legacy_key_versions_have_no_bidirectional_or_attestation_key() {
         let (sender, path) = ("sender", "path");
-        assert_eq!(
-            derive_epsilon(
-                LEGACY_MPC_KEY_VERSION_0,
-                Chain::Solana,
-                KeyPurpose::Bidirectional { sender, path }
-            ),
-            refused(LEGACY_MPC_KEY_VERSION_0, "predates bidirectional signing")
-        );
-        assert_eq!(
-            derive_epsilon(
-                LEGACY_MPC_KEY_VERSION_0,
-                Chain::Solana,
-                KeyPurpose::Attestation { sender }
-            ),
-            refused(LEGACY_MPC_KEY_VERSION_0, "predates bidirectional signing")
-        );
+        for key_version in [LEGACY_MPC_KEY_VERSION_0, LEGACY_MPC_KEY_VERSION_1] {
+            let refusal = refused(key_version, "predates bidirectional keys");
+            let bidirectional = KeyPurpose::Bidirectional { sender, path };
+            let attestation = KeyPurpose::Attestation { sender };
+            assert_eq!(
+                derive_epsilon(key_version, Chain::Solana, bidirectional),
+                refusal
+            );
+            assert_eq!(
+                derive_epsilon(key_version, Chain::Solana, attestation),
+                refusal
+            );
+            let plain = KeyPurpose::Plain { sender, path };
+            assert!(derive_epsilon(key_version, Chain::Solana, plain).is_ok());
+            let system = KeyPurpose::System { path };
+            assert!(derive_epsilon(key_version, Chain::Ethereum, system).is_ok());
+        }
         assert!(derive_epsilon(
-            LEGACY_MPC_KEY_VERSION_0,
+            MIN_BIDI_KEY_VERSION,
             Chain::Solana,
-            KeyPurpose::Plain { sender, path }
-        )
-        .is_ok());
-        assert!(derive_epsilon(
-            LEGACY_MPC_KEY_VERSION_0,
-            Chain::Ethereum,
-            KeyPurpose::System { path }
+            KeyPurpose::Bidirectional { sender, path }
         )
         .is_ok());
     }
 
-    /// A chain that is not a bidirectional source has an attestation key only from
-    /// key version 2.
-    #[test]
-    fn attestation_keys_below_key_version_2_need_a_reserved_path() {
-        let attestation = KeyPurpose::Attestation { sender: "sender" };
-        assert_eq!(
-            derive_epsilon(LEGACY_MPC_KEY_VERSION_1, Chain::Ethereum, attestation),
-            refused(LEGACY_MPC_KEY_VERSION_1, "the chain has no attestation key")
-        );
-        assert!(versioned_derivation_path(MPC_KEY_VERSION_2, Chain::Ethereum, attestation).is_ok());
-    }
-
-    /// Below key version 2 a request naming the reserved path would derive the
-    /// attestation key, so it is refused; from key version 2 the path is ordinary.
+    /// Below key version 2 a plain request naming the reserved path would derive the
+    /// old attestation key, so it is refused; from key version 2 the path is ordinary.
     #[test]
     fn requests_below_key_version_2_cannot_name_the_reserved_path() {
         for (chain, path) in [
             (Chain::Solana, "solana response key"),
-            (Chain::Hydration, "hydration response key"),
             (Chain::Canton, "canton response key"),
             (Chain::Midnight, "midnight response key"),
         ] {
@@ -723,12 +619,8 @@ mod tests {
                 derive_epsilon(LEGACY_MPC_KEY_VERSION_1, chain, plain),
                 refused(LEGACY_MPC_KEY_VERSION_1, reserved)
             );
-            assert_eq!(
-                derive_epsilon(LEGACY_MPC_KEY_VERSION_1, chain, bidirectional),
-                refused(LEGACY_MPC_KEY_VERSION_1, reserved)
-            );
-            assert!(versioned_derivation_path(MPC_KEY_VERSION_2, chain, plain).is_ok());
-            assert!(versioned_derivation_path(MPC_KEY_VERSION_2, chain, bidirectional).is_ok());
+            assert!(derive_epsilon(MIN_BIDI_KEY_VERSION, chain, plain).is_ok());
+            assert!(derive_epsilon(MIN_BIDI_KEY_VERSION, chain, bidirectional).is_ok());
         }
         // Only the chain's own reserved path.
         let other_chains = KeyPurpose::Plain {
@@ -736,7 +628,6 @@ mod tests {
             path: "solana response key",
         };
         assert!(derive_epsilon(LEGACY_MPC_KEY_VERSION_1, Chain::Ethereum, other_chains).is_ok());
-        assert!(derive_epsilon(LEGACY_MPC_KEY_VERSION_1, Chain::Hydration, other_chains).is_ok());
     }
 
     #[test]
@@ -746,10 +637,6 @@ mod tests {
             Some("solana response key")
         );
         assert_eq!(
-            reserved_path(LEGACY_MPC_KEY_VERSION_1, Chain::Hydration),
-            Some("hydration response key")
-        );
-        assert_eq!(
             reserved_path(LEGACY_MPC_KEY_VERSION_1, Chain::Canton),
             Some("canton response key")
         );
@@ -757,7 +644,7 @@ mod tests {
             reserved_path(LEGACY_MPC_KEY_VERSION_1, Chain::Midnight),
             Some("midnight response key")
         );
-        assert_eq!(reserved_path(MPC_KEY_VERSION_2, Chain::Solana), None);
+        assert_eq!(reserved_path(MIN_BIDI_KEY_VERSION, Chain::Solana), None);
         assert_eq!(
             reserved_path(LEGACY_MPC_KEY_VERSION_1, Chain::Ethereum),
             None

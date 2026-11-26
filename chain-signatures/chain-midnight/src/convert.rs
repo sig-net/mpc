@@ -330,30 +330,6 @@ mod tests {
         .expect_err("SDK constructor reserves the exact padded response key path");
         assert!(error.to_string().contains("path is reserved"));
 
-        record.path[31] = 1;
-        let request = generate_sign_request(
-            &record,
-            &READ_ADDRESS,
-            REQUEST_ID,
-            BLOCK_HASH,
-            INDEXED_TS,
-            test_root_pk(),
-        )
-        .unwrap();
-        assert_eq!(request.args.path, hex::encode(record.path));
-        assert_ne!(request.args.path, reserved);
-        assert_ne!(
-            request.args.epsilon,
-            signet_crypto::derive_epsilon(
-                request.args.key_version,
-                Chain::Midnight,
-                signet_crypto::KeyPurpose::Attestation {
-                    sender: &READ_ADDRESS.to_hex(),
-                },
-            )
-            .unwrap(),
-        );
-
         // From key version 2 the bytes are an ordinary path.
         record.path = ascii_padded(reserved.as_bytes());
         record.key_version = u8::try_from(mpc_primitives::MPC_KEY_VERSION_2).unwrap();
@@ -490,22 +466,29 @@ mod tests {
 
     #[test]
     fn generate_sign_request_bounds_key_versions() {
-        let mut record = caller_record();
-        record.key_version = u8::try_from(mpc_primitives::LEGACY_MPC_KEY_VERSION_0).unwrap();
-        let err = generate_sign_request(
-            &record,
-            &READ_ADDRESS,
-            REQUEST_ID,
-            BLOCK_HASH,
-            INDEXED_TS,
-            test_root_pk(),
-        )
-        .expect_err("key_version 0 predates bidirectional signing")
-        .to_string();
-        assert!(
-            err.contains("key version 0: predates bidirectional signing"),
-            "err: {err}"
-        );
+        for key_version in [
+            mpc_primitives::LEGACY_MPC_KEY_VERSION_0,
+            mpc_primitives::LEGACY_MPC_KEY_VERSION_1,
+        ] {
+            let mut record = caller_record();
+            record.key_version = u8::try_from(key_version).unwrap();
+            let err = generate_sign_request(
+                &record,
+                &READ_ADDRESS,
+                REQUEST_ID,
+                BLOCK_HASH,
+                INDEXED_TS,
+                test_root_pk(),
+            )
+            .expect_err("legacy key versions have no bidirectional key")
+            .to_string();
+            assert!(
+                err.contains(&format!(
+                    "key version {key_version}: predates bidirectional keys"
+                )),
+                "err: {err}"
+            );
+        }
 
         let mut record = caller_record();
         record.key_version = u8::try_from(mpc_primitives::LATEST_MPC_KEY_VERSION + 1).unwrap();

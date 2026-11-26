@@ -25,3 +25,6 @@ pub const LEGACY_MPC_KEY_VERSION_1: KeyVersion = 1;
 pub const MPC_KEY_VERSION_2: KeyVersion = 2;
 /// The highest key version the network signs; it refuses requests above it.
 pub const LATEST_MPC_KEY_VERSION: KeyVersion = MPC_KEY_VERSION_2;
+/// The lowest key version a bidirectional request may use: below it there are no
+/// bidirectional or attestation keys.
+pub const MIN_BIDI_KEY_VERSION: KeyVersion = MPC_KEY_VERSION_2;
