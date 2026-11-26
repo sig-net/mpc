@@ -238,6 +238,36 @@ pub enum TargetChain {
     Tron,
 }
 
+/// The verdict an attestation of a vault request carries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum VaultOutcome {
+    Executed,
+    Failed,
+    Unviable,
+}
+
+impl From<VaultOutcome> for mpc_primitives::AttestationOutcomeKind {
+    fn from(outcome: VaultOutcome) -> Self {
+        match outcome {
+            VaultOutcome::Executed => Self::Executed,
+            VaultOutcome::Failed => Self::Failed,
+            VaultOutcome::Unviable => Self::Unviable,
+        }
+    }
+}
+
+/// What a solidified Tron receipt says its transaction cost.
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TronCost {
+    /// `receipt.result`: SUCCESS, REVERT, OUT_OF_ENERGY, ...
+    pub result: String,
+    pub energy: u64,
+    /// Sun burned in total.
+    pub fee: u64,
+}
+
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct VaultOperation {
@@ -245,11 +275,15 @@ pub struct VaultOperation {
     pub chain: TargetChain,
     pub request_id: String,
     pub placement: Vec<CallPlacement>,
-    /// The executed transaction's hash (EVM) or id (Tron), hex.
+    /// The transaction's hash (EVM) or id (Tron), hex; a Tron one may never have been included.
     pub transaction: String,
     /// The block height the attestation commits to.
     pub block_height: u64,
+    pub outcome: VaultOutcome,
+    /// The attested output, hex; empty unless executed.
     pub output: String,
+    /// What the Tron transaction cost, when TRE included it.
+    pub tron_cost: Option<TronCost>,
     /// From the notifying send's finalisation to the driver's first read of the signature.
     pub send_to_signature_ms: u64,
     /// From the broadcast to the driver's first read of the verified attestation.
@@ -275,12 +309,16 @@ pub struct LastSeen {
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LastSeenSteps {
-    /// Before the withdraw attestations are queued.
+    /// Before the second round's attestations are queued.
     pub before: LastSeen,
-    /// After the ETH withdraw's attestation alone is flushed.
+    /// After the round's ETH attestations alone are flushed.
     pub after_ethereum: LastSeen,
-    /// After the Tron withdraw's attestation is flushed too.
+    /// After the round's Tron attestations are flushed too.
     pub after_tron: LastSeen,
+    /// The operations whose attestations the ETH flush carried.
+    pub ethereum_flushed: Vec<String>,
+    /// The operations whose attestations the Tron flush carried.
+    pub tron_flushed: Vec<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -300,11 +338,12 @@ pub struct TronRecipient {
     pub after: u64,
 }
 
-/// A Tron withdraw left unsent until its window closed to sends, then refunded.
+/// A Tron withdraw, supply and redeem left unsent until their windows closed to sends, then
+/// refunded.
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UnsentRefund {
-    /// `sendTronWithdraw` once the window closed to sends.
+    /// The late sends' refusals, joined.
     pub late_send_refusal: String,
     /// From the start to the refund.
     pub waited_ms: u64,
@@ -321,6 +360,8 @@ pub struct VaultTronRunResult {
     pub recipient: TronRecipient,
     pub unsent_refund: UnsentRefund,
     pub withdraw_binding: TronWithdrawBinding,
+    pub tron_lend: TronLendResult,
+    pub scenarios: Vec<TronScenario>,
 }
 
 /// The executed Tron withdraw's trailing calldata word and the start it must name.
@@ -331,6 +372,105 @@ pub struct TronWithdrawBinding {
     pub binding: String,
     /// The ownership commitment of the withdrawal's start, which the binding must equal.
     pub expected_binding: String,
+}
+
+/// The Tron lend legs' amounts in base units, decimal strings (shares exceed `u64`).
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TronLendResult {
+    pub underlying: String,
+    pub share_token: String,
+    pub share_factor: String,
+    pub supply: TronLendSupply,
+    pub redeem: TronLendRedeem,
+    pub share_deposit: TronShareTransfer,
+    pub share_withdraw: TronShareWithdraw,
+    pub starved_supply: TronStarvedSupply,
+    pub backing: TronBacking,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TronLendSupply {
+    /// Underlying coin units surrendered (factor 1).
+    pub amount: String,
+    /// The `deposit` call's assets argument.
+    pub calldata_amount: String,
+    /// The attested shares.
+    pub shares: String,
+    /// Share coin units minted.
+    pub minted: String,
+    /// Shares left in the vault's Tron account below one coin unit.
+    pub remainder: String,
+    /// The trailing calldata word binding the request to its requester, 32-byte hex.
+    pub binding: String,
+    /// The ownership commitment of the request's start, which the binding must equal.
+    pub expected_binding: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TronLendRedeem {
+    /// Share coin units surrendered.
+    pub shares: String,
+    /// The `redeem` call's shares argument.
+    pub calldata_shares: String,
+    /// The attested assets, minted as underlying coin units.
+    pub assets: String,
+    /// The trailing calldata word binding the request to its requester, 32-byte hex.
+    pub binding: String,
+    /// The ownership commitment of the request's start, which the binding must equal.
+    pub expected_binding: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TronShareTransfer {
+    /// Share coin units.
+    pub amount: String,
+    /// The `transfer` call's value argument.
+    pub calldata_amount: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TronShareWithdraw {
+    pub amount: String,
+    pub calldata_amount: String,
+    /// What the recipient's share balance gained.
+    pub received: String,
+    /// The trailing calldata word binding the withdrawal to its requester, 32-byte hex.
+    pub binding: String,
+    /// The ownership commitment of the withdrawal's start, which the binding must equal.
+    pub expected_binding: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TronStarvedSupply {
+    pub fee_limit: String,
+    /// TRE's refusal of the broadcast.
+    pub broadcast_refusal: String,
+}
+
+/// The vault's Tron balances and the coins of each colour, fee coins included, at the end.
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TronBacking {
+    pub underlying_vault: String,
+    pub underlying_coins: String,
+    pub share_vault: String,
+    pub share_coins: String,
+}
+
+/// One scenario of the Tron run: what was expected and observed, and its wall time.
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TronScenario {
+    pub name: String,
+    pub expected: String,
+    pub observed: String,
+    pub wall_ms: u64,
 }
 
 #[derive(Deserialize)]
@@ -598,8 +738,9 @@ impl MidnightContext {
         Ok(result)
     }
 
-    /// Deploy the ERC20 vault, its local EVM targets and a TRC-20 on `tron_rpc_url`, then run
-    /// an ETH and a Tron deposit and withdraw through the MPC side by side and settle each.
+    /// Deploy the ERC20 vault, its local EVM targets, a TRC-20 and the Tron lend pair on
+    /// `tron_rpc_url`, then run ETH and Tron deposits, withdraws, supplies and redeems through
+    /// the MPC side by side, reaching every Tron verdict, and settle each.
     pub async fn run_vault_tron(
         &self,
         mpc_public_key: &str,

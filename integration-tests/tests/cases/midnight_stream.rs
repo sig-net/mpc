@@ -10,7 +10,7 @@ use anyhow::Context as _;
 use integration_tests::cluster;
 use integration_tests::midnight::{
     AdversarialScenario, CallPlacement, MidnightContext, PlacementScenario, TargetChain,
-    VaultOperation,
+    TronLendResult, VaultOperation, VaultOutcome,
 };
 use k256::elliptic_curve::sec1::ToEncodedPoint as _;
 use mpc_chain_integration_core::utils::test::ChainIndexerStream;
@@ -691,28 +691,31 @@ fn notification_phase(placement: &[CallPlacement], request_id: &str) -> Option<&
     })
 }
 
-fn expect_executed_attestation(
+/// Checks the attestation carries `outcome_kind` at `block_height` and its digest binds
+/// `output` (empty unless executed).
+fn expect_attestation(
     request_id: &[u8; 32],
     attestation: &PublishedAttestation,
     block_height: u64,
+    outcome_kind: AttestationOutcomeKind,
     output: &[u8],
 ) -> anyhow::Result<()> {
     anyhow::ensure!(
         attestation.block_height == block_height
-            && attestation.outcome_kind == AttestationOutcomeKind::Executed
+            && attestation.outcome_kind == outcome_kind
             && attestation.serialized_output_length == output.len() as u64,
-        "{}: unexpected attestation {attestation:?} for block {block_height}",
+        "{}: unexpected attestation {attestation:?} for {outcome_kind:?} at block {block_height}",
         hex::encode(request_id)
     );
     let metadata = AttestationMetadata {
         key_version: mpc_primitives::LATEST_MPC_KEY_VERSION,
         block_height,
-        outcome_kind: AttestationOutcomeKind::Executed,
+        outcome_kind,
     };
     anyhow::ensure!(
         attestation.digest
             == mpc_compact_hashing::compute_attestation_hash(request_id, &metadata, output)?,
-        "{}: attestation digest does not bind the executed output",
+        "{}: attestation digest does not bind the {outcome_kind:?} output",
         hex::encode(request_id)
     );
     Ok(())
@@ -930,7 +933,13 @@ async fn midnight_indexes_notifications_by_transcript_placement() -> anyhow::Res
         })
         .await?;
     for id in &expected {
-        expect_executed_attestation(id, &observed.attested[id], heights[id], &[1])?;
+        expect_attestation(
+            id,
+            &observed.attested[id],
+            heights[id],
+            AttestationOutcomeKind::Executed,
+            &[1],
+        )?;
     }
     let final_block = observed.next_block(&mut events).await?;
     for id in expected.iter().chain(&skipped) {
@@ -1014,7 +1023,11 @@ async fn midnight_vault_operations_complete_with_real_mpc() -> anyhow::Result<()
                 "supply",
                 "redeem",
             ])
-            && result.operations.len() == operations.len(),
+            && result.operations.len() == operations.len()
+            && result
+                .operations
+                .iter()
+                .all(|operation| operation.outcome == VaultOutcome::Executed),
         "unexpected vault operations {operations:?}"
     );
     expect_settled_by_cluster(&cluster, &mut events, &mut observed, &result.operations).await?;
@@ -1022,8 +1035,8 @@ async fn midnight_vault_operations_complete_with_real_mpc() -> anyhow::Result<()
     Ok(())
 }
 
-/// Checks every vault operation the cluster indexed, signed and attested executed at the
-/// height and over the output the driver saw, then waits for every node to checkpoint the
+/// Checks every vault operation the cluster indexed, signed and attested with the verdict, at
+/// the height and over the output the driver saw, then waits for every node to checkpoint the
 /// requests' completion.
 async fn expect_settled_by_cluster(
     cluster: &cluster::Cluster,
@@ -1066,10 +1079,11 @@ async fn expect_settled_by_cluster(
         .await?;
     for operation in operations {
         let id = request_id(&operation.request_id)?;
-        expect_executed_attestation(
+        expect_attestation(
             &id,
             &observed.attested[&id],
             operation.block_height,
+            operation.outcome.into(),
             &hex::decode(&operation.output)?,
         )?;
     }
@@ -1080,13 +1094,18 @@ async fn expect_settled_by_cluster(
     Ok(())
 }
 
-/// The vault's Tron withdraw with the real MPC and a TRE chain, beside an ETH withdraw on the
-/// same vault. An ETH and a Tron deposit fund a vault coin of each colour; then the two
-/// withdraws run side by side, each attestation flushed while the other request is open, so
-/// each must fold only into its own chain's last-seen height, and each is offered to the
-/// other chain's complete circuit before the real completes. A third Tron withdraw, flushed
-/// and never sent, waits until its window closes to sends: the late send is refused and the
-/// withdrawer's refund re-mints its amount.
+/// The vault's Tron deposit, withdraw and lend with the real MPC and a TRE chain, beside ETH
+/// deposit, withdraw and lend on the same vault. ETH and Tron deposits fund a vault coin of
+/// each colour: an unshifted TRC-20, a USDT-like underlying (the vault's Tron USDT) and the
+/// 18-decimal shares of an ERC-4626 over it, listed with factor 10^12. A Tron approval lets
+/// the share token pull the underlying. Then ETH and Tron withdraws and supplies run side by
+/// side, each chain's attestations flushed while the other chain's requests are open, so each
+/// must fold only into its own chain's last-seen height, and each chain's attestation is
+/// offered to the other chain's complete. The Tron supply mints its shares floored to coin
+/// units; a supply against a paused share token and a redeem with no cash fail and refund; a
+/// supply whose fee limit TRE refuses and a redeem never broadcast are attested unviable and
+/// refund; a withdraw, supply and redeem never sent refund once their windows close to sends;
+/// the shares go back to Tron as a withdraw. ETH and Tron redeems after yield close the run.
 #[ignore = "starts a real Midnight node, indexer, proof server, Anvil, TRE, and MPC cluster"]
 #[serial]
 #[test(tokio::test)]
@@ -1133,7 +1152,7 @@ async fn midnight_vault_tron_withdraw_with_real_mpc() -> anyhow::Result<()> {
         &tron.funder_private_key,
     );
     tokio::pin!(run);
-    let result = tokio::time::timeout(Duration::from_secs(45 * 60), async {
+    let result = tokio::time::timeout(Duration::from_secs(150 * 60), async {
         loop {
             tokio::select! {
                 result = &mut run => return result,
@@ -1144,42 +1163,87 @@ async fn midnight_vault_tron_withdraw_with_real_mpc() -> anyhow::Result<()> {
         }
     })
     .await
-    .context("the Tron vault run exceeded 45 minutes")??;
+    .context("the Tron vault run exceeded 150 minutes")??;
 
+    for scenario in &result.scenarios {
+        tracing::info!(
+            name = scenario.name,
+            expected = scenario.expected,
+            observed = scenario.observed,
+            wall_ms = scenario.wall_ms,
+            "Tron run scenario"
+        );
+    }
+    for operation in &result.operations {
+        tracing::info!(
+            operation = operation.operation,
+            outcome = ?operation.outcome,
+            block_height = operation.block_height,
+            tron_cost = ?operation.tron_cost,
+            "vault request settled"
+        );
+    }
     let operations = result
         .operations
         .iter()
-        .map(|operation| (operation.operation.as_str(), operation.chain))
+        .map(|operation| {
+            (
+                operation.operation.as_str(),
+                (operation.chain, operation.outcome),
+            )
+        })
         .collect::<BTreeMap<_, _>>();
+    let ethereum_executed = (TargetChain::Ethereum, VaultOutcome::Executed);
+    let tron_executed = (TargetChain::Tron, VaultOutcome::Executed);
+    let tron_failed = (TargetChain::Tron, VaultOutcome::Failed);
+    let tron_unviable = (TargetChain::Tron, VaultOutcome::Unviable);
     anyhow::ensure!(
         operations
             == BTreeMap::from([
-                ("deposit", TargetChain::Ethereum),
-                ("tronDeposit", TargetChain::Tron),
-                ("withdraw", TargetChain::Ethereum),
-                ("tronWithdraw", TargetChain::Tron),
+                ("deposit", ethereum_executed),
+                ("approveStata", ethereum_executed),
+                ("tronDeposit", tron_executed),
+                ("tronDepositUsdt", tron_executed),
+                ("tronDepositShares", tron_executed),
+                ("tronApprove", tron_executed),
+                ("withdraw", ethereum_executed),
+                ("supply", ethereum_executed),
+                ("tronWithdraw", tron_executed),
+                ("tronSupply", tron_executed),
+                ("tronSupplyPaused", tron_failed),
+                ("tronRedeemNoCash", tron_failed),
+                ("tronWithdrawShares", tron_executed),
+                ("tronSupplyStarved", tron_unviable),
+                ("tronRedeemUnbroadcast", tron_unviable),
+                ("redeem", ethereum_executed),
+                ("tronRedeem", tron_executed),
             ])
             && result.operations.len() == operations.len(),
         "unexpected vault operations {operations:?}"
     );
     expect_settled_by_cluster(&cluster, &mut events, &mut observed, &result.operations).await?;
 
-    let height_of = |name: &str| {
-        result
-            .operations
+    let max_height_of = |names: &[String]| {
+        names
             .iter()
-            .find(|operation| operation.operation == name)
-            .map(|operation| operation.block_height)
-            .with_context(|| format!("no {name} operation"))
+            .map(|name| {
+                result
+                    .operations
+                    .iter()
+                    .find(|operation| &operation.operation == name)
+                    .map(|operation| operation.block_height)
+                    .with_context(|| format!("no {name} operation"))
+            })
+            .try_fold(0, |max, height| height.map(|height| max.max(height)))
     };
-    let withdraw = height_of("withdraw")?;
-    let tron_withdraw = height_of("tronWithdraw")?;
     let last_seen = &result.last_seen;
+    let ethereum_flushed = max_height_of(&last_seen.ethereum_flushed)?;
+    let tron_flushed = max_height_of(&last_seen.tron_flushed)?;
     anyhow::ensure!(
-        tron_withdraw > last_seen.before.tron
-            && last_seen.after_ethereum.ethereum == last_seen.before.ethereum.max(withdraw)
+        tron_flushed > last_seen.before.tron
+            && last_seen.after_ethereum.ethereum == last_seen.before.ethereum.max(ethereum_flushed)
             && last_seen.after_ethereum.tron == last_seen.before.tron
-            && last_seen.after_tron.tron == tron_withdraw
+            && last_seen.after_tron.tron == tron_flushed
             && last_seen.after_tron.ethereum == last_seen.after_ethereum.ethereum,
         "an attestation moved the other chain's last-seen height: {last_seen:?}"
     );
@@ -1196,10 +1260,10 @@ async fn midnight_vault_tron_withdraw_with_real_mpc() -> anyhow::Result<()> {
         result.recipient
     );
     let unsent = &result.unsent_refund;
-    tracing::info!(?unsent, "unsent Tron withdraw refunded");
+    tracing::info!(?unsent, "unsent Tron requests refunded");
     anyhow::ensure!(
-        unsent.late_send_refusal.contains("too close"),
-        "the late send was refused for another reason: {unsent:?}"
+        unsent.late_send_refusal.matches("too close").count() == 3,
+        "a late send was refused for another reason: {unsent:?}"
     );
     // The executed transfer carried its request's binding as a trailing word, which the
     // token's ABI decoder ignored: a copy of the start would have named another transaction.
@@ -1208,7 +1272,72 @@ async fn midnight_vault_tron_withdraw_with_real_mpc() -> anyhow::Result<()> {
         binding.binding == binding.expected_binding,
         "the Tron withdraw ran without its own binding word: {binding:?}"
     );
+    expect_tron_lend_amounts(&result.tron_lend)?;
     midnight.shutdown().await?;
+    Ok(())
+}
+
+/// The Tron lend run's arithmetic: requests carry coin units and calldata units times the
+/// factor, attested shares and assets mint floored to coin units, and the vault's Tron
+/// account backs every coin at its factor.
+fn expect_tron_lend_amounts(lend: &TronLendResult) -> anyhow::Result<()> {
+    tracing::info!(?lend, "Tron lend amounts");
+    let parse = |value: &str| {
+        value
+            .parse::<u128>()
+            .with_context(|| format!("{value} is not a u128"))
+    };
+    let factor = parse(&lend.share_factor)?;
+    let supply = &lend.supply;
+    let (amount, shares, minted, remainder) = (
+        parse(&supply.amount)?,
+        parse(&supply.shares)?,
+        parse(&supply.minted)?,
+        parse(&supply.remainder)?,
+    );
+    anyhow::ensure!(
+        factor == 10u128.pow(12)
+            && parse(&supply.calldata_amount)? == amount
+            && shares > u128::from(u64::MAX)
+            && minted == shares / factor
+            && remainder == shares - minted * factor
+            && remainder < factor,
+        "the Tron supply minted other than its floored shares: {supply:?}"
+    );
+    let redeem = &lend.redeem;
+    anyhow::ensure!(
+        parse(&redeem.shares)? == minted
+            && parse(&redeem.calldata_shares)? == minted * factor
+            && parse(&redeem.assets)? > amount,
+        "the Tron redeem did not return more than the supply for its shares: {redeem:?}"
+    );
+    // Each executed call carried its request's binding as a trailing word, which the token's
+    // ABI decoder ignored: the ownership commitment of that request's own start.
+    let deposit = &lend.share_deposit;
+    let withdraw = &lend.share_withdraw;
+    anyhow::ensure!(
+        supply.binding == supply.expected_binding
+            && redeem.binding == redeem.expected_binding
+            && withdraw.binding == withdraw.expected_binding,
+        "a Tron supply, redeem or withdraw ran without its own binding word: {supply:?} {redeem:?} {withdraw:?}"
+    );
+    anyhow::ensure!(
+        parse(&deposit.calldata_amount)? == parse(&deposit.amount)? * factor
+            && parse(&withdraw.calldata_amount)? == parse(&withdraw.amount)? * factor
+            && parse(&withdraw.received)? == parse(&withdraw.calldata_amount)?,
+        "a share deposit or withdraw moved other than its units times the factor: {deposit:?} {withdraw:?}"
+    );
+    let backing = &lend.backing;
+    anyhow::ensure!(
+        parse(&backing.underlying_vault)? == parse(&backing.underlying_coins)?
+            && parse(&backing.share_vault)? == parse(&backing.share_coins)? * factor + remainder,
+        "the vault's Tron account does not back its coins: {backing:?}"
+    );
+    anyhow::ensure!(
+        !lend.starved_supply.broadcast_refusal.is_empty(),
+        "the starved supply's broadcast was not refused: {:?}",
+        lend.starved_supply
+    );
     Ok(())
 }
 

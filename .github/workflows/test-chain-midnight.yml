@@ -31,7 +31,7 @@ jobs:
     # The first name is the required check; each test starts its own stack and cluster.
     name: ${{ matrix.name }}
     runs-on: warp-ubuntu-latest-x64-4x
-    timeout-minutes: 90
+    timeout-minutes: ${{ matrix.timeout-minutes || 90 }}
     strategy:
       fail-fast: false
       matrix:
@@ -46,6 +46,8 @@ jobs:
             test: midnight_partial_success_review_shapes
           - name: Midnight Tron Withdraw Tests
             test: midnight_vault_tron_withdraw_with_real_mpc
+            # Its unviable and unsent requests wait out their Tron validity windows.
+            timeout-minutes: 180
 
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6

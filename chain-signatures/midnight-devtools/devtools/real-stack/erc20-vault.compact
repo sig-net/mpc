@@ -44,6 +44,14 @@ struct VaultGasLimits {
 }
 export ledger vaultGasLimits: VaultGasLimits;
 
+// The fee limit, in sun, of each kind of Tron transaction the vault's own account signs.
+export struct VaultTronFeeLimits {
+  withdraw: Uint<64>;
+  approve: Uint<64>;
+  supply: Uint<64>;
+  redeem: Uint<64>;
+}
+
 // Set once initialise() has run.
 export ledger initialised: Boolean;
 
@@ -81,7 +89,18 @@ export struct AllowedTokenConfig {
 // Keyed by every ERC20 a vault coin can exist for.
 export ledger allowedTokens: Map<Bytes<20>, AllowedTokenConfig>;
 
-export ledger allowedTronTokens: Map<Bytes<20>, AllowedTokenConfig>;
+// A Tron token's coins count in units of `factor` base units (10^s, 1 for an unshifted
+// token), so a coin's Uint<64> reaches (2^64 - 1)·factor base units. The factor is fixed at
+// listing: changing it would reprice every coin already minted. Fees are in coin units.
+// colour is tronCoinColour(token, factor), fixed with it: computing it once here keeps the
+// hash out of every circuit that mints or checks a Tron coin.
+export struct AllowedTronTokenConfig {
+  fees: TokenFees;
+  factor: Uint<64>;
+  colour: Bytes<32>;
+}
+
+export ledger allowedTronTokens: Map<Bytes<20>, AllowedTronTokenConfig>;
 
 export ledger tronUsdtAddress: Bytes<20>;
 
@@ -105,6 +124,11 @@ circuit requireTokenAllowed(erc20Address: Bytes<20>): [] {
 
 circuit requireTronTokenAllowed(tokenAddress: Bytes<20>): [] {
   assert(allowedTronTokens.member(disclose(tokenAddress)), "TRC-20 not allowed");
+}
+
+circuit tronTokenConfig(tokenAddress: Bytes<20>): AllowedTronTokenConfig {
+  requireTronTokenAllowed(tokenAddress);
+  return allowedTronTokens.lookup(disclose(tokenAddress));
 }
 
 circuit tokenFees(erc20Address: Bytes<20>): TokenFees {
@@ -168,6 +192,36 @@ export pure circuit vaultTronTokenDomainSeparator(tokenAddress: Bytes<20>): Byte
     tokenAddress as Field as Bytes<32>
   ]));
 }
+
+// The domain separator of a Tron token's vault coins, which its listing stores. A shifted
+// token hashes its factor in, so two coins share a colour only if they share the token and
+// the factor; an unshifted one keeps vaultTronTokenDomainSeparator.
+export pure circuit tronCoinColour(tokenAddress: Bytes<20>, factor: Uint<64>): Bytes<32> {
+  return factor == 1
+    ? vaultTronTokenDomainSeparator(tokenAddress)
+    : upgradeFromTransient(transientHash<Vector<3, Bytes<32>>>([
+        pad(32, "vault:token:tron:shifted:"),
+        tokenAddress as Field as Bytes<32>,
+        factor as Field as Bytes<32>
+      ]));
+}
+
+// A Tron amount in coin units as the token's base units, which calldata carries.
+export pure circuit tronBaseOfUnits(units: Uint<64>, factor: Uint<64>): Uint<128> {
+  return (units * factor) as Uint<128>;
+}
+
+// floor(base / factor) given the caller's quotient q, which this checks: Compact cannot
+// divide. A base whose quotient exceeds Uint<64> has no q to pass.
+export pure circuit tronUnitsOfBaseFloor(base: Uint<128>, factor: Uint<64>, q: Uint<64>): Uint<64> {
+  const low = tronBaseOfUnits(q, factor);
+  assert(low <= base, "Quotient too large");
+  assert(((base - low) as Uint<128>) < (factor as Uint<128>), "Quotient too small");
+  return q;
+}
+
+// floor(base / factor), which tronUnitsOfBaseFloor checks.
+witness unitsOfBase(base: Uint<128>, factor: Uint<64>): Uint<64>;
 
 witness callerSecretKey(): Bytes<32>;
 
@@ -251,13 +305,26 @@ export circuit initialise(
     supply: 500000 as Uint<64>,
     redeem: 500000 as Uint<64>
   };
-  // 100 TRX, in sun.
-  vaultTronFeeLimit = 100000000 as Uint<64>;
+  // In sun (100 per unit of energy on mainnet). Mainnet simulations of JustLend V2's USDT
+  // vault used ~397k energy for a deposit and ~395k for a redeem, a USDT approve ~34k; the
+  // limits leave room for Tron's dynamic energy penalty to rise.
+  vaultTronFeeLimits = VaultTronFeeLimits {
+    withdraw: 100000000 as Uint<64>,
+    approve: 50000000 as Uint<64>,
+    supply: 150000000 as Uint<64>,
+    redeem: 150000000 as Uint<64>
+  };
 }
 
 // ==== Gas settings ===================================================================
 // The deployer resets the vault account's fee envelope and per-action gas limits, and the
-// fee limit of its Tron transactions. A request keeps the values it was started with.
+// per-action fee limits of its Tron transactions. A request keeps the values it was started
+// with.
+
+circuit assertTronFeeLimit(feeLimit: Uint<64>): [] {
+  assert(feeLimit > 0 as Uint<64>, "Tron fee limit must be positive");
+  assert(feeLimit <= tronInt64Max(), "Tron fee limit exceeds int64");
+}
 
 export circuit setGasParams(
   newMaxFeePerGas: Uint<128>,
@@ -267,7 +334,7 @@ export circuit setGasParams(
   newSwapGasLimit: Uint<64>,
   newSupplyGasLimit: Uint<64>,
   newRedeemGasLimit: Uint<64>,
-  newTronFeeLimit: Uint<64>
+  newTronFeeLimits: VaultTronFeeLimits
 ): [] {
   requireInitialised();
   requireDeployer();
@@ -282,8 +349,10 @@ export circuit setGasParams(
   assert(newSwapGasLimit > 0 as Uint<64>, "Gas limit must be positive");
   assert(newSupplyGasLimit > 0 as Uint<64>, "Gas limit must be positive");
   assert(newRedeemGasLimit > 0 as Uint<64>, "Gas limit must be positive");
-  assert(newTronFeeLimit > 0 as Uint<64>, "Tron fee limit must be positive");
-  assert(newTronFeeLimit <= tronInt64Max(), "Tron fee limit exceeds int64");
+  assertTronFeeLimit(newTronFeeLimits.withdraw);
+  assertTronFeeLimit(newTronFeeLimits.approve);
+  assertTronFeeLimit(newTronFeeLimits.supply);
+  assertTronFeeLimit(newTronFeeLimits.redeem);
 
   vaultMaxFeePerGas = disclose(newMaxFeePerGas);
   vaultMaxPriorityFeePerGas = disclose(newMaxPriorityFeePerGas);
@@ -294,7 +363,7 @@ export circuit setGasParams(
     supply: disclose(newSupplyGasLimit),
     redeem: disclose(newRedeemGasLimit)
   };
-  vaultTronFeeLimit = disclose(newTronFeeLimit);
+  vaultTronFeeLimits = disclose(newTronFeeLimits);
 }
 
 // ==== Allowed tokens and fees ========================================================
@@ -316,11 +385,33 @@ export circuit setTokenFees(erc20Address: Bytes<20>, fees: TokenFees): [] {
   allowedTokens.insert(disclose(erc20Address), disclose(AllowedTokenConfig { fees: fees }));
 }
 
-export circuit addAllowedTronToken(tokenAddress: Bytes<20>, fees: TokenFees): [] {
+// Lists a Tron token once, with its fees and its fixed factor (see AllowedTronTokenConfig).
+export circuit addAllowedTronToken(tokenAddress: Bytes<20>, fees: TokenFees, factor: Uint<64>): [] {
   requireInitialised();
   requireDeployer();
   assert(tokenAddress as Field != 0 as Field, "TRC-20 address cannot be zero");
-  allowedTronTokens.insert(disclose(tokenAddress), disclose(AllowedTokenConfig { fees: fees }));
+  assert(factor > 0 as Uint<64>, "Factor must be positive");
+  assert(!allowedTronTokens.member(disclose(tokenAddress)), "TRC-20 already allowed");
+  allowedTronTokens.insert(
+    disclose(tokenAddress),
+    disclose(AllowedTronTokenConfig {
+      fees: fees,
+      factor: factor,
+      colour: tronCoinColour(tokenAddress, factor),
+    })
+  );
+}
+
+// Reprices a listed Tron token and keeps its factor. A request keeps the fee it was
+// started with.
+export circuit setTronTokenFees(tokenAddress: Bytes<20>, fees: TokenFees): [] {
+  requireInitialised();
+  requireDeployer();
+  const config = tronTokenConfig(tokenAddress);
+  allowedTronTokens.insert(
+    disclose(tokenAddress),
+    disclose(AllowedTronTokenConfig { ...config, fees: fees })
+  );
 }
 
 export circuit setFeeRecipient(coinPublicKey: ZswapCoinPublicKey, encryptionPublicKey: Bytes<32>): [] {
@@ -338,7 +429,10 @@ export circuit setFeeRecipient(coinPublicKey: ZswapCoinPublicKey, encryptionPubl
 // Keep at least two variants: a one-variant enum in a hashed struct compiles to a
 // field element the ledger parses as zero bytes, and proofs then fail the proof
 // server's alignment check.
-export enum Action { deposit, withdraw, swap, supply, redeem, approve, replaceNonce, tronDeposit, tronWithdraw }
+export enum Action {
+  deposit, withdraw, swap, supply, redeem, approve, replaceNonce, tronDeposit, tronWithdraw,
+  tronApprove, tronSupply, tronRedeem
+}
 
 export enum Chain { ethereum, tron }
 
@@ -578,7 +672,7 @@ export pure circuit replaceNonceOutputSchema(): Bytes<2> {
 }
 
 // Nonce replacement requests (no calldata, 2-byte output schema).
-// Compiled path for MPC notification: [1, 11] (read from managed/erc20-vault/compiler/contract-info.json).
+// Compiled path for MPC notification: [2, 2] (read from managed/erc20-vault/compiler/contract-info.json).
 export ledger bidirectionalReplaceNonceMap: SignBidirectionalEventMapV1<EvmType2TxParams<2, 0, 0>, 2>;
 
 // inIndex -> the arguments of the replacement queued under it, from start to complete.
@@ -595,7 +689,11 @@ circuit replaceNonceArgsHash(args: ReplaceNonceArgs): Bytes<32> {
 // map. A deposit signs with the caller's account, so it holds no vault nonce.
 circuit sentVaultNonce(requestId: RequestId, action: Action): Uint<64> {
   assert(action != Action.deposit && action != Action.tronDeposit, "Deposit has no vault nonce");
-  assert(action != Action.tronWithdraw, "Tron request has no vault nonce");
+  assert(
+    action != Action.tronWithdraw && action != Action.tronApprove &&
+      action != Action.tronSupply && action != Action.tronRedeem,
+    "Tron request has no vault nonce"
+  );
   if (action == Action.withdraw) {
     assert(bidirectionalWithdrawMap.member(requestId), "Request not sent");
     return bidirectionalWithdrawMap.lookup(requestId).txParams.nonce;
@@ -689,11 +787,11 @@ export circuit sendReplaceNonce(outIndex: Bytes<32>): [] {
   bidirectionalReplaceNonceMap.insert(requestId, request);
   evictionMap.insert(requestId, disclosedIndex);
 
-  // Notify the MPC (bidirectionalReplaceNonceMap's compiled ledger path, [1, 11]).
+  // Notify the MPC (bidirectionalReplaceNonceMap's compiled ledger path, [2, 2]).
   signetSigner.signBidirectional(
     requestId,
     constructSignBidirectionalEventNotificationV1(
-      kernel.self(), 2 as Uint<8>, [1, 11, 0, 0] as Vector<4, Uint<8>>,
+      kernel.self(), 2 as Uint<8>, [2, 2, 0, 0] as Vector<4, Uint<8>>,
     ),
   );
 }
@@ -734,7 +832,7 @@ export struct ApproveArgs {
 }
 
 // Approve requests of both spenders (2-word ERC20 approve, 34-byte output schema).
-// Compiled path for MPC notification: [1, 13] (read from managed/erc20-vault/compiler/contract-info.json).
+// Compiled path for MPC notification: [2, 4] (read from managed/erc20-vault/compiler/contract-info.json).
 export ledger bidirectionalApproveMap: SignBidirectionalEventMapV1<EvmType2TxParams<2, 0, 0>, 34>;
 
 // inIndex -> the arguments of the approval queued under it, from start to complete.
@@ -848,11 +946,11 @@ export circuit sendApprove(outIndex: Bytes<32>): [] {
   bidirectionalApproveMap.insert(requestId, request);
   evictionMap.insert(requestId, disclosedIndex);
 
-  // Notify the MPC (bidirectionalApproveMap's compiled ledger path, [1, 13]).
+  // Notify the MPC (bidirectionalApproveMap's compiled ledger path, [2, 4]).
   signetSigner.signBidirectional(
     requestId,
     constructSignBidirectionalEventNotificationV1(
-      kernel.self(), 2 as Uint<8>, [1, 13, 0, 0] as Vector<4, Uint<8>>,
+      kernel.self(), 2 as Uint<8>, [2, 4, 0, 0] as Vector<4, Uint<8>>,
     ),
   );
 }
@@ -903,7 +1001,7 @@ export struct DepositArgs {
 }
 
 // Deposit requests (2-word ERC20 transfer, 34-byte output schema).
-// Compiled path for MPC notification: [2, 0] (read from managed/erc20-vault/compiler/contract-info.json).
+// Compiled path for MPC notification: [2, 6] (read from managed/erc20-vault/compiler/contract-info.json).
 export ledger bidirectionalDepositMap: SignBidirectionalEventMapV1<EvmType2TxParams<2, 0, 0>, 34>;
 
 // inIndex -> the arguments of the deposit queued under it, from start to complete.
@@ -995,11 +1093,11 @@ export circuit sendDeposit(outIndex: Bytes<32>): [] {
   bidirectionalDepositMap.insert(requestId, request);
   evictionMap.insert(requestId, disclosedIndex);
 
-  // Notify the MPC (bidirectionalDepositMap's compiled ledger path, [2, 0]).
+  // Notify the MPC (bidirectionalDepositMap's compiled ledger path, [2, 6]).
   signetSigner.signBidirectional(
     requestId,
     constructSignBidirectionalEventNotificationV1(
-      kernel.self(), 2 as Uint<8>, [2, 0, 0, 0] as Vector<4, Uint<8>>,
+      kernel.self(), 2 as Uint<8>, [2, 6, 0, 0] as Vector<4, Uint<8>>,
     ),
   );
 }
@@ -1051,6 +1149,7 @@ export circuit completeDeposit(
 
 export struct TronDepositRequest {
   tokenAddress: Bytes<20>;
+  // In the token's coin units; the transfer moves amount·factor base units.
   amount: Uint<128>;
 }
 
@@ -1126,12 +1225,13 @@ export circuit sendTronDeposit(outIndex: Bytes<32>): [] {
   const entry = outputRequestBuffer.lookup(disclosedIndex).entry;
   assert(entry.action == Action.tronDeposit, "Wrong action");
   const args = tronDepositArgsMap.lookup(entry.inIndex);
+  const factor = tronTokenConfig(args.request.tokenAddress).factor;
   const calldata = EvmCalldata<2> {
     selector: Bytes [0xa9, 0x05, 0x9c, 0xbb],
     noWords: 2 as Uint<16>,
     words: [
       evmAddressAbiWord(vaultEvmAddress),
-      numericAbiWord(args.request.amount),
+      numericAbiWord(tronBaseOfUnits(args.request.amount as Uint<64>, factor)),
     ]
   };
   const txParams = TronTriggerSmartContractTxParams<2> {
@@ -1157,7 +1257,7 @@ export circuit sendTronDeposit(outIndex: Bytes<32>): [] {
   signetSigner.signBidirectional(
     requestId,
     constructSignBidirectionalEventNotificationV1(
-      kernel.self(), 2 as Uint<8>, [2, 2, 0, 0] as Vector<4, Uint<8>>,
+      kernel.self(), 2 as Uint<8>, [2, 8, 0, 0] as Vector<4, Uint<8>>,
     ),
   );
 }
@@ -1191,7 +1291,7 @@ export circuit completeTronDeposit(
         ? disclose(recipient).value
         : left<ZswapCoinPublicKey, ContractAddress>(ownPublicKey());
       mintShieldedToken(
-        vaultTronTokenDomainSeparator(args.request.tokenAddress),
+        tronTokenConfig(args.request.tokenAddress).colour,
         args.request.amount as Uint<64>,
         disclose(mintNonce),
         claimRecipient
@@ -1217,7 +1317,7 @@ export struct WithdrawArgs {
 }
 
 // Withdraw requests (2-word ERC20 transfer, 34-byte output schema).
-// Compiled path for MPC notification: [2, 4] (read from managed/erc20-vault/compiler/contract-info.json).
+// Compiled path for MPC notification: [2, 10] (read from managed/erc20-vault/compiler/contract-info.json).
 export ledger bidirectionalWithdrawMap: SignBidirectionalEventMapV1<EvmType2TxParams<2, 0, 0>, 34>;
 
 // inIndex -> the arguments of the withdrawal queued under it, from start to complete.
@@ -1324,11 +1424,11 @@ export circuit sendWithdraw(outIndex: Bytes<32>): [] {
   bidirectionalWithdrawMap.insert(requestId, request);
   evictionMap.insert(requestId, disclosedIndex);
 
-  // Notify the MPC (bidirectionalWithdrawMap's compiled ledger path, [2, 4]).
+  // Notify the MPC (bidirectionalWithdrawMap's compiled ledger path, [2, 10]).
   signetSigner.signBidirectional(
     requestId,
     constructSignBidirectionalEventNotificationV1(
-      kernel.self(), 2 as Uint<8>, [2, 4, 0, 0] as Vector<4, Uint<8>>,
+      kernel.self(), 2 as Uint<8>, [2, 10, 0, 0] as Vector<4, Uint<8>>,
     ),
   );
 }
@@ -1403,7 +1503,7 @@ export pure circuit swapOutputSchema(): Bytes<38> {
 }
 
 // Swap requests (7-word exactOutputSingle, 38-byte output schema).
-// Compiled path for MPC notification: [2, 6] (read from managed/erc20-vault/compiler/contract-info.json).
+// Compiled path for MPC notification: [2, 12] (read from managed/erc20-vault/compiler/contract-info.json).
 export ledger bidirectionalSwapMap: SignBidirectionalEventMapV1<EvmType2TxParams<7, 0, 0>, 38>;
 
 // inIndex -> the arguments of the swap queued under it, from start to complete.
@@ -1525,11 +1625,11 @@ export circuit sendSwap(outIndex: Bytes<32>): [] {
   bidirectionalSwapMap.insert(requestId, request);
   evictionMap.insert(requestId, disclosedIndex);
 
-  // Notify the MPC (bidirectionalSwapMap's compiled ledger path, [2, 6]).
+  // Notify the MPC (bidirectionalSwapMap's compiled ledger path, [2, 12]).
   signetSigner.signBidirectional(
     requestId,
     constructSignBidirectionalEventNotificationV1(
-      kernel.self(), 2 as Uint<8>, [2, 6, 0, 0] as Vector<4, Uint<8>>,
+      kernel.self(), 2 as Uint<8>, [2, 12, 0, 0] as Vector<4, Uint<8>>,
     ),
   );
 }
@@ -1625,7 +1725,7 @@ export struct SupplyArgs {
 }
 
 // Supply requests (2-word ERC-4626 deposit, 36-byte output schema).
-// Compiled path for MPC notification: [2, 8] (read from managed/erc20-vault/compiler/contract-info.json).
+// Compiled path for MPC notification: [2, 14] (read from managed/erc20-vault/compiler/contract-info.json).
 export ledger bidirectionalSupplyMap: SignBidirectionalEventMapV1<EvmType2TxParams<2, 0, 0>, 36>;
 
 // inIndex -> the arguments of the supply queued under it, from start to complete.
@@ -1731,11 +1831,11 @@ export circuit sendSupply(outIndex: Bytes<32>): [] {
   bidirectionalSupplyMap.insert(requestId, request);
   evictionMap.insert(requestId, disclosedIndex);
 
-  // Notify the MPC (bidirectionalSupplyMap's compiled ledger path, [2, 8]).
+  // Notify the MPC (bidirectionalSupplyMap's compiled ledger path, [2, 14]).
   signetSigner.signBidirectional(
     requestId,
     constructSignBidirectionalEventNotificationV1(
-      kernel.self(), 2 as Uint<8>, [2, 8, 0, 0] as Vector<4, Uint<8>>,
+      kernel.self(), 2 as Uint<8>, [2, 14, 0, 0] as Vector<4, Uint<8>>,
     ),
   );
 }
@@ -1815,7 +1915,7 @@ export struct RedeemArgs {
 }
 
 // Redeem requests (3-word ERC-4626 redeem, 36-byte output schema).
-// Compiled path for MPC notification: [2, 10] (read from managed/erc20-vault/compiler/contract-info.json).
+// Compiled path for MPC notification: [3, 1] (read from managed/erc20-vault/compiler/contract-info.json).
 export ledger bidirectionalRedeemMap: SignBidirectionalEventMapV1<EvmType2TxParams<3, 0, 0>, 36>;
 
 // inIndex -> the arguments of the redeem queued under it, from start to complete.
@@ -1923,11 +2023,11 @@ export circuit sendRedeem(outIndex: Bytes<32>): [] {
   bidirectionalRedeemMap.insert(requestId, request);
   evictionMap.insert(requestId, disclosedIndex);
 
-  // Notify the MPC (bidirectionalRedeemMap's compiled ledger path, [2, 10]).
+  // Notify the MPC (bidirectionalRedeemMap's compiled ledger path, [3, 1]).
   signetSigner.signBidirectional(
     requestId,
     constructSignBidirectionalEventNotificationV1(
-      kernel.self(), 2 as Uint<8>, [2, 10, 0, 0] as Vector<4, Uint<8>>,
+      kernel.self(), 2 as Uint<8>, [3, 1, 0, 0] as Vector<4, Uint<8>>,
     ),
   );
 }
@@ -1983,30 +2083,127 @@ export circuit completeRedeem(
   }
 }
 
-// ==== Tron withdraw ==================================================================
-// transfer(destTronAddress, amount) on the TRC-20, signed by the MPC with the vault's own
-// account (path "vault": its Tron address is 0x41 ‖ vaultEvmAddress) under the vault's fee
-// limit. Tron has no nonce: the withdrawer names the reference block and the validity
-// window, and a transaction that never lands expires, which the MPC attests unviable, so
-// the withdrawal is refunded. A withdrawal nobody sent before its window closed to sends
-// never reaches the MPC, so its withdrawer refunds it with refundUnsentTronWithdraw. The
-// vault's Tron account pays the energy and bandwidth, in staked resources or burned TRX up
-// to the fee limit.
+// ==== Tron transactions ==============================================================
+// What every request the vault's own Tron account signs shares (path "vault": its Tron
+// address is 0x41 ‖ vaultEvmAddress). Tron has no nonce: the requester names the reference
+// block and the validity window, and a transaction that never lands expires, which the MPC
+// attests unviable, so the request is refunded. A request nobody sent before its window
+// closed to sends never reaches the MPC, so its requester refunds it with the action's
+// refundUnsent circuit. The vault's Tron account pays the energy and bandwidth, in staked
+// resources or burned TRX up to the action's fee limit.
 
-export struct TronWithdrawRequest {
-  tokenAddress: Bytes<20>;
-  amount: Uint<128>;
-  // The recipient's Tron address without its 0x41 prefix: the 20 bytes the TRC-20
-  // transfer's ABI address argument carries.
-  destTronAddress: Bytes<20>;
-}
-
-// The withdrawer's TaPoS reference and validity window, in Tron's milliseconds.
+// The requester's TaPoS reference and validity window, in Tron's milliseconds.
 export struct TronTxWindow {
   refBlockBytes: Bytes<2>;
   refBlockHash: Bytes<8>;
   timestamp: Uint<64>;
   expiration: Uint<64>;
+}
+
+// The fee limits, in sun, of the vault's Tron transactions: set by initialise() and
+// setGasParams(), read at start.
+export ledger vaultTronFeeLimits: VaultTronFeeLimits;
+
+// The margins, in seconds, by which the expiration must clear the MPC's admission bounds
+// at the block that runs the check (see assertTronExpirationWindowV1). The start keeps
+// room for the flush and the send; the send keeps room for the gap between the block
+// time the ledger checks and the one the MPC reads.
+export pure circuit tronStartMinRemainingSeconds(): Uint<64> {
+  return 600;
+}
+
+export pure circuit tronSendMinRemainingSeconds(): Uint<64> {
+  return 60;
+}
+
+export pure circuit tronCapMarginSeconds(): Uint<64> {
+  return 60;
+}
+
+// floor(millis / 1000), which assertTronExpirationWindowV1 checks: Compact cannot divide.
+witness secondsOfMillis(millis: Uint<64>): Uint<64>;
+
+circuit assertTronWindow(expiration: Uint<64>, minRemainingSeconds: Uint<64>): [] {
+  assertTronExpirationWindowV1(
+    expiration,
+    secondsOfMillis(expiration),
+    minRemainingSeconds,
+    tronCapMarginSeconds()
+  );
+}
+
+// The vault-signed transaction's fields: the requester's window and the action's fee limit.
+circuit tronVaultTxFields(window: TronTxWindow, feeLimit: Uint<64>): TronTxFields {
+  return TronTxFields {
+    refBlockBytes: window.refBlockBytes,
+    refBlockHash: window.refBlockHash,
+    timestamp: window.timestamp,
+    expiration: window.expiration,
+    feeLimit: feeLimit,
+  };
+}
+
+// Asserts the block time has reached the first one at which a send refuses a request
+// expiring at `expiration`: assertTronWindow admits a send only while the block time is
+// below h - tronSendMinRemainingSeconds(), h the expiration's whole seconds, so this asserts
+// the complement, at least that. The start admitted only an h above
+// tronStartMinRemainingSeconds(), so the difference cannot underflow.
+circuit assertTronSendClosed(expiration: Uint<64>): [] {
+  const ms = disclose(expiration);
+  const seconds = disclose(secondsOfMillis(expiration));
+  assert(
+    seconds * 1000 <= ms && ms < seconds * 1000 + 1000,
+    "expirationSeconds is not the expiration in whole seconds"
+  );
+  assert(
+    blockTimeGte((seconds - tronSendMinRemainingSeconds()) as Uint<64>),
+    "Tron request can still be sent"
+  );
+}
+
+// Takes the never-sent Tron request of `action` queued under inIndex out of whichever
+// request buffer holds it, once the caller proves they started it. Unflushed, the entry
+// sits under inIndex. Flushed, the inIndex may hold another action's entry, and the entry
+// sits under its requestIndex, which reads only the nonce (always 0 on Tron) and the args
+// hash.
+circuit removeUnsentTronRequest(inIndex: Uint<64>, action: Action, argsHash: Bytes<32>): [] {
+  const queued = inputRequestBuffer.member(inIndex) &&
+    inputRequestBuffer.lookup(inIndex).action == action;
+  const outIndex = requestIndex(RequestBufferEntry {
+    action: action,
+    chain: Chain.tron,
+    useNextVaultAccountNonce: false,
+    evmNonce: 0 as Uint<64>,
+    inIndex: inIndex,
+    commitment: default<Bytes<32>>,
+    argsHash: argsHash,
+  });
+  const entry = queued
+    ? inputRequestBuffer.lookup(inIndex)
+    : outputRequestBuffer.lookup(outIndex).entry;
+  assert(
+    entry.commitment == ownershipCommitment(entry.inIndex, callerSecretKey()),
+    "Not the requester"
+  );
+
+  if (queued) {
+    inputRequestBuffer.remove(inIndex);
+  } else {
+    outputRequestBuffer.remove(outIndex);
+  }
+}
+
+// ==== Tron withdraw ==================================================================
+// transfer(destTronAddress, amount·factor) on the TRC-20, signed by the MPC with the
+// vault's own Tron account under the vault's withdraw fee limit.
+
+export struct TronWithdrawRequest {
+  tokenAddress: Bytes<20>;
+  // In the token's coin units; the transfer moves amount·factor base units.
+  amount: Uint<128>;
+  // The recipient's Tron address without its 0x41 prefix: the 20 bytes the TRC-20
+  // transfer's ABI address argument carries.
+  destTronAddress: Bytes<20>;
 }
 
 // binding is the request's ownership commitment, appended to the transfer as a third
@@ -2021,44 +2218,12 @@ export struct TronWithdrawArgs {
   binding: Bytes<32>;
 }
 
-// The fee limit, in sun, of the vault's Tron transactions: set by initialise() and
-// setGasParams(), read at start.
-export ledger vaultTronFeeLimit: Uint<64>;
-
 // Tron withdraw requests (2-word TRC-20 transfer plus the binding word, 34-byte output schema).
-// Compiled path for MPC notification: [2, 13] (read from managed/erc20-vault/compiler/contract-info.json).
+// Compiled path for MPC notification: [3, 4] (read from managed/erc20-vault/compiler/contract-info.json).
 export ledger bidirectionalTronWithdrawMap: SignBidirectionalEventMapV1<TronTriggerSmartContractTxParams<3>, 34>;
 
 // inIndex -> the arguments of the Tron withdrawal queued under it, from start to complete.
 export ledger tronWithdrawArgsMap: Map<Uint<64>, TronWithdrawArgs>;
-
-// The margins, in seconds, by which the expiration must clear the MPC's admission bounds
-// at the block that runs the check (see assertTronExpirationWindowV1). The start keeps
-// room for the flush and the send; the send keeps room for the gap between the block
-// time the ledger checks and the one the MPC reads.
-export pure circuit tronWithdrawStartMinRemainingSeconds(): Uint<64> {
-  return 600;
-}
-
-export pure circuit tronWithdrawSendMinRemainingSeconds(): Uint<64> {
-  return 60;
-}
-
-export pure circuit tronWithdrawCapMarginSeconds(): Uint<64> {
-  return 60;
-}
-
-// floor(millis / 1000), which assertTronExpirationWindowV1 checks: Compact cannot divide.
-witness secondsOfMillis(millis: Uint<64>): Uint<64>;
-
-circuit assertTronWithdrawWindow(expiration: Uint<64>, minRemainingSeconds: Uint<64>): [] {
-  assertTronExpirationWindowV1(
-    expiration,
-    secondsOfMillis(expiration),
-    minRemainingSeconds,
-    tronWithdrawCapMarginSeconds()
-  );
-}
 
 circuit tronWithdrawArgsHash(args: TronWithdrawArgs): Bytes<32> {
   return upgradeFromTransient(transientHash<[Bytes<32>, TronWithdrawArgs]>([
@@ -2067,22 +2232,18 @@ circuit tronWithdrawArgsHash(args: TronWithdrawArgs): Bytes<32> {
   ]));
 }
 
-circuit tronTokenFees(tokenAddress: Bytes<20>): TokenFees {
-  requireTronTokenAllowed(tokenAddress);
-  return allowedTronTokens.lookup(disclose(tokenAddress)).fees;
-}
-
 // The withdrawal's SignBidirectionalEvent. Its args fix every field, so the start knows
 // the request id the send will record.
 circuit tronWithdrawEvent(
   args: TronWithdrawArgs
 ): SignBidirectionalEventV1<TronTriggerSmartContractTxParams<3>, 34, 0> {
+  const factor = tronTokenConfig(args.request.tokenAddress).factor;
   const calldata = EvmCalldata<3> {
     selector: Bytes [0xa9, 0x05, 0x9c, 0xbb], // transfer(address,uint256)
     noWords: 3 as Uint<16>,
     words: [
       evmAddressAbiWord(args.request.destTronAddress),
-      numericAbiWord(args.request.amount),
+      numericAbiWord(tronBaseOfUnits(args.request.amount as Uint<64>, factor)),
       args.binding,
     ]
   };
@@ -2108,11 +2269,11 @@ circuit tronWithdrawEvent(
 // withdraw fee: the coin spend is the authorisation. The vault's account signs and pays, so
 // the fee limit is the vault's own setting at start. The checks refuse a request the MPC
 // would never answer: fields Tron cannot encode, and a window the MPC would not admit by
-// the send (with tronWithdrawStartMinRemainingSeconds left for the flush and the send).
+// the send (with tronStartMinRemainingSeconds left for the flush and the send).
 // A withdrawal repeating an earlier one's inIndex, window, token, amount, destination and
-// fee limit under the same key names the same Tron transaction, which Tron takes only once,
-// so such a twin's coin can be left with nothing to settle it: the client picks a fresh
-// index.
+// withdraw fee limit under the same key names the same Tron transaction, which Tron takes
+// only once, so such a twin's coin can be left with nothing to settle it: the client picks a
+// fresh index.
 export circuit startTronWithdraw(
   inIndex: Uint<64>,
   withdrawRequest: TronWithdrawRequest,
@@ -2131,33 +2292,29 @@ export circuit startTronWithdraw(
     "Index already in use"
   );
 
-  const fee = tronTokenFees(withdrawRequest.tokenAddress).withdraw;
+  const config = tronTokenConfig(withdrawRequest.tokenAddress);
+  const fee = config.fees.withdraw;
+  const colour = config.colour;
   assert(
-    coin.color == tokenType(vaultTronTokenDomainSeparator(withdrawRequest.tokenAddress), kernel.self()),
+    coin.color == tokenType(colour, kernel.self()),
     "Coin is not the vault token for this TRC-20"
   );
   assert(
     coin.value == (withdrawRequest.amount + fee) as Uint<128>,
     "Coin value must equal the withdraw amount plus fee"
   );
-  takeFee(vaultTronTokenDomainSeparator(withdrawRequest.tokenAddress), coin, fee);
+  takeFee(colour, coin, fee);
 
   const commitment = ownershipCommitment(inIndex, callerSecretKey());
   const args = disclose(TronWithdrawArgs {
     request: withdrawRequest,
-    tx: TronTxFields {
-      refBlockBytes: tronTx.refBlockBytes,
-      refBlockHash: tronTx.refBlockHash,
-      timestamp: tronTx.timestamp,
-      expiration: tronTx.expiration,
-      feeLimit: vaultTronFeeLimit,
-    },
+    tx: tronVaultTxFields(tronTx, vaultTronFeeLimits.withdraw),
     fee: fee,
     binding: commitment,
   });
   const request = tronWithdrawEvent(args);
   assertTronTriggerSmartContractTxParamsV1<3>(request.txParams);
-  assertTronWithdrawWindow(args.tx.expiration, tronWithdrawStartMinRemainingSeconds());
+  assertTronWindow(args.tx.expiration, tronStartMinRemainingSeconds());
 
   tronWithdrawArgsMap.insert(disclosedIndex, args);
   inputRequestBuffer.insert(disclosedIndex, disclose(RequestBufferEntry {
@@ -2173,7 +2330,7 @@ export circuit startTronWithdraw(
 
 // Records the flushed Tron withdrawal's SignBidirectionalEvent and notifies the MPC, once
 // its window still clears the MPC's admission at this block with
-// tronWithdrawSendMinRemainingSeconds to spare. Permissionless: the entry and its args fix
+// tronSendMinRemainingSeconds to spare. Permissionless: the entry and its args fix
 // every byte of the Tron transaction, so a second send of the same entry names the same
 // request id and is refused.
 export circuit sendTronWithdraw(outIndex: Bytes<32>): [] {
@@ -2183,18 +2340,18 @@ export circuit sendTronWithdraw(outIndex: Bytes<32>): [] {
   const entry = outputRequestBuffer.lookup(disclosedIndex).entry;
   assert(entry.action == Action.tronWithdraw, "Wrong action");
   const args = tronWithdrawArgsMap.lookup(entry.inIndex);
-  assertTronWithdrawWindow(args.tx.expiration, tronWithdrawSendMinRemainingSeconds());
+  assertTronWindow(args.tx.expiration, tronSendMinRemainingSeconds());
   const request = tronWithdrawEvent(args);
   const requestId = calculateTronTriggerSmartContractRequestIdV1<3, 34>(request);
   assert(!bidirectionalTronWithdrawMap.member(requestId), "Request already sent");
   bidirectionalTronWithdrawMap.insert(requestId, request);
   evictionMap.insert(requestId, disclosedIndex);
 
-  // Notify the MPC (bidirectionalTronWithdrawMap's compiled ledger path, [2, 13]).
+  // Notify the MPC (bidirectionalTronWithdrawMap's compiled ledger path, [3, 4]).
   signetSigner.signBidirectional(
     requestId,
     constructSignBidirectionalEventNotificationV1(
-      kernel.self(), 2 as Uint<8>, [2, 13, 0, 0] as Vector<4, Uint<8>>,
+      kernel.self(), 2 as Uint<8>, [3, 4, 0, 0] as Vector<4, Uint<8>>,
     ),
   );
 }
@@ -2237,30 +2394,12 @@ export circuit completeTronWithdraw(
       (!transferred && args.request.tokenAddress != tronUsdtAddress)
   ) {
     mintShieldedToken(
-      vaultTronTokenDomainSeparator(args.request.tokenAddress),
+      tronTokenConfig(args.request.tokenAddress).colour,
       args.request.amount as Uint<64>,
       disclose(mintNonce),
       left<ZswapCoinPublicKey, ContractAddress>(ownPublicKey())
     );
   }
-}
-
-// Asserts the block time has reached the first one at which sendTronWithdraw refuses a
-// withdrawal expiring at `expiration`: assertTronWithdrawWindow admits a send only while
-// the block time is below h - tronWithdrawSendMinRemainingSeconds(), h the expiration's
-// whole seconds, so this asserts the complement, at least that. The start admitted only an
-// h above tronWithdrawStartMinRemainingSeconds(), so the difference cannot underflow.
-circuit assertTronWithdrawSendClosed(expiration: Uint<64>): [] {
-  const ms = disclose(expiration);
-  const seconds = disclose(secondsOfMillis(expiration));
-  assert(
-    seconds * 1000 <= ms && ms < seconds * 1000 + 1000,
-    "expirationSeconds is not the expiration in whole seconds"
-  );
-  assert(
-    blockTimeGte((seconds - tronWithdrawSendMinRemainingSeconds()) as Uint<64>),
-    "Tron withdrawal can still be sent"
-  );
 }
 
 // Re-mints the amount of the Tron withdrawal queued under inIndex that was never sent and
@@ -2279,39 +2418,616 @@ export circuit refundUnsentTronWithdraw(inIndex: Uint<64>, mintNonce: Bytes<32>)
   const args = tronWithdrawArgsMap.lookup(disclosedIndex);
   const requestId = calculateTronTriggerSmartContractRequestIdV1<3, 34>(tronWithdrawEvent(args));
   assert(!bidirectionalTronWithdrawMap.member(requestId), "Request already sent");
-  assertTronWithdrawSendClosed(args.tx.expiration);
+  assertTronSendClosed(args.tx.expiration);
 
-  // Unflushed, the entry sits under inIndex. Flushed, the inIndex may hold another
-  // action's entry, and the entry sits under its requestIndex, which reads only the nonce
-  // (always 0 on Tron) and the args hash.
-  const queued = inputRequestBuffer.member(disclosedIndex) &&
-    inputRequestBuffer.lookup(disclosedIndex).action == Action.tronWithdraw;
-  const outIndex = requestIndex(RequestBufferEntry {
-    action: Action.tronWithdraw,
+  removeUnsentTronRequest(disclosedIndex, Action.tronWithdraw, tronWithdrawArgsHash(args));
+  tronWithdrawArgsMap.remove(disclosedIndex);
+  mintShieldedToken(
+    tronTokenConfig(args.request.tokenAddress).colour,
+    args.request.amount as Uint<64>,
+    disclose(mintNonce),
+    left<ZswapCoinPublicKey, ContractAddress>(ownPublicKey())
+  );
+}
+
+// ==== Tron lend ======================================================================
+// The Tron twin of Supply and Redeem: deposit and redeem on an ERC-4626 share token over
+// a Tron underlying, both listed Tron tokens the deployer pairs once, signed by the MPC
+// with the vault's own Tron account under the vault's per-action fee limits. Requests carry
+// coin units; calldata carries units·factor. The attested shares or assets come back
+// floored to coin units, so the vault never mints more than its Tron account holds; the
+// remainder, under one coin unit per request, stays in that account.
+// The share token's code is trusted as the stata pair on Ethereum is: no cap bounds what
+// the vault holds in it.
+
+// The pair setTronLendPair records, and the smallest supply, in underlying coin units, it
+// admits: a supply too small to return one share coin unit would mint nothing.
+export ledger tronLendUnderlying: Bytes<20>;
+export ledger tronLendShareToken: Bytes<20>;
+export ledger tronLendMinSupply: Uint<64>;
+
+circuit requireTronLendPair(): [] {
+  assert(tronLendShareToken as Field != 0 as Field, "Tron lend pair not set");
+}
+
+// One-shot and deployer-gated: pairs a listed Tron underlying with its listed ERC-4626
+// share token. Fees and factors come from each token's listing.
+export circuit setTronLendPair(underlying: Bytes<20>, shareToken: Bytes<20>, minSupply: Uint<64>): [] {
+  requireInitialised();
+  requireDeployer();
+  assert(tronLendShareToken as Field == 0 as Field, "Tron lend pair already set");
+  assert(underlying as Field != 0 as Field, "Underlying cannot be zero");
+  assert(shareToken as Field != 0 as Field, "Share token cannot be zero");
+  assert(underlying != shareToken, "Underlying and share token must differ");
+  requireTronTokenAllowed(underlying);
+  requireTronTokenAllowed(shareToken);
+  assert(minSupply > 0 as Uint<64>, "Minimum supply must be positive");
+  tronLendUnderlying = disclose(underlying);
+  tronLendShareToken = disclose(shareToken);
+  tronLendMinSupply = disclose(minSupply);
+}
+
+// -- Tron approve ---------------------------------------------------------------------
+// approve(tronLendShareToken, unlimitedAllowance()) on tronLendUnderlying, which a supply
+// needs. The spender is pinned: the vault's Tron account holds the underlying that backs
+// users' coins.
+
+export struct TronApproveArgs {
+  tx: TronTxFields;
+}
+
+// Tron approve requests (2-word TRC-20 approve, 34-byte output schema).
+// Compiled path for MPC notification: [3, 9] (read from managed/erc20-vault/compiler/contract-info.json).
+export ledger bidirectionalTronApproveMap: SignBidirectionalEventMapV1<TronTriggerSmartContractTxParams<2>, 34>;
+
+// inIndex -> the arguments of the Tron approval queued under it, from start to complete.
+export ledger tronApproveArgsMap: Map<Uint<64>, TronApproveArgs>;
+
+circuit tronApproveArgsHash(args: TronApproveArgs): Bytes<32> {
+  return upgradeFromTransient(transientHash<[Bytes<32>, TronApproveArgs]>([
+    pad(32, "vault:tronApprove:args"),
+    args
+  ]));
+}
+
+circuit tronApproveEvent(
+  args: TronApproveArgs
+): SignBidirectionalEventV1<TronTriggerSmartContractTxParams<2>, 34, 0> {
+  const calldata = EvmCalldata<2> {
+    selector: Bytes [0x09, 0x5e, 0xa7, 0xb3], // approve(address,uint256)
+    noWords: 2 as Uint<16>,
+    words: [
+      evmAddressAbiWord(tronLendShareToken),
+      numericAbiWord(unlimitedAllowance()),
+    ]
+  };
+  const txParams = TronTriggerSmartContractTxParams<2> {
+    refBlockBytes: args.tx.refBlockBytes,
+    refBlockHash: args.tx.refBlockHash,
+    timestamp: args.tx.timestamp,
+    expiration: args.tx.expiration,
+    feeLimit: args.tx.feeLimit,
+    contractAddress: tronAddress(tronLendUnderlying),
+    callValue: 0 as Uint<64>,
+    calldata: some<EvmCalldata<2>>(calldata)
+  };
+  return constructSignBidirectionalEventV1<TronTriggerSmartContractTxParams<2>, 34>(
+    mpcKeyVersion, kernel.self(), pad(32, "vault"),
+    MPCSignatureAlgorithm.ecdsa, TxParamType.tronTriggerSmartContract, txParams, tronCaip2Id(),
+    MPCDestination.unused, pad(64, ""), vaultOutputSchema()
+  );
+}
+
+// Queues the vault's approval under inIndex, a caller-chosen random index, in the
+// deployer's window. Deployer-gated. An approval never sent in its window surrendered
+// nothing: the deployer starts another.
+export circuit startTronApprove(inIndex: Uint<64>, tronTx: TronTxWindow): [] {
+  requireInitialised();
+  requireDeployer();
+  requireTronLendPair();
+
+  const disclosedIndex = disclose(inIndex);
+  assert(
+    !inputRequestBuffer.member(disclosedIndex) && !tronApproveArgsMap.member(disclosedIndex),
+    "Index already in use"
+  );
+
+  const args = disclose(TronApproveArgs {
+    tx: tronVaultTxFields(tronTx, vaultTronFeeLimits.approve),
+  });
+  assertTronTriggerSmartContractTxParamsV1<2>(tronApproveEvent(args).txParams);
+  assertTronWindow(args.tx.expiration, tronStartMinRemainingSeconds());
+
+  tronApproveArgsMap.insert(disclosedIndex, args);
+  inputRequestBuffer.insert(disclosedIndex, disclose(RequestBufferEntry {
+    action: Action.tronApprove,
     chain: Chain.tron,
     useNextVaultAccountNonce: false,
     evmNonce: 0 as Uint<64>,
-    inIndex: disclosedIndex,
-    commitment: default<Bytes<32>>,
-    argsHash: tronWithdrawArgsHash(args),
-  });
-  const entry = queued
-    ? inputRequestBuffer.lookup(disclosedIndex)
-    : outputRequestBuffer.lookup(outIndex).entry;
+    inIndex: inIndex,
+    commitment: ownershipCommitment(inIndex, callerSecretKey()),
+    argsHash: tronApproveArgsHash(args),
+  }));
+}
+
+// Records the flushed Tron approval's SignBidirectionalEvent and notifies the MPC, while
+// its window still clears the MPC's admission. Permissionless, as sendTronWithdraw.
+export circuit sendTronApprove(outIndex: Bytes<32>): [] {
+  requireInitialised();
+  const disclosedIndex = disclose(outIndex);
+  assert(outputRequestBuffer.member(disclosedIndex), "Request not flushed");
+  const entry = outputRequestBuffer.lookup(disclosedIndex).entry;
+  assert(entry.action == Action.tronApprove, "Wrong action");
+  const args = tronApproveArgsMap.lookup(entry.inIndex);
+  assertTronWindow(args.tx.expiration, tronSendMinRemainingSeconds());
+  const request = tronApproveEvent(args);
+  const requestId = calculateTronTriggerSmartContractRequestIdV1<2, 34>(request);
+  assert(!bidirectionalTronApproveMap.member(requestId), "Request already sent");
+  bidirectionalTronApproveMap.insert(requestId, request);
+  evictionMap.insert(requestId, disclosedIndex);
+
+  // Notify the MPC (bidirectionalTronApproveMap's compiled ledger path, [3, 9]).
+  signetSigner.signBidirectional(
+    requestId,
+    constructSignBidirectionalEventNotificationV1(
+      kernel.self(), 2 as Uint<8>, [3, 9, 0, 0] as Vector<4, Uint<8>>,
+    ),
+  );
+}
+
+// Settles a Tron approval on any verdict, as completeApprove: executed checks the output
+// against the attestation; an approval surrendered nothing, so every verdict only closes
+// the request. Requester-gated (the deployer who started it), one settle per request.
+export circuit completeTronApprove(requestId: RequestId, serializedOutput: Bytes<1>): [] {
+  requireInitialised();
+  const disclosedId = disclose(requestId);
+  const settled = settleRequest(disclosedId, Action.tronApprove);
+  const entry = settled[0];
+  const record = settled[1];
+  tronApproveArgsMap.remove(entry.inIndex);
+  assert(bidirectionalTronApproveMap.member(disclosedId), "Request event missing");
+  bidirectionalTronApproveMap.remove(disclosedId);
+
+  if (record.outputKind == OutputKind.executed) {
+    assert(
+      verifyAttestedOutputV1<1>(
+        disclose(serializedOutput), record.serializedOutputLength, record.outputHash
+      ),
+      "Output does not match the attestation"
+    );
+  }
+}
+
+// -- Tron supply ----------------------------------------------------------------------
+// deposit(amount·underlyingFactor, vaultEvmAddress) on tronLendShareToken, which pulls the
+// underlying from the vault's Tron account under the Tron approval and returns the shares
+// it minted. Exact-input, so there is no change. The calldata carries one more word, the
+// requester's binding (see TronSupplyArgs), which the ABI decoder ignores.
+
+export struct TronSupplyRequest {
+  // In tronLendUnderlying coin units.
+  amount: Uint<128>;
+}
+
+// Holds what fixes the Tron transaction and no fee. binding is the request's ownership
+// commitment, which the start computes and the queued entry already publishes: as the last
+// calldata word it gives every request its own Tron transaction and request id, so a copy of
+// a public start (same amount and window) can neither hold the original at the flush nor
+// share its request id, and no request can be settled by another's receipt.
+export struct TronSupplyArgs {
+  request: TronSupplyRequest;
+  tx: TronTxFields;
+  binding: Bytes<32>;
+}
+
+// Tron supply requests (2-word ERC-4626 deposit plus the binding word, 36-byte output schema).
+// Compiled path for MPC notification: [3, 11] (read from managed/erc20-vault/compiler/contract-info.json).
+export ledger bidirectionalTronSupplyMap: SignBidirectionalEventMapV1<TronTriggerSmartContractTxParams<3>, 36>;
+
+// inIndex -> the arguments of the Tron supply queued under it, from start to complete.
+export ledger tronSupplyArgsMap: Map<Uint<64>, TronSupplyArgs>;
+
+circuit tronSupplyArgsHash(args: TronSupplyArgs): Bytes<32> {
+  return upgradeFromTransient(transientHash<[Bytes<32>, TronSupplyArgs]>([
+    pad(32, "vault:tronSupply:args"),
+    args
+  ]));
+}
+
+circuit tronSupplyEvent(
+  args: TronSupplyArgs
+): SignBidirectionalEventV1<TronTriggerSmartContractTxParams<3>, 36, 0> {
+  const factor = tronTokenConfig(tronLendUnderlying).factor;
+  // The pinned receiver keeps the shares in the vault's Tron account, which backs the
+  // minted coins.
+  const calldata = EvmCalldata<3> {
+    selector: Bytes [0x6e, 0x55, 0x3f, 0x65], // deposit(uint256,address)
+    noWords: 3 as Uint<16>,
+    words: [
+      numericAbiWord(tronBaseOfUnits(args.request.amount as Uint<64>, factor)),
+      evmAddressAbiWord(vaultEvmAddress),
+      args.binding,
+    ]
+  };
+  const txParams = TronTriggerSmartContractTxParams<3> {
+    refBlockBytes: args.tx.refBlockBytes,
+    refBlockHash: args.tx.refBlockHash,
+    timestamp: args.tx.timestamp,
+    expiration: args.tx.expiration,
+    feeLimit: args.tx.feeLimit,
+    contractAddress: tronAddress(tronLendShareToken),
+    callValue: 0 as Uint<64>,
+    calldata: some<EvmCalldata<3>>(calldata)
+  };
+  return constructSignBidirectionalEventV1<TronTriggerSmartContractTxParams<3>, 36>(
+    mpcKeyVersion, kernel.self(), pad(32, "vault"),
+    MPCSignatureAlgorithm.ecdsa, TxParamType.tronTriggerSmartContract, txParams, tronCaip2Id(),
+    MPCDestination.unused, pad(64, ""), supplyOutputSchema()
+  );
+}
+
+// Queues the Tron supply under inIndex, a caller-chosen random index (must be fresh, else
+// no unlinkability is guaranteed), burns the surrendered underlying coin and takes the
+// supply fee: the coin spend is the authorisation. Refuses an amount below
+// tronLendMinSupply and a window the MPC would not admit by the send, as startTronWithdraw.
+export circuit startTronSupply(
+  inIndex: Uint<64>,
+  supplyRequest: TronSupplyRequest,
+  tronTx: TronTxWindow,
+  coin: ShieldedCoinInfo
+): [] {
+  requireInitialised();
+  requireTronLendPair();
+  assert(supplyRequest.amount >= tronLendMinSupply as Uint<128>, "Amount below the minimum supply");
+  // completeTronSupply re-mints via a Uint<64> API, so reject unrefundable amounts.
+  assert(supplyRequest.amount <= 18446744073709551615 as Uint<128>, "Amount exceeds Uint<64> max");
+
+  const disclosedIndex = disclose(inIndex);
   assert(
-    entry.commitment == ownershipCommitment(entry.inIndex, callerSecretKey()),
-    "Not the requester"
+    !inputRequestBuffer.member(disclosedIndex) && !tronSupplyArgsMap.member(disclosedIndex),
+    "Index already in use"
   );
 
-  if (queued) {
-    inputRequestBuffer.remove(disclosedIndex);
-  } else {
-    outputRequestBuffer.remove(outIndex);
+  const config = tronTokenConfig(tronLendUnderlying);
+  const fee = config.fees.supply;
+  const colour = config.colour;
+  assert(
+    coin.color == tokenType(colour, kernel.self()),
+    "Coin is not the vault token for the underlying"
+  );
+  assert(
+    coin.value == (supplyRequest.amount + fee) as Uint<128>,
+    "Coin value must equal the supply amount plus fee"
+  );
+  takeFee(colour, coin, fee);
+
+  const commitment = ownershipCommitment(inIndex, callerSecretKey());
+  const args = disclose(TronSupplyArgs {
+    request: supplyRequest,
+    tx: tronVaultTxFields(tronTx, vaultTronFeeLimits.supply),
+    binding: commitment,
+  });
+  assertTronTriggerSmartContractTxParamsV1<3>(tronSupplyEvent(args).txParams);
+  assertTronWindow(args.tx.expiration, tronStartMinRemainingSeconds());
+
+  tronSupplyArgsMap.insert(disclosedIndex, args);
+  inputRequestBuffer.insert(disclosedIndex, disclose(RequestBufferEntry {
+    action: Action.tronSupply,
+    chain: Chain.tron,
+    useNextVaultAccountNonce: false,
+    evmNonce: 0 as Uint<64>,
+    inIndex: inIndex,
+    commitment: commitment,
+    argsHash: tronSupplyArgsHash(args),
+  }));
+}
+
+// Records the flushed Tron supply's SignBidirectionalEvent and notifies the MPC, while its
+// window still clears the MPC's admission. Permissionless, as sendTronWithdraw.
+export circuit sendTronSupply(outIndex: Bytes<32>): [] {
+  requireInitialised();
+  const disclosedIndex = disclose(outIndex);
+  assert(outputRequestBuffer.member(disclosedIndex), "Request not flushed");
+  const entry = outputRequestBuffer.lookup(disclosedIndex).entry;
+  assert(entry.action == Action.tronSupply, "Wrong action");
+  const args = tronSupplyArgsMap.lookup(entry.inIndex);
+  assertTronWindow(args.tx.expiration, tronSendMinRemainingSeconds());
+  const request = tronSupplyEvent(args);
+  const requestId = calculateTronTriggerSmartContractRequestIdV1<3, 36>(request);
+  assert(!bidirectionalTronSupplyMap.member(requestId), "Request already sent");
+  bidirectionalTronSupplyMap.insert(requestId, request);
+  evictionMap.insert(requestId, disclosedIndex);
+
+  // Notify the MPC (bidirectionalTronSupplyMap's compiled ledger path, [3, 11]).
+  signetSigner.signBidirectional(
+    requestId,
+    constructSignBidirectionalEventNotificationV1(
+      kernel.self(), 2 as Uint<8>, [3, 11, 0, 0] as Vector<4, Uint<8>>,
+    ),
+  );
+}
+
+// Settles a Tron supply on any verdict. Executed: checks the output against the
+// attestation, then mints the attested shares floored to share coin units. Failed or
+// unviable: the share token took nothing, so the surrendered underlying amount is
+// re-minted, and serializedOutput is ignored. The fee is kept either way. Either mint goes
+// to the caller. Supplier-gated, one settle per request. mintNonce is caller-chosen and
+// must be random, else no hiding property is guaranteed.
+export circuit completeTronSupply(
+  requestId: RequestId,
+  serializedOutput: Bytes<32>,
+  mintNonce: Bytes<32>,
+): [] {
+  requireInitialised();
+  const disclosedId = disclose(requestId);
+  const settled = settleRequest(disclosedId, Action.tronSupply);
+  const entry = settled[0];
+  const record = settled[1];
+  const args = tronSupplyArgsMap.lookup(entry.inIndex);
+  tronSupplyArgsMap.remove(entry.inIndex);
+  assert(bidirectionalTronSupplyMap.member(disclosedId), "Request event missing");
+  bidirectionalTronSupplyMap.remove(disclosedId);
+
+  const caller = left<ZswapCoinPublicKey, ContractAddress>(ownPublicKey());
+  if (record.outputKind == OutputKind.executed) {
+    const output = disclose(serializedOutput);
+    assert(
+      verifyAttestedOutputV1<32>(output, record.serializedOutputLength, record.outputHash),
+      "Output does not match the attestation"
+    );
+    const share = tronTokenConfig(tronLendShareToken);
+    const shares = checkedTruncationU128(output);
+    mintShieldedToken(
+      share.colour,
+      tronUnitsOfBaseFloor(shares, share.factor, disclose(unitsOfBase(shares, share.factor))),
+      disclose(mintNonce),
+      caller
+    );
   }
-  tronWithdrawArgsMap.remove(disclosedIndex);
+  if (outcomeRefunds(record.outputKind)) {
+    mintShieldedToken(
+      tronTokenConfig(tronLendUnderlying).colour,
+      args.request.amount as Uint<64>,
+      disclose(mintNonce),
+      caller
+    );
+  }
+}
+
+// Re-mints the amount of the Tron supply queued under inIndex that was never sent and can
+// no longer be, keeping the supply fee, as refundUnsentTronWithdraw. Supplier-gated, once.
+// mintNonce is caller-chosen and must be random, else no hiding property is guaranteed.
+export circuit refundUnsentTronSupply(inIndex: Uint<64>, mintNonce: Bytes<32>): [] {
+  requireInitialised();
+  const disclosedIndex = disclose(inIndex);
+  assert(tronSupplyArgsMap.member(disclosedIndex), "Tron supply not open");
+  const args = tronSupplyArgsMap.lookup(disclosedIndex);
+  const requestId = calculateTronTriggerSmartContractRequestIdV1<3, 36>(tronSupplyEvent(args));
+  assert(!bidirectionalTronSupplyMap.member(requestId), "Request already sent");
+  assertTronSendClosed(args.tx.expiration);
+
+  removeUnsentTronRequest(disclosedIndex, Action.tronSupply, tronSupplyArgsHash(args));
+  tronSupplyArgsMap.remove(disclosedIndex);
   mintShieldedToken(
-    vaultTronTokenDomainSeparator(args.request.tokenAddress),
+    tronTokenConfig(tronLendUnderlying).colour,
     args.request.amount as Uint<64>,
+    disclose(mintNonce),
+    left<ZswapCoinPublicKey, ContractAddress>(ownPublicKey())
+  );
+}
+
+// -- Tron redeem ----------------------------------------------------------------------
+// redeem(shares·shareFactor, vaultEvmAddress, vaultEvmAddress) on tronLendShareToken,
+// which burns shares the vault's Tron account owns, so no allowance is involved, and pays
+// that account the underlying they are worth. Exact-input, so there is no change. The
+// calldata carries the requester's binding as a fourth word, as the supply's.
+
+export struct TronRedeemRequest {
+  // In tronLendShareToken coin units.
+  shares: Uint<128>;
+}
+
+// Holds no fee and binds the request to its requester, as TronSupplyArgs.
+export struct TronRedeemArgs {
+  request: TronRedeemRequest;
+  tx: TronTxFields;
+  binding: Bytes<32>;
+}
+
+// Tron redeem requests (3-word ERC-4626 redeem plus the binding word, 36-byte output schema).
+// Compiled path for MPC notification: [3, 13] (read from managed/erc20-vault/compiler/contract-info.json).
+export ledger bidirectionalTronRedeemMap: SignBidirectionalEventMapV1<TronTriggerSmartContractTxParams<4>, 36>;
+
+// inIndex -> the arguments of the Tron redeem queued under it, from start to complete.
+export ledger tronRedeemArgsMap: Map<Uint<64>, TronRedeemArgs>;
+
+circuit tronRedeemArgsHash(args: TronRedeemArgs): Bytes<32> {
+  return upgradeFromTransient(transientHash<[Bytes<32>, TronRedeemArgs]>([
+    pad(32, "vault:tronRedeem:args"),
+    args
+  ]));
+}
+
+circuit tronRedeemEvent(
+  args: TronRedeemArgs
+): SignBidirectionalEventV1<TronTriggerSmartContractTxParams<4>, 36, 0> {
+  const factor = tronTokenConfig(tronLendShareToken).factor;
+  // The pinned receiver and owner keep the assets in, and burn the shares from, the
+  // vault's Tron account, which backs the minted coins. One word serves both: each
+  // evmAddressAbiWord costs ~7,000 rows, which would push the send past k=15.
+  const vaultWord = evmAddressAbiWord(vaultEvmAddress);
+  const calldata = EvmCalldata<4> {
+    selector: Bytes [0xba, 0x08, 0x76, 0x52], // redeem(uint256,address,address)
+    noWords: 4 as Uint<16>,
+    words: [
+      numericAbiWord(tronBaseOfUnits(args.request.shares as Uint<64>, factor)),
+      vaultWord,
+      vaultWord,
+      args.binding,
+    ]
+  };
+  const txParams = TronTriggerSmartContractTxParams<4> {
+    refBlockBytes: args.tx.refBlockBytes,
+    refBlockHash: args.tx.refBlockHash,
+    timestamp: args.tx.timestamp,
+    expiration: args.tx.expiration,
+    feeLimit: args.tx.feeLimit,
+    contractAddress: tronAddress(tronLendShareToken),
+    callValue: 0 as Uint<64>,
+    calldata: some<EvmCalldata<4>>(calldata)
+  };
+  return constructSignBidirectionalEventV1<TronTriggerSmartContractTxParams<4>, 36>(
+    mpcKeyVersion, kernel.self(), pad(32, "vault"),
+    MPCSignatureAlgorithm.ecdsa, TxParamType.tronTriggerSmartContract, txParams, tronCaip2Id(),
+    MPCDestination.unused, pad(64, ""), redeemOutputSchema()
+  );
+}
+
+// Queues the Tron redeem under inIndex, a caller-chosen random index (must be fresh, else
+// no unlinkability is guaranteed), burns the surrendered share coin and takes the redeem
+// fee: the coin spend is the authorisation. Refuses a window the MPC would not admit by
+// the send, as startTronWithdraw.
+export circuit startTronRedeem(
+  inIndex: Uint<64>,
+  redeemRequest: TronRedeemRequest,
+  tronTx: TronTxWindow,
+  coin: ShieldedCoinInfo
+): [] {
+  requireInitialised();
+  requireTronLendPair();
+  assert(redeemRequest.shares > 0 as Uint<128>, "shares must be positive");
+  // completeTronRedeem re-mints via a Uint<64> API, so reject unrefundable shares.
+  assert(redeemRequest.shares <= 18446744073709551615 as Uint<128>, "shares exceeds Uint<64> max");
+
+  const disclosedIndex = disclose(inIndex);
+  assert(
+    !inputRequestBuffer.member(disclosedIndex) && !tronRedeemArgsMap.member(disclosedIndex),
+    "Index already in use"
+  );
+
+  const config = tronTokenConfig(tronLendShareToken);
+  const fee = config.fees.redeem;
+  const colour = config.colour;
+  assert(
+    coin.color == tokenType(colour, kernel.self()),
+    "Coin is not the vault token for the share token"
+  );
+  assert(
+    coin.value == (redeemRequest.shares + fee) as Uint<128>,
+    "Coin value must equal shares plus fee"
+  );
+  takeFee(colour, coin, fee);
+
+  const commitment = ownershipCommitment(inIndex, callerSecretKey());
+  const args = disclose(TronRedeemArgs {
+    request: redeemRequest,
+    tx: tronVaultTxFields(tronTx, vaultTronFeeLimits.redeem),
+    binding: commitment,
+  });
+  assertTronTriggerSmartContractTxParamsV1<4>(tronRedeemEvent(args).txParams);
+  assertTronWindow(args.tx.expiration, tronStartMinRemainingSeconds());
+
+  tronRedeemArgsMap.insert(disclosedIndex, args);
+  inputRequestBuffer.insert(disclosedIndex, disclose(RequestBufferEntry {
+    action: Action.tronRedeem,
+    chain: Chain.tron,
+    useNextVaultAccountNonce: false,
+    evmNonce: 0 as Uint<64>,
+    inIndex: inIndex,
+    commitment: commitment,
+    argsHash: tronRedeemArgsHash(args),
+  }));
+}
+
+// Records the flushed Tron redeem's SignBidirectionalEvent and notifies the MPC, while its
+// window still clears the MPC's admission. Permissionless, as sendTronWithdraw.
+export circuit sendTronRedeem(outIndex: Bytes<32>): [] {
+  requireInitialised();
+  const disclosedIndex = disclose(outIndex);
+  assert(outputRequestBuffer.member(disclosedIndex), "Request not flushed");
+  const entry = outputRequestBuffer.lookup(disclosedIndex).entry;
+  assert(entry.action == Action.tronRedeem, "Wrong action");
+  const args = tronRedeemArgsMap.lookup(entry.inIndex);
+  assertTronWindow(args.tx.expiration, tronSendMinRemainingSeconds());
+  const request = tronRedeemEvent(args);
+  const requestId = calculateTronTriggerSmartContractRequestIdV1<4, 36>(request);
+  assert(!bidirectionalTronRedeemMap.member(requestId), "Request already sent");
+  bidirectionalTronRedeemMap.insert(requestId, request);
+  evictionMap.insert(requestId, disclosedIndex);
+
+  // Notify the MPC (bidirectionalTronRedeemMap's compiled ledger path, [3, 13]).
+  signetSigner.signBidirectional(
+    requestId,
+    constructSignBidirectionalEventNotificationV1(
+      kernel.self(), 2 as Uint<8>, [3, 13, 0, 0] as Vector<4, Uint<8>>,
+    ),
+  );
+}
+
+// Settles a Tron redeem on any verdict. Executed: checks the output against the
+// attestation, then mints the attested assets floored to underlying coin units. Failed or
+// unviable: the share token burned nothing, so the surrendered shares are re-minted, and
+// serializedOutput is ignored. The fee is kept either way. Either mint goes to the caller.
+// Redeemer-gated, one settle per request. mintNonce is caller-chosen and must be random,
+// else no hiding property is guaranteed.
+export circuit completeTronRedeem(
+  requestId: RequestId,
+  serializedOutput: Bytes<32>,
+  mintNonce: Bytes<32>,
+): [] {
+  requireInitialised();
+  const disclosedId = disclose(requestId);
+  const settled = settleRequest(disclosedId, Action.tronRedeem);
+  const entry = settled[0];
+  const record = settled[1];
+  const args = tronRedeemArgsMap.lookup(entry.inIndex);
+  tronRedeemArgsMap.remove(entry.inIndex);
+  assert(bidirectionalTronRedeemMap.member(disclosedId), "Request event missing");
+  bidirectionalTronRedeemMap.remove(disclosedId);
+
+  const caller = left<ZswapCoinPublicKey, ContractAddress>(ownPublicKey());
+  if (record.outputKind == OutputKind.executed) {
+    const output = disclose(serializedOutput);
+    assert(
+      verifyAttestedOutputV1<32>(output, record.serializedOutputLength, record.outputHash),
+      "Output does not match the attestation"
+    );
+    const underlying = tronTokenConfig(tronLendUnderlying);
+    const assets = checkedTruncationU128(output);
+    mintShieldedToken(
+      underlying.colour,
+      tronUnitsOfBaseFloor(assets, underlying.factor, disclose(unitsOfBase(assets, underlying.factor))),
+      disclose(mintNonce),
+      caller
+    );
+  }
+  if (outcomeRefunds(record.outputKind)) {
+    mintShieldedToken(
+      tronTokenConfig(tronLendShareToken).colour,
+      args.request.shares as Uint<64>,
+      disclose(mintNonce),
+      caller
+    );
+  }
+}
+
+// Re-mints the shares of the Tron redeem queued under inIndex that was never sent and can
+// no longer be, keeping the redeem fee, as refundUnsentTronWithdraw. Redeemer-gated, once.
+// mintNonce is caller-chosen and must be random, else no hiding property is guaranteed.
+export circuit refundUnsentTronRedeem(inIndex: Uint<64>, mintNonce: Bytes<32>): [] {
+  requireInitialised();
+  const disclosedIndex = disclose(inIndex);
+  assert(tronRedeemArgsMap.member(disclosedIndex), "Tron redeem not open");
+  const args = tronRedeemArgsMap.lookup(disclosedIndex);
+  const requestId = calculateTronTriggerSmartContractRequestIdV1<4, 36>(tronRedeemEvent(args));
+  assert(!bidirectionalTronRedeemMap.member(requestId), "Request already sent");
+  assertTronSendClosed(args.tx.expiration);
+
+  removeUnsentTronRequest(disclosedIndex, Action.tronRedeem, tronRedeemArgsHash(args));
+  tronRedeemArgsMap.remove(disclosedIndex);
+  mintShieldedToken(
+    tronTokenConfig(tronLendShareToken).colour,
+    args.request.shares as Uint<64>,
     disclose(mintNonce),
     left<ZswapCoinPublicKey, ContractAddress>(ownPublicKey())
   );

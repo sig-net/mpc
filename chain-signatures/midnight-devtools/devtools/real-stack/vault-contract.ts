@@ -32,6 +32,12 @@ const vaultWitnesses: Witnesses<VaultPrivateState> = {
     privateState,
     millis / 1000n,
   ],
+  // A Tron lend settle floors the attested base units to coin units, which the circuit
+  // checks.
+  unitsOfBase: ({ privateState }, base, factor): [VaultPrivateState, bigint] => [
+    privateState,
+    base / factor,
+  ],
 };
 
 export type VaultContract = Contract<VaultPrivateState>;
