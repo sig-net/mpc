@@ -92,11 +92,14 @@ pub(crate) async fn watch_landing<C: SubmitChain>(
                 // TODO: three consecutive throttled scans, reset by any other
                 // outcome, escape to the publisher's gate as a retryable end
                 // instead of polling the watch to the budget.
-                tracing::warn!(
-                    error = %format_args!("{error:#}"),
-                    tx_hash = %tx_hash,
-                    "midnight: watching for the respond transaction failed; retrying"
-                );
+                if let Some(count) = mpc_utils::throttle::check("midnight:watch-retry") {
+                    tracing::warn!(
+                        count,
+                        error = %format_args!("{error:#}"),
+                        tx_hash = %tx_hash,
+                        "midnight: watching for the respond transaction failed; retrying"
+                    );
+                }
             }
             Err(_) => break,
         }
