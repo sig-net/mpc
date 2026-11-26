@@ -29,7 +29,7 @@ version = "1.24.0"
 publish = false
 
 [workspace.dependencies]
-alloy = { version = "=1.0.38", features = ["contract", "json"] }
+alloy = { version = "1.0.38", features = ["contract", "json"] }
 anyhow = { version = "1.0.95", features = ["backtrace"] }
 async-trait = "0.1"
 backon = "0.4"
@@ -134,6 +134,9 @@ mpc-utils = { path = "./chain-signatures/utils" }
 mpc-node = { path = "./chain-signatures/node" }
 mpc-primitives = { path = "./chain-signatures/primitives" }
 signet-crypto = { path = "./signet-crypto" }
+# Pinned to the Midnight serialization the deployed contract was compiled with,
+# not the latest contract packages. midnight-respond-codec's
+# `replays_every_typescript_oracle_vector` fails if a bump changes the encoding.
 signet-midnight-serde = "=0.24.0"
 signet-primitives = { path = "./signet-primitives" }
 signet-program = { path = "./chain-signatures/contract-sol" }
