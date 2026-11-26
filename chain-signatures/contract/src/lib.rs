@@ -16,7 +16,6 @@ use mpc_crypto::{
     derive_epsilon, derive_key, kdf::check_ec_signature, near_public_key_to_affine_point,
     KeyPurpose, ScalarExt as _,
 };
-use mpc_primitives::CheckpointDigest;
 use near_sdk::env::panic_str;
 use near_sdk::json_types::U128;
 use near_sdk::store::IterableMap;
@@ -25,7 +24,7 @@ use near_sdk::{
     PublicKey,
 };
 use primitives::{
-    CandidateEntry, CandidateInfo, Candidates, CheckpointReset, CheckpointVotes,
+    CandidateEntry, CandidateInfo, Candidates, CheckpointDigest, CheckpointReset, CheckpointVotes,
     InternalSignRequest, Participants, PendingRequest, PkVotes, Read, ReshareProposal,
     ReshareVotes, SignPoll, SignRequest, StorageKey, ThresholdVotes, View, YieldIndex,
 };
@@ -63,6 +62,9 @@ const MAX_CONCURRENT_REQUESTS: u32 = 128;
 /// Maximum accepted byte length for a candidate node URL.
 pub const MAX_JOIN_URL_LEN: usize = 2048;
 
+/// Maximum accepted byte length for a checkpoint's chain name.
+pub const MAX_CHAIN_NAME_LEN: usize = 32;
+
 /// Fixed anti-spam deposit required to join as a candidate.
 pub const REQUIRED_JOIN_DEPOSIT: NearToken = NearToken::from_near(1);
 
@@ -73,7 +75,7 @@ pub struct MpcContract {
     pending_requests: IterableMap<SignId, PendingRequest>,
     proposed_updates: ProposedUpdates,
     config: ProtocolConfig,
-    latest_checkpoints: IterableMap<Chain, CheckpointDigest>,
+    latest_checkpoints: IterableMap<String, CheckpointDigest>,
     checkpoint_votes: CheckpointVotes,
 }
 
@@ -785,7 +787,7 @@ impl MpcContract {
         threshold: usize,
         public_key: PublicKey,
         config: Option<ProtocolConfig>,
-        checkpoints: Option<BTreeMap<Chain, CheckpointDigest>>,
+        checkpoints: Option<BTreeMap<String, CheckpointDigest>>,
     ) -> Result<Self, Error> {
         log!(
             "init_running: signer={}, epoch={}, participants={}, threshold={}, public_key={:?}, config={:?}, checkpoints={:?}",
@@ -840,6 +842,9 @@ impl MpcContract {
         let state_bytes =
             env::storage_read(b"STATE").ok_or(InvalidState::ContractStateIsMissing)?;
         let mut contract = migration::migrate(&state_bytes)?;
+        // State from before checkpoints were keyed by chain name holds them by `Chain`'s position.
+        migration::rekey_latest_checkpoints(&mut contract.latest_checkpoints);
+        contract.drop_unknown_chain_checkpoints();
         // State from before reshares dropped removed nodes' checkpoint votes can still hold some.
         contract.drop_non_member_checkpoint_votes();
         Ok(contract)
@@ -864,7 +869,7 @@ impl MpcContract {
         &self.config
     }
 
-    pub fn latest_checkpoint(&self, chain: Chain) -> Option<&CheckpointDigest> {
+    pub fn latest_checkpoint(&self, chain: String) -> Option<&CheckpointDigest> {
         self.latest_checkpoints().get(&chain)
     }
 
@@ -895,9 +900,9 @@ impl MpcContract {
                 Read::State => View::State(Box::new(self.state())),
                 Read::Config => View::Config(self.config().clone()),
                 Read::Checkpoints => View::Checkpoints(
-                    Chain::iter()
-                        .into_iter()
-                        .filter_map(|chain| self.latest_checkpoint(chain).map(|cp| (chain, *cp)))
+                    self.latest_checkpoints()
+                        .iter()
+                        .map(|(chain, cp)| (chain.clone(), cp.clone()))
                         .collect(),
                 ),
             };
@@ -939,7 +944,8 @@ impl MpcContract {
     /// required.
     ///
     /// Returns an error if the protocol is not running, the caller is not an
-    /// eligible participant, the submitted checkpoint is behind the latest
+    /// eligible participant, the chain name is longer than
+    /// [`MAX_CHAIN_NAME_LEN`], the submitted checkpoint is behind the latest
     /// checkpoint, or the caller submits a different digest for an already
     /// finalized height.
     #[handle_result]
@@ -949,8 +955,11 @@ impl MpcContract {
             ProtocolContractState::Running(state) => state.threshold,
             _ => return Err(InvalidState::ProtocolStateNotRunning.into()),
         };
+        if checkpoint.chain.len() > MAX_CHAIN_NAME_LEN {
+            return Err(CheckpointError::ChainNameTooLong.into());
+        }
 
-        if let Some(existing) = self.latest_checkpoint(checkpoint.chain) {
+        if let Some(existing) = self.latest_checkpoints().get(&checkpoint.chain) {
             if existing.height > checkpoint.height {
                 // checkpoint is behind, reject.
                 return Err(CheckpointError::CheckpointBehind.into());
@@ -965,7 +974,7 @@ impl MpcContract {
         }
 
         let vote_count = {
-            let voters = self.checkpoint_votes.entry(checkpoint);
+            let voters = self.checkpoint_votes.entry(checkpoint.clone());
             voters.insert(voter);
             voters.len()
         };
@@ -973,7 +982,7 @@ impl MpcContract {
         if vote_count < threshold {
             return Ok(false);
         }
-        self.insert_checkpoint(checkpoint);
+        self.insert_checkpoint(checkpoint.clone());
 
         // Remove stale votes where candidate checkpoint is less than or equal to
         // this voted in consensus checkpoint.
@@ -983,14 +992,14 @@ impl MpcContract {
         Ok(true)
     }
 
-    pub fn checkpoint_votes(&self, chain: Chain) -> Vec<(CheckpointDigest, usize)> {
+    pub fn checkpoint_votes(&self, chain: String) -> Vec<(CheckpointDigest, usize)> {
         let votes = &self.checkpoint_votes;
 
         votes
             .votes
             .iter()
             .filter(|(checkpoint, _)| checkpoint.chain == chain)
-            .map(|(checkpoint, voters)| (*checkpoint, voters.len()))
+            .map(|(checkpoint, voters)| (checkpoint.clone(), voters.len()))
             .collect()
     }
 
@@ -1182,6 +1191,31 @@ impl MpcContract {
         });
     }
 
+    /// Drop the checkpoints and checkpoint votes of every chain this code does
+    /// not know, so deploying code without a chain removes that chain's state.
+    fn drop_unknown_chain_checkpoints(&mut self) {
+        let known = |chain: &str| Chain::iter().iter().any(|known| known.as_str() == chain);
+        let unknown: Vec<String> = self
+            .latest_checkpoints
+            .keys()
+            .filter(|chain| !known(chain))
+            .cloned()
+            .collect();
+        for chain in unknown {
+            self.latest_checkpoints.remove(&chain);
+            env::log_str(
+                &serde_json::json!({
+                    "event": "checkpoints_removed",
+                    "chain": chain,
+                })
+                .to_string(),
+            );
+        }
+        self.checkpoint_votes
+            .votes
+            .retain(|checkpoint, _| known(&checkpoint.chain));
+    }
+
     /// Get our own account id as a voter. Check to see if we are a participant in the protocol.
     /// If we are not a participant, return an error.
     fn voter(&self) -> Result<AccountId, Error> {
@@ -1195,14 +1229,15 @@ impl MpcContract {
         Ok(voter)
     }
 
-    fn latest_checkpoints(&self) -> &IterableMap<Chain, CheckpointDigest> {
+    fn latest_checkpoints(&self) -> &IterableMap<String, CheckpointDigest> {
         &self.latest_checkpoints
     }
 
     /// Store a checkpoint under its own `chain` field, keeping the map key and
     /// the value's chain consistent by construction.
     fn insert_checkpoint(&mut self, checkpoint: CheckpointDigest) {
-        self.latest_checkpoints.insert(checkpoint.chain, checkpoint);
+        self.latest_checkpoints
+            .insert(checkpoint.chain.clone(), checkpoint);
     }
 
     fn checkpoint_votes_mut(&mut self) -> &mut CheckpointVotes {
@@ -1230,7 +1265,7 @@ impl MpcContract {
         let mut chains = HashSet::new();
         for CheckpointReset { chain, height } in resets {
             let resume_after = height.saturating_sub(1);
-            chains.insert(chain);
+            chains.insert(chain.to_string());
             self.insert_checkpoint(CheckpointDigest::new(
                 chain,
                 resume_after,
@@ -1255,43 +1290,9 @@ impl MpcContract {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use near_sdk::borsh::{self, BorshSerialize};
+    use near_sdk::borsh;
     use near_sdk::test_utils::VMContextBuilder;
     use near_sdk::testing_env;
-
-    #[derive(BorshSerialize)]
-    struct IterableMapValueAndIndexForTest<V> {
-        value: V,
-        key_index: u32,
-    }
-
-    // Mirrors near-sdk's `IterableMap::with_hasher` layout for the map half:
-    // `LatestCheckpointDigests` is split into a vector of iterable keys under
-    // `<prefix>v` and a lookup map under `<prefix>m`.
-    fn latest_checkpoints_map_prefix() -> Vec<u8> {
-        let mut prefix = Vec::new();
-        StorageKey::LatestCheckpointDigests
-            .serialize(&mut prefix)
-            .unwrap();
-        [prefix.as_slice(), b"m"].concat()
-    }
-
-    // Seed only the lookup-map entry and intentionally do not seed the vector
-    // key entry. This reproduces the observed deployed state where
-    // `latest_checkpoint(chain)` works because it uses `.get()`, while
-    // `IterableMap::iter()` returns no checkpoints.
-    fn seed_checkpoint_lookup_without_iterable_key(chain: Chain, checkpoint: CheckpointDigest) {
-        let mut key_bytes = latest_checkpoints_map_prefix();
-        chain.serialize(&mut key_bytes).unwrap();
-        let storage_key = env::sha256_array(&key_bytes);
-
-        let value = IterableMapValueAndIndexForTest {
-            value: checkpoint,
-            key_index: 0,
-        };
-        let value_bytes = borsh::to_vec(&value).unwrap();
-        env::storage_write(&storage_key, &value_bytes);
-    }
 
     #[test]
     fn test_migrate_idempotent() {
@@ -1305,9 +1306,9 @@ mod tests {
             protocol_state: ProtocolContractState::NotInitialized,
             pending_requests: IterableMap::new(StorageKey::PendingRequests),
             proposed_updates: ProposedUpdates::default(),
-            config: ProtocolConfig::default().into(),
+            config: ProtocolConfig::default(),
             latest_checkpoints: IterableMap::new(StorageKey::LatestCheckpointDigests),
-            checkpoint_votes: CheckpointVotes::new(),
+            checkpoint_votes: Default::default(),
         };
         let prev_bytes = borsh::to_vec(&previous_contract).unwrap();
         env::storage_write(b"STATE", &prev_bytes);
@@ -1339,56 +1340,6 @@ mod tests {
 
         // Verify the second migrated state matches
         assert!(second_migrated.latest_checkpoints.is_empty());
-    }
-
-    #[test]
-    fn test_checkpoint_read_handles_missing_iterable_keys() {
-        let context = VMContextBuilder::new()
-            .current_account_id("contract.near".parse().unwrap())
-            .build();
-        testing_env!(context);
-
-        let checkpoint = CheckpointDigest::new(Chain::Solana, 120, [7u8; 32]);
-        seed_checkpoint_lookup_without_iterable_key(Chain::Solana, checkpoint);
-
-        // Construct a contract whose `latest_checkpoints` map points at the
-        // seeded storage. The map itself has an empty iterable key vector.
-        let contract = MpcContract {
-            protocol_state: ProtocolContractState::NotInitialized,
-            pending_requests: IterableMap::new(StorageKey::PendingRequests),
-            proposed_updates: ProposedUpdates::default(),
-            config: ProtocolConfig::default(),
-            latest_checkpoints: IterableMap::new(StorageKey::LatestCheckpointDigests),
-            checkpoint_votes: CheckpointVotes::new(),
-        };
-
-        // Prove the test setup matches production: direct lookup sees the
-        // checkpoint, but iteration over the same map does not.
-        assert!(
-            contract.latest_checkpoint(Chain::Solana).is_some(),
-            "direct checkpoint lookup should reproduce production .get() behavior"
-        );
-        assert!(
-            contract.latest_checkpoints().iter().next().is_none(),
-            "test setup should reproduce the broken iterable index"
-        );
-
-        // `read(Checkpoints)` is the path nodes use to learn confirmed
-        // checkpoints. It must not rely on `IterableMap::iter()` here.
-        let checkpoints = contract
-            .read(vec![Read::Checkpoints])
-            .into_iter()
-            .find_map(|view| match view {
-                View::Checkpoints(checkpoints) => Some(checkpoints),
-                _ => None,
-            })
-            .expect("read should return checkpoints view");
-
-        let stored = checkpoints
-            .get(&Chain::Solana)
-            .expect("read(Checkpoints) should not rely on IterableMap::iter()");
-        assert_eq!(stored.height, checkpoint.height);
-        assert_eq!(stored.digest, checkpoint.digest);
     }
 
     // A Running-state contract with `alice.near` as sole participant, so that
@@ -1447,7 +1398,7 @@ mod tests {
         let solana_checkpoint = CheckpointDigest::new(Chain::Solana, 10, [1u8; 32]);
         let ethereum_checkpoint = CheckpointDigest::new(Chain::Ethereum, 20, [2u8; 32]);
 
-        contract.insert_checkpoint(solana_checkpoint);
+        contract.insert_checkpoint(solana_checkpoint.clone());
         contract
             .checkpoint_votes_mut()
             .entry(solana_checkpoint)
@@ -1467,15 +1418,20 @@ mod tests {
         // The reset is an ordinary settled checkpoint whose digest is derived
         // from the pair, which is what every node re-derives locally.
         assert_eq!(
-            contract.latest_checkpoint(Chain::Solana),
+            contract.latest_checkpoint(Chain::Solana.to_string()),
             Some(&CheckpointDigest::new(
                 Chain::Solana,
                 5,
                 mpc_primitives::reset_checkpoint_digest(Chain::Solana, 5),
             ))
         );
-        assert!(contract.checkpoint_votes(Chain::Solana).is_empty());
-        assert_eq!(contract.checkpoint_votes(Chain::Ethereum).len(), 1);
+        assert!(contract
+            .checkpoint_votes(Chain::Solana.to_string())
+            .is_empty());
+        assert_eq!(
+            contract.checkpoint_votes(Chain::Ethereum.to_string()).len(),
+            1
+        );
 
         // Reissuable, including backwards — it's just another settled checkpoint.
         contract.reset_checkpoints(vec![CheckpointReset {
@@ -1483,7 +1439,7 @@ mod tests {
             height: 31,
         }]);
         assert_eq!(
-            contract.latest_checkpoint(Chain::Solana),
+            contract.latest_checkpoint(Chain::Solana.to_string()),
             Some(&CheckpointDigest::new(
                 Chain::Solana,
                 30,
@@ -1508,7 +1464,9 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains(&CheckpointError::CheckpointBehind.to_string()));
-        assert!(contract.checkpoint_votes(Chain::Solana).is_empty());
+        assert!(contract
+            .checkpoint_votes(Chain::Solana.to_string())
+            .is_empty());
 
         // Re-submitting the reset checkpoint itself is an idempotent no-op,
         // which is what lets nodes confirm it rather than fight over it.
@@ -1530,9 +1488,9 @@ mod tests {
 
         // Above it, voting resumes normally and settles past the reset.
         let above = CheckpointDigest::new(Chain::Solana, resume_at_height, [3u8; 32]);
-        assert!(contract.vote_checkpoint(above).unwrap());
+        assert!(contract.vote_checkpoint(above.clone()).unwrap());
         assert_eq!(
-            contract.latest_checkpoint(Chain::Solana),
+            contract.latest_checkpoint(Chain::Solana.to_string()),
             Some(&above),
             "a settled checkpoint replaces the reset checkpoint"
         );
@@ -1620,7 +1578,7 @@ mod tests {
             .unwrap();
         for voter in [alice, dave] {
             act_as(voter);
-            assert!(!contract.vote_checkpoint(far).unwrap());
+            assert!(!contract.vote_checkpoint(far.clone()).unwrap());
             assert!(!contract.vote_update(id).unwrap());
         }
         reshare(
@@ -1635,10 +1593,13 @@ mod tests {
     #[test]
     fn reshare_keeps_only_members_votes() {
         let (mut contract, [alice, bob, ..], far, id) = kick_dave_and_erin_after_votes();
-        assert_eq!(contract.checkpoint_votes(Chain::Solana), vec![(far, 1)]);
+        assert_eq!(
+            contract.checkpoint_votes(Chain::Solana.to_string()),
+            vec![(far.clone(), 1)]
+        );
 
         act_as(&alice);
-        assert!(!contract.vote_checkpoint(far).unwrap());
+        assert!(!contract.vote_checkpoint(far.clone()).unwrap());
         assert!(!contract.vote_update(id).unwrap());
 
         act_as(&bob);
@@ -1650,11 +1611,79 @@ mod tests {
     #[test]
     fn migrate_drops_non_member_checkpoint_votes() {
         let (mut contract, [.., dave, _], far, _) = kick_dave_and_erin_after_votes();
-        contract.checkpoint_votes.entry(far).insert(dave);
-        assert_eq!(contract.checkpoint_votes(Chain::Solana), vec![(far, 2)]);
+        contract.checkpoint_votes.entry(far.clone()).insert(dave);
+        assert_eq!(
+            contract.checkpoint_votes(Chain::Solana.to_string()),
+            vec![(far.clone(), 2)]
+        );
         env::storage_write(b"STATE", &borsh::to_vec(&contract).unwrap());
 
         let migrated = MpcContract::migrate().unwrap();
-        assert_eq!(migrated.checkpoint_votes(Chain::Solana), vec![(far, 1)]);
+        assert_eq!(
+            migrated.checkpoint_votes(Chain::Solana.to_string()),
+            vec![(far, 1)]
+        );
+    }
+
+    /// Checkpoints are stored per chain name, so the contract settles one for a
+    /// chain it has no code for.
+    #[test]
+    fn vote_settles_a_checkpoint_for_any_chain_name() {
+        let mut contract = running_contract(1);
+        let checkpoint = CheckpointDigest {
+            chain: "Unlisted".to_string(),
+            height: 7,
+            digest: [4; 32],
+        };
+        assert!(contract.vote_checkpoint(checkpoint.clone()).unwrap());
+        assert_eq!(
+            contract.latest_checkpoint("Unlisted".to_string()),
+            Some(&checkpoint)
+        );
+    }
+
+    #[test]
+    fn vote_rejects_an_overlong_chain_name() {
+        let mut contract = running_contract(1);
+        let checkpoint = CheckpointDigest {
+            chain: "x".repeat(MAX_CHAIN_NAME_LEN + 1),
+            height: 7,
+            digest: [4; 32],
+        };
+        assert!(contract
+            .vote_checkpoint(checkpoint)
+            .unwrap_err()
+            .to_string()
+            .contains(&CheckpointError::ChainNameTooLong.to_string()));
+    }
+
+    /// A chain missing from the deployed code loses its checkpoints and votes
+    /// on migration; the other chains keep theirs.
+    #[test]
+    fn migrate_drops_checkpoints_of_unknown_chains() {
+        let mut contract = running_contract(2);
+        let unlisted = |height| CheckpointDigest {
+            chain: "Unlisted".to_string(),
+            height,
+            digest: [1; 32],
+        };
+        let canton = CheckpointDigest::new(Chain::Canton, 20, [2; 32]);
+        contract.insert_checkpoint(unlisted(10));
+        contract.insert_checkpoint(canton.clone());
+        assert!(!contract.vote_checkpoint(unlisted(11)).unwrap());
+        assert!(!contract
+            .vote_checkpoint(CheckpointDigest::new(Chain::Canton, 21, [4; 32]))
+            .unwrap());
+        contract.latest_checkpoints.flush();
+        env::storage_write(b"STATE", &borsh::to_vec(&contract).unwrap());
+
+        let migrated = MpcContract::migrate().unwrap();
+        assert_eq!(migrated.latest_checkpoint("Unlisted".to_string()), None);
+        assert!(migrated.checkpoint_votes("Unlisted".to_string()).is_empty());
+        assert_eq!(
+            migrated.latest_checkpoint("Canton".to_string()),
+            Some(&canton)
+        );
+        assert_eq!(migrated.checkpoint_votes("Canton".to_string()).len(), 1);
     }
 }
