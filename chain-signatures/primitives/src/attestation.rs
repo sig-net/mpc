@@ -82,7 +82,7 @@ mod tests {
             (AttestationOutcomeKind::Unviable, "a36b6b65795f76657273696f6e016c626c6f636b5f686569676874182a6c6f7574636f6d655f6b696e6468556e766961626c65"),
         ] {
             let metadata = AttestationMetadata {
-                key_version: 1,
+                key_version: crate::LEGACY_MPC_KEY_VERSION_1,
                 block_height: 42,
                 outcome_kind: outcome,
             };

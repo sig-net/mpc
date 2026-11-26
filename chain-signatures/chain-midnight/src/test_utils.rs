@@ -362,7 +362,7 @@ pub(crate) fn sample_evm_params() -> EvmType2TxParams {
 pub(crate) fn sample_record() -> SignBidirectionalRecord {
     SignBidirectionalRecord {
         sender: MidnightAddress::from_bytes([0xab; 32]),
-        key_version: 1,
+        key_version: u8::try_from(mpc_primitives::LEGACY_MPC_KEY_VERSION_1).unwrap(),
         path: ascii_padded(b"caller-path"),
         algo: MpcSignatureAlgorithm::Ecdsa,
         signature_dest: MpcDestination::Unused,
@@ -404,7 +404,7 @@ pub(crate) fn sample_tron_params() -> TronTxParams {
 pub(crate) fn tron_record(params: TronTxParams) -> SignBidirectionalRecord {
     SignBidirectionalRecord {
         sender: MidnightAddress::from_bytes([0xab; 32]),
-        key_version: 1,
+        key_version: u8::try_from(mpc_primitives::LEGACY_MPC_KEY_VERSION_1).unwrap(),
         path: ascii_padded(b"caller-path"),
         algo: MpcSignatureAlgorithm::Ecdsa,
         signature_dest: MpcDestination::Unused,

@@ -14,6 +14,4 @@ pub use kdf::{
     derive_epsilon, derive_key, reconstruct_signature, reserved_path, x_coordinate, DeriveError,
     KeyPurpose,
 };
-pub use signet_primitives::{PublicKey, ScalarExt};
-
-pub type KeyVersion = u32;
+pub use signet_primitives::{KeyVersion, PublicKey, ScalarExt};

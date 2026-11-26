@@ -89,7 +89,7 @@ impl NearIndexer {
         // NOTE: path is not used at all currently in signature.rs during signing, so hardcoding
         // it here won't matter.
         let path = "integration-tests".to_string();
-        let key_version = 0u32;
+        let key_version = mpc_primitives::LEGACY_MPC_KEY_VERSION_0;
 
         IndexedSignRequest::sign(
             sign_id,

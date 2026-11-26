@@ -404,12 +404,15 @@ mod tests {
         assert_eq!(payload, [1, 2, 3]);
     }
 
+    /// The key version the ethabi reference request id was computed with.
+    const ETHABI_VECTOR_KEY_VERSION: u32 = 7;
+
     #[test]
     fn request_id_matches_ethabi() {
         let event = SignatureRequestedEvent {
             sender: Pubkey::new_from_array([0x11; 32]),
             payload: [0x22; 32],
-            key_version: 7,
+            key_version: ETHABI_VECTOR_KEY_VERSION,
             deposit: 12345,
             chain_id: "solana-test-chain".to_string(),
             path: "m/44'/501'/0'/0'".to_string(),
