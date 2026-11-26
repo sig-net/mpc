@@ -1,12 +1,13 @@
 name: Stale PRs
 
 on:
+  # Daily at 00:00 UTC.
   schedule:
     - cron: "0 0 * * *"
 
 permissions:
+  # Saves progress in the Actions cache when a run hits the 30-operation limit.
   actions: write
-  issues: write
   pull-requests: write
 
 jobs:
@@ -15,8 +16,9 @@ jobs:
     steps:
       - uses: actions/stale@4391f3da665fdf50b6810c1a66712fb9ba21aa93 # v11.0.0
         with:
+          # Issues would otherwise go stale after the 60-day default.
           days-before-issue-stale: -1
-          days-before-issue-close: -1
+          # Labeled after 7 idle days, closed 7 days after the label: 14 in total.
           days-before-pr-stale: 7
           days-before-pr-close: 7
           stale-pr-message: "No activity for 7 days. This PR closes in 7 more days unless it is updated."
