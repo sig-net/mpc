@@ -63,7 +63,7 @@ check_core() {
     if cargo near --version 2>/dev/null | grep -qF "$CARGO_NEAR_VERSION"; then ok "cargo-near ${CARGO_NEAR_VERSION}"; else miss "cargo-near ${CARGO_NEAR_VERSION}"; hint "scripts/install-cargo-near.sh"; fi
     if cargo nextest --version 2>/dev/null | grep -qF "$NEXTEST_VERSION"; then ok "cargo-nextest ${NEXTEST_VERSION}"; else miss "cargo-nextest ${NEXTEST_VERSION}"; hint "curl -LsSf https://get.nexte.st/${NEXTEST_VERSION}/linux | tar zxf - -C ~/.cargo/bin (linux-arm, mac for other platforms)"; fi
     if have cargo-deny; then ok "$(cargo-deny --version 2>/dev/null | head -n 1)"; else miss "cargo-deny"; hint "cargo install cargo-deny --locked"; fi
-    if just --version 2>/dev/null | grep -qF "$JUST_VERSION"; then ok "just ${JUST_VERSION}"; else miss "just ${JUST_VERSION}"; hint "curl --proto '=https' --tlsv1.2 -sSf https://just.systems/install.sh | bash -s -- --tag ${JUST_VERSION} --to ~/.cargo/bin"; fi
+    if have just; then ok "just $(just --version)"; else miss "just"; hint "curl --proto '=https' --tlsv1.2 -sSf https://just.systems/install.sh | bash -s -- --to ~/.cargo/bin"; fi
     if have git; then ok "git"; else miss "git"; fi
     if have curl; then ok "curl"; else miss "curl"; fi
     if have pkg-config; then ok "pkg-config"; else miss "pkg-config"; fi

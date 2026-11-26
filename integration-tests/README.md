@@ -11,9 +11,9 @@ Solana/Anchor, Java/dpm, Compact). Manual install notes follow.
 
 ```bash
 # Linux
-curl -LsSf https://get.nexte.st/latest/linux | tar zxf - -C ~/.cargo/bin
+curl -LsSf https://get.nexte.st/0.9.145/linux | tar zxf - -C ~/.cargo/bin
 # macOS:
-curl -LsSf https://get.nexte.st/latest/mac | tar zxf - -C ~/.cargo/bin
+curl -LsSf https://get.nexte.st/0.9.145/mac | tar zxf - -C ~/.cargo/bin
 ```
 
 2. Install the WebAssembly `wasm32-unknown-unknown` target:
