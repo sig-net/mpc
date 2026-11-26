@@ -842,8 +842,6 @@ impl MpcContract {
         let state_bytes =
             env::storage_read(b"STATE").ok_or(InvalidState::ContractStateIsMissing)?;
         let mut contract = migration::migrate(&state_bytes)?;
-        // State from before checkpoints were keyed by chain name holds them by `Chain`'s position.
-        migration::rekey_latest_checkpoints(&mut contract.latest_checkpoints);
         contract.drop_unknown_chain_checkpoints();
         // State from before reshares dropped removed nodes' checkpoint votes can still hold some.
         contract.drop_non_member_checkpoint_votes();
