@@ -28,6 +28,18 @@ pub(crate) enum WatchEnd {
     TerminalRead(anyhow::Error),
 }
 
+impl std::fmt::Display for WatchEnd {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Landed(Landing::Applied) => write!(f, "Landed(Applied)"),
+            Self::Landed(Landing::PartialSuccess) => write!(f, "Landed(PartialSuccess)"),
+            Self::Expired => write!(f, "Expired"),
+            Self::Budget => write!(f, "Budget"),
+            Self::TerminalRead(error) => write!(f, "TerminalRead({error:#})"),
+        }
+    }
+}
+
 /// Scans each finalized block after `after` for `tx_hash` until one holds it,
 /// until a finalized block past `ttl` holds none of it (`WatchEnd::Expired`),
 /// or until `deadline`, when the outcome is unknown. A terminal read verdict

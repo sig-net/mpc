@@ -329,7 +329,7 @@ mod tests {
                     .expect_err("an HTTP rejection must fail the read"),
                 // The watch's reads: against an all-rejecting transport each
                 // fails at its first legacy call; subxt's wrappers forward
-                // source() to RawRpcError regardless (subxt 0.44.0
+                // source() to RawRpcError regardless (subxt 0.44.3
                 // error/mod.rs).
                 SubmitChain::block_number(&rpc, &at_hash)
                     .await

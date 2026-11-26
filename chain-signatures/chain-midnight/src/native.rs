@@ -416,7 +416,7 @@ impl<W: FeePayer, C: SubmitChain + 'static> NativeIntentClient<W, C> {
             ?submitted,
             settled = ?started.elapsed(),
             ?landed,
-            outcome = ?end,
+            outcome = %end,
             "midnight: respond settled"
         );
         match end {
@@ -1940,9 +1940,9 @@ mod tests {
             settles[4]
         );
         assert!(
-            settles[4]
-                .get("outcome")
-                .is_some_and(|outcome| outcome.starts_with("TerminalRead")),
+            settles[4].get("outcome").is_some_and(
+                |outcome| outcome.starts_with("TerminalRead") && outcome.contains("403")
+            ),
             "{:?}",
             settles[4]
         );
