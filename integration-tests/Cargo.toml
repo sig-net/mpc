@@ -14,6 +14,7 @@ async-trait.workspace = true
 backon.workspace = true
 bollard = "0.21"
 borsh.workspace = true
+bon.workspace = true
 bs58.workspace = true
 ciborium.workspace = true
 clap.workspace = true
