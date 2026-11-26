@@ -61,16 +61,15 @@ its [digest](#digest). See [bidirectional-calls.md
 Each node keeps one backlog per [source chain](#source-chain), with one entry
 per [admitted](#admitted-request) [request](#request) that is not finished. An
 entry holds the [request id](#request-id), the request and, for a
-[bidirectional request](#bidirectional-request), the signatures
-for it [published](#publish) in final source chain blocks. Only final source
+[bidirectional request](#bidirectional-request), the ids of the transactions
+that the signatures [published](#publish) for it give and the height at which
+another request's response left it [unviable](#outcome). Only final source
 chain events change it; anything else a node keeps about a request stays out of
-it (`Backlog`, `backlog/`). See [checkpoints.md
+it (`Backlog`, `BacklogEntry`, `backlog/`). See [checkpoints.md
 §1](checkpoints.md#1-background).
 
-*Code today:* `BacklogEntry` holds the request and the node's progress,
-including phases set from what the node read on the [target
-chain](#target-chain), and the whole entry goes into the
-[checkpoint](#checkpoint); there is no `signatures` list.
+*Code today:* `BacklogEntry` also holds the node's progress on the request.
+See [checkpoints.md §7](checkpoints.md#7-implementation-status).
 
 ## Bidirectional request
 
@@ -330,8 +329,9 @@ sets the sender to the calling contract and accepts the call
 
 ## Request id
 
-A deterministic function of a [request](#request), so every node derives the
-same one (`SignId`, `signet-primitives/src/crypto.rs`). See
+The identifier of a [request](#request), a deterministic function of it, so
+every node derives the same one (`SignId`, `signet-primitives/src/crypto.rs`).
+See
 [bidirectional-calls.md §2](bidirectional-calls.md#2-vocabulary).
 
 ## Reservation
@@ -412,7 +412,8 @@ S1](protocol-properties.md#s1-one-shot-artifacts-are-consumed-at-most-once).
 ## Target chain
 
 The chain a [bidirectional request](#bidirectional-request)'s transaction
-executes on (`executionDest` on the wire). See
+executes on, also called the destination chain (`executionDest` on the wire).
+See
 [bidirectional-calls.md](bidirectional-calls.md).
 
 ## Threshold
