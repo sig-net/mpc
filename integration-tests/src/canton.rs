@@ -545,7 +545,7 @@ canton.participants.sandbox.ledger-api {{
             auth: CantonAuthConfig {
                 token_url: self.oidc_provider.token_url().clone(),
                 client_id: self.ledger_api_user.clone(),
-                client_secret: LOCAL_OIDC_CLIENT_SECRET.to_string(),
+                client_secret: LOCAL_OIDC_CLIENT_SECRET.into(),
                 audience: LOCAL_OIDC_AUDIENCE.to_string(),
                 scope: Some(LOCAL_OIDC_SCOPE.to_string()),
             },
@@ -885,7 +885,7 @@ fn canton_test_client_config(
         auth: CantonAuthConfig {
             token_url: token_url.clone(),
             client_id: ledger_api_user.to_string(),
-            client_secret: LOCAL_OIDC_CLIENT_SECRET.to_string(),
+            client_secret: LOCAL_OIDC_CLIENT_SECRET.into(),
             audience: LOCAL_OIDC_AUDIENCE.to_string(),
             scope: Some(LOCAL_OIDC_SCOPE.to_string()),
         },
