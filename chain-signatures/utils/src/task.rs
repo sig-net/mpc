@@ -6,16 +6,6 @@ use tokio::task::{AbortHandle, JoinSet};
 use tokio::time::sleep;
 use tokio_util::sync::CancellationToken;
 
-/// Aborts the wrapped task on drop, preventing a leaked background task when
-/// the owner (e.g. an indexer `run()` loop) is dropped or cancelled.
-pub struct AbortOnDrop(pub tokio::task::JoinHandle<()>);
-
-impl Drop for AbortOnDrop {
-    fn drop(&mut self) {
-        self.0.abort();
-    }
-}
-
 /// Extension methods on [`CancellationToken`] for cancellation-aware waiting.
 pub trait CancellationTokenExt {
     /// Waits up to `dur`, returning early if the token is cancelled.
@@ -143,10 +133,6 @@ impl<T, U> Drop for JoinMap<T, U> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{
-        atomic::{AtomicU32, Ordering},
-        Arc,
-    };
 
     #[tokio::test]
     async fn join_next_skips_an_aborted_task_and_still_reports_the_tracked_one() {
@@ -244,36 +230,5 @@ mod tests {
         let cancelled = cancel.cancelled_within(Duration::from_millis(500)).await;
         assert!(cancelled);
         assert!(started.elapsed() < Duration::from_millis(200));
-    }
-
-    #[tokio::test]
-    async fn abort_on_drop_aborts_the_wrapped_task() {
-        let count = Arc::new(AtomicU32::new(0));
-        let count_clone = count.clone();
-        let handle = tokio::spawn(async move {
-            loop {
-                count_clone.fetch_add(1, Ordering::Relaxed);
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        });
-
-        {
-            let guard = AbortOnDrop(handle);
-            tokio::time::sleep(Duration::from_millis(35)).await;
-            assert!(
-                count.load(Ordering::Relaxed) >= 2,
-                "task should have incremented before drop"
-            );
-            drop(guard);
-        }
-
-        // After dropping the guard, the wrapped task must stop running.
-        let after_drop = count.load(Ordering::Relaxed);
-        tokio::time::sleep(Duration::from_millis(50)).await;
-        assert_eq!(
-            count.load(Ordering::Relaxed),
-            after_drop,
-            "wrapped task kept running after AbortOnDrop was dropped"
-        );
     }
 }

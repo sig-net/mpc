@@ -1,4 +1,5 @@
 use mpc_chain_solana::{Keypair, Pubkey, SolConfig, SolIndexerConfig};
+use secrecy::SecretString;
 use url::Url;
 
 /// Configures Solana indexer.
@@ -14,7 +15,7 @@ pub struct SolArgs {
         value_parser = parse_account_sk,
         requires_all = ["sol_rpc_http_url", "sol_program_address"]
     )]
-    pub sol_account_sk: Option<String>,
+    pub sol_account_sk: Option<SecretString>,
     /// Solana RPC HTTP URL
     #[arg(
         long,
@@ -29,11 +30,12 @@ pub struct SolArgs {
 }
 
 /// The Solana client loads the key with a call that panics on a malformed key,
-/// so clap checks it first.
-fn parse_account_sk(value: &str) -> Result<String, String> {
+/// so clap checks it first. Keep the parsed key secret, and return a constant
+/// error: base58 decoding errors can quote the offending input.
+fn parse_account_sk(value: &str) -> Result<SecretString, String> {
     Keypair::try_from_base58_string(value)
-        .map(|_| value.to_owned())
-        .map_err(|e| e.to_string())
+        .map(|_| value.to_owned().into())
+        .map_err(|_| "invalid solana account sk".to_owned())
 }
 
 impl SolArgs {
@@ -51,6 +53,7 @@ impl SolArgs {
 mod tests {
     use super::*;
     use clap::Parser as _;
+    use secrecy::ExposeSecret as _;
 
     /// The system program id: any valid address will do.
     const PROGRAM_ADDRESS: &str = "11111111111111111111111111111111";
@@ -65,6 +68,14 @@ mod tests {
             "--sol-program-address",
             program_address,
         ])
+    }
+
+    #[test]
+    fn the_cli_keeps_the_account_sk_secret() {
+        let account_sk = Keypair::new().to_base58_string();
+        let args = parse(&account_sk, PROGRAM_ADDRESS).unwrap();
+        let parsed = args.sol_account_sk.unwrap();
+        assert_eq!(parsed.expose_secret(), &account_sk);
     }
 
     #[test]

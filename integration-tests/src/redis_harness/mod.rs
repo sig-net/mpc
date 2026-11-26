@@ -226,7 +226,9 @@ mod tests {
 
     #[tokio::test]
     async fn external_redis_is_rejected_before_connecting_without_opt_in() {
-        let config = RedisHarnessConfig::default().with_redis_url("not a valid Redis URL");
+        let config = RedisHarnessConfig::builder()
+            .redis_url("not a valid Redis URL".to_owned())
+            .build();
         let error = match RedisHarness::new(config).await {
             Ok(_) => panic!("external Redis should require explicit opt-in"),
             Err(error) => error,

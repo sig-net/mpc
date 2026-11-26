@@ -443,8 +443,8 @@ impl CheckpointStorage {
                 // checkpoint and wipes both pending storage hashes, clearing diverged history.
                 const RESET: &str = r#"
                     redis.call('SET', KEYS[1], ARGV[1])
-                    redis.call('DEL', KEYS[2])
-                    redis.call('DEL', KEYS[3])
+                    redis.call('UNLINK', KEYS[2])
+                    redis.call('UNLINK', KEYS[3])
                 "#;
                 let _: () = redis::Script::new(RESET)
                     .key(self.checkpoint_key(checkpoint.chain))
@@ -723,7 +723,7 @@ pub struct InjectedFailures {
 #[cfg(test)]
 fn take_injected_failure(remaining: &std::sync::atomic::AtomicUsize) -> bool {
     remaining
-        .fetch_update(
+        .try_update(
             std::sync::atomic::Ordering::SeqCst,
             std::sync::atomic::Ordering::SeqCst,
             |remaining| remaining.checked_sub(1),

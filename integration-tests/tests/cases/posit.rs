@@ -51,17 +51,17 @@ async fn test_generation_posits_check_storage_only_on_propose() -> anyhow::Resul
         msg.clone(),
         node0_id.to_string(),
     );
-    let mut presignature_spawner = PresignatureSpawner::new(
-        node0,
-        5,
-        123,
-        &SecretKeyShare::default(),
-        &PublicKey::default(),
-        &triple_storage,
-        &presignature_storage,
-        msg,
-        node0_id.to_string(),
-    );
+    let mut presignature_spawner = PresignatureSpawner::builder()
+        .me(node0)
+        .threshold(5)
+        .epoch(123)
+        .private_share(&SecretKeyShare::default())
+        .public_key(&PublicKey::default())
+        .triples(&triple_storage)
+        .presignatures(&presignature_storage)
+        .msg(msg)
+        .node_account_id(node0_id.to_string())
+        .build();
     let timeout = Duration::from_secs(10);
     let limits = AcceptLimits::new(10, 16, 3);
     let already_stored = vec![PositAction::RejectWithReason(
@@ -190,17 +190,17 @@ async fn test_generation_posits_reject_on_load() -> anyhow::Result<()> {
         msg.clone(),
         node0_id.to_string(),
     );
-    let mut presignature_spawner = PresignatureSpawner::new(
-        node0,
-        5,
-        123,
-        &SecretKeyShare::default(),
-        &PublicKey::default(),
-        &triple_storage,
-        &presignature_storage,
-        msg,
-        node0_id.to_string(),
-    );
+    let mut presignature_spawner = PresignatureSpawner::builder()
+        .me(node0)
+        .threshold(5)
+        .epoch(123)
+        .private_share(&SecretKeyShare::default())
+        .public_key(&PublicKey::default())
+        .triples(&triple_storage)
+        .presignatures(&presignature_storage)
+        .msg(msg)
+        .node_account_id(node0_id.to_string())
+        .build();
     let timeout = Duration::from_secs(10);
     let reject = |reason| vec![PositAction::RejectWithReason(reason)];
     // The presignature PROPOSE also needs its pair held.

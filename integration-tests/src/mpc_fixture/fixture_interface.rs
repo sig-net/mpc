@@ -514,17 +514,17 @@ impl MpcFixtureNode {
             }
         };
 
-        let task = mpc_node::web::run(
-            web_port,
-            self.msg_channel.clone(),
-            self.state.clone(),
-            self.triple_storage.to_initializing(),
-            self.presignature_storage.to_initializing(),
-            self.contract.clone(),
-            self.network.clone(),
-            account_id,
-            self.backlog.clone(),
-        );
+        let task = mpc_node::web::run()
+            .port(web_port)
+            .msg_channel(self.msg_channel.clone())
+            .node(self.state.clone())
+            .triple_storage(self.triple_storage.to_initializing())
+            .presignature_storage(self.presignature_storage.to_initializing())
+            .contract(self.contract.clone())
+            .network(self.network.clone())
+            .my_account_id(account_id)
+            .backlog(self.backlog.clone())
+            .call();
         self.web_handle = Some(tokio::spawn(task));
         Some(web_port)
     }

@@ -204,7 +204,9 @@ pub struct SignatureSpawner {
     sync_report_tx: SyncReportSender,
 }
 
+#[bon::bon]
 impl SignatureSpawner {
+    #[builder]
     pub fn new(
         node_account_id: near_account_id::AccountId,
         contract: ContractStateWatcher,
@@ -711,6 +713,7 @@ mod tests {
 
     use cait_sith::protocol::Participant;
     use deadpool_redis::Runtime;
+    use std::mem::DropGuard;
     use tokio::sync::Notify;
 
     struct SpawnerSetup {
@@ -852,15 +855,15 @@ mod tests {
         let (_mesh_tx, mesh_rx) = watch::channel(MeshState::default());
         let (sync_report_tx, _sync_report_rx) = mpsc::channel(1);
 
-        let spawner = SignatureSpawner::new(
-            account_id,
-            contract,
-            presignatures,
-            mesh_rx,
-            msg_channel,
-            RpcChannel { tx: rpc_tx },
-            sync_report_tx,
-        );
+        let spawner = SignatureSpawner::builder()
+            .node_account_id(account_id)
+            .contract(contract)
+            .presignatures(presignatures)
+            .mesh_state(mesh_rx)
+            .msg(msg_channel)
+            .rpc(RpcChannel { tx: rpc_tx })
+            .sync_report_tx(sync_report_tx)
+            .build();
         let backlog = crate::backlog::Backlog::new();
         let signature_timeout = crate::config::Timeouts::default().signature_generation;
 
@@ -881,13 +884,7 @@ mod tests {
         let probe_id = SignId::new([43u8; 32]);
         let probe_request = crate::backlog::mock::mock_sign_request(probe_id, Chain::Solana);
         let dropped = Arc::new(Notify::new());
-        struct DropProbe(Arc<Notify>);
-        impl Drop for DropProbe {
-            fn drop(&mut self) {
-                self.0.notify_one();
-            }
-        }
-        let probe = DropProbe(Arc::clone(&dropped));
+        let probe = DropGuard::new(Arc::clone(&dropped), |notify| notify.notify_one());
         let entry = backlog::SignEntry::generating(probe_request, &spawner.backlog);
         spawner.requests.insert(
             probe_id,

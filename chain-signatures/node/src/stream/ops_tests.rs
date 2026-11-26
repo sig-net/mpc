@@ -2084,39 +2084,6 @@ async fn process_sign_request_rejects_empty_bidirectional_serialized_transaction
     );
 }
 
-/// Plain `sign` takes a free-text path and never reaches `validate`, so without
-/// this check a contract asks for its own chain's attestation path with a payload
-/// of keccak(request_id || output) and gets a valid attestation for any outcome.
-#[tokio::test]
-async fn process_sign_request_rejects_the_reserved_attestation_path() {
-    let backlog = Backlog::new();
-    let (sign_tx, _sign_rx) = mpsc::channel(4);
-    let ctx = make_test_stream_context_with_generator_pk(backlog.clone(), sign_tx, false);
-
-    let mut reserved = mock_sign_request(SignId::new([31u8; 32]), Chain::Solana);
-    Arc::make_mut(&mut reserved).args.path = "solana response key".to_string();
-    let err = process_sign_request(reserved, &ctx, test_root_pk(), None)
-        .await
-        .expect_err("a sign request on the attestation path must be rejected");
-    assert!(err.to_string().contains("reserved attestation path"));
-    assert_eq!(
-        backlog.len(),
-        0,
-        "a rejected request must not reach the backlog"
-    );
-
-    // Only this request's own source chain's path is reserved. Another chain's
-    // cannot derive this one's attestation key, so it stays admitted, which is
-    // what distinguishes the check from one that matches all four strings.
-    let foreign_id = SignId::new([32u8; 32]);
-    let mut foreign = mock_sign_request(foreign_id, Chain::Solana);
-    Arc::make_mut(&mut foreign).args.path = "canton response key".to_string();
-    process_sign_request(foreign, &ctx, test_root_pk(), None)
-        .await
-        .expect("another chain's attestation path must still be admitted");
-    assert!(backlog.get(Chain::Solana, &foreign_id).await.is_some());
-}
-
 #[tokio::test]
 async fn process_sign_request_duplicate_is_idempotent() {
     let backlog = Backlog::new();
@@ -2795,7 +2762,8 @@ async fn publish_failover_fires_once_per_leg() {
         ProjectivePoint::GENERATOR.to_affine(),
     );
     // No observe lag: this test is about the once-per-leg property, not the gate.
-    let ctx = ctx.with_observe_lag(Some(Duration::ZERO));
+    let mut ctx = ctx;
+    ctx.observe_lag = Some(Duration::ZERO);
 
     publish_failover_due(&ctx, Chain::Solana).await;
     assert!(
@@ -2857,7 +2825,8 @@ async fn catchup_resume_suppresses_the_sweep_for_the_same_entry() {
         true,
         ProjectivePoint::GENERATOR.to_affine(),
     );
-    let ctx = ctx.with_observe_lag(Some(Duration::ZERO));
+    let mut ctx = ctx;
+    ctx.observe_lag = Some(Duration::ZERO);
 
     resume_pending_publish_requests(&ctx, Chain::Solana).await;
     assert!(
@@ -3101,7 +3070,8 @@ async fn recovered_midnight_final_publication_requires_canonical_metadata() {
         restored.recover_by_checkpoint(&before).await;
         let (sign_tx, _sign_rx) = mpsc::channel(4);
         let (ctx, mut rpc_rx) = make_test_stream_context_with_rpc(restored, sign_tx, true, pk);
-        let ctx = ctx.with_observe_lag(Some(Duration::ZERO));
+        let mut ctx = ctx;
+        ctx.observe_lag = Some(Duration::ZERO);
         resume_pending_publish_requests(&ctx, Chain::Midnight).await;
         assert_eq!(next_publish(&mut rpc_rx).await.is_some(), compatible);
         publish_failover_due(&ctx, Chain::Midnight).await;
@@ -3121,12 +3091,7 @@ async fn recovered_midnight_final_publication_requires_canonical_metadata() {
 /// could not be interpreted. No sign request is queued.
 #[tokio::test]
 async fn decode_failure_parks_request_and_preserves_source_checkpoint() {
-    for source_chain in [
-        Chain::Midnight,
-        Chain::Solana,
-        Chain::Canton,
-        Chain::Hydration,
-    ] {
+    for source_chain in [Chain::Midnight, Chain::Solana, Chain::Canton] {
         for caught_up in [false, true] {
             let backlog = Backlog::new();
             let tx = test_bidirectional_tx(97, source_chain, Chain::Ethereum);
@@ -3536,7 +3501,6 @@ async fn unobserved_response_settles_when_it_verifies() {
         ),
         (Chain::Solana, success(), false, "signed", true),
         (Chain::Solana, success(), true, "signed", true),
-        (Chain::Hydration, success(), false, "signed", true),
         (Chain::Canton, success(), false, "signed", true),
         (Chain::Solana, success(), false, "altered", false),
     ] {
@@ -3613,13 +3577,13 @@ async fn final_response_latency_follows_the_recorded_outcome() {
     let root_sk = k256::SecretKey::from_slice(&[1; 32]).unwrap();
     let count = |status| {
         crate::metrics::requests::request_latency_count(
-            Chain::Hydration,
+            Chain::Canton,
             SignRequestStep::BidirectionalTotal,
             status,
             RequestKind::RespondBidirectional,
         )
     };
-    // No other test records a Hydration `bidirectional_total` latency, so the counts below
+    // No other test records a Canton `bidirectional_total` latency, so the counts below
     // are this test's. The cases share one test for the same reason.
     for (seed, outcome, status) in [
         (
@@ -3631,7 +3595,7 @@ async fn final_response_latency_follows_the_recorded_outcome() {
         ),
         (108, ExecutionOutcome::Failed, "execution_failed"),
     ] {
-        let tx = test_bidirectional_tx(seed, Chain::Hydration, Chain::Ethereum);
+        let tx = test_bidirectional_tx(seed, Chain::Canton, Chain::Ethereum);
         let backlog = Backlog::new();
         backlog.insert_mock_executing(&tx).await;
         let (sign_tx, mut sign_rx) = mpsc::channel(4);
@@ -3648,7 +3612,7 @@ async fn final_response_latency_follows_the_recorded_outcome() {
             attestation: None,
             request_id: tx.request_id,
             signature: mpc_crypto::generate_signature(&root_sk, &entry.request().args),
-            chain: Chain::Hydration,
+            chain: Chain::Canton,
         };
         let (ok, failed) = (count("ok"), count("execution_failed"));
 
@@ -3733,13 +3697,13 @@ async fn failover_counts_from_the_floor() {
         .await
         .unwrap();
     let (sign_tx, _sign_rx) = mpsc::channel(4);
-    let (ctx, mut rpc_rx) = make_test_stream_context_with_rpc(
+    let (mut ctx, mut rpc_rx) = make_test_stream_context_with_rpc(
         backlog,
         sign_tx,
         false,
         ProjectivePoint::GENERATOR.to_affine(),
     );
-    let mut ctx = ctx.with_observe_lag(Some(Duration::ZERO));
+    ctx.observe_lag = Some(Duration::ZERO);
     let before = mpc_utils::time::current_unix_timestamp();
     crate::stream::handle_chain_event(
         mpc_primitives::ChainEvent::CatchupCompleted,

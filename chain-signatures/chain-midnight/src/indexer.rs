@@ -12,7 +12,8 @@ use crate::reader::{
     resolve_verified_record, signet_field_node_by_path, unpack_notification_v1, Resolved,
 };
 use crate::records::SignBidirectionalEventNotification;
-use crate::rpc::{is_oversized_contract_state, BlockRef};
+use crate::rpc::reader::BlockRef;
+use crate::rpc::reads::is_oversized_contract_state;
 use crate::source::{BlockEmissions, ChainSource, ContractState, LiveSource};
 use crate::types::BlockHash;
 use crate::types::MidnightAddress;
@@ -806,7 +807,7 @@ mod tests {
             central_address: crate::MidnightAddress::from_bytes(SINGLETON),
             responder_address: crate::MidnightAddress::from_bytes(RESPONDER),
             publisher: crate::PublisherConfig {
-                funding_seed: "ab".repeat(32),
+                funding_seed: "ab".repeat(32).into(),
                 indexer_ws_url: "ws://127.0.0.1:1/api/v3/graphql/ws".parse().unwrap(),
                 ..Default::default()
             },
@@ -1071,7 +1072,7 @@ mod tests {
         ) -> anyhow::Result<ContractState> {
             let key = (*address, *at_hash);
             if self.oversized_states.contains(&key) {
-                return Err(crate::rpc::oversized_contract_state(
+                return Err(crate::rpc::reads::oversized_contract_state(
                     "fixture oversized contract state",
                 ));
             }
@@ -1483,10 +1484,13 @@ mod tests {
         assert_eq!(request.id, SignId::new(genuine_rid));
         assert_eq!(
             request.args.epsilon,
-            signet_crypto::derive_epsilon_midnight(
+            signet_crypto::derive_epsilon(
                 1,
-                &hex::encode(CALLER),
-                &hex::encode(genuine.path),
+                Chain::Midnight,
+                signet_crypto::KeyPurpose::Bidirectional {
+                    sender: &hex::encode(CALLER),
+                    path: &hex::encode(genuine.path),
+                },
             )
             .unwrap(),
             "the signing key derives from the contract the record was read from"

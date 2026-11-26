@@ -25,7 +25,7 @@ We are using an extended version of the [CAIP-10](https://chainagnostic.org/CAIP
 
 ### Derivation Path Structure
 
-A key's derivation path names the key version and the key's purpose, which is what the key signs. This section gives key version 2, the latest; [Earlier Key Versions](#earlier-key-versions) gives versions 0 and 1.
+At [key version](glossary.md#key-version) 2, a key's derivation path names the key version and the key's [purpose](glossary.md#purpose-of-the-key), which is what the key signs. This section gives key version 2; [Earlier Key Versions](#earlier-key-versions) gives versions 0 and 1.
 
 | `PURPOSE` | Signs | Derivation path |
 |---|---|---|
@@ -55,7 +55,9 @@ Key versions 0, 1 and 2 derive from the same MPC root key, so keys of two of the
 | 1 | `sig.network v2.0.0 epsilon derivation:{CAIP2_CHAIN_ID}:{SENDER}:{DERIVATION_PATH}` |
 | 0 | `sig.network v1.0.0 epsilon derivation,{CHAIN_ID},{SENDER},{DERIVATION_PATH}`, with `CHAIN_ID` in a legacy format (`0x1` for Ethereum) |
 
-They have no purpose. A [system account](glossary.md#system-account) derives with the sender `%admin#`, and bidirectional requests need key version 1 or later ([bidirectional-calls.md §7.1](bidirectional-calls.md#71-request-signbidirectionaleventv1)). At key version 1 a bidirectional key derives as a plain key, and the attestation key as a plain key under a reserved path (`<chain> response key`, for example `solana response key`) that no request on any signing API may name ([bidirectional-calls.md §4.3](bidirectional-calls.md#43-mpc-network), M1).
+These formats do not encode the key's purpose. A [system account](glossary.md#system-account) derives with the sender `%admin#`.
+
+Bidirectional requests need key version 1 or later ([bidirectional-calls.md §7.1](bidirectional-calls.md#71-request-signbidirectionaleventv1)), so key version 0 has no bidirectional or attestation key. At key version 1 a bidirectional key derives as a plain key, and a contract's attestation key as a plain key under its source chain's reserved path (`<chain> response key`, for example `solana response key` on Solana). Below key version 2 no request from a chain may name that chain's reserved path, on any signing API ([bidirectional-calls.md §4.3](bidirectional-calls.md#43-mpc-network), M1).
 
 ### Contract-Based Derivation
 

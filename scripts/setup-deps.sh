@@ -14,14 +14,12 @@
 set -u
 
 RUST_VERSION="$(sed -n 's/^channel = "\(.*\)"/\1/p' "$(dirname "$0")/../rust-toolchain.toml")"
-# The versions CI installs.
-JUST_VERSION="1.54.0"
-NEXTEST_VERSION="0.9.145"
-FOUNDRY_VERSION="v1.10.0"
+WASM_TARGET="wasm32-unknown-unknown"
+REDIS_IMAGE="redis:7.4.12@sha256:2e3eb11462c4e3759e6972678dd051d150ff54b1e60714b3c33b701260172a90"
 SOLANA_VERSION="4.2.2"
 ANCHOR_VERSION="0.31.1"
-WASM_TARGET="wasm32-unknown-unknown"
-REDIS_IMAGE="redis:7.4.12"
+NEXTEST_VERSION="0.9.145"
+FOUNDRY_VERSION="v1.10.0"
 CANTON_SDK="3.5.1"
 COMPACTC_VERSION="0.36.0"
 CARGO_NEAR_VERSION="$(sed -n 's/^VERSION="\(.*\)"/\1/p' "$(dirname "$0")/install-cargo-near.sh")"
@@ -73,7 +71,7 @@ check_core() {
     if have clang || have cc; then ok "clang ($({ command -v clang || command -v cc; } 2>/dev/null))"; else miss "clang"; fi
     if have docker && docker info >/dev/null 2>&1; then ok "docker"; else miss "docker daemon"; hint "rerun just setup to install Docker (Desktop on macOS, docker.io on Linux), then launch/start it"; fi
     if have docker && docker info >/dev/null 2>&1; then
-        if docker images -q "$REDIS_IMAGE" 2>/dev/null | grep -q .; then ok "${REDIS_IMAGE} image"; else printf 'note - %s image not cached; testcontainers pulls it on first run\n' "$REDIS_IMAGE"; fi
+        if docker image inspect "$REDIS_IMAGE" >/dev/null 2>&1; then ok "${REDIS_IMAGE} image"; else printf 'note - %s image not cached; testcontainers pulls it on first run\n' "$REDIS_IMAGE"; fi
     fi
     if have node; then
         MAJOR="$(node -v 2>/dev/null | sed 's/^v\([0-9]*\).*/\1/')"

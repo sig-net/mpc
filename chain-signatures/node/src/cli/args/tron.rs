@@ -1,5 +1,5 @@
 use mpc_chain_tron::TronConfig;
-use secrecy::{ExposeSecret as _, SecretString};
+use secrecy::SecretString;
 use std::time::Duration;
 use url::Url;
 
@@ -34,7 +34,7 @@ impl TronArgs {
         };
         let config = TronConfig {
             endpoint: tron_endpoint,
-            api_key: self.tron_api_key.map(|key| key.expose_secret().to_string()),
+            api_key: self.tron_api_key,
             poll_interval: Duration::from_millis(self.tron_poll_interval_ms),
             ..TronConfig::default()
         };
@@ -47,6 +47,7 @@ impl TronArgs {
 mod tests {
     use super::*;
     use clap::Parser as _;
+    use secrecy::ExposeSecret as _;
 
     #[test]
     fn unconfigured_yields_no_config() {
@@ -68,7 +69,10 @@ mod tests {
             config.endpoint,
             Url::parse("https://api.trongrid.io").unwrap()
         );
-        assert_eq!(config.api_key.as_deref(), Some("tron-key"));
+        assert_eq!(
+            config.api_key.as_ref().map(|key| key.expose_secret()),
+            Some("tron-key")
+        );
         assert_eq!(config.poll_interval, Duration::from_millis(250));
     }
 

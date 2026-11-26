@@ -5,9 +5,7 @@ use k256::{
     elliptic_curve::{point::DecompressPoint, sec1::ToEncodedPoint},
     Scalar, SecretKey,
 };
-use mpc_primitives::{Chain, Signature as MpcSignature};
-use near_account_id::AccountId;
-use signet_crypto::KeyVersion;
+use mpc_primitives::Signature as MpcSignature;
 
 // `ScalarExt` and `Sha3_256` are used only by `derive_delta`, which is
 // excluded from the wasm contract build; gate the imports to match so the
@@ -21,24 +19,9 @@ use sha3::Sha3_256;
 // `signet-crypto` kernel; re-exported here so node paths (`mpc_crypto::kdf::…`,
 // `mpc_crypto::…`) keep resolving unchanged.
 pub use signet_crypto::{
-    derive_epsilon, derive_epsilon_bitcoin, derive_epsilon_canton, derive_epsilon_eth,
-    derive_epsilon_hydration, derive_epsilon_midnight, derive_epsilon_sol, derive_key,
-    reconstruct_signature, x_coordinate, DerivationParams, UnsupportedKeyVersion,
-    EPSILON_DERIVATION_PREFIX_V1, EPSILON_DERIVATION_PREFIX_V2,
+    derive_epsilon, derive_key, reconstruct_signature, reserved_path, x_coordinate, DeriveError,
+    KeyPurpose,
 };
-
-pub fn derive_epsilon_near(
-    key_version: KeyVersion,
-    account_id: &AccountId,
-    path: &str,
-) -> Result<Scalar, UnsupportedKeyVersion> {
-    derive_epsilon(&DerivationParams::UserAccount(
-        key_version,
-        Chain::NEAR,
-        account_id.to_string(),
-        path.to_string(),
-    ))
-}
 
 pub fn derive_secret_key(secret_key: &SecretKey, epsilon: Scalar) -> SecretKey {
     SecretKey::new((epsilon + secret_key.to_nonzero_scalar().as_ref()).into())
@@ -175,6 +158,7 @@ pub fn derive_delta(
 mod tests {
     use super::*;
     use crate::near_public_key_to_affine_point;
+    use mpc_primitives::Chain;
     use std::str::FromStr;
 
     #[test]
@@ -234,11 +218,13 @@ mod tests {
     #[test]
     fn derive_ethereum_admin_key() {
         // Define epsilon
-        let epsilon = derive_epsilon(&DerivationParams::SystemAccount(
+        let epsilon = derive_epsilon(
             0,
             Chain::Ethereum,
-            "signing_contract_control".to_string(),
-        ))
+            KeyPurpose::System {
+                path: "signing_contract_control",
+            },
+        )
         .unwrap();
 
         // Mainnet root PK
