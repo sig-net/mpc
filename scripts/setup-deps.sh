@@ -16,8 +16,10 @@ set -u
 RUST_VERSION="$(sed -n 's/^channel = "\(.*\)"/\1/p' "$(dirname "$0")/../rust-toolchain.toml")"
 WASM_TARGET="wasm32-unknown-unknown"
 REDIS_IMAGE="redis:7.4.12@sha256:2e3eb11462c4e3759e6972678dd051d150ff54b1e60714b3c33b701260172a90"
-SOLANA_VERSION="2.3.9"
-ANCHOR_VERSION="0.30.1"
+SOLANA_VERSION="4.2.2"
+ANCHOR_VERSION="0.31.1"
+NEXTEST_VERSION="0.9.145"
+FOUNDRY_VERSION="v1.10.0"
 CANTON_SDK="3.5.1"
 COMPACTC_VERSION="0.36.0"
 CARGO_NEAR_VERSION="$(sed -n 's/^VERSION="\(.*\)"/\1/p' "$(dirname "$0")/install-cargo-near.sh")"
@@ -59,7 +61,7 @@ check_core() {
     if rustup component list --toolchain "$RUST_VERSION" 2>/dev/null | grep -q "rustfmt.*(installed)"; then ok "rustfmt ${RUST_VERSION}"; else miss "rustfmt ${RUST_VERSION}"; hint "rustup component add --toolchain ${RUST_VERSION} rustfmt"; fi
     if rustup target list --toolchain "$RUST_VERSION" 2>/dev/null | grep -q "${WASM_TARGET} (installed)"; then ok "${WASM_TARGET} target"; else miss "${WASM_TARGET} target"; hint "rustup target add --toolchain ${RUST_VERSION} ${WASM_TARGET}"; fi
     if cargo near --version 2>/dev/null | grep -qF "$CARGO_NEAR_VERSION"; then ok "cargo-near ${CARGO_NEAR_VERSION}"; else miss "cargo-near ${CARGO_NEAR_VERSION}"; hint "scripts/install-cargo-near.sh"; fi
-    if have cargo-nextest; then ok "cargo-nextest $(cargo-nextest --version 2>/dev/null | head -n 1)"; else miss "cargo-nextest"; hint "curl -LsSf https://get.nexte.st/latest/linux | tar zxf - -C ~/.cargo/bin (macos: .../latest/mac)"; fi
+    if cargo nextest --version 2>/dev/null | grep -qF "$NEXTEST_VERSION"; then ok "cargo-nextest ${NEXTEST_VERSION}"; else miss "cargo-nextest ${NEXTEST_VERSION}"; hint "curl -LsSf https://get.nexte.st/${NEXTEST_VERSION}/linux | tar zxf - -C ~/.cargo/bin (linux-arm, mac for other platforms)"; fi
     if have cargo-deny; then ok "$(cargo-deny --version 2>/dev/null | head -n 1)"; else miss "cargo-deny"; hint "cargo install cargo-deny --locked"; fi
     if have just; then ok "just $(just --version)"; else miss "just"; hint "curl --proto '=https' --tlsv1.2 -sSf https://just.systems/install.sh | bash -s -- --to ~/.cargo/bin"; fi
     if have git; then ok "git"; else miss "git"; fi
@@ -78,12 +80,12 @@ check_core() {
         miss "node >= 22"
     fi
     if have npm; then ok "npm"; else miss "npm (ships with node)"; fi
-    if have anvil; then ok "anvil"; else miss "anvil (foundry)"; hint "curl -L https://foundry.paradigm.xyz | bash && foundryup"; fi
+    if anvil --version 2>/dev/null | grep -qF "${FOUNDRY_VERSION#v}"; then ok "anvil ${FOUNDRY_VERSION}"; else miss "anvil (foundry ${FOUNDRY_VERSION})"; hint "curl -L https://foundry.paradigm.xyz | bash && foundryup --install ${FOUNDRY_VERSION}"; fi
 }
 
 check_extended() {
-    if have solana && solana --version 2>/dev/null | grep -q "$SOLANA_VERSION"; then ok "solana $(solana --version)"; else miss "solana ${SOLANA_VERSION}"; fi
-    if have anchor && anchor --version 2>/dev/null | grep -q "$ANCHOR_VERSION"; then ok "anchor $(anchor --version)"; else miss "anchor ${ANCHOR_VERSION}"; hint "cargo install --git https://github.com/coral-xyz/anchor avm --locked && avm install ${ANCHOR_VERSION}"; fi
+    if have solana && solana --version 2>/dev/null | grep -q "$SOLANA_VERSION"; then ok "solana $(solana --version)"; else miss "solana ${SOLANA_VERSION}"; hint "sh -c \"\$(curl -sSfL https://release.anza.xyz/v${SOLANA_VERSION}/install)\""; fi
+    if have anchor && anchor --version 2>/dev/null | grep -q "$ANCHOR_VERSION"; then ok "anchor $(anchor --version)"; else miss "anchor ${ANCHOR_VERSION}"; hint "cargo install --git https://github.com/solana-foundation/anchor --tag v${ANCHOR_VERSION} avm --locked && avm install ${ANCHOR_VERSION} && avm use ${ANCHOR_VERSION}"; fi
     if java -version 2>&1 | grep -q "21"; then ok "java 21"; else miss "java 21 (temurin)"; fi
     if have dpm; then ok "dpm $(dpm --version 2>/dev/null | head -n 1)"; else miss "dpm (Canton SDK ${CANTON_SDK})"; hint "curl -fsSL https://get.digitalasset.com/install/install.sh | sh && dpm install ${CANTON_SDK}"; fi
     if have compact; then ok "compact"; else miss "compact launcher 0.5.3 + compactc ${COMPACTC_VERSION}"; hint "see .github/workflows/test-chain-midnight.yml (Linux pins)"; fi
@@ -121,14 +123,14 @@ ensure_rust() {
 }
 
 ensure_nextest() {
-    have cargo-nextest && return 0
+    cargo nextest --version 2>/dev/null | grep -qF "$NEXTEST_VERSION" && return 0
     mkdir -p "$HOME/.cargo/bin"
     case "$OS" in
-        Linux) NEXTEST_OS="linux" ;;
+        Linux) case "$(uname -m)" in aarch64|arm64) NEXTEST_OS="linux-arm" ;; *) NEXTEST_OS="linux" ;; esac ;;
         Darwin) NEXTEST_OS="mac" ;;
         *) return 1 ;;
     esac
-    curl -LsSf "https://get.nexte.st/latest/${NEXTEST_OS}" | tar zxf - -C "$HOME/.cargo/bin"
+    curl -LsSf "https://get.nexte.st/${NEXTEST_VERSION}/${NEXTEST_OS}" | tar zxf - -C "$HOME/.cargo/bin"
 }
 
 ensure_cargo_near() {
@@ -141,9 +143,9 @@ ensure_cargo_deny() {
 }
 
 ensure_foundry() {
-    have anvil && return 0
-    curl -L https://foundry.paradigm.xyz | bash
-    "$HOME/.foundry/bin/foundryup"
+    anvil --version 2>/dev/null | grep -qF "${FOUNDRY_VERSION#v}" && return 0
+    [ -x "$HOME/.foundry/bin/foundryup" ] || curl -L https://foundry.paradigm.xyz | bash
+    "$HOME/.foundry/bin/foundryup" --install "$FOUNDRY_VERSION"
     note_path_dir "$HOME/.foundry/bin"
 }
 
@@ -199,15 +201,12 @@ ensure_docker() {
 }
 
 ensure_extended() {
-    case "$OS" in
-        Linux) sh -c "$(curl -sSfL "https://release.solana.com/v${SOLANA_VERSION}/solana-install-init-x86_64-unknown-linux-gnu")" ;;
-        Darwin) sh -c "$(curl -sSfL "https://release.solana.com/v${SOLANA_VERSION}/solana-install-init-x86_64-apple-darwin")" ;;
-        *) return 1 ;;
-    esac
+    sh -c "$(curl -sSfL "https://release.anza.xyz/v${SOLANA_VERSION}/install")"
     note_path_dir "$HOME/.local/share/solana/install/active_release/bin"
-    if ! have anchor; then
-        cargo install --git https://github.com/coral-xyz/anchor avm --locked
-        "$HOME/.cargo/bin/avm" install "$ANCHOR_VERSION" || avm install "$ANCHOR_VERSION"
+    if ! anchor --version 2>/dev/null | grep -qF "$ANCHOR_VERSION"; then
+        have avm || cargo install --git https://github.com/solana-foundation/anchor --tag "v${ANCHOR_VERSION}" avm --locked
+        AVM="$(command -v avm || echo "$HOME/.cargo/bin/avm")"
+        "$AVM" install "$ANCHOR_VERSION" && "$AVM" use "$ANCHOR_VERSION"
     fi
     if ! java -version 2>&1 | grep -q "21"; then
         case "$OS" in
