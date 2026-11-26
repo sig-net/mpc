@@ -24,9 +24,18 @@ use tokio::sync::Mutex;
 use crate::cluster::spawner::ClusterSpawner;
 use crate::containers::{start_container_with_network_retry, Container};
 
-const NODE_IMAGE: (&str, &str) = ("midnightntwrk/midnight-node", "2.1.101");
-const INDEXER_IMAGE: (&str, &str) = ("midnightntwrk/indexer-standalone", "4.4.101");
-const PROOF_IMAGE: (&str, &str) = ("midnightntwrk/proof-server", "9.0.1");
+const NODE_IMAGE: (&str, &str) = (
+    "midnightntwrk/midnight-node",
+    "2.1.101@sha256:0c1ad548d523c1109aa1f16daab1bf72dcb78c7e17b8a8c6d97424ad0eba7b8a",
+);
+const INDEXER_IMAGE: (&str, &str) = (
+    "midnightntwrk/indexer-standalone",
+    "4.4.101@sha256:119f35db548ba1c390845f215bb1e928e73038bef7c315825aee0461bd54499d",
+);
+const PROOF_IMAGE: (&str, &str) = (
+    "midnightntwrk/proof-server",
+    "9.0.1@sha256:90e36a14f92c2004127f0ed1cfd6ee89d770cf1f6e9cd7f02026ffd4ecb42f37",
+);
 
 /// Set to a deployed network's node RPC URL to run the cases there instead of on a local node
 /// and indexer; the other `MPC_MIDNIGHT_E2E_*` variables then become required.
@@ -364,10 +373,12 @@ impl MidnightContext {
             "Midnight caller address must be 32 bytes, got {}",
             caller_bytes.len()
         );
-        let epsilon = mpc_crypto::derive_epsilon_midnight(
+        let epsilon = mpc_crypto::derive_epsilon(
             mpc_primitives::LATEST_MPC_KEY_VERSION,
-            &hex::encode(caller_bytes),
-            mpc_node::respond_bidirectional::MIDNIGHT_RESPOND_BIDIRECTIONAL_PATH,
+            mpc_primitives::Chain::Midnight,
+            mpc_crypto::KeyPurpose::Attestation {
+                sender: &hex::encode(caller_bytes),
+            },
         )?;
         let response_public_key = mpc_crypto::derive_key(root_public_key, epsilon);
         let response_public_key = format!(
@@ -378,6 +389,7 @@ impl MidnightContext {
             .request(&serde_json::json!({
                 "op": "initialise",
                 "responsePublicKey": response_public_key,
+                "keyVersion": mpc_primitives::LATEST_MPC_KEY_VERSION,
             }))
             .await
             .context("initialising the Midnight caller with the MPC response key")?;
@@ -726,7 +738,7 @@ fn responder_config(
             .context("decoding Midnight responder address")?,
         publisher: PublisherConfig {
             output_storage,
-            funding_seed: bootstrap.publisher_seeds[0].clone(),
+            funding_seed: bootstrap.publisher_seeds[0].clone().into(),
             indexer_ws_url: endpoints
                 .indexer_ws_url
                 .parse()

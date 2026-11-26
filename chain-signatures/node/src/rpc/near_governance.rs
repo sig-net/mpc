@@ -47,7 +47,9 @@ pub struct NearGovernanceClient {
     gates: NearRpcGates,
 }
 
+#[bon::bon]
 impl NearGovernanceClient {
+    #[builder]
     pub fn new(
         client: NearFetchClient,
         my_addr: &Url,

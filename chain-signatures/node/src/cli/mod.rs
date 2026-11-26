@@ -1,4 +1,5 @@
 mod args;
+mod redacted;
 
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
@@ -28,8 +29,7 @@ use crate::{logs, storage, web};
 #[cfg(feature = "test-feature")]
 pub use args::ethereum::mock_indexer_config;
 pub use args::{
-    canton::CantonArgs, ethereum::EthArgs, hydration::HydrationArgs, midnight::MidnightArgs,
-    solana::SolArgs, tron::TronArgs,
+    canton::CantonArgs, ethereum::EthArgs, midnight::MidnightArgs, solana::SolArgs, tron::TronArgs,
 };
 
 use anyhow::Context as _;
@@ -38,7 +38,6 @@ use deadpool_redis::{Hook, Runtime};
 use enum_map::EnumMap;
 use mpc_chain_canton::{CantonClient, CantonConfig, CantonIndexer};
 use mpc_chain_ethereum::{publisher, EthConfig, EthereumIndexer};
-use mpc_chain_hydration::{HydrationConfig, HydrationIndexer};
 use mpc_chain_integration_core::{utils::retry::SharedBackoff, ChainPublisher, GatedPublisher};
 use mpc_chain_midnight::{
     DustCheckpointStore, MidnightConfig, MidnightIndexer, RecoveringMidnightPublisher,
@@ -50,6 +49,8 @@ use mpc_keys::hpke;
 use mpc_primitives::{Chain, CheckpointDigest};
 use near_account_id::AccountId;
 use near_crypto::{InMemorySigner, SecretKey};
+use redacted::Redacted;
+use secrecy::ExposeSecret as _;
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
@@ -63,9 +64,15 @@ const MAX_SIGN_COMMANDS: usize = 16384;
 #[command(version = build::version_with_commit())]
 pub enum Cli {
     Start {
-        /// NEAR RPC address
-        #[arg(long, env("MPC_NEAR_RPC"), hide_env_values = true)]
-        near_rpc: Url,
+        /// Typed and redacted NEAR RPC address. Parsed here so malformed URLs
+        /// fail at the CLI boundary without exposing credentials in errors.
+        #[arg(
+            long,
+            env("MPC_NEAR_RPC"),
+            hide_env_values = true,
+            value_parser = parse_near_rpc
+        )]
+        near_rpc: Redacted<Url>,
         /// MPC contract id
         #[arg(long, env("MPC_CONTRACT_ID"))]
         mpc_contract_id: AccountId,
@@ -76,10 +83,9 @@ pub enum Cli {
         #[arg(long, env("MPC_ENV"), value_enum)]
         env: logs::Env,
         /// This node's account ed25519 secret key
-        #[arg(long, env("MPC_ACCOUNT_SK"), hide_env_values = true)]
-        account_sk: SecretKey,
-        /// Port the node's web server listens on. Whatever `--my-address` resolves to
-        /// (load balancer or direct) must forward to this port.
+        #[arg(long, env("MPC_ACCOUNT_SK"), hide_env_values = true, value_parser = parse_secret_key)]
+        account_sk: Redacted<SecretKey>,
+        /// Port the node's web server listens on.
         #[arg(
             long,
             env("MPC_WEB_PORT"),
@@ -88,20 +94,17 @@ pub enum Cli {
         )]
         web_port: u16,
         /// The cipher secret key used to decrypt messages between nodes.
-        #[arg(long, env("MPC_CIPHER_SK"), hide_env_values = true)]
-        cipher_sk: hpke::SecretKey,
+        #[arg(long, env("MPC_CIPHER_SK"), hide_env_values = true, value_parser = parse_cipher_sk)]
+        cipher_sk: Redacted<hpke::SecretKey>,
         /// The secret key used to sign messages to be sent between nodes.
-        #[arg(long, env("MPC_SIGN_SK"), hide_env_values = true)]
-        sign_sk: SecretKey,
+        #[arg(long, env("MPC_SIGN_SK"), hide_env_values = true, value_parser = parse_secret_key)]
+        sign_sk: Redacted<SecretKey>,
         /// Ethereum Indexer options
         #[command(flatten)]
         eth: EthArgs,
         /// Solana Indexer options
         #[command(flatten)]
         sol: SolArgs,
-        /// Hydration Indexer options
-        #[command(flatten)]
-        hydration: HydrationArgs,
         /// Canton Indexer options
         #[command(flatten)]
         canton: CantonArgs,
@@ -178,6 +181,25 @@ fn env_var_of(flag: &str) -> Option<String> {
     Some(arg.get_env()?.to_string_lossy().into_owned())
 }
 
+fn parse_near_rpc(s: &str) -> Result<Redacted<Url>, String> {
+    Url::parse(s)
+        .map(Redacted::new)
+        .map_err(|_| "invalid NEAR RPC URL".to_owned())
+}
+
+fn parse_secret_key(s: &str) -> Result<Redacted<SecretKey>, String> {
+    s.parse::<SecretKey>()
+        .map(Redacted::new)
+        .map_err(|_| "invalid secret key".to_owned())
+}
+
+fn parse_cipher_sk(s: &str) -> Result<Redacted<hpke::SecretKey>, String> {
+    let bytes = hex::decode(s).map_err(|_| "invalid cipher secret key".to_owned())?;
+    hpke::SecretKey::try_from_bytes(&bytes)
+        .map(Redacted::new)
+        .map_err(|_| "invalid cipher secret key".to_owned())
+}
+
 /// `Url` alone accepts `node.example.org:8080`, reading the host as the scheme,
 /// and the contract cannot change a participant's URL once it has joined.
 fn parse_peer_address(s: &str) -> Result<Url, String> {
@@ -203,7 +225,6 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             sign_sk,
             eth,
             sol,
-            hydration,
             canton,
             midnight,
             tron,
@@ -255,12 +276,16 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 sync_report_tx,
             } = MeshHandles::new(&account_id);
 
-            let stack = ChainStack::new(ChainConfigs::from_args(
-                eth, sol, hydration, canton, midnight, tron,
-            )?)
-            .with_midnight_dust(midnight_dust);
-            let network = NetworkConfig { cipher_sk, sign_sk };
-            let signer = match InMemorySigner::from_secret_key(account_id.clone(), account_sk) {
+            let stack = ChainStack::new(ChainConfigs::from_args(eth, sol, canton, midnight, tron)?)
+                .with_midnight_dust(midnight_dust);
+            let network = NetworkConfig {
+                cipher_sk: cipher_sk.into_inner(),
+                sign_sk: sign_sk.into_inner(),
+            };
+            let signer = match InMemorySigner::from_secret_key(
+                account_id.clone(),
+                account_sk.into_inner(),
+            ) {
                 near_crypto::Signer::InMemory(s) => s,
                 _ => unreachable!(),
             };
@@ -270,37 +295,37 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 near_governance_client,
                 rpc_channel,
                 rpc_executor,
-            } = RpcHandles::new(
-                &near_rpc,
-                &my_address,
-                &network,
-                &mpc_contract_id,
-                signer,
-                &stack,
-                backlog.clone(),
-            )
-            .await?;
+            } = RpcHandles::builder()
+                .near_rpc_url(&near_rpc)
+                .my_address(&my_address)
+                .network(&network)
+                .mpc_contract_id(&mpc_contract_id)
+                .signer(signer)
+                .stack(&stack)
+                .backlog(backlog.clone())
+                .build()
+                .await?;
 
-            let sync_task = SyncTask::new(
-                &node_client,
-                triple_storage.clone(),
-                presignature_storage.clone(),
-                mesh_state.clone(),
-                contract_watcher.clone(),
-                sync_report_tx.clone(),
-                network.clone(),
-            );
+            let sync_task = SyncTask::builder()
+                .client(&node_client)
+                .triples(triple_storage.clone())
+                .presignatures(presignature_storage.clone())
+                .mesh_state(mesh_state.clone())
+                .contract(contract_watcher.clone())
+                .sync_report_tx(sync_report_tx.clone())
+                .network(network.clone())
+                .build();
 
-            log_startup(
-                &mpc_contract_id,
-                &account_id,
-                &account_pk,
-                &my_address,
-                &cipher_pk_hex,
-                &network,
-                &near_rpc,
-                &stack.configs,
-            );
+            log_startup()
+                .mpc_contract_id(&mpc_contract_id)
+                .account_id(&account_id)
+                .account_pk(&account_pk)
+                .my_address(&my_address)
+                .cipher_pk_hex(&cipher_pk_hex)
+                .network(&network)
+                .near_rpc(&near_rpc)
+                .chains(&stack.configs)
+                .call();
 
             let ProtocolHandles {
                 protocol,
@@ -310,20 +335,20 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 config_tx,
                 checkpoints_tx,
                 checkpoints_rx,
-            } = ProtocolHandles::new(
-                &account_id,
-                network.clone(),
-                sign_rx,
-                &node_client,
-                &contract_watcher,
-                keystore,
-                triple_storage.clone(),
-                presignature_storage.clone(),
-                mesh_state.clone(),
-                rpc_channel.clone(),
-                sync_report_tx,
-            )
-            .await;
+            } = ProtocolHandles::builder()
+                .account_id(&account_id)
+                .network(network.clone())
+                .sign_rx(sign_rx)
+                .node_client(&node_client)
+                .contract_watcher(&contract_watcher)
+                .keystore(keystore)
+                .triple_storage(triple_storage.clone())
+                .presignature_storage(presignature_storage.clone())
+                .mesh_state(mesh_state.clone())
+                .rpc_channel(rpc_channel.clone())
+                .sync_report_tx(sync_report_tx)
+                .build()
+                .await;
 
             tracing::info!("protocol initialized");
             let mut tasks = JoinSet::new();
@@ -344,30 +369,32 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 contract_watcher.clone(),
                 mesh_state.clone(),
             ));
-            tasks.spawn(web::run(
-                web_port,
-                message_channel,
-                node_watcher,
-                triple_storage,
-                presignature_storage,
-                contract_watcher.clone(),
-                network.clone(),
-                account_id,
-                backlog.clone(),
-            ));
+            tasks.spawn(
+                web::run()
+                    .port(web_port)
+                    .msg_channel(message_channel)
+                    .node(node_watcher)
+                    .triple_storage(triple_storage)
+                    .presignature_storage(presignature_storage)
+                    .contract(contract_watcher.clone())
+                    .network(network.clone())
+                    .my_account_id(account_id)
+                    .backlog(backlog.clone())
+                    .call(),
+            );
 
-            spawn_indexers(
-                &mut tasks,
-                stack,
-                sign_tx,
-                rpc_channel.clone(),
-                backlog.clone(),
-                contract_watcher.clone(),
-                mesh_state.clone(),
-                node_client.clone(),
-                checkpoints_rx,
-            )
-            .await?;
+            spawn_indexers()
+                .tasks(&mut tasks)
+                .stack(stack)
+                .sign_tx(sign_tx)
+                .rpc_channel(rpc_channel.clone())
+                .backlog(backlog.clone())
+                .contract_watcher(contract_watcher.clone())
+                .mesh_state(mesh_state.clone())
+                .node_client(node_client.clone())
+                .checkpoints_rx(checkpoints_rx)
+                .call()
+                .await?;
             tracing::info!("node tasks spawned");
 
             // A core task never returns in normal operation, so the first to
@@ -446,7 +473,6 @@ fn checkpoint_watchers() -> (
 struct ChainConfigs {
     eth: Option<EthConfig>,
     sol: Option<SolConfig>,
-    hydration: Option<HydrationConfig>,
     canton: Option<CantonConfig>,
     midnight: Option<MidnightConfig>,
     tron: Option<TronConfig>,
@@ -456,7 +482,6 @@ impl ChainConfigs {
     fn from_args(
         eth: EthArgs,
         sol: SolArgs,
-        hydration: HydrationArgs,
         canton: CantonArgs,
         midnight: MidnightArgs,
         tron: TronArgs,
@@ -464,7 +489,6 @@ impl ChainConfigs {
         Ok(Self {
             eth: eth.into_config()?,
             sol: sol.into_config(),
-            hydration: hydration.into_config(),
             canton: canton.into_config(),
             midnight: midnight.into_config()?,
             tron: tron.into_config()?,
@@ -501,8 +525,8 @@ impl ChainStack {
     }
 
     /// Wraps an internally-ungated publisher in [`GatedPublisher`] bound to
-    /// this stack's gate for `chain` (Solana, Midnight and Hydration are
-    /// externally gated — their clients don't gate publishes themselves).
+    /// this stack's gate for `chain` (Solana and Midnight are externally
+    /// gated — their clients don't gate publishes themselves).
     /// `operation` labels the adapter's throttle warn per chain.
     ///
     /// TODO: deleted once those clients gate publishes internally
@@ -544,15 +568,6 @@ impl ChainStack {
                 self.gated_publisher(Chain::Solana, "solana publish", client),
             );
         }
-        if let Some(hydration) = &self.configs.hydration {
-            let telemetry = Arc::new(NodeTelemetry::new(Chain::Hydration));
-            let client = rpc::HydrationClient::new(hydration, telemetry)
-                .context("failed to create hydration client")?;
-            publishers.insert(
-                Chain::Hydration,
-                self.gated_publisher(Chain::Hydration, "hydration publish", client),
-            );
-        }
         if let Some(canton) = &self.configs.canton {
             let telemetry = Arc::new(NodeTelemetry::new(Chain::Canton));
             let client = CantonClient::new(canton, telemetry, self.gate(Chain::Canton))
@@ -587,7 +602,7 @@ fn host_of(url: &Url) -> &str {
 
 /// Emit the single structured "starting node" banner describing this node's identity
 /// and which chains it is configured to index.
-#[allow(clippy::too_many_arguments)]
+#[bon::builder]
 fn log_startup(
     mpc_contract_id: &AccountId,
     account_id: &AccountId,
@@ -600,7 +615,6 @@ fn log_startup(
 ) {
     let eth_signer_address = chains.eth.as_ref().map(|c| c.signer_address());
     let sol_signer_address = chains.sol.as_ref().map(|c| c.signer_address());
-    let hydration_signer_address = chains.hydration.as_ref().and_then(|c| c.signer_address());
 
     tracing::info!(
         %mpc_contract_id,
@@ -619,8 +633,6 @@ fn log_startup(
         sol_program_address = %chains.sol.as_ref().map(|c| c.program_address.to_string()).unwrap_or_else(|| "None".to_string()),
         sol_rpc_host = %chains.sol.as_ref().map_or("None", |c| host_of(&c.rpc_http_url)),
         sol_signer_address = %sol_signer_address.as_deref().unwrap_or("None"),
-        hydration_rpc_host = %chains.hydration.as_ref().map_or("None", |c| host_of(&c.rpc_ws_url)),
-        hydration_signer_address = %hydration_signer_address.as_deref().unwrap_or("None"),
         canton_json_api_host = %chains.canton.as_ref().map_or("None", |c| host_of(&c.json_api_url)),
         midnight_node_host = %chains.midnight.as_ref().map_or("None", |c| host_of(&c.node_url)),
         tron_host = %chains.tron.as_ref().map_or("None", |c| host_of(&c.endpoint)),
@@ -666,7 +678,9 @@ struct RpcHandles {
     rpc_executor: RpcExecutor,
 }
 
+#[bon::bon]
 impl RpcHandles {
+    #[builder]
     async fn new(
         near_rpc_url: &Url,
         my_address: &Url,
@@ -688,15 +702,15 @@ impl RpcHandles {
             near_gates.clone(),
             publisher_telemetry,
         );
-        let near_governance_client = NearGovernanceClient::new(
-            near_rpc,
-            my_address,
-            &network.sign_sk,
-            &network.cipher_sk,
-            mpc_contract_id,
-            signer,
-            near_gates,
-        );
+        let near_governance_client = NearGovernanceClient::builder()
+            .client(near_rpc)
+            .my_addr(my_address)
+            .sign_sk(&network.sign_sk)
+            .cipher_sk(&network.cipher_sk)
+            .contract_id(mpc_contract_id)
+            .signer(signer)
+            .gates(near_gates)
+            .build();
         let publishers = stack.publishers(near_client, backlog).await?;
         let (rpc_channel, rpc_executor) =
             RpcExecutor::new(near_governance_client.clone(), publishers).await;
@@ -742,7 +756,7 @@ impl StorageHandles {
         storage_options: &storage::Options,
     ) -> anyhow::Result<Self> {
         let keystore = Keystore::init(storage_options, account_id).await?;
-        let redis_pool = redis_pool(storage_options.redis_url.clone())?;
+        let redis_pool = redis_pool(Url::parse(storage_options.redis_url.expose_secret())?)?;
         let triple_storage = TriplePair::storage(&redis_pool, account_id);
         let presignature_storage = Presignature::storage(&redis_pool, account_id);
         let backlog = Backlog::persisted(CheckpointStorage::Redis(
@@ -770,8 +784,9 @@ struct ProtocolHandles {
     checkpoints_rx: EnumMap<Chain, watch::Receiver<Option<CheckpointDigest>>>,
 }
 
+#[bon::bon]
 impl ProtocolHandles {
-    #[allow(clippy::too_many_arguments)]
+    #[builder]
     async fn new(
         account_id: &AccountId,
         network: NetworkConfig,
@@ -797,15 +812,15 @@ impl ProtocolHandles {
             contract_watcher.clone(),
         )
         .await;
-        let spawner = SignatureSpawner::new(
-            account_id.clone(),
-            contract_watcher.clone(),
-            presignature_storage.clone(),
-            mesh_state.clone(),
-            message_channel.clone(),
-            rpc_channel,
-            sync_report_tx,
-        );
+        let spawner = SignatureSpawner::builder()
+            .node_account_id(account_id.clone())
+            .contract(contract_watcher.clone())
+            .presignatures(presignature_storage.clone())
+            .mesh_state(mesh_state.clone())
+            .msg(message_channel.clone())
+            .rpc(rpc_channel)
+            .sync_report_tx(sync_report_tx)
+            .build();
         let sign_task = SignatureSpawnerTask::run(spawner, sign_rx, config_rx.clone());
         let protocol = MpcSignProtocol {
             my_account_id: account_id.clone(),
@@ -833,7 +848,7 @@ impl ProtocolHandles {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+#[bon::builder]
 async fn spawn_indexers(
     tasks: &mut JoinSet<anyhow::Result<()>>,
     stack: ChainStack,
@@ -849,7 +864,6 @@ async fn spawn_indexers(
     let ChainConfigs {
         eth,
         sol,
-        hydration,
         canton,
         midnight,
         tron,
@@ -858,7 +872,6 @@ async fn spawn_indexers(
     tracing::info!(
         ethereum = eth.is_some(),
         solana = sol.is_some(),
-        hydration = hydration.is_some(),
         canton = canton.is_some(),
         midnight = midnight.is_some(),
         tron = tron.is_some(),
@@ -896,16 +909,16 @@ async fn spawn_indexers(
         tracing::info!("ethereum indexer created successfully");
         tasks.spawn(run_supervised(
             eth_indexer,
-            StreamContext::new(
-                backlog.clone(),
-                sign_tx.clone(),
-                rpc_channel.clone(),
-                contract_watcher.clone(),
-                mesh_state.clone(),
-                node_client.clone(),
-                checkpoints_rx[Chain::Ethereum].clone(),
-            )
-            .with_ethereum_chain_id(ethereum_chain_id),
+            StreamContext::builder()
+                .backlog(backlog.clone())
+                .sign_tx(sign_tx.clone())
+                .rpc(rpc_channel.clone())
+                .contract_watcher(contract_watcher.clone())
+                .mesh_state(mesh_state.clone())
+                .node_client(node_client.clone())
+                .checkpoints_rx(checkpoints_rx[Chain::Ethereum].clone())
+                .maybe_ethereum_chain_id(ethereum_chain_id)
+                .build(),
             eth_telemetry,
         ));
     }
@@ -922,40 +935,17 @@ async fn spawn_indexers(
         tracing::info!("solana indexer created successfully");
         tasks.spawn(run_supervised(
             sol_indexer,
-            StreamContext::new(
-                backlog.clone(),
-                sign_tx.clone(),
-                rpc_channel.clone(),
-                contract_watcher.clone(),
-                mesh_state.clone(),
-                node_client.clone(),
-                checkpoints_rx[Chain::Solana].clone(),
-            )
-            .with_ethereum_chain_id(ethereum_chain_id),
+            StreamContext::builder()
+                .backlog(backlog.clone())
+                .sign_tx(sign_tx.clone())
+                .rpc(rpc_channel.clone())
+                .contract_watcher(contract_watcher.clone())
+                .mesh_state(mesh_state.clone())
+                .node_client(node_client.clone())
+                .checkpoints_rx(checkpoints_rx[Chain::Solana].clone())
+                .maybe_ethereum_chain_id(ethereum_chain_id)
+                .build(),
             sol_telemetry,
-        ));
-    }
-
-    if let Some(hydration_config) = hydration {
-        let hydration_telemetry = NodeTelemetry::new(Chain::Hydration);
-        // TODO: read-side gating - this indexer's reads don't share the
-        // chain's cooldown gate yet
-        let hydration_indexer =
-            HydrationIndexer::new(hydration_config, hydration_telemetry.clone());
-        tracing::info!("hydration indexer created successfully");
-        tasks.spawn(run_supervised(
-            hydration_indexer,
-            StreamContext::new(
-                backlog.clone(),
-                sign_tx.clone(),
-                rpc_channel.clone(),
-                contract_watcher.clone(),
-                mesh_state.clone(),
-                node_client.clone(),
-                checkpoints_rx[Chain::Hydration].clone(),
-            )
-            .with_ethereum_chain_id(ethereum_chain_id),
-            hydration_telemetry,
         ));
     }
 
@@ -972,16 +962,16 @@ async fn spawn_indexers(
         tracing::info!("canton indexer created successfully");
         tasks.spawn(run_supervised(
             canton_indexer,
-            StreamContext::new(
-                backlog.clone(),
-                sign_tx.clone(),
-                rpc_channel.clone(),
-                contract_watcher.clone(),
-                mesh_state.clone(),
-                node_client.clone(),
-                checkpoints_rx[Chain::Canton].clone(),
-            )
-            .with_ethereum_chain_id(ethereum_chain_id),
+            StreamContext::builder()
+                .backlog(backlog.clone())
+                .sign_tx(sign_tx.clone())
+                .rpc(rpc_channel.clone())
+                .contract_watcher(contract_watcher.clone())
+                .mesh_state(mesh_state.clone())
+                .node_client(node_client.clone())
+                .checkpoints_rx(checkpoints_rx[Chain::Canton].clone())
+                .maybe_ethereum_chain_id(ethereum_chain_id)
+                .build(),
             canton_telemetry,
         ));
     }
@@ -993,16 +983,16 @@ async fn spawn_indexers(
         // Waits for the network public key inside the task, so a stop signal or
         // a failed core task during the wait still ends the node.
         let mut contract_watcher = contract_watcher.clone();
-        let ctx = StreamContext::new(
-            backlog.clone(),
-            sign_tx.clone(),
-            rpc_channel.clone(),
-            contract_watcher.clone(),
-            mesh_state.clone(),
-            node_client.clone(),
-            checkpoints_rx[Chain::Midnight].clone(),
-        )
-        .with_ethereum_chain_id(ethereum_chain_id);
+        let ctx = StreamContext::builder()
+            .backlog(backlog.clone())
+            .sign_tx(sign_tx.clone())
+            .rpc(rpc_channel.clone())
+            .contract_watcher(contract_watcher.clone())
+            .mesh_state(mesh_state.clone())
+            .node_client(node_client.clone())
+            .checkpoints_rx(checkpoints_rx[Chain::Midnight].clone())
+            .maybe_ethereum_chain_id(ethereum_chain_id)
+            .build();
         let backlog = backlog.clone();
         tasks.spawn(async move {
             tracing::info!("Midnight indexer waiting for the network public key");
@@ -1034,16 +1024,16 @@ async fn spawn_indexers(
         tracing::info!("tron execution watcher created successfully");
         tasks.spawn(run_supervised(
             watcher,
-            StreamContext::new(
-                backlog.clone(),
-                sign_tx.clone(),
-                rpc_channel.clone(),
-                contract_watcher.clone(),
-                mesh_state.clone(),
-                node_client.clone(),
-                checkpoints_rx[Chain::Tron].clone(),
-            )
-            .with_ethereum_chain_id(ethereum_chain_id),
+            StreamContext::builder()
+                .backlog(backlog.clone())
+                .sign_tx(sign_tx.clone())
+                .rpc(rpc_channel.clone())
+                .contract_watcher(contract_watcher.clone())
+                .mesh_state(mesh_state.clone())
+                .node_client(node_client.clone())
+                .checkpoints_rx(checkpoints_rx[Chain::Tron].clone())
+                .maybe_ethereum_chain_id(ethereum_chain_id)
+                .build(),
             tron_telemetry,
         ));
     }
@@ -1054,6 +1044,7 @@ async fn spawn_indexers(
 mod tests {
     use mpc_chain_integration_core::utils::test::make_publish_action;
     use mpc_primitives::{SignId, SignKind};
+    use secrecy::SecretString;
     use std::str::FromStr;
     use std::time::Duration;
 
@@ -1093,6 +1084,51 @@ mod tests {
         // Operators set env vars, so a rejected value names the one to fix.
         let named = parse(&["--near-rpc=s3cr3t".into()]);
         assert!(named.contains("MPC_NEAR_RPC (--near-rpc)"), "{named}");
+    }
+
+    #[test]
+    fn debug_of_start_hides_the_secret_fields() {
+        let account_key =
+            SecretKey::from_seed(near_crypto::KeyType::ED25519, "account").to_string();
+        let sign_key = SecretKey::from_seed(near_crypto::KeyType::ED25519, "sign").to_string();
+        let cipher_hex = "1".repeat(64);
+        let cli = Cli::try_parse_from([
+            "mpc-node",
+            "start",
+            "--near-rpc",
+            "https://rpc-user:NEAR_RPC_SENTINEL@rpc.example.org",
+            "--mpc-contract-id",
+            "contract.near",
+            "--account-id",
+            "node.near",
+            "--env",
+            "dev",
+            "--account-sk",
+            &account_key,
+            "--cipher-sk",
+            &cipher_hex,
+            "--sign-sk",
+            &sign_key,
+            "--my-address",
+            "http://localhost:3000",
+            "--redis-url",
+            "redis://localhost",
+            "--sk-share-secret-id",
+            "s",
+            "--gcp-project-id",
+            "p",
+        ])
+        .expect("valid start arguments");
+        let rendered = format!("{cli:?}");
+        for secret in [
+            "NEAR_RPC_SENTINEL",
+            account_key.as_str(),
+            sign_key.as_str(),
+            cipher_hex.as_str(),
+        ] {
+            assert!(!rendered.contains(secret), "{secret} leaked: {rendered}");
+        }
+        assert!(rendered.matches("[REDACTED]").count() >= 4, "{rendered}");
     }
 
     #[test]
@@ -1163,7 +1199,6 @@ mod tests {
         let chains = ChainConfigs::from_args(
             EthArgs::parse_from(["test"]),
             SolArgs::parse_from(["test"]),
-            HydrationArgs::parse_from(["test"]),
             CantonArgs::parse_from(["test"]),
             MidnightArgs::parse_from(["test"]),
             TronArgs::parse_from(["test"]),
@@ -1202,7 +1237,6 @@ mod tests {
         let chains = ChainConfigs::from_args(
             EthArgs::parse_from(["test"]),
             SolArgs::parse_from(["test"]),
-            HydrationArgs::parse_from(["test"]),
             CantonArgs::parse_from(["test"]),
             MidnightArgs::parse_from(["test"]),
             TronArgs::parse_from(["test", "--tron-endpoint", "https://api.trongrid.io"]),
@@ -1215,35 +1249,6 @@ mod tests {
         assert_eq!(tron.endpoint.as_str(), "https://api.trongrid.io/");
     }
 
-    /// Hydration's RPC is dialed on first publish: a node whose Hydration
-    /// endpoint is down still starts, and a bad signer still fails startup.
-    #[tokio::test]
-    async fn hydration_publisher_registers_while_its_rpc_is_unreachable() {
-        let chains = |signer_uri: &str| ChainConfigs {
-            eth: None,
-            sol: None,
-            hydration: Some(HydrationConfig {
-                // Nothing listens on port 1.
-                rpc_ws_url: "ws://127.0.0.1:1".parse().unwrap(),
-                signer_uri: signer_uri.to_string(),
-            }),
-            canton: None,
-            midnight: None,
-            tron: None,
-        };
-
-        let publishers = ChainStack::new(chains("//Alice"))
-            .publishers(undialed_near_client(), Backlog::new())
-            .await
-            .unwrap();
-        assert!(publishers.contains_key(&Chain::Hydration));
-
-        assert!(ChainStack::new(chains("not a signer uri"))
-            .publishers(undialed_near_client(), Backlog::new())
-            .await
-            .is_err());
-    }
-
     /// A Midnight node that is unreachable at startup must not leave the node without a
     /// Midnight publisher for its lifetime: the publisher registers and connects later.
     #[tokio::test]
@@ -1251,7 +1256,6 @@ mod tests {
         let chains = ChainConfigs {
             eth: None,
             sol: None,
-            hydration: None,
             canton: None,
             midnight: Some(MidnightConfig {
                 // Nothing listens on port 1, so the startup dial is refused.
@@ -1259,7 +1263,7 @@ mod tests {
                 central_address: mpc_chain_midnight::MidnightAddress::from_bytes([0xab; 32]),
                 responder_address: mpc_chain_midnight::MidnightAddress::from_bytes([0xcd; 32]),
                 publisher: mpc_chain_midnight::PublisherConfig {
-                    funding_seed: "ab".repeat(32),
+                    funding_seed: "ab".repeat(32).into(),
                     indexer_ws_url: "ws://127.0.0.1:1/api/v3/graphql/ws".parse().unwrap(),
                     ..Default::default()
                 },
@@ -1299,7 +1303,7 @@ mod tests {
 
     fn sol_config_with_bogus_rpc() -> SolConfig {
         SolConfig {
-            account_sk: mpc_chain_solana::Keypair::new().to_base58_string(),
+            account_sk: mpc_chain_solana::Keypair::new().to_base58_string().into(),
             rpc_http_url: "http://127.0.0.1:1".parse().unwrap(),
             program_address: mpc_chain_solana::Pubkey::new_unique(),
             indexer: Default::default(),
@@ -1310,7 +1314,6 @@ mod tests {
         let stack = ChainStack::new(ChainConfigs {
             eth: None,
             sol: Some(sol_config_with_bogus_rpc()),
-            hydration: None,
             canton: None,
             midnight: None,
             tron: None,
@@ -1348,6 +1351,23 @@ mod tests {
         );
     }
 
+    /// `--help` is the only list of parameters, so each one explains itself there.
+    #[test]
+    fn every_start_parameter_has_help() {
+        use clap::CommandFactory;
+
+        let cmd = Cli::command();
+        let start = cmd
+            .find_subcommand("start")
+            .expect("start subcommand must exist");
+        let without_help: Vec<_> = start
+            .get_arguments()
+            .filter(|arg| arg.get_help().is_none())
+            .map(|arg| arg.get_id().as_str())
+            .collect();
+        assert!(without_help.is_empty(), "no help text: {without_help:?}");
+    }
+
     #[test]
     fn hide_env_values_configured_on_secret_arguments() {
         use clap::CommandFactory;
@@ -1365,14 +1385,12 @@ mod tests {
             "redis_url",
             "sol_account_sk",
             "eth_account_sk",
-            "hydration_signer_uri",
             "canton_oidc_client_secret",
             "midnight_funding_seed",
             "near_rpc",
             "otlp_endpoint",
             "eth_execution_rpc_http_url",
             "sol_rpc_http_url",
-            "hydration_rpc_ws_url",
             "canton_json_api_url",
             "canton_json_api_ws_url",
             "canton_oidc_token_url",
@@ -1433,5 +1451,56 @@ mod tests {
             .map(|group| group.get_id().as_str())
             .collect();
         assert_eq!(required_groups, ["sk_share"]);
+    }
+
+    /// Chain configs live for the node's lifetime, so their secret fields must
+    /// remain in redacting types rather than plain strings.
+    #[test]
+    fn chain_configs_carry_secrets_as_secret_strings() {
+        let sol_sk = "dummy_solana_payer_secret";
+        let sol = SolConfig {
+            account_sk: sol_sk.into(),
+            rpc_http_url: "http://127.0.0.1:8899".parse().unwrap(),
+            program_address: "11111111111111111111111111111111".parse().unwrap(),
+            indexer: Default::default(),
+        };
+        let _: &SecretString = &sol.account_sk;
+        assert!(!format!("{sol:?}").contains(sol_sk));
+
+        let canton_secret = "dummy_canton_oidc_client_secret";
+        let canton = CantonConfig {
+            json_api_url: "http://127.0.0.1:7575".parse().unwrap(),
+            json_api_ws_url: "ws://127.0.0.1:7575".parse().unwrap(),
+            auth: mpc_chain_canton::CantonAuthConfig {
+                token_url: "http://127.0.0.1:7575/token".parse().unwrap(),
+                client_id: "client-id".to_string(),
+                client_secret: canton_secret.into(),
+                audience: "audience".to_string(),
+                scope: None,
+            },
+            ledger_api_user: "ledger-user".to_string(),
+            party_id: "party".to_string(),
+            signer_contract_id: "contract".to_string(),
+            signer_template_id: "template".to_string(),
+        };
+        let _: &SecretString = &canton.auth.client_secret;
+        assert!(!format!("{canton:?}").contains(canton_secret));
+    }
+
+    #[test]
+    fn storage_options_redact_the_redis_url() {
+        let options = <storage::Options as Parser>::try_parse_from([
+            "test",
+            "--redis-url",
+            "redis://:redis-password@127.0.0.1:6379",
+            "--sk-share-secret-id",
+            "s",
+            "--gcp-project-id",
+            "p",
+        ])
+        .expect("the redis url and one key-share store are a valid set");
+
+        let _: &SecretString = &options.redis_url;
+        assert!(!format!("{options:?}").contains("redis-password"));
     }
 }

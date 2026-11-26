@@ -117,12 +117,10 @@ fn output_cases() -> anyhow::Result<Vec<OutputCase>> {
             .find(|vector| vector.name == name)
             .with_context(|| format!("missing SDK oracle case: {name}"))?;
         anyhow::ensure!(vector.is_contract_call, "{name}: not a contract call");
-        let artifact = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(format!(
-            "../chain-signatures/contract-eth/artifacts/contracts/MidnightConformance.sol/{contract}.json"
-        ));
+        let artifact = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join(format!("fixtures/evm/{contract}.json"));
         let artifact: serde_json::Value = serde_json::from_slice(
-            &std::fs::read(&artifact)
-                .with_context(|| format!("reading {}; run just build eth", artifact.display()))?,
+            &std::fs::read(&artifact).with_context(|| format!("reading {}", artifact.display()))?,
         )?;
         let runtime = artifact["deployedBytecode"]
             .as_str()

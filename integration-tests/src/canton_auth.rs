@@ -12,7 +12,8 @@ pub(crate) const LOCAL_OIDC_CLIENT_SECRET: &str = "local-canton-client-secret";
 pub(crate) const LOCAL_OIDC_SCOPE: &str = "daml_ledger_api";
 
 const MOCK_OAUTH2_SERVER_IMAGE: &str = "ghcr.io/navikt/mock-oauth2-server";
-const MOCK_OAUTH2_SERVER_TAG: &str = "3.0.1";
+const MOCK_OAUTH2_SERVER_TAG: &str =
+    "3.0.1@sha256:4f3660e5f3586b81fe2e0d42d0c9fcd3c8c64268db0d3ade261dadd70d27020b";
 const MOCK_OAUTH2_SERVER_PORT: u16 = 8080;
 const TRUSTED_ISSUER_ID: &str = "default";
 const ROGUE_ISSUER_ID: &str = "rogue";

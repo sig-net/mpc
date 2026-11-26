@@ -185,14 +185,14 @@ async fn main() -> anyhow::Result<()> {
     println!("=========================================================================\n");
 
     println!("Initializing Redis benchmark harness...");
-    let mut config = RedisHarnessConfig::new(args.participants)
-        .with_pool_size(effective_pool_size)
-        .with_flush_between(should_flush)
-        .with_allow_external_redis(args.allow_external_redis)
-        .with_slowlog_threshold(args.slowlog_threshold);
-    if let Some(ref url) = args.redis_url {
-        config = config.with_redis_url(url);
-    }
+    let config = RedisHarnessConfig::builder()
+        .num_participants(args.participants)
+        .maybe_max_pool_size(effective_pool_size)
+        .flush_between(should_flush)
+        .allow_external_redis(args.allow_external_redis)
+        .slowlog_threshold_us(args.slowlog_threshold)
+        .maybe_redis_url(args.redis_url.clone())
+        .build();
     let harness = RedisHarness::new(config).await?;
     let pool_status = harness.client.status();
     println!("Connected to Redis");

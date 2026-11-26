@@ -15,11 +15,12 @@ set -u
 
 RUST_VERSION="$(sed -n 's/^channel = "\(.*\)"/\1/p' "$(dirname "$0")/../rust-toolchain.toml")"
 WASM_TARGET="wasm32-unknown-unknown"
-REDIS_IMAGE="redis:7.4.12"
+REDIS_IMAGE="redis:7.4.12@sha256:2e3eb11462c4e3759e6972678dd051d150ff54b1e60714b3c33b701260172a90"
 SOLANA_VERSION="2.3.9"
 ANCHOR_VERSION="0.30.1"
 CANTON_SDK="3.5.1"
 COMPACTC_VERSION="0.36.0"
+CARGO_NEAR_VERSION="$(sed -n 's/^VERSION="\(.*\)"/\1/p' "$(dirname "$0")/install-cargo-near.sh")"
 
 MODE="${1:-}"
 SCOPE="${2:-}"
@@ -57,7 +58,7 @@ check_core() {
     if rustup component list --toolchain "$RUST_VERSION" 2>/dev/null | grep -q "clippy.*(installed)"; then ok "clippy ${RUST_VERSION}"; else miss "clippy ${RUST_VERSION}"; hint "rustup component add --toolchain ${RUST_VERSION} clippy"; fi
     if rustup component list --toolchain "$RUST_VERSION" 2>/dev/null | grep -q "rustfmt.*(installed)"; then ok "rustfmt ${RUST_VERSION}"; else miss "rustfmt ${RUST_VERSION}"; hint "rustup component add --toolchain ${RUST_VERSION} rustfmt"; fi
     if rustup target list --toolchain "$RUST_VERSION" 2>/dev/null | grep -q "${WASM_TARGET} (installed)"; then ok "${WASM_TARGET} target"; else miss "${WASM_TARGET} target"; hint "rustup target add --toolchain ${RUST_VERSION} ${WASM_TARGET}"; fi
-    if have cargo-near; then ok "cargo-near $(cargo-near --version 2>/dev/null | head -n 1)"; else miss "cargo-near"; hint "curl --proto '=https' --tlsv1.2 -LsSf https://github.com/near/cargo-near/releases/latest/download/cargo-near-installer.sh | sh"; fi
+    if cargo near --version 2>/dev/null | grep -qF "$CARGO_NEAR_VERSION"; then ok "cargo-near ${CARGO_NEAR_VERSION}"; else miss "cargo-near ${CARGO_NEAR_VERSION}"; hint "scripts/install-cargo-near.sh"; fi
     if have cargo-nextest; then ok "cargo-nextest $(cargo-nextest --version 2>/dev/null | head -n 1)"; else miss "cargo-nextest"; hint "curl -LsSf https://get.nexte.st/latest/linux | tar zxf - -C ~/.cargo/bin (macos: .../latest/mac)"; fi
     if have cargo-deny; then ok "$(cargo-deny --version 2>/dev/null | head -n 1)"; else miss "cargo-deny"; hint "cargo install cargo-deny --locked"; fi
     if have just; then ok "just $(just --version)"; else miss "just"; hint "curl --proto '=https' --tlsv1.2 -sSf https://just.systems/install.sh | bash -s -- --to ~/.cargo/bin"; fi
@@ -68,7 +69,7 @@ check_core() {
     if have clang || have cc; then ok "clang ($({ command -v clang || command -v cc; } 2>/dev/null))"; else miss "clang"; fi
     if have docker && docker info >/dev/null 2>&1; then ok "docker"; else miss "docker daemon"; hint "rerun just setup to install Docker (Desktop on macOS, docker.io on Linux), then launch/start it"; fi
     if have docker && docker info >/dev/null 2>&1; then
-        if docker images -q "$REDIS_IMAGE" 2>/dev/null | grep -q .; then ok "${REDIS_IMAGE} image"; else printf 'note - %s image not cached; testcontainers pulls it on first run\n' "$REDIS_IMAGE"; fi
+        if docker image inspect "$REDIS_IMAGE" >/dev/null 2>&1; then ok "${REDIS_IMAGE} image"; else printf 'note - %s image not cached; testcontainers pulls it on first run\n' "$REDIS_IMAGE"; fi
     fi
     if have node; then
         MAJOR="$(node -v 2>/dev/null | sed 's/^v\([0-9]*\).*/\1/')"
@@ -131,8 +132,7 @@ ensure_nextest() {
 }
 
 ensure_cargo_near() {
-    have cargo-near && return 0
-    curl --proto '=https' --tlsv1.2 -LsSf https://github.com/near/cargo-near/releases/latest/download/cargo-near-installer.sh | sh
+    "$(dirname "$0")/install-cargo-near.sh"
 }
 
 ensure_cargo_deny() {

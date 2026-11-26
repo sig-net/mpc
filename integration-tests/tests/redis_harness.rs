@@ -33,7 +33,13 @@ async fn wait_for_blocked_ping(
 
 #[tokio::test]
 async fn mixed_pipeline_uses_independent_node_pools() -> anyhow::Result<()> {
-    let harness = RedisHarness::new(RedisHarnessConfig::new(3).with_pool_size(Some(1))).await?;
+    let harness = RedisHarness::new(
+        RedisHarnessConfig::builder()
+            .num_participants(3)
+            .max_pool_size(1)
+            .build(),
+    )
+    .await?;
 
     // Holding one node's only connection must not prevent another node from connecting.
     let first = harness.participants[0].pool.get().await?;
@@ -130,9 +136,11 @@ async fn mixed_pipeline_uses_independent_node_pools() -> anyhow::Result<()> {
 #[tokio::test]
 async fn blocking_spike_delays_other_connections_for_requested_duration() -> anyhow::Result<()> {
     let harness = RedisHarness::new(
-        RedisHarnessConfig::new(1)
-            .with_pool_size(Some(1))
-            .with_pool_timeout(Some(Duration::from_millis(50))),
+        RedisHarnessConfig::builder()
+            .num_participants(1)
+            .max_pool_size(1)
+            .pool_timeout(Some(Duration::from_millis(50)))
+            .build(),
     )
     .await?;
     harness.client.check_debug_sleep().await?;

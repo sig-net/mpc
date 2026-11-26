@@ -117,6 +117,7 @@ interface BootstrapRequest {
 interface InitialiseRequest {
   op: "initialise";
   responsePublicKey: string;
+  keyVersion: number;
 }
 
 interface SubmitRequest {
@@ -670,7 +671,7 @@ async function dispatch(request: Request): Promise<unknown> {
     if (active.responseKey !== undefined) throw new Error("caller is already initialised");
     diagnostics("initialising deployed Compact caller");
     const responseKey = parseSecp256k1PublicKey(request.responsePublicKey);
-    await active.caller.callTx.initialise(responseKey);
+    await active.caller.callTx.initialise(responseKey, BigInt(request.keyVersion));
     active.responseKey = responseKey;
     return {};
   }
@@ -894,7 +895,6 @@ async function dispatch(request: Request): Promise<unknown> {
   }
   const submitted = await active.caller.callTx.submitIsEvenRequest(
     BigInt(request.nonce),
-    1n,
     bytes(request.target, 20),
     bytes(request.argument, 32),
     requestOutputSchema(request),

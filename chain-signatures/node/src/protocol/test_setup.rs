@@ -36,15 +36,15 @@ impl MpcSignProtocol {
         // Nothing in tests observes sync-status reports, so the receiving end is
         // dropped immediately.
         let (sync_report_tx, _sync_report_rx) = mpsc::channel(1);
-        let spawner = SignatureSpawner::new(
-            my_account_id.clone(),
-            contract.clone(),
-            storage.presignature_storage.clone(),
-            channels.mesh_state.clone(),
-            channels.msg_channel.clone(),
-            channels.rpc_channel.clone(),
-            sync_report_tx,
-        );
+        let spawner = SignatureSpawner::builder()
+            .node_account_id(my_account_id.clone())
+            .contract(contract.clone())
+            .presignatures(storage.presignature_storage.clone())
+            .mesh_state(channels.mesh_state.clone())
+            .msg(channels.msg_channel.clone())
+            .rpc(channels.rpc_channel.clone())
+            .sync_report_tx(sync_report_tx)
+            .build();
         let sign_task =
             SignatureSpawnerTask::run(spawner, channels.sign_rx, channels.config.clone());
         Self {

@@ -415,15 +415,15 @@ async fn test_ethereum_stream_resume_starts_after_checkpoint_height() -> Result<
     let (_cp_tx, checkpoints_rx) = watch::channel(None);
     let run_handle = tokio::spawn(run_supervised(
         indexer,
-        StreamContext::new(
-            backlog.clone(),
-            sign_tx.clone(),
-            rpc.clone(),
-            contract_watcher.clone(),
-            mesh_rx.clone(),
-            NodeClient::new(),
-            checkpoints_rx.clone(),
-        ),
+        StreamContext::builder()
+            .backlog(backlog.clone())
+            .sign_tx(sign_tx.clone())
+            .rpc(rpc.clone())
+            .contract_watcher(contract_watcher.clone())
+            .mesh_state(mesh_rx.clone())
+            .node_client(NodeClient::new())
+            .checkpoints_rx(checkpoints_rx.clone())
+            .build(),
         NoopChainTelemetry,
     ));
 
@@ -567,15 +567,15 @@ async fn test_ethereum_stream_linear_catchup_from_checkpoint() -> Result<()> {
     let (_cp_tx, checkpoints_rx) = watch::channel(None);
     let run_handle = tokio::spawn(run_supervised(
         indexer,
-        StreamContext::new(
-            backlog.clone(),
-            sign_tx.clone(),
-            rpc.clone(),
-            contract_watcher.clone(),
-            mesh_rx.clone(),
-            NodeClient::new(),
-            checkpoints_rx.clone(),
-        ),
+        StreamContext::builder()
+            .backlog(backlog.clone())
+            .sign_tx(sign_tx.clone())
+            .rpc(rpc.clone())
+            .contract_watcher(contract_watcher.clone())
+            .mesh_state(mesh_rx.clone())
+            .node_client(NodeClient::new())
+            .checkpoints_rx(checkpoints_rx.clone())
+            .build(),
         NoopChainTelemetry,
     ));
 
@@ -722,15 +722,15 @@ async fn test_ethereum_stream_backfills_late_execution_watcher_after_catchup() -
     let (_cp_tx, checkpoints_rx) = watch::channel(None);
     let run_handle = tokio::spawn(run_supervised(
         indexer,
-        StreamContext::new(
-            backlog.clone(),
-            sign_tx.clone(),
-            rpc.clone(),
-            contract_watcher.clone(),
-            mesh_rx.clone(),
-            NodeClient::new(),
-            checkpoints_rx.clone(),
-        ),
+        StreamContext::builder()
+            .backlog(backlog.clone())
+            .sign_tx(sign_tx.clone())
+            .rpc(rpc.clone())
+            .contract_watcher(contract_watcher.clone())
+            .mesh_state(mesh_rx.clone())
+            .node_client(NodeClient::new())
+            .checkpoints_rx(checkpoints_rx.clone())
+            .build(),
         NoopChainTelemetry,
     ));
 

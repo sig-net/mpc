@@ -195,17 +195,17 @@ async fn test_presignature_persistence() -> anyhow::Result<()> {
     let redis = containers::Redis::run(&spawner).await;
     let triple_storage = redis.triple_storage(&node0_id, node0);
     let presignature_storage = redis.presignature_storage(&node0_id, node0);
-    let presignature_spawner = PresignatureSpawner::new(
-        Participant::from(0),
-        5,
-        123,
-        &SecretKeyShare::default(),
-        &PublicKey::default(),
-        &triple_storage,
-        &presignature_storage,
-        msg,
-        node0_id.to_string(),
-    );
+    let presignature_spawner = PresignatureSpawner::builder()
+        .me(Participant::from(0))
+        .threshold(5)
+        .epoch(123)
+        .private_share(&SecretKeyShare::default())
+        .public_key(&PublicKey::default())
+        .triples(&triple_storage)
+        .presignatures(&presignature_storage)
+        .msg(msg)
+        .node_account_id(node0_id.to_string())
+        .build();
 
     let id = 1;
     let presignature = dummy_presignature(id);
@@ -603,12 +603,20 @@ async fn test_clear_removes_more_artifacts_than_one_unpack_allows() -> anyhow::R
     let redis_container = containers::Redis::run(&spawner).await;
     let triple_storage = redis_container.triple_storage(&node0_id, node0);
 
-    // Lua's unpack in Redis 7.4 fails somewhere above 8000 entries.
+    // Lua's unpack in Redis 7.4 fails somewhere above 8000 entries. Populate the
+    // full key layout (artifact hash, holder sets, owners registry and owner
+    // sets) so clear() has to remove every kind of key it knows about.
+    const COUNT: u64 = 10_000;
     let artifact_key = triple_storage.artifact_key();
+    let owners_key = triple_storage.owner_keys();
+    let owner_key = format!("{owners_key}:p0");
+
     let mut pipe = redis::pipe();
-    for id in 1..=10_000u64 {
+    pipe.sadd(owners_key, owner_key.as_str()).ignore();
+    for id in 1..=COUNT {
         pipe.hset(artifact_key, id, "x")
             .sadd(format!("{artifact_key}:holders:{id}"), 1)
+            .sadd(owner_key.as_str(), id)
             .ignore();
     }
     let mut conn = redis_container.pool().get().await?;

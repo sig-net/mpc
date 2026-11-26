@@ -22,19 +22,12 @@ jobs:
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
-      - name: Install Rust (1.95.0)
-        uses: dtolnay/rust-toolchain@035fceb3c12fb0c6a9461b52775e16473133e591 # 1.95.0
+      - name: Install Rust (1.100.0)
+        uses: dtolnay/rust-toolchain@d5e4d57b030548f435d0befec15ff413a2c60eff # 1.100.0
         with:
-          toolchain: 1.95.0
+          toolchain: 1.100.0
           targets: wasm32-unknown-unknown
           components: clippy, rustfmt
-
-      - name: Install Node.js
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
-        with:
-          node-version: "22"
-          cache: 'npm'
-          cache-dependency-path: chain-signatures/contract-eth/package-lock.json
 
       - name: Detect dependency changes vs develop
         id: depchange
@@ -69,19 +62,11 @@ jobs:
         run: echo "OPENSSL_NO_VENDOR=1" >> $GITHUB_ENV
 
       - name: Install cargo-near
-        run: |
-          if ! command -v cargo-near >/dev/null; then
-            curl --proto '=https' --tlsv1.2 -LsSf https://github.com/near/cargo-near/releases/latest/download/cargo-near-installer.sh | sh
-          fi
+        run: scripts/install-cargo-near.sh
 
       - name: Compile Contract
         run: just build contract
-      - name: Compile eth contract
-        run: just build eth
-      
-      - name: Eth contract unit tests
-        run: just test-eth-unit
-      
+
       - name: Test format
         run: just fmt-check
       
@@ -119,9 +104,9 @@ jobs:
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@035fceb3c12fb0c6a9461b52775e16473133e591 # 1.95.0
+        uses: dtolnay/rust-toolchain@d5e4d57b030548f435d0befec15ff413a2c60eff # 1.100.0
         with:
-          toolchain: 1.95.0
+          toolchain: 1.100.0
 
       # Check the feature-resolved dependency graph: security advisories
       # (vulnerabilities deny; `unmaintained`/`unsound` downgraded to warnings to

@@ -153,10 +153,8 @@ fn encode(fields: &[OutputField], return_data: &[u8]) -> anyhow::Result<Vec<u8>>
         "return data of {} bytes is not whole ABI words",
         return_data.len()
     );
-    let words: Vec<&[u8; ABI_WORD_BYTES]> = return_data
-        .chunks_exact(ABI_WORD_BYTES)
-        .map(|word| word.try_into().expect("chunks are whole words"))
-        .collect();
+    let words: Vec<&[u8; ABI_WORD_BYTES]> =
+        return_data.as_chunks::<ABI_WORD_BYTES>().0.iter().collect();
     anyhow::ensure!(
         words.len() >= fields.len(),
         "return data holds {} words but the output schema declares {} fields",

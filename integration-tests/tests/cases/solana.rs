@@ -1,7 +1,8 @@
 use elliptic_curve::ops::Reduce;
 use integration_tests::cluster;
 use mpc_crypto::kdf::check_ec_signature;
-use mpc_crypto::{derive_epsilon_sol, derive_key, near_public_key_to_affine_point};
+use mpc_crypto::{derive_epsilon, derive_key, near_public_key_to_affine_point, KeyPurpose};
+use mpc_primitives::Chain;
 use test_log::test;
 
 #[test(tokio::test)]
@@ -22,7 +23,14 @@ async fn test_solana_signature_basic() -> anyhow::Result<()> {
     let root_pk_near = cluster.root_public_key().await.unwrap();
     let root_pk = near_public_key_to_affine_point(root_pk_near);
 
-    let epsilon = derive_epsilon_sol(key_version, &outcome.signer_account, path)?;
+    let epsilon = derive_epsilon(
+        key_version,
+        Chain::Solana,
+        KeyPurpose::Plain {
+            sender: &outcome.signer_account,
+            path,
+        },
+    )?;
     let derived_user_pk = derive_key(root_pk, epsilon);
     let payload_hash = *alloy::primitives::keccak256(payload);
     let payload_hash = <k256::Scalar as Reduce<

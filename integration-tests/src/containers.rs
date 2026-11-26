@@ -312,7 +312,7 @@ impl Redis {
         let password = enable_debug.then(|| uuid::Uuid::new_v4().simple().to_string());
         let container = start_container_with_network_retry(
             || {
-                let container = GenericImage::new("redis", "7.4.12")
+                let container = GenericImage::new("redis", "7.4.12@sha256:2e3eb11462c4e3759e6972678dd051d150ff54b1e60714b3c33b701260172a90")
                     .with_exposed_port(Self::DEFAULT_REDIS_PORT.tcp())
                     .with_wait_for(WaitFor::message_on_stdout("Ready to accept connections"))
                     .with_network(&spawner.network);
@@ -525,7 +525,10 @@ impl EthereumSandbox {
 
         let container = start_container_with_network_retry(
             || {
-                GenericImage::new("ghcr.io/foundry-rs/foundry", "nightly")
+                GenericImage::new(
+                    "ghcr.io/foundry-rs/foundry",
+                    "v1.10.0@sha256:03ca6dc0accb53b6f67278b5a1c70bef984d5a2a2bcb197298c3b6f3b929c798",
+                )
                     .with_exposed_port(Self::RPC_PORT.tcp())
                     .with_network(&spawner.network)
                     .with_cmd(vec![command.clone()])
@@ -996,7 +999,9 @@ impl Solana {
 
     pub fn get_config(&self, program_address: SolanaPubkey) -> SolConfig {
         SolConfig {
-            account_sk: bs58::encode(self.payer_keypair.to_bytes()).into_string(),
+            account_sk: bs58::encode(self.payer_keypair.to_bytes())
+                .into_string()
+                .into(),
             rpc_http_url: self.rpc_address.clone(),
             program_address,
             indexer: Default::default(),

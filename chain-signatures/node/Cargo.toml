@@ -40,6 +40,7 @@ alloy.workspace = true
 anyhow.workspace = true
 enum-map.workspace = true
 borsh.workspace = true
+bon.workspace = true
 cait-sith.workspace = true
 ciborium.workspace = true
 clap.workspace = true
@@ -75,7 +76,6 @@ mpc-chain-ethereum.workspace = true
 mpc-evm-common.workspace = true
 mpc-chain-solana.workspace = true
 mpc-chain-near.workspace = true
-mpc-chain-hydration.workspace = true
 mpc-chain-midnight.workspace = true
 mpc-chain-tron.workspace = true
 mpc-tron-wire.workspace = true
@@ -87,7 +87,7 @@ mpc-utils.workspace = true
 rlp.workspace = true
 
 maud = { version = "0.27.0", optional = true }
-secrecy = "0.10.3"
+secrecy.workspace = true
 
 [dev-dependencies]
 mockito.workspace = true

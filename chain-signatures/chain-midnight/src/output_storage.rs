@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use google_cloud_storage::client::Storage;
 use mpc_primitives::AttestationMetadata;
-use mpc_utils::task::AbortOnDrop;
+use tokio_util::task::AbortOnDropHandle;
 
 use crate::config::OutputStorageConfig;
 use crate::types::{MidnightAddress, NetworkId};
@@ -24,7 +24,7 @@ pub(crate) trait OutputStore: Send + Sync {
 /// Keeps optional caching recoverable without making publishers wait for initialization.
 pub(crate) struct RecoveringOutputStore {
     ready: Arc<OnceLock<GcsOutputStore>>,
-    _initializer: AbortOnDrop,
+    _initializer: AbortOnDropHandle<()>,
 }
 
 impl RecoveringOutputStore {
@@ -84,7 +84,7 @@ impl RecoveringOutputStore {
         });
         Self {
             ready,
-            _initializer: AbortOnDrop(initializer),
+            _initializer: AbortOnDropHandle::new(initializer),
         }
     }
 }
@@ -449,13 +449,8 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn dropping_storage_cancels_pending_initialization_and_sleeping_retries() {
+        use std::mem::DropGuard;
         use std::sync::atomic::{AtomicUsize, Ordering};
-        struct Attempt(Arc<AtomicUsize>);
-        impl Drop for Attempt {
-            fn drop(&mut self) {
-                self.0.fetch_add(1, Ordering::SeqCst);
-            }
-        }
         for pending in [true, false] {
             let attempts = Arc::new(AtomicUsize::new(0));
             let dropped = Arc::new(AtomicUsize::new(0));
@@ -464,7 +459,9 @@ mod tests {
             let store =
                 RecoveringOutputStore::spawn("outputs".into(), Duration::from_secs(2), move || {
                     calls.fetch_add(1, Ordering::SeqCst);
-                    let attempt = Attempt(drops.clone());
+                    let attempt = DropGuard::new(drops.clone(), |drops| {
+                        drops.fetch_add(1, Ordering::SeqCst);
+                    });
                     async move {
                         let _attempt = attempt;
                         if pending {

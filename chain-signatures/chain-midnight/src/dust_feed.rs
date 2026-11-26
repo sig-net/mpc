@@ -9,7 +9,6 @@ use async_trait::async_trait;
 use futures_util::stream::BoxStream;
 use futures_util::{Sink, SinkExt as _, Stream, StreamExt as _};
 use midnight_base_crypto::time::Timestamp;
-use mpc_utils::task::AbortOnDrop;
 use serde::Deserialize;
 use serde_json::json;
 use tokio::sync::mpsc;
@@ -17,6 +16,7 @@ use tokio_tungstenite::tungstenite::client::IntoClientRequest as _;
 use tokio_tungstenite::tungstenite::http::HeaderValue;
 use tokio_tungstenite::tungstenite::protocol::CloseFrame;
 use tokio_tungstenite::tungstenite::{Error as WsError, Message};
+use tokio_util::task::AbortOnDropHandle;
 
 /// A connection that answers no keepalive within this long is dead.
 const KEEPALIVE: Duration = Duration::from_secs(30);
@@ -116,7 +116,7 @@ impl DustEventSource for IndexerDustEvents {
             .context("subscribing to the DUST ledger events")?;
 
         let (sender, receiver) = mpsc::channel(BUFFER);
-        let pump = AbortOnDrop(tokio::spawn(async move {
+        let pump = AbortOnDropHandle::new(tokio::spawn(async move {
             if let Err(error) = pump(socket, &sender).await {
                 let _ = sender.send(Err(error)).await;
             }
@@ -563,7 +563,7 @@ mod tests {
             let _ = server.next().await;
         });
         let (sender, mut receiver) = mpsc::channel(1);
-        let pumping = AbortOnDrop(tokio::spawn(async move {
+        let pumping = AbortOnDropHandle::new(tokio::spawn(async move {
             // Ending drops the sender, which ends the wait below without an event.
             let _ = pump(client, &sender).await;
         }));

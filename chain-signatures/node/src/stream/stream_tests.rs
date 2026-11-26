@@ -10,6 +10,7 @@ use crate::stream::test_utils::{
     run_stream_with_two_node_mesh, signature_responded_event, test_bidirectional_tx,
     test_rpc_channel, test_sign_args,
 };
+use crate::stream::StreamContext;
 use crate::types::SignCommand;
 use async_trait::async_trait;
 use cait_sith::protocol::Participant;
@@ -112,15 +113,15 @@ async fn a_supervised_restart_publishes_a_stored_signature() {
 
     run_supervised(
         indexer,
-        crate::stream::StreamContext::new(
-            restarted.clone(),
-            sign_tx,
-            rpc,
-            contract_watcher,
-            mesh_state_rx,
-            NodeClient::new(),
-            cp_rx,
-        ),
+        StreamContext::builder()
+            .backlog(restarted.clone())
+            .sign_tx(sign_tx)
+            .rpc(rpc)
+            .contract_watcher(contract_watcher)
+            .mesh_state(mesh_state_rx)
+            .node_client(NodeClient::new())
+            .checkpoints_rx(cp_rx)
+            .build(),
         mpc_chain_integration_core::NoopChainTelemetry,
     )
     .await
@@ -180,15 +181,15 @@ async fn test_stream_handles_sign_and_respond() {
     // Run the indexer
     run_supervised(
         indexer,
-        crate::stream::StreamContext::new(
-            backlog.clone(),
-            sign_tx.clone(),
-            rpc,
-            contract_watcher,
-            mesh_state_rx,
-            node_client,
-            cp_rx,
-        ),
+        StreamContext::builder()
+            .backlog(backlog.clone())
+            .sign_tx(sign_tx.clone())
+            .rpc(rpc)
+            .contract_watcher(contract_watcher)
+            .mesh_state(mesh_state_rx)
+            .node_client(node_client)
+            .checkpoints_rx(cp_rx)
+            .build(),
         mpc_chain_integration_core::NoopChainTelemetry,
     )
     .await
@@ -296,15 +297,15 @@ async fn test_bidirectional_sign_request_enqueues_command() {
 
     run_supervised(
         indexer,
-        crate::stream::StreamContext::new(
-            backlog.clone(),
-            sign_tx,
-            rpc,
-            contract_watcher,
-            mesh_state_rx,
-            node_client,
-            cp_rx,
-        ),
+        StreamContext::builder()
+            .backlog(backlog.clone())
+            .sign_tx(sign_tx)
+            .rpc(rpc)
+            .contract_watcher(contract_watcher)
+            .mesh_state(mesh_state_rx)
+            .node_client(node_client)
+            .checkpoints_rx(cp_rx)
+            .build(),
         mpc_chain_integration_core::NoopChainTelemetry,
     )
     .await
@@ -378,15 +379,15 @@ async fn test_respond_event_advances_to_pending_execution() {
 
     run_supervised(
         indexer,
-        crate::stream::StreamContext::new(
-            backlog.clone(),
-            sign_tx,
-            rpc,
-            contract_watcher,
-            mesh_state_rx,
-            node_client,
-            cp_rx,
-        ),
+        StreamContext::builder()
+            .backlog(backlog.clone())
+            .sign_tx(sign_tx)
+            .rpc(rpc)
+            .contract_watcher(contract_watcher)
+            .mesh_state(mesh_state_rx)
+            .node_client(node_client)
+            .checkpoints_rx(cp_rx)
+            .build(),
         mpc_chain_integration_core::NoopChainTelemetry,
     )
     .await
@@ -634,15 +635,15 @@ async fn test_stream_resumes_pending_publish_after_catchup() {
     let run_handle = tokio::spawn(async move {
         run_supervised(
             indexer,
-            crate::stream::StreamContext::new(
-                backlog,
-                sign_tx,
-                rpc,
-                contract_watcher,
-                mesh_state_rx,
-                node_client,
-                cp_rx,
-            ),
+            StreamContext::builder()
+                .backlog(backlog)
+                .sign_tx(sign_tx)
+                .rpc(rpc)
+                .contract_watcher(contract_watcher)
+                .mesh_state(mesh_state_rx)
+                .node_client(node_client)
+                .checkpoints_rx(cp_rx)
+                .build(),
             mpc_chain_integration_core::NoopChainTelemetry,
         )
         .await
@@ -702,15 +703,15 @@ async fn test_stream_does_not_resume_non_proposer_pending_publish_after_catchup(
     let run_handle = tokio::spawn(async move {
         run_supervised(
             indexer,
-            crate::stream::StreamContext::new(
-                backlog,
-                sign_tx,
-                rpc,
-                contract_watcher,
-                mesh_state_rx,
-                node_client,
-                cp_rx,
-            ),
+            StreamContext::builder()
+                .backlog(backlog)
+                .sign_tx(sign_tx)
+                .rpc(rpc)
+                .contract_watcher(contract_watcher)
+                .mesh_state(mesh_state_rx)
+                .node_client(node_client)
+                .checkpoints_rx(cp_rx)
+                .build(),
             mpc_chain_integration_core::NoopChainTelemetry,
         )
         .await
