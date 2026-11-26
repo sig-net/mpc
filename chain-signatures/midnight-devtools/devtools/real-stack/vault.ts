@@ -228,6 +228,11 @@ export interface VaultTronRunResult {
    * and the refund that re-minted its amount.
    */
   unsentRefund: { lateSendRefusal: string; waitedMs: number };
+  /**
+   * The executed Tron withdraw's trailing calldata word after `transfer`'s two arguments,
+   * and the ownership commitment of its start, which it must equal: 32-byte hex each.
+   */
+  withdrawBinding: { binding: string; expectedBinding: string };
 }
 
 /** A request its start circuit queued under `inIndex`. */
@@ -253,6 +258,8 @@ interface ExecutedRequest extends SentRequest {
   blockHeight: number;
   decoded: Record<string, unknown>;
   output: Uint8Array;
+  /** The signed transaction's calldata, hex. */
+  calldata: string;
   signedAt: number;
   broadcastAt: number;
 }
@@ -262,6 +269,14 @@ interface AttestedRequest extends ExecutedRequest {
 }
 
 const diagnostics = (message: string) => process.stderr.write(`vault: ${message}\n`);
+
+// The ABI word `index` of hex calldata, after its 4-byte selector.
+function calldataWord(calldata: string, index: number): bigint {
+  const hex = calldata.replace(/^0x/i, "");
+  const word = hex.slice(8 + index * 64, 8 + (index + 1) * 64);
+  if (word.length !== 64) throw new Error(`calldata ${calldata} has no word ${index}`);
+  return BigInt(`0x${word}`);
+}
 
 function attestedOf(attested: Map<string, AttestedRequest>, operation: string): AttestedRequest {
   const request = attested.get(operation);
@@ -623,6 +638,7 @@ class VaultRun {
           kind: EvmTraceOutputKind.Output,
           returnData,
         }),
+        calldata: transaction.data,
         signedAt,
         broadcastAt,
       });
@@ -672,9 +688,10 @@ class VaultRun {
     if (tronReceiptExecutionResult(receipt) !== TronExecutionResult.Succeeded) {
       throw new Error(`${request.operation} ran ${String(receipt.receiptResult)}`);
     }
+    const calldata = assembleCalldata(record.txParams.calldata);
     const output = executedEvmRespondOutput(
       record.outputDeserializationSchema,
-      isEvmContractCall(assembleCalldata(record.txParams.calldata)),
+      isEvmContractCall(calldata),
       evmTraceOutputFromTronReceipt(receipt.body),
     );
     const decoded = deserializeEvmOutput(
@@ -689,6 +706,7 @@ class VaultRun {
       blockHeight: Number(receipt.blockNumber),
       decoded,
       output,
+      calldata,
       signedAt,
       broadcastAt,
     };
@@ -1395,6 +1413,12 @@ class VaultRun {
         address: bytesToHex(recipient),
         before: Number(recipientBefore),
         after: Number(recipientAfter),
+      },
+      withdrawBinding: {
+        binding: calldataWord(tronWithdraw.calldata, 2).toString(16).padStart(64, "0"),
+        expectedBinding: bytesToHex(
+          pureCircuits.ownershipCommitment(tronWithdrawStart.inIndex, this.userSecret),
+        ),
       },
     };
   }

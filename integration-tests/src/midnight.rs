@@ -320,6 +320,17 @@ pub struct VaultTronRunResult {
     pub cross_chain_refusals: CrossChainRefusals,
     pub recipient: TronRecipient,
     pub unsent_refund: UnsentRefund,
+    pub withdraw_binding: TronWithdrawBinding,
+}
+
+/// The executed Tron withdraw's trailing calldata word and the start it must name.
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TronWithdrawBinding {
+    /// The trailing calldata word binding the withdrawal to its requester, 32-byte hex.
+    pub binding: String,
+    /// The ownership commitment of the withdrawal's start, which the binding must equal.
+    pub expected_binding: String,
 }
 
 #[derive(Deserialize)]

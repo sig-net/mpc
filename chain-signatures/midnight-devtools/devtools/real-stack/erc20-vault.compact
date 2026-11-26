@@ -2009,20 +2009,25 @@ export struct TronTxWindow {
   expiration: Uint<64>;
 }
 
+// binding is the request's ownership commitment, appended to the transfer as a third
+// calldata word (the ABI decoder ignores it): every withdrawal names its own Tron
+// transaction and request id, so a copy of a public start can neither hold the original at
+// the flush nor share its request id and strand it.
 export struct TronWithdrawArgs {
   request: TronWithdrawRequest;
   // The withdrawer's window and the vault's fee limit at start.
   tx: TronTxFields;
   fee: Uint<64>;
+  binding: Bytes<32>;
 }
 
 // The fee limit, in sun, of the vault's Tron transactions: set by initialise() and
 // setGasParams(), read at start.
 export ledger vaultTronFeeLimit: Uint<64>;
 
-// Tron withdraw requests (2-word TRC-20 transfer, 34-byte output schema).
+// Tron withdraw requests (2-word TRC-20 transfer plus the binding word, 34-byte output schema).
 // Compiled path for MPC notification: [2, 13] (read from managed/erc20-vault/compiler/contract-info.json).
-export ledger bidirectionalTronWithdrawMap: SignBidirectionalEventMapV1<TronTriggerSmartContractTxParams<2>, 34>;
+export ledger bidirectionalTronWithdrawMap: SignBidirectionalEventMapV1<TronTriggerSmartContractTxParams<3>, 34>;
 
 // inIndex -> the arguments of the Tron withdrawal queued under it, from start to complete.
 export ledger tronWithdrawArgsMap: Map<Uint<64>, TronWithdrawArgs>;
@@ -2071,16 +2076,17 @@ circuit tronTokenFees(tokenAddress: Bytes<20>): TokenFees {
 // the request id the send will record.
 circuit tronWithdrawEvent(
   args: TronWithdrawArgs
-): SignBidirectionalEventV1<TronTriggerSmartContractTxParams<2>, 34, 0> {
-  const calldata = EvmCalldata<2> {
+): SignBidirectionalEventV1<TronTriggerSmartContractTxParams<3>, 34, 0> {
+  const calldata = EvmCalldata<3> {
     selector: Bytes [0xa9, 0x05, 0x9c, 0xbb], // transfer(address,uint256)
-    noWords: 2 as Uint<16>,
+    noWords: 3 as Uint<16>,
     words: [
       evmAddressAbiWord(args.request.destTronAddress),
       numericAbiWord(args.request.amount),
+      args.binding,
     ]
   };
-  const txParams = TronTriggerSmartContractTxParams<2> {
+  const txParams = TronTriggerSmartContractTxParams<3> {
     refBlockBytes: args.tx.refBlockBytes,
     refBlockHash: args.tx.refBlockHash,
     timestamp: args.tx.timestamp,
@@ -2088,9 +2094,9 @@ circuit tronWithdrawEvent(
     feeLimit: args.tx.feeLimit,
     contractAddress: tronAddress(args.request.tokenAddress),
     callValue: 0 as Uint<64>,
-    calldata: some<EvmCalldata<2>>(calldata)
+    calldata: some<EvmCalldata<3>>(calldata)
   };
-  return constructSignBidirectionalEventV1<TronTriggerSmartContractTxParams<2>, 34>(
+  return constructSignBidirectionalEventV1<TronTriggerSmartContractTxParams<3>, 34>(
     mpcKeyVersion, kernel.self(), pad(32, "vault"),
     MPCSignatureAlgorithm.ecdsa, TxParamType.tronTriggerSmartContract, txParams, tronCaip2Id(),
     MPCDestination.unused, pad(64, ""), vaultOutputSchema()
@@ -2103,9 +2109,10 @@ circuit tronWithdrawEvent(
 // the fee limit is the vault's own setting at start. The checks refuse a request the MPC
 // would never answer: fields Tron cannot encode, and a window the MPC would not admit by
 // the send (with tronWithdrawStartMinRemainingSeconds left for the flush and the send).
-// Fields an earlier Tron withdrawal used name the same Tron transaction, which Tron takes
-// only once, so such a twin's coin can be left with nothing to settle it: the client picks
-// a fresh timestamp.
+// A withdrawal repeating an earlier one's inIndex, window, token, amount, destination and
+// fee limit under the same key names the same Tron transaction, which Tron takes only once,
+// so such a twin's coin can be left with nothing to settle it: the client picks a fresh
+// index.
 export circuit startTronWithdraw(
   inIndex: Uint<64>,
   withdrawRequest: TronWithdrawRequest,
@@ -2135,6 +2142,7 @@ export circuit startTronWithdraw(
   );
   takeFee(vaultTronTokenDomainSeparator(withdrawRequest.tokenAddress), coin, fee);
 
+  const commitment = ownershipCommitment(inIndex, callerSecretKey());
   const args = disclose(TronWithdrawArgs {
     request: withdrawRequest,
     tx: TronTxFields {
@@ -2145,9 +2153,10 @@ export circuit startTronWithdraw(
       feeLimit: vaultTronFeeLimit,
     },
     fee: fee,
+    binding: commitment,
   });
   const request = tronWithdrawEvent(args);
-  assertTronTriggerSmartContractTxParamsV1<2>(request.txParams);
+  assertTronTriggerSmartContractTxParamsV1<3>(request.txParams);
   assertTronWithdrawWindow(args.tx.expiration, tronWithdrawStartMinRemainingSeconds());
 
   tronWithdrawArgsMap.insert(disclosedIndex, args);
@@ -2157,7 +2166,7 @@ export circuit startTronWithdraw(
     useNextVaultAccountNonce: false,
     evmNonce: 0 as Uint<64>,
     inIndex: inIndex,
-    commitment: ownershipCommitment(inIndex, callerSecretKey()),
+    commitment: commitment,
     argsHash: tronWithdrawArgsHash(args),
   }));
 }
@@ -2176,7 +2185,7 @@ export circuit sendTronWithdraw(outIndex: Bytes<32>): [] {
   const args = tronWithdrawArgsMap.lookup(entry.inIndex);
   assertTronWithdrawWindow(args.tx.expiration, tronWithdrawSendMinRemainingSeconds());
   const request = tronWithdrawEvent(args);
-  const requestId = calculateTronTriggerSmartContractRequestIdV1<2, 34>(request);
+  const requestId = calculateTronTriggerSmartContractRequestIdV1<3, 34>(request);
   assert(!bidirectionalTronWithdrawMap.member(requestId), "Request already sent");
   bidirectionalTronWithdrawMap.insert(requestId, request);
   evictionMap.insert(requestId, disclosedIndex);
@@ -2268,7 +2277,7 @@ export circuit refundUnsentTronWithdraw(inIndex: Uint<64>, mintNonce: Bytes<32>)
   const disclosedIndex = disclose(inIndex);
   assert(tronWithdrawArgsMap.member(disclosedIndex), "Tron withdrawal not open");
   const args = tronWithdrawArgsMap.lookup(disclosedIndex);
-  const requestId = calculateTronTriggerSmartContractRequestIdV1<2, 34>(tronWithdrawEvent(args));
+  const requestId = calculateTronTriggerSmartContractRequestIdV1<3, 34>(tronWithdrawEvent(args));
   assert(!bidirectionalTronWithdrawMap.member(requestId), "Request already sent");
   assertTronWithdrawSendClosed(args.tx.expiration);
 

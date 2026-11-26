@@ -1201,6 +1201,13 @@ async fn midnight_vault_tron_withdraw_with_real_mpc() -> anyhow::Result<()> {
         unsent.late_send_refusal.contains("too close"),
         "the late send was refused for another reason: {unsent:?}"
     );
+    // The executed transfer carried its request's binding as a trailing word, which the
+    // token's ABI decoder ignored: a copy of the start would have named another transaction.
+    let binding = &result.withdraw_binding;
+    anyhow::ensure!(
+        binding.binding == binding.expected_binding,
+        "the Tron withdraw ran without its own binding word: {binding:?}"
+    );
     midnight.shutdown().await?;
     Ok(())
 }
