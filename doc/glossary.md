@@ -333,14 +333,6 @@ Signet singleton, and the signet responder receives published signatures
 and attestations. See [bidirectional-calls.md
 §4.2](bidirectional-calls.md#42-signet-contract-per-source-chain).
 
-## Signing scheme
-
-The signature algorithm and curve a key signs with: ECDSA over secp256k1
-today, with EdDSA planned. A request names its signing scheme among its key
-parameters, in a field the contracts call `algo`. See
-[bidirectional-calls.md
-§7.1](bidirectional-calls.md#71-request-signbidirectionaleventv1).
-
 ## Source chain
 
 The chain a [request](#request) is made on and answered on.
