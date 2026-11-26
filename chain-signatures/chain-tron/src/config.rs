@@ -1,15 +1,18 @@
 use mpc_chain_integration_core::utils::retry::RetryConfig;
-use std::fmt;
+use secrecy::{ExposeSecret as _, SecretString};
 use std::time::Duration;
 use url::Url;
 
 /// Tron chain integration configuration.
-#[derive(Clone, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct TronConfig {
     /// Base URL of the provider's HTTP API
     pub endpoint: Url,
     /// `TRON-PRO-API-KEY` header value when the provider is TronGrid, None for other providers.
-    pub api_key: Option<String>,
+    ///
+    /// Carried as a [`SecretString`] so derived `Debug` redacts it; exposed only
+    /// when setting the request header.
+    pub api_key: Option<SecretString>,
     /// Timeout for HTTP requests to the provider.
     pub request_timeout: Duration,
     /// Retry configuration for HTTP requests to the provider.
@@ -35,26 +38,13 @@ impl Default for TronConfig {
     }
 }
 
-/// Custom `Debug` implementation that redacts the `api_key` field
-impl fmt::Debug for TronConfig {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("TronConfig")
-            .field("endpoint", &self.endpoint)
-            .field("api_key", &"<redacted>")
-            .field("request_timeout", &self.request_timeout)
-            .field("retry", &self.retry)
-            .field("poll_interval", &self.poll_interval)
-            .finish()
-    }
-}
-
 impl TronConfig {
     pub const DEFAULT_POLL_INTERVAL_MS: u64 = 15_000;
     pub fn validate(&self) -> anyhow::Result<()> {
         validate_base_url("endpoint", &self.endpoint)?;
         if let Some(api_key) = &self.api_key {
             anyhow::ensure!(
-                !api_key.trim().is_empty(),
+                !api_key.expose_secret().trim().is_empty(),
                 "tron config: api_key must not be blank"
             );
         }
@@ -96,7 +86,7 @@ mod tests {
     fn defaults_are_pinned() {
         let config = TronConfig::default();
         assert_eq!(config.endpoint.as_str(), "https://api.trongrid.io/");
-        assert_eq!(config.api_key, None);
+        assert!(config.api_key.is_none());
         assert_eq!(config.request_timeout, Duration::from_secs(10));
         assert_eq!(config.poll_interval, Duration::from_secs(15));
         config.validate().expect("defaults are valid");
@@ -126,10 +116,7 @@ mod tests {
                 "fragment",
                 variant(|c| c.endpoint = Url::parse("https://h/#f").unwrap()),
             ),
-            (
-                "blank api key",
-                variant(|c| c.api_key = Some("  ".to_string())),
-            ),
+            ("blank api key", variant(|c| c.api_key = Some("  ".into()))),
             (
                 "zero request timeout",
                 variant(|c| c.request_timeout = Duration::ZERO),
@@ -148,7 +135,7 @@ mod tests {
     fn debug_redacts_the_api_key() {
         let key = "secret-trongrid-key";
         let config = TronConfig {
-            api_key: Some(key.to_string()),
+            api_key: Some(key.into()),
             ..TronConfig::default()
         };
 
@@ -158,7 +145,7 @@ mod tests {
             "the api key reached Debug: {rendered}"
         );
         assert!(
-            rendered.contains("<redacted>"),
+            rendered.contains("[REDACTED]"),
             "the field must render redacted rather than vanish, or a later \
              derive(Debug) reinstates the leak unnoticed: {rendered}"
         );

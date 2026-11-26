@@ -1,4 +1,5 @@
 mod args;
+mod redacted;
 
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
@@ -48,6 +49,8 @@ use mpc_keys::hpke;
 use mpc_primitives::{Chain, CheckpointDigest};
 use near_account_id::AccountId;
 use near_crypto::{InMemorySigner, SecretKey};
+use redacted::Redacted;
+use secrecy::ExposeSecret as _;
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
@@ -61,9 +64,15 @@ const MAX_SIGN_COMMANDS: usize = 16384;
 #[command(version = build::version_with_commit())]
 pub enum Cli {
     Start {
-        /// NEAR RPC address
-        #[arg(long, env("MPC_NEAR_RPC"), hide_env_values = true)]
-        near_rpc: Url,
+        /// Typed and redacted NEAR RPC address. Parsed here so malformed URLs
+        /// fail at the CLI boundary without exposing credentials in errors.
+        #[arg(
+            long,
+            env("MPC_NEAR_RPC"),
+            hide_env_values = true,
+            value_parser = parse_near_rpc
+        )]
+        near_rpc: Redacted<Url>,
         /// MPC contract id
         #[arg(long, env("MPC_CONTRACT_ID"))]
         mpc_contract_id: AccountId,
@@ -74,8 +83,8 @@ pub enum Cli {
         #[arg(long, env("MPC_ENV"), value_enum)]
         env: logs::Env,
         /// This node's account ed25519 secret key
-        #[arg(long, env("MPC_ACCOUNT_SK"), hide_env_values = true)]
-        account_sk: SecretKey,
+        #[arg(long, env("MPC_ACCOUNT_SK"), hide_env_values = true, value_parser = parse_secret_key)]
+        account_sk: Redacted<SecretKey>,
         /// Port the node's web server listens on.
         #[arg(
             long,
@@ -85,11 +94,11 @@ pub enum Cli {
         )]
         web_port: u16,
         /// The cipher secret key used to decrypt messages between nodes.
-        #[arg(long, env("MPC_CIPHER_SK"), hide_env_values = true)]
-        cipher_sk: hpke::SecretKey,
+        #[arg(long, env("MPC_CIPHER_SK"), hide_env_values = true, value_parser = parse_cipher_sk)]
+        cipher_sk: Redacted<hpke::SecretKey>,
         /// The secret key used to sign messages to be sent between nodes.
-        #[arg(long, env("MPC_SIGN_SK"), hide_env_values = true)]
-        sign_sk: SecretKey,
+        #[arg(long, env("MPC_SIGN_SK"), hide_env_values = true, value_parser = parse_secret_key)]
+        sign_sk: Redacted<SecretKey>,
         /// Ethereum Indexer options
         #[command(flatten)]
         eth: EthArgs,
@@ -172,6 +181,25 @@ fn env_var_of(flag: &str) -> Option<String> {
     Some(arg.get_env()?.to_string_lossy().into_owned())
 }
 
+fn parse_near_rpc(s: &str) -> Result<Redacted<Url>, String> {
+    Url::parse(s)
+        .map(Redacted::new)
+        .map_err(|_| "invalid NEAR RPC URL".to_owned())
+}
+
+fn parse_secret_key(s: &str) -> Result<Redacted<SecretKey>, String> {
+    s.parse::<SecretKey>()
+        .map(Redacted::new)
+        .map_err(|_| "invalid secret key".to_owned())
+}
+
+fn parse_cipher_sk(s: &str) -> Result<Redacted<hpke::SecretKey>, String> {
+    let bytes = hex::decode(s).map_err(|_| "invalid cipher secret key".to_owned())?;
+    hpke::SecretKey::try_from_bytes(&bytes)
+        .map(Redacted::new)
+        .map_err(|_| "invalid cipher secret key".to_owned())
+}
+
 /// `Url` alone accepts `node.example.org:8080`, reading the host as the scheme,
 /// and the contract cannot change a participant's URL once it has joined.
 fn parse_peer_address(s: &str) -> Result<Url, String> {
@@ -250,8 +278,14 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
 
             let stack = ChainStack::new(ChainConfigs::from_args(eth, sol, canton, midnight, tron)?)
                 .with_midnight_dust(midnight_dust);
-            let network = NetworkConfig { cipher_sk, sign_sk };
-            let signer = match InMemorySigner::from_secret_key(account_id.clone(), account_sk) {
+            let network = NetworkConfig {
+                cipher_sk: cipher_sk.into_inner(),
+                sign_sk: sign_sk.into_inner(),
+            };
+            let signer = match InMemorySigner::from_secret_key(
+                account_id.clone(),
+                account_sk.into_inner(),
+            ) {
                 near_crypto::Signer::InMemory(s) => s,
                 _ => unreachable!(),
             };
@@ -718,7 +752,7 @@ impl StorageHandles {
         storage_options: &storage::Options,
     ) -> anyhow::Result<Self> {
         let keystore = Keystore::init(storage_options, account_id).await?;
-        let redis_pool = redis_pool(storage_options.redis_url.clone())?;
+        let redis_pool = redis_pool(Url::parse(storage_options.redis_url.expose_secret())?)?;
         let triple_storage = TriplePair::storage(&redis_pool, account_id);
         let presignature_storage = Presignature::storage(&redis_pool, account_id);
         let backlog = Backlog::persisted(CheckpointStorage::Redis(
@@ -1005,6 +1039,7 @@ async fn spawn_indexers(
 mod tests {
     use mpc_chain_integration_core::utils::test::make_publish_action;
     use mpc_primitives::{SignId, SignKind};
+    use secrecy::SecretString;
     use std::str::FromStr;
     use std::time::Duration;
 
@@ -1044,6 +1079,51 @@ mod tests {
         // Operators set env vars, so a rejected value names the one to fix.
         let named = parse(&["--near-rpc=s3cr3t".into()]);
         assert!(named.contains("MPC_NEAR_RPC (--near-rpc)"), "{named}");
+    }
+
+    #[test]
+    fn debug_of_start_hides_the_secret_fields() {
+        let account_key =
+            SecretKey::from_seed(near_crypto::KeyType::ED25519, "account").to_string();
+        let sign_key = SecretKey::from_seed(near_crypto::KeyType::ED25519, "sign").to_string();
+        let cipher_hex = "1".repeat(64);
+        let cli = Cli::try_parse_from([
+            "mpc-node",
+            "start",
+            "--near-rpc",
+            "https://rpc-user:NEAR_RPC_SENTINEL@rpc.example.org",
+            "--mpc-contract-id",
+            "contract.near",
+            "--account-id",
+            "node.near",
+            "--env",
+            "dev",
+            "--account-sk",
+            &account_key,
+            "--cipher-sk",
+            &cipher_hex,
+            "--sign-sk",
+            &sign_key,
+            "--my-address",
+            "http://localhost:3000",
+            "--redis-url",
+            "redis://localhost",
+            "--sk-share-secret-id",
+            "s",
+            "--gcp-project-id",
+            "p",
+        ])
+        .expect("valid start arguments");
+        let rendered = format!("{cli:?}");
+        for secret in [
+            "NEAR_RPC_SENTINEL",
+            account_key.as_str(),
+            sign_key.as_str(),
+            cipher_hex.as_str(),
+        ] {
+            assert!(!rendered.contains(secret), "{secret} leaked: {rendered}");
+        }
+        assert!(rendered.matches("[REDACTED]").count() >= 4, "{rendered}");
     }
 
     #[test]
@@ -1178,7 +1258,7 @@ mod tests {
                 central_address: mpc_chain_midnight::MidnightAddress::from_bytes([0xab; 32]),
                 responder_address: mpc_chain_midnight::MidnightAddress::from_bytes([0xcd; 32]),
                 publisher: mpc_chain_midnight::PublisherConfig {
-                    funding_seed: "ab".repeat(32),
+                    funding_seed: "ab".repeat(32).into(),
                     indexer_ws_url: "ws://127.0.0.1:1/api/v3/graphql/ws".parse().unwrap(),
                     ..Default::default()
                 },
@@ -1218,7 +1298,7 @@ mod tests {
 
     fn sol_config_with_bogus_rpc() -> SolConfig {
         SolConfig {
-            account_sk: mpc_chain_solana::Keypair::new().to_base58_string(),
+            account_sk: mpc_chain_solana::Keypair::new().to_base58_string().into(),
             rpc_http_url: "http://127.0.0.1:1".parse().unwrap(),
             program_address: mpc_chain_solana::Pubkey::new_unique(),
             indexer: Default::default(),
@@ -1366,5 +1446,56 @@ mod tests {
             .map(|group| group.get_id().as_str())
             .collect();
         assert_eq!(required_groups, ["sk_share"]);
+    }
+
+    /// Chain configs live for the node's lifetime, so their secret fields must
+    /// remain in redacting types rather than plain strings.
+    #[test]
+    fn chain_configs_carry_secrets_as_secret_strings() {
+        let sol_sk = "dummy_solana_payer_secret";
+        let sol = SolConfig {
+            account_sk: sol_sk.into(),
+            rpc_http_url: "http://127.0.0.1:8899".parse().unwrap(),
+            program_address: "11111111111111111111111111111111".parse().unwrap(),
+            indexer: Default::default(),
+        };
+        let _: &SecretString = &sol.account_sk;
+        assert!(!format!("{sol:?}").contains(sol_sk));
+
+        let canton_secret = "dummy_canton_oidc_client_secret";
+        let canton = CantonConfig {
+            json_api_url: "http://127.0.0.1:7575".parse().unwrap(),
+            json_api_ws_url: "ws://127.0.0.1:7575".parse().unwrap(),
+            auth: mpc_chain_canton::CantonAuthConfig {
+                token_url: "http://127.0.0.1:7575/token".parse().unwrap(),
+                client_id: "client-id".to_string(),
+                client_secret: canton_secret.into(),
+                audience: "audience".to_string(),
+                scope: None,
+            },
+            ledger_api_user: "ledger-user".to_string(),
+            party_id: "party".to_string(),
+            signer_contract_id: "contract".to_string(),
+            signer_template_id: "template".to_string(),
+        };
+        let _: &SecretString = &canton.auth.client_secret;
+        assert!(!format!("{canton:?}").contains(canton_secret));
+    }
+
+    #[test]
+    fn storage_options_redact_the_redis_url() {
+        let options = <storage::Options as Parser>::try_parse_from([
+            "test",
+            "--redis-url",
+            "redis://:redis-password@127.0.0.1:6379",
+            "--sk-share-secret-id",
+            "s",
+            "--gcp-project-id",
+            "p",
+        ])
+        .expect("the redis url and one key-share store are a valid set");
+
+        let _: &SecretString = &options.redis_url;
+        assert!(!format!("{options:?}").contains("redis-password"));
     }
 }
