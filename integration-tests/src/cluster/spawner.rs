@@ -186,6 +186,8 @@ pub struct ClusterSpawner {
     pub pregenerated_keys: PregeneratedKeys,
     pub use_ethereum: bool,
     pub use_midnight: bool,
+    /// Start a TRE (`tronbox/tre`) chain and point every node's Tron watcher at it.
+    pub use_tron: bool,
     /// Midnight funding seeds by node index; see [`Self::node_config`].
     pub midnight_funding_seeds: Vec<String>,
     /// Tracks which binary source to use for each node index
@@ -229,6 +231,7 @@ impl Default for ClusterSpawner {
             pregenerated_keys: PregeneratedKeys::load(nodes, threshold).unwrap(),
             use_ethereum: false,
             use_midnight: false,
+            use_tron: false,
             midnight_funding_seeds: Vec::new(),
             node_binary_sources: vec![NodeBinarySource::CurrentCode; nodes],
         }
@@ -397,6 +400,11 @@ impl ClusterSpawner {
 
     pub fn midnight(mut self) -> Self {
         self.use_midnight = true;
+        self
+    }
+
+    pub fn tron(mut self) -> Self {
+        self.use_tron = true;
         self
     }
 

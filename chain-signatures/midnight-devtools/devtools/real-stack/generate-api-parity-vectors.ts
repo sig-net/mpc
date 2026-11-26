@@ -373,8 +373,8 @@ const fixture = {
   responseEvent,
   compiler: "0.36.0",
   runtime: "0.21.0",
-  reference: "@sig-net/midnight@0.26.0-rc.7/src/Signet.compact",
-  referenceCommit: "242965d9535c602374a7b772ceb94a97012f5ebd",
+  reference: "@sig-net/midnight@0.27.0-rc.6/src/Signet.compact",
+  referenceCommit: "becdfc713efcce847edad9d9da3a8bfa01024dea",
   request: requestVectors[0],
   requestVectors,
   attestations: vectors.map((vector) => ({

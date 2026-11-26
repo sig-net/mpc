@@ -230,15 +230,30 @@ pub struct VaultPartialSend {
     pub retry_error: Option<String>,
 }
 
+/// The chain a vault request's transaction executes on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum TargetChain {
+    Ethereum,
+    Tron,
+}
+
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct VaultOperation {
     pub operation: String,
+    pub chain: TargetChain,
     pub request_id: String,
     pub placement: Vec<CallPlacement>,
-    pub evm_transaction: String,
-    pub evm_block_height: u64,
+    /// The executed transaction's hash (EVM) or id (Tron), hex.
+    pub transaction: String,
+    /// The block height the attestation commits to.
+    pub block_height: u64,
     pub output: String,
+    /// From the notifying send's finalisation to the driver's first read of the signature.
+    pub send_to_signature_ms: u64,
+    /// From the broadcast to the driver's first read of the verified attestation.
+    pub broadcast_to_attestation_ms: u64,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -247,6 +262,75 @@ pub struct VaultRunResult {
     pub vault_address: String,
     pub targets: serde_json::Value,
     pub operations: Vec<VaultOperation>,
+}
+
+/// The vault's `globalLastSeen` and `tronLastSeen` at one point of the Tron run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LastSeen {
+    pub ethereum: u64,
+    pub tron: u64,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LastSeenSteps {
+    /// Before the withdraw attestations are queued.
+    pub before: LastSeen,
+    /// After the ETH withdraw's attestation alone is flushed.
+    pub after_ethereum: LastSeen,
+    /// After the Tron withdraw's attestation is flushed too.
+    pub after_tron: LastSeen,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CrossChainRefusals {
+    /// `completeTronWithdraw` given the ETH withdraw's request and output.
+    pub tron_complete_of_ethereum: String,
+    /// `completeWithdraw` given the Tron withdraw's request and output.
+    pub ethereum_complete_of_tron: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TronRecipient {
+    pub address: String,
+    pub before: u64,
+    pub after: u64,
+}
+
+/// A Tron withdraw left unsent until its window closed to sends, then refunded.
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UnsentRefund {
+    /// `sendTronWithdraw` once the window closed to sends.
+    pub late_send_refusal: String,
+    /// From the start to the refund.
+    pub waited_ms: u64,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VaultTronRunResult {
+    pub vault_address: String,
+    pub tron_token: String,
+    pub operations: Vec<VaultOperation>,
+    pub last_seen: LastSeenSteps,
+    pub cross_chain_refusals: CrossChainRefusals,
+    pub recipient: TronRecipient,
+    pub unsent_refund: UnsentRefund,
+    pub withdraw_binding: TronWithdrawBinding,
+}
+
+/// The executed Tron withdraw's trailing calldata word and the start it must name.
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TronWithdrawBinding {
+    /// The trailing calldata word binding the withdrawal to its requester, 32-byte hex.
+    pub binding: String,
+    /// The ownership commitment of the withdrawal's start, which the binding must equal.
+    pub expected_binding: String,
 }
 
 #[derive(Deserialize)]
@@ -511,6 +595,38 @@ impl MidnightContext {
             serde_json::to_vec_pretty(&result)?,
         )
         .context("saving the vault operation results")?;
+        Ok(result)
+    }
+
+    /// Deploy the ERC20 vault, its local EVM targets and a TRC-20 on `tron_rpc_url`, then run
+    /// an ETH and a Tron deposit and withdraw through the MPC side by side and settle each.
+    pub async fn run_vault_tron(
+        &self,
+        mpc_public_key: &str,
+        evm_rpc_url: &str,
+        evm_funder_key: &str,
+        tron_rpc_url: &str,
+        tron_funder_key: &str,
+    ) -> anyhow::Result<VaultTronRunResult> {
+        let token_artifact = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../chain-signatures/chain-tron/tests/fixtures/tre/gate-token.json");
+        let mut driver = self.driver.lock().await;
+        let result: VaultTronRunResult = driver
+            .request(&serde_json::json!({
+                "op": "runVaultTron",
+                "mpcPublicKey": mpc_public_key,
+                "evmRpcUrl": evm_rpc_url,
+                "evmFunderKey": evm_funder_key,
+                "tronRpcUrl": tron_rpc_url,
+                "tronFunderKey": tron_funder_key,
+                "tronTokenArtifact": token_artifact,
+            }))
+            .await?;
+        std::fs::write(
+            self._stack.artifact_dir.join("vault-tron-result.json"),
+            serde_json::to_vec_pretty(&result)?,
+        )
+        .context("saving the Tron vault run results")?;
         Ok(result)
     }
 

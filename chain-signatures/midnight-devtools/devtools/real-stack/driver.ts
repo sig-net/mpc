@@ -57,7 +57,7 @@ import {
   type CallerContract,
   type CallerProviders,
 } from "./providers.js";
-import { runVault, runVaultPartialSend } from "./vault.js";
+import { runVault, runVaultPartialSend, runVaultTron } from "./vault.js";
 import { createCallerPrivateState } from "./witnesses.js";
 
 interface RoleSeeds {
@@ -189,6 +189,13 @@ interface RunVaultPartialSendRequest extends Omit<RunVaultRequest, "op"> {
   op: "runVaultPartialSend";
 }
 
+interface RunVaultTronRequest extends Omit<RunVaultRequest, "op"> {
+  op: "runVaultTron";
+  tronRpcUrl: string;
+  tronFunderKey: string;
+  tronTokenArtifact: string;
+}
+
 interface ShutdownRequest {
   op: "shutdown";
 }
@@ -206,6 +213,7 @@ type Request =
   | FireTwinRequest
   | RunVaultRequest
   | RunVaultPartialSendRequest
+  | RunVaultTronRequest
   | ShutdownRequest;
 
 interface Session {
@@ -689,6 +697,25 @@ async function dispatch(request: Request): Promise<unknown> {
       userFacade: active.facade,
     });
   }
+  if (request.op === "runVaultTron") {
+    return runVaultTron({
+      config: active.config,
+      artifactDir: active.artifactDir,
+      centralAddress: active.centralAddress,
+      responderAddress: active.responderAddress,
+      mpcPublicKey: request.mpcPublicKey,
+      evmRpcUrl: request.evmRpcUrl,
+      evmFunderKey: request.evmFunderKey,
+      deployerSeed: active.roleSeeds.deployer,
+      userSeed: active.roleSeeds.invoker,
+      userFacade: active.facade,
+      tron: {
+        rpcUrl: request.tronRpcUrl,
+        funderKey: request.tronFunderKey,
+        tokenArtifact: request.tronTokenArtifact,
+      },
+    });
+  }
   if (request.op === "submitPlacement") {
     return submitPlacement(
       placementContext(active),
@@ -804,6 +831,8 @@ async function dispatch(request: Request): Promise<unknown> {
         { ...circuitInput, serializedOutputLength: circuitInput.serializedOutputLength ^ 1n },
       ],
       ["outputHash", { ...circuitInput, outputHash: flipFirst(circuitInput.outputHash) }],
+      // The checker requires the carried digest to equal the one it recomputes.
+      ["digest", { ...circuitInput, digest: flipFirst(circuitInput.digest) }],
     ] as const) {
       if (check(value, serializedOutput, responseKey))
         throw new Error(`accepted tampered ${field}`);
@@ -818,16 +847,6 @@ async function dispatch(request: Request): Promise<unknown> {
       wrongWidth.length === 20 ? pureCircuits.checkResponse20 : pureCircuits.checkResponse32;
     if (checkWrongWidth(circuitInput, wrongWidth, responseKey))
       throw new Error("accepted serialized output at a different width");
-    // The upstream checker recomputes the digest from the other event fields; the
-    // carried digest is reader metadata and deliberately excluded from verification.
-    if (
-      !check(
-        { ...circuitInput, digest: flipFirst(circuitInput.digest) },
-        serializedOutput,
-        responseKey,
-      )
-    )
-      throw new Error("reader metadata changed upstream circuit verification");
     if (request.rejectPaddedReplay === true) {
       const padded = new Uint8Array(8);
       padded.set(serializedOutput);

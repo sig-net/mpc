@@ -3,7 +3,7 @@
 //! silently losing a setting.
 
 use crate::local::NodeEnvConfig;
-use crate::{Context, NodeConfig};
+use crate::{Context, NodeConfig, TronNodeConfig};
 
 use mpc_chain_canton::CantonConfig;
 use mpc_chain_ethereum::EthConfig;
@@ -50,6 +50,9 @@ impl Args {
         }
         if let Some(midnight) = &cfg.midnight {
             self.midnight(midnight);
+        }
+        if let Some(tron) = &cfg.tron {
+            self.tron(tron);
         }
     }
 
@@ -123,6 +126,10 @@ impl Args {
                 self.flag("--midnight-output-storage-emulator-endpoint", endpoint);
             }
         }
+    }
+
+    fn tron(&mut self, tron: &TronNodeConfig) {
+        self.flag("--tron-endpoint", &tron.endpoint);
     }
 
     fn storage(&mut self, storage: &storage::Options, is_current_node: bool) {

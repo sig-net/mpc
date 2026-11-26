@@ -557,6 +557,71 @@ impl EthereumSandbox {
     }
 }
 
+/// A TRE (Tron Runtime Environment) chain: a single-witness java-tron that packs a block
+/// only when it has a transaction to pack, and solidifies each block at once.
+pub struct TronSandbox {
+    pub container: Container,
+    pub external_http_endpoint: String,
+    /// Hex private key of the account `useDefaultPrivateKey` funds with TRX.
+    pub funder_private_key: String,
+}
+
+impl TronSandbox {
+    const HTTP_PORT: u16 = 9090;
+    /// Tag-pinned only: the vendor publishes no digest. Same image as `just test-tron-tre`.
+    const IMAGE: (&'static str, &'static str) = ("tronbox/tre", "2.0.0");
+    const FUNDER_PRIVATE_KEY: &'static str =
+        "0000000000000000000000000000000000000000000000000000000000000001";
+
+    pub async fn run(spawner: &ClusterSpawner) -> anyhow::Result<Self> {
+        let container = start_container_with_network_retry(
+            || {
+                GenericImage::new(Self::IMAGE.0, Self::IMAGE.1)
+                    .with_exposed_port(Self::HTTP_PORT.tcp())
+                    .with_wait_for(WaitFor::Nothing)
+                    .with_env_var("useDefaultPrivateKey", "true")
+                    .with_network(&spawner.network)
+            },
+            &spawner.network,
+        )
+        .await
+        .context("starting the TRE container")?;
+        let external_port = container
+            .get_host_port_ipv4(Self::HTTP_PORT)
+            .await
+            .context("TRE port mapping")?;
+        let external_http_endpoint = format!("http://127.0.0.1:{external_port}");
+        wait_for_tre(&external_http_endpoint).await?;
+        Ok(Self {
+            container,
+            external_http_endpoint,
+            funder_private_key: Self::FUNDER_PRIVATE_KEY.to_string(),
+        })
+    }
+}
+
+/// TRE funds its accounts after its HTTP API is up, and lists them once funded.
+async fn wait_for_tre(endpoint: &str) -> anyhow::Result<()> {
+    const MAX_ATTEMPTS: usize = 180;
+    let client = Client::new();
+    let accounts = format!("{endpoint}/admin/accounts");
+    let mut last_err = None;
+    for _ in 0..MAX_ATTEMPTS {
+        match client.get(&accounts).send().await {
+            Ok(response) => match response.text().await {
+                Ok(body) if body.contains("Available Accounts") => return Ok(()),
+                Ok(body) => last_err = Some(format!("accounts not listed yet: {body:.80}")),
+                Err(err) => last_err = Some(err.to_string()),
+            },
+            Err(err) => last_err = Some(err.to_string()),
+        }
+        sleep(Duration::from_secs(1)).await;
+    }
+    Err(anyhow!(
+        "TRE at '{endpoint}' did not become ready: {last_err:?}"
+    ))
+}
+
 async fn wait_for_rpc(endpoint: &str) -> anyhow::Result<()> {
     const MAX_ATTEMPTS: usize = 120;
     let client = Client::new();
