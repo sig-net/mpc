@@ -11,7 +11,6 @@ use crate::protocol::presignature::PresignatureId;
 use crate::protocol::signature::{GenerateCtx, SignError, SignGenerator};
 use crate::protocol::sync::{SyncKind, SyncReportSender};
 use crate::protocol::Chain;
-use crate::respond_bidirectional::claims_attestation_key;
 use crate::rpc::{ContractStateWatcher, GovernanceInfo, RpcChannel};
 use crate::storage::presignature_storage::{PresignatureReservation, PresignatureTaken};
 use crate::storage::{Initializing, PresignatureStorage};
@@ -557,19 +556,6 @@ impl SignatureSpawner {
                     self.retire_task(sign_id, tracked_kind, "superseded by the next leg");
                 }
 
-                // Every route into signing passes here, checkpoint recovery included (it skips
-                // admission). After the duplicate guard, so a refusal can't retire a tracked request.
-                if claims_attestation_key(entry.request()) {
-                    tracing::error!(
-                        ?sign_id,
-                        chain = %entry.chain(),
-                        "refusing to sign on the reserved attestation path"
-                    );
-                    // Drop posits peers sent ahead of the request, and any that arrive later across all kinds.
-                    self.retire_all(sign_id, "refused attestation path");
-                    return;
-                }
-
                 if let Some(indexed) = entry.request().unix_timestamp_indexed {
                     record_request_latency_since(
                         entry.chain(),
@@ -768,11 +754,6 @@ mod tests {
             self.handle_sign(SignCommand::AbortChain(chain));
         }
 
-        fn sign_entry(&self, sign_id: SignId, chain: Chain) -> backlog::SignEntry<Generating> {
-            let req = crate::backlog::mock::mock_sign_request(sign_id, chain);
-            backlog::SignEntry::generating(req, &self.backlog)
-        }
-
         fn bidi_entry(&self, sign_id: SignId, chain: Chain) -> backlog::SignEntry<Generating> {
             let req = crate::backlog::mock::mock_bidi_request(sign_id, chain);
             backlog::SignEntry::generating(req, &self.backlog)
@@ -791,11 +772,6 @@ mod tests {
             backlog::SignEntry::generating(req, &self.backlog)
         }
 
-        fn request_sign(&mut self, sign_id: SignId, chain: Chain) {
-            let entry = self.sign_entry(sign_id, chain);
-            self.request(entry);
-        }
-
         fn request_bidi(&mut self, sign_id: SignId, chain: Chain) {
             let entry = self.bidi_entry(sign_id, chain);
             self.request(entry);
@@ -803,19 +779,6 @@ mod tests {
 
         fn request_bidi_response(&mut self, sign_id: SignId, chain: Chain) {
             let entry = self.bidi_response_entry(sign_id, chain);
-            self.request(entry);
-        }
-
-        fn reserved_entry(&self, sign_id: SignId) -> backlog::SignEntry<Generating> {
-            let mut req = crate::backlog::mock::mock_sign_request(sign_id, Chain::Solana);
-            let args = &mut Arc::make_mut(&mut req).args;
-            args.key_version = mpc_primitives::LEGACY_MPC_KEY_VERSION_1;
-            args.path = "solana response key".to_string();
-            backlog::SignEntry::generating(req, &self.backlog)
-        }
-
-        fn request_reserved(&mut self, sign_id: SignId) {
-            let entry = self.reserved_entry(sign_id);
             self.request(entry);
         }
     }
@@ -991,43 +954,6 @@ mod tests {
         spawner.request(entry);
         assert!(spawner.test_requests_contains(&sign_id));
         assert!(spawner.test_tasks_contains(sign_id, RequestKind::Sign));
-    }
-
-    /// Checkpoint recovery hands the spawner entries that never passed admission, so
-    /// the refusal has to hold here too, without catching the legitimate leg 2.
-    #[tokio::test]
-    async fn test_refuses_the_reserved_attestation_path() {
-        let mut spawner = setup();
-
-        // A peer that still admits the request proposes before this node sees it.
-        let attack_id = SignId::new([10u8; 32]);
-        spawner.handle_posit(attack_id, RequestKind::Sign, propose(0));
-        spawner.request_reserved(attack_id);
-        assert!(!spawner.test_requests_contains(&attack_id));
-        assert!(!spawner.test_tasks_contains(attack_id, RequestKind::Sign));
-        assert!(!spawner.test_posit_mailboxes_contains(&attack_id, RequestKind::Sign));
-        spawner.handle_posit(attack_id, RequestKind::Sign, propose(0));
-        assert!(
-            !spawner.test_posit_mailboxes_contains(&attack_id, RequestKind::Sign),
-            "late posits for a refused id must not reopen its mailbox"
-        );
-
-        // A refusal sharing a tracked request's id must not retire that request.
-        let tracked_id = SignId::new([12u8; 32]);
-        spawner.request_sign(tracked_id, Chain::Solana);
-        spawner.request_reserved(tracked_id);
-        assert!(spawner.test_tasks_contains(tracked_id, RequestKind::Sign));
-
-        let leg_two_id = SignId::new([11u8; 32]);
-        let mut leg_two = crate::backlog::mock::mock_bidi_response_request(
-            leg_two_id,
-            mpc_primitives::BidirectionalTxId([11u8; 32]),
-            Chain::Solana,
-        );
-        Arc::make_mut(&mut leg_two).args.path = "solana response key".to_string();
-        let entry = backlog::SignEntry::generating(leg_two, &spawner.backlog);
-        spawner.request(entry);
-        assert!(spawner.test_tasks_contains(leg_two_id, RequestKind::RespondBidirectional));
     }
 
     /// The duplicate guard admits a next leg over the leg it supersedes, while
@@ -1357,34 +1283,5 @@ mod tests {
         assert!(spawner.test_dead_ids_contains(&sign_id, RequestKind::Sign));
         assert!(spawner.test_dead_ids_contains(&sign_id, RequestKind::SignBidirectional));
         assert!(spawner.test_dead_ids_contains(&sign_id, RequestKind::RespondBidirectional));
-    }
-
-    #[tokio::test]
-    async fn test_refused_request_blocks_posits_across_all_kinds() {
-        let mut spawner = setup();
-        let sign_id = SignId::new([91u8; 32]);
-
-        // Pre-buffer posits for Sign and RespondBidirectional
-        spawner.handle_posit(sign_id, RequestKind::Sign, propose(0));
-        spawner.handle_posit(sign_id, RequestKind::RespondBidirectional, propose(0));
-        assert!(spawner.test_posit_mailboxes_contains(&sign_id, RequestKind::Sign));
-        assert!(spawner.test_posit_mailboxes_contains(&sign_id, RequestKind::RespondBidirectional));
-
-        // Refuse the request via attestation path
-        spawner.request_reserved(sign_id);
-
-        // All mailboxes must be cleared
-        assert!(!spawner.test_posit_mailboxes_contains(&sign_id, RequestKind::Sign));
-        assert!(!spawner.test_posit_mailboxes_contains(&sign_id, RequestKind::SignBidirectional));
-        assert!(!spawner.test_posit_mailboxes_contains(&sign_id, RequestKind::RespondBidirectional));
-        assert_eq!(spawner.test_dead_ids_len(), 1);
-
-        // Late posits for any kind must be dropped and cannot reopen a mailbox
-        spawner.handle_posit(sign_id, RequestKind::Sign, propose(0));
-        spawner.handle_posit(sign_id, RequestKind::SignBidirectional, propose(0));
-        spawner.handle_posit(sign_id, RequestKind::RespondBidirectional, propose(0));
-        assert!(!spawner.test_posit_mailboxes_contains(&sign_id, RequestKind::Sign));
-        assert!(!spawner.test_posit_mailboxes_contains(&sign_id, RequestKind::SignBidirectional));
-        assert!(!spawner.test_posit_mailboxes_contains(&sign_id, RequestKind::RespondBidirectional));
     }
 }

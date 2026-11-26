@@ -6,7 +6,6 @@ use mpc_primitives::{
     AttestationError, AttestationMetadata, AttestationOutcomeKind, BidirectionalTx, Chain,
     ChainConfig as _, IndexedSignRequest, PublishedAttestation, RespondBidirectionalEvent,
     RespondBidirectionalSerializedOutput, RespondBidirectionalTx, SerDeserFormat, SignArgs, SignId,
-    SignKind,
 };
 use mpc_utils::time::current_unix_timestamp;
 use sha3::{Digest as _, Sha3_256};
@@ -42,14 +41,6 @@ pub(crate) fn published_failure(
         (None, _) => is_failed_execution_response(own),
     }
 }
-/// Whether `request` asks for its chain's attestation key without being the network's
-/// own response, which is signed with it.
-pub(crate) fn claims_attestation_key(request: &IndexedSignRequest) -> bool {
-    !matches!(request.kind, SignKind::RespondBidirectional(_))
-        && mpc_crypto::kdf::reserved_path(request.args.key_version, request.chain)
-            == Some(request.args.path.as_str())
-}
-
 /// The key tweak and payload a genuine published Midnight response for `tx` is signed with.
 pub(crate) fn published_midnight_signing_args(
     tx: &BidirectionalTx,
@@ -224,11 +215,7 @@ impl CompletedTx {
                 entropy,
                 epsilon,
                 payload,
-                // Below key version 2 the path stays the reserved one, as checkpoint
-                // digests cover it; the key comes from the purpose either way.
-                path: mpc_crypto::kdf::reserved_path(self.tx.key_version, source_chain)
-                    .unwrap_or_default()
-                    .to_string(),
+                path: String::new(),
                 key_version: self.tx.key_version,
             },
             source_chain,
@@ -368,41 +355,23 @@ mod tests {
         })
     }
 
-    /// A response is signed with the requester's attestation key. Below key version 2 it
-    /// names the reserved path, which checkpoint digests of pending responses cover.
+    /// A response is signed with the requester's attestation key and names no path.
     #[test]
     fn a_response_is_signed_with_the_attestation_key() {
-        for (chain, reserved) in [
-            (Chain::Solana, "solana response key"),
-            (Chain::Canton, "canton response key"),
-            (Chain::Midnight, "midnight response key"),
-        ] {
-            for key_version in
-                mpc_primitives::MIN_BIDI_KEY_VERSION..=mpc_primitives::LATEST_MPC_KEY_VERSION
-            {
-                let mut tx = (*sample_bidirectional_tx(chain, [0x32; 32])).clone();
-                tx.key_version = key_version;
-                let sender = tx.sender_string().unwrap();
-                let request = CompletedTx::new(Arc::new(tx), None, None, 456, [0; 32])
-                    .create_sign_request_from_serialized_output(vec![1; 32])
-                    .unwrap();
-                let attestation = mpc_crypto::derive_epsilon(
-                    key_version,
-                    chain,
-                    mpc_crypto::KeyPurpose::Attestation { sender: &sender },
-                )
+        for chain in [Chain::Solana, Chain::Canton, Chain::Midnight] {
+            let tx = sample_bidirectional_tx(chain, [0x32; 32]);
+            let sender = tx.sender_string().unwrap();
+            let request = CompletedTx::new(Arc::clone(&tx), None, None, 456, [0; 32])
+                .create_sign_request_from_serialized_output(vec![1; 32])
                 .unwrap();
-                assert_eq!(
-                    request.args.epsilon, attestation,
-                    "{chain:?} v{key_version}"
-                );
-                let path = if key_version < mpc_primitives::MPC_KEY_VERSION_2 {
-                    reserved
-                } else {
-                    ""
-                };
-                assert_eq!(request.args.path, path, "{chain:?} v{key_version}");
-            }
+            let attestation = mpc_crypto::derive_epsilon(
+                tx.key_version,
+                chain,
+                mpc_crypto::KeyPurpose::Attestation { sender: &sender },
+            )
+            .unwrap();
+            assert_eq!(request.args.epsilon, attestation, "{chain:?}");
+            assert_eq!(request.args.path, "", "{chain:?}");
         }
     }
 
@@ -792,12 +761,7 @@ mod tests {
 
         assert_eq!(request.chain, Chain::Midnight);
         assert_eq!(request.args.payload, expected_payload);
-        let path = if request.args.key_version < mpc_primitives::MPC_KEY_VERSION_2 {
-            "midnight response key"
-        } else {
-            ""
-        };
-        assert_eq!(request.args.path, path);
+        assert_eq!(request.args.path, "");
     }
 
     #[tokio::test]
@@ -817,12 +781,7 @@ mod tests {
         assert_eq!(response.attestation, Some(metadata));
         assert!(response.output.is_empty());
         assert_eq!(response.origin_indexed_at, Some(100));
-        let path = if request.args.key_version < mpc_primitives::MPC_KEY_VERSION_2 {
-            "midnight response key"
-        } else {
-            ""
-        };
-        assert_eq!(request.args.path, path);
+        assert_eq!(request.args.path, "");
         assert_eq!(
             request.args.payload,
             Scalar::from_bytes(
@@ -953,46 +912,5 @@ mod tests {
                 "{outcome_kind:?}"
             );
         }
-    }
-
-    /// Below key version 2 a request naming the reserved path asks for the attestation
-    /// key; the network's own response is signed with it and passes.
-    #[test]
-    fn claims_attestation_key_refuses_requests_on_the_reserved_path() {
-        // A response recovered from a checkpoint taken before key version 2.
-        let mut response = (*crate::backlog::mock::mock_bidi_response_request(
-            SignId::new([0x30; 32]),
-            BidirectionalTxId([0x30; 32]),
-            Chain::Solana,
-        ))
-        .clone();
-        response.args.key_version = mpc_primitives::LEGACY_MPC_KEY_VERSION_1;
-        response.args.path = "solana response key".to_string();
-        assert!(!claims_attestation_key(&response));
-
-        let mut attack = response.clone();
-        attack.kind = SignKind::Sign;
-        assert!(claims_attestation_key(&attack));
-
-        // Canton has no plain `sign`, so a first leg is its only way to ask.
-        let mut leg_one =
-            (*crate::backlog::mock::mock_bidi_request(SignId::new([0x31; 32]), Chain::Solana))
-                .clone();
-        leg_one.args.path = "solana response key".to_string();
-        leg_one.args.key_version = mpc_primitives::LEGACY_MPC_KEY_VERSION_1;
-        assert!(claims_attestation_key(&leg_one));
-
-        let mut v2 = attack.clone();
-        v2.args.key_version = mpc_primitives::MPC_KEY_VERSION_2;
-        assert!(
-            !claims_attestation_key(&v2),
-            "from key version 2 the path is ordinary"
-        );
-
-        attack.chain = Chain::Ethereum;
-        assert!(
-            !claims_attestation_key(&attack),
-            "only the request's own chain's path is reserved"
-        );
     }
 }
