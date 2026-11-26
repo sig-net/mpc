@@ -335,7 +335,7 @@ impl<A: ProtocolArtifact> ProtocolStorage<A, Ready> {
 
     /// Create a slot for generating an artifact with the given ID.
     /// Tracks the ID in the `generating` set until the slot is inserted or dropped.
-    /// Returns `None` if the ID is already generating, in use, or stored in Redis.
+    /// Returns `None` if the ID is already generating or in use.
     pub async fn create_slot(&self, id: A::Id, owner: Participant) -> Option<ArtifactSlot<A>> {
         {
             let mut state = self.reserved.write().await;
@@ -352,11 +352,6 @@ impl<A: ProtocolArtifact> ProtocolStorage<A, Ready> {
             }
             let me = self.me();
             state.generating.insert(id, owner == me);
-        }
-        if self.contains(id).await {
-            self.reserved.write().await.generating.remove(&id);
-            tracing::error!(id, "cannot create slot: artifact already exists in storage");
-            return None;
         }
         Some(ArtifactSlot {
             id,
@@ -456,7 +451,18 @@ impl<A: ProtocolArtifact> ProtocolStorage<A, Ready> {
                 excluded[ARGV[i]] = true
             end
 
-            -- Find the first available member not excluded and having non-empty holders
+            -- Fast path: sample a small random batch first before pulling entire set
+            local sample = redis.call("SRANDMEMBER", mine_key, 20)
+            for _, id in ipairs(sample) do
+                if not excluded[id] then
+                    local holders_key = artifact_key .. ':holders:' .. id
+                    if redis.call("SCARD", holders_key) > 0 then
+                        return {id, redis.call("SMEMBERS", holders_key)}
+                    end
+                end
+            end
+
+            -- Fallback if random sample was fully excluded: full scan
             local members = redis.call("SMEMBERS", mine_key)
             for _, id in ipairs(members) do
                 if not excluded[id] then
@@ -724,7 +730,7 @@ impl<A: ProtocolArtifact, Phase> ProtocolStorage<A, Phase> {
             return Err(StorageError::ConnectionFailed);
         };
 
-        let owned: HashSet<A::Id> = conn
+        let owned: Vec<A::Id> = conn
             .smembers(owner_key(&self.owner_keys, owner))
             .await
             .map_err(|err| {
@@ -732,7 +738,7 @@ impl<A: ProtocolArtifact, Phase> ProtocolStorage<A, Phase> {
                 StorageError::RedisFailed(err.to_string())
             })?;
 
-        Ok(owned.into_iter().collect())
+        Ok(owned)
     }
 
     /// Check if an artifact is currently being generated (mine or peer).

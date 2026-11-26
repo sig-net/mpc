@@ -87,10 +87,20 @@ fn env() -> (Runtime, SyncEnv) {
         let redis = spawner.spawn_redis().await;
         let triples = redis.triple_storage(&node_id, me);
         let presignatures = redis.presignature_storage(&node_id, me);
-        {
-            let participants = into_contract_participants(&participants);
-            redis
-                .stockpile_triples(&spawner.cfg, &participants, 1)
+        for i in 0..1024 {
+            let t = dummy_pair(i);
+            triples
+                .create_slot(t.id, me)
+                .await
+                .unwrap()
+                .insert(t, me)
+                .await;
+            let p = dummy_presignature(i);
+            presignatures
+                .create_slot(p.id, me)
+                .await
+                .unwrap()
+                .insert(p, me)
                 .await;
         }
         let client = NodeClient::new();
@@ -147,11 +157,13 @@ fn bench_load_keys(c: &mut Criterion) {
     let (rt, env) = env();
     tracing::info!(elapsed = ?env_start.elapsed(), "init store env");
 
+    let mut triple_id_seq: u64 = 10_000_000;
     c.bench_function("add 1000 triples", |b| {
         b.iter(|| {
             rt.block_on(async {
-                for i in 0..1000 {
-                    let t = dummy_pair(i);
+                for _ in 0..1000 {
+                    triple_id_seq += 1;
+                    let t = dummy_pair(triple_id_seq);
                     env.triples
                         .create_slot(t.id, env.me)
                         .await
@@ -163,11 +175,13 @@ fn bench_load_keys(c: &mut Criterion) {
         })
     });
 
+    let mut presig_id_seq: u64 = 10_000_000;
     c.bench_function("add 1000 presignatures", |b| {
         b.iter(|| {
             rt.block_on(async {
-                for i in 0..1000 {
-                    let p = dummy_presignature(i);
+                for _ in 0..1000 {
+                    presig_id_seq += 1;
+                    let p = dummy_presignature(presig_id_seq);
                     env.presignatures
                         .create_slot(p.id, env.me)
                         .await
@@ -196,6 +210,14 @@ fn bench_load_keys(c: &mut Criterion) {
             };
 
             rt.block_on(task());
+        })
+    });
+
+    c.bench_function("peek mine triple", |b| {
+        b.iter(|| {
+            rt.block_on(async {
+                let _ = env.triples.peek_mine(&[]).await;
+            });
         })
     });
 
@@ -246,41 +268,5 @@ fn dummy_triple() -> Triple {
             participants: vec![Participant::from(1), Participant::from(2)],
             threshold: 5,
         },
-    }
-}
-
-fn into_contract_participants(
-    participants: &Participants,
-) -> mpc_contract::primitives::Participants {
-    mpc_contract::primitives::Participants {
-        next_id: participants.len() as u32,
-        participants: participants
-            .participants
-            .values()
-            .map(|info| {
-                (
-                    info.account_id.clone(),
-                    mpc_contract::primitives::ParticipantInfo {
-                        account_id: info.account_id.clone(),
-                        url: info.url.clone(),
-                        cipher_pk: info.cipher_pk.to_bytes(),
-                        sign_pk: near_sdk::PublicKey::from_parts(
-                            match info.sign_pk.key_type() {
-                                near_crypto::KeyType::ED25519 => near_sdk::CurveType::ED25519,
-                                near_crypto::KeyType::SECP256K1 => near_sdk::CurveType::SECP256K1,
-                                _ => unimplemented!(),
-                            },
-                            info.sign_pk.key_data().to_vec(),
-                        )
-                        .unwrap(),
-                    },
-                )
-            })
-            .collect(),
-        account_to_participant_id: participants
-            .participants
-            .iter()
-            .map(|(participant, info)| (info.account_id.clone(), (*participant).into()))
-            .collect(),
     }
 }

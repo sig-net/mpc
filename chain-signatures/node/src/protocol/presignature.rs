@@ -491,6 +491,9 @@ impl PresignatureSpawner {
             _ => None,
         };
         let internal_action = if let Some(reason) = rejection {
+            if matches!(reason, PositRejectReason::AlreadyGenerating) {
+                self.posits.remove(&id);
+            }
             PositInternalAction::Reply(PositAction::RejectWithReason(reason))
         } else {
             let internal_action = self.posits.act(id, from, self.threshold, &action);

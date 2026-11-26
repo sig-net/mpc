@@ -418,6 +418,10 @@ impl<Id: Copy + Hash + Eq + fmt::Debug, S> Posits<Id, S> {
         self.posits.is_empty()
     }
 
+    pub fn remove(&mut self, id: &Id) -> bool {
+        self.posits.remove(id).is_some()
+    }
+
     /// Expire and start protocols on enough accepted votes. Abort protocols action will be returned
     /// if the posit has expired.
     ///
