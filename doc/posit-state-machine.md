@@ -355,7 +355,9 @@ because the round timeout ran out.
 - **The proposer commits its presignature before `START` goes out.** Accepters
   take theirs from storage the moment they see `START`, so a proposer that
   announced first and then failed to commit would spend their copies on a round
-  it had already left.
+  it had already left. An abort before the commit releases the reservation; an
+  abort after it does not (`ArtifactReservation::commit`,
+  `storage/protocol_storage.rs`).
 - **`Generating` is not preempted by a new round**; a node only leaves it by
   finishing or failing.
 
@@ -398,7 +400,8 @@ expiry tick, and cached; the stockpile tick itself touches storage only when it
 proposes, so a node at its CPU quota is not starved of the loop by its own
 bookkeeping. The floor and cap are judged on counts up to one expiry tick old,
 so a node can overshoot its floor by at most one tick of proposals, bounded by
-`max_mine_generations`. A triple is proposed to all active nodes. A
+`max_mine_generations`. A triple is proposed to all active nodes, under an id
+its proposer draws at random. A
 presignature uses a triple pair the owner holds, reserved in memory, and is
 proposed to the pair's active holders; its id is the pair's hash, so a retry of
 the same pair reuses the id.

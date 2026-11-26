@@ -34,22 +34,9 @@ A one-shot input generated ahead of time and consumed by at most one
 [instance](#instance): a [triple pair](#triple-pair) or a
 [presignature](#presignature) (`ProtocolArtifact`,
 `storage/protocol_storage.rs`). Each artifact has a single [owner](#owner) and
-a set of [holders](#holder).
-
-Its states are `Generating` (the [generation](#generation) protocol that
-produces it is still running), `Available` (stored and ready to use) and
-`Using` (taken by a running generation), with implicit `init` and `done`. The
-explicit states are stored and ideally persisted, and the change to `Using`
-must be persisted as soon as the artifact leaves storage. See
-[node-specification.md](node-specification.md) and
-[state-sync.md](state-sync.md).
-
-*Code today:* artifacts are stored in Redis, and their marks `Generating`,
-`Pending` (a [reservation](#reservation)) and `Using` live only in memory
-(`ReservedKind`, `storage/protocol_storage.rs`). There is no `Available`
-mark: an artifact in Redis with no mark plays that role. A crash loses an
-artifact in `Using`, and `Using` clears whenever the consuming generation
-ends, even when it fails.
+a set of [holders](#holder). See
+[node-specification.md](node-specification.md#triple-and-pre-signature-state-machine)
+and [state-sync.md](state-sync.md).
 
 ## Attestation
 
@@ -250,8 +237,7 @@ See [bidirectional-calls.md §2](bidirectional-calls.md#2-vocabulary).
 
 The node that coordinated an [artifact](#artifact)'s
 [generation](#generation). It decides about the artifact, and only an
-[instance](#instance) it proposes can consume the artifact. Having one owner
-per artifact keeps coordination and [state sync](#state-sync) simple.
+[instance](#instance) it proposes can consume the artifact.
 
 ## Participant
 
@@ -269,38 +255,24 @@ A [request](#request) for a signature with nothing to report back
 
 ## Posit
 
-The agreement phase before an [instance](#instance), in four messages
-(`PositAction`):
-
-- **PROPOSE.** For a signature or a [presignature](#presignature), the
-  [proposer](#proposer) [reserves](#reservation) the [artifact](#artifact) to
-  consume and offers it to the artifact's active [holders](#holder). For a
-  [triple pair](#triple-pair), which consumes no artifact, it proposes to
-  every node in its [active set](#active-set).
-- **ACCEPT** or **REJECT.** Each [deliberator](#deliberator) agrees, or
-  refuses with a reason (`PositRejectReason`).
-- **START.** The proposer commits the reserved artifact, removing it from the
-  pool, and sends the final [participant](#participant) list. Aborting before
-  the commit releases the reservation; aborting after it does not
-  (`ArtifactReservation::commit`, `storage/protocol_storage.rs`).
-
-Code: `protocol/posit.rs`, `protocol/request/`. See
+The phase before an [instance](#instance) in which nodes agree on its
+[participants](#participant). The [proposer](#proposer) sends PROPOSE, each
+[deliberator](#deliberator) answers ACCEPT or REJECT, and the proposer sends
+START with the final participant list (`PositAction`, `PositRejectReason`,
+`protocol/posit.rs`, `protocol/request/`). See
 [posit-state-machine.md](posit-state-machine.md).
 
 ## Presignature
 
-A pre-computed, secret-shared ECDSA nonce (`big_r` and the shares k and
-sigma), built from one [triple pair](#triple-pair) and consumed by one
-signature (`Presignature`, `protocol/presignature.rs`). Its id is derived from
-the pair's id, not chosen (`hash_as_id`). Abbreviated P.
+A pre-computed, secret-shared ECDSA nonce, built from one [triple
+pair](#triple-pair) and consumed by one signature (`Presignature`,
+`protocol/presignature.rs`). Abbreviated P.
 
 ## Proposer
 
-The node that drives a [posit](#posit). For a signature it is elected per
-[round](#round) from the request's [entropy](#entropy) and the round number
-(`protocol/request/organize.rs`), so every node agrees on it without
-messaging; for a [triple pair](#triple-pair) or
-[presignature](#presignature) it is the [owner](#owner). See
+The node that drives a [posit](#posit): for a signature, the node elected
+for the [round](#round) (`protocol/request/organize.rs`); for a [triple
+pair](#triple-pair) or [presignature](#presignature), its [owner](#owner). See
 [posit-state-machine.md §5](posit-state-machine.md#5-bumping-rounds).
 
 ## Publish
@@ -344,10 +316,7 @@ See
 
 A [proposer](#proposer)'s claim on one of its own stored
 [artifacts](#artifact) for a [posit](#posit), so that its other posits
-running at the same time do not pick the same artifact. The artifact stays
-stored and, in the spec's terms, `Available`. The START commit removes it and
-makes it `Using`; a posit that ends before START releases it. A reservation
-is local to the proposer and kept only in memory, so a restart drops it
+running at the same time do not pick the same artifact
 (`ArtifactReservation`, `ReservedKind::Pending`,
 `storage/protocol_storage.rs`). See
 [posit-state-machine.md](posit-state-machine.md).
@@ -391,11 +360,8 @@ The chain a [request](#request) is made on and answered on.
 ## State sync
 
 The exchange in which an [artifact](#artifact)'s [owner](#owner) and its
-[holders](#holder) repair the holder directory after one of them lost data.
-It runs whenever a node connects or reconnects to a peer, and when a sign
-[posit](#posit) fails on REJECTs: the peers that rejected its
-[presignature](#presignature) as missing (`MissingArtifact`) are synced again
-(`protocol/sync/`, `protocol/request/posit.rs`). See
+[holders](#holder) repair the holder directory after one of them lost data
+(`protocol/sync/`). See
 [state-sync.md](state-sync.md).
 
 ## System account
@@ -409,8 +375,7 @@ An account the MPC network itself controls on a chain, rather than one a
 
 A [holder](#holder) removing its own share of an [artifact](#artifact) from
 storage when the [generation](#generation) that consumes it starts. Taking is
-what burns the artifact, and the removal must reach durable storage before
-anything derived from it is sent (`take`, `ArtifactTaken`,
+what burns the artifact (`take`, `ArtifactTaken`,
 `storage/protocol_storage.rs`). See
 [protocol-properties.md,
 S1](protocol-properties.md#s1-one-shot-artifacts-are-consumed-at-most-once).
@@ -433,6 +398,5 @@ contract](#governance-contract) (`vote_threshold`,
 Two secret-shared random triples, produced in the background and stored, owned
 and consumed as one [artifact](#artifact) under one id, spent to build one
 [presignature](#presignature) (`TriplePair` in `storage/triple_storage.rs`,
-`TripleId` in `protocol/triple.rs`). Its id is drawn at random by its
-[proposer](#proposer). Abbreviated T, which is not the
+`TripleId` in `protocol/triple.rs`). Abbreviated T, which is not the
 [threshold](#threshold) t.
