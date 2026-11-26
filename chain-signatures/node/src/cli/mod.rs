@@ -335,17 +335,19 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 contract_watcher.clone(),
                 mesh_state.clone(),
             ));
-            tasks.spawn(web::run(
-                web_port,
-                message_channel,
-                node_watcher,
-                triple_storage,
-                presignature_storage,
-                contract_watcher.clone(),
-                network.clone(),
-                account_id,
-                backlog.clone(),
-            ));
+            tasks.spawn(
+                web::run()
+                    .port(web_port)
+                    .msg_channel(message_channel)
+                    .node(node_watcher)
+                    .triple_storage(triple_storage)
+                    .presignature_storage(presignature_storage)
+                    .contract(contract_watcher.clone())
+                    .network(network.clone())
+                    .my_account_id(account_id)
+                    .backlog(backlog.clone())
+                    .call(),
+            );
 
             spawn_indexers()
                 .tasks(&mut tasks)
