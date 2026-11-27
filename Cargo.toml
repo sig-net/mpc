@@ -14,7 +14,6 @@ members = [
     "chain-signatures/chain-solana",
     "chain-signatures/chain-ethereum",
     "chain-signatures/chain-near",
-    "chain-signatures/chain-hydration",
     "chain-signatures/chain-midnight",
 "chain-signatures/chain-tron",
     "chain-signatures/tron-wire",
@@ -26,16 +25,17 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "1.23.0"
+version = "1.24.0"
 publish = false
 
 [workspace.dependencies]
-alloy = { version = "=1.0.38", features = ["contract", "json"] }
+alloy = { version = "1.0.38", features = ["contract", "json"] }
 anyhow = { version = "1.0.95", features = ["backtrace"] }
 async-trait = "0.1"
 backon = "0.4"
 bip32 = { version = "0.5.3", default-features = false }
 borsh = { version = "1.6.1", features = ["derive"] }
+bon = "3.10.3"
 bs58 = "0.5.1"
 enum-map = "2.7.3"
 http = "1.5"
@@ -68,6 +68,7 @@ semver = "1.0.23"
 serde = { version = "1", features = ["derive", "rc"] }
 serde_bytes = "0.11.15"
 serde_json = "1"
+secrecy = "0.10.3"
 sha2 = "0.11.0"
 sha3 = "0.10.8"
 subxt = { version = "0.44", default-features = false }
@@ -122,7 +123,6 @@ mpc-chain-canton = { path = "./chain-signatures/chain-canton" }
 mpc-chain-ethereum = { path = "./chain-signatures/chain-ethereum" }
 mpc-chain-solana = { path = "./chain-signatures/chain-solana" }
 mpc-chain-near = { path = "./chain-signatures/chain-near" }
-mpc-chain-hydration = { path = "./chain-signatures/chain-hydration" }
 mpc-chain-midnight = { path = "./chain-signatures/chain-midnight" }
 mpc-chain-tron = { path = "./chain-signatures/chain-tron" }
 mpc-tron-wire = { path = "./chain-signatures/tron-wire" }
@@ -134,6 +134,9 @@ mpc-utils = { path = "./chain-signatures/utils" }
 mpc-node = { path = "./chain-signatures/node" }
 mpc-primitives = { path = "./chain-signatures/primitives" }
 signet-crypto = { path = "./signet-crypto" }
+# Pinned to the Midnight serialization the deployed contract was compiled with,
+# not the latest contract packages. midnight-respond-codec's
+# `replays_every_typescript_oracle_vector` fails if a bump changes the encoding.
 signet-midnight-serde = "=0.24.0"
 signet-primitives = { path = "./signet-primitives" }
 signet-program = { path = "./chain-signatures/contract-sol" }

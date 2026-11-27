@@ -19,6 +19,8 @@ export ledger initialised: Counter;
 export ledger ballast: Map<Uint<8>, Bytes<32>>;
 // Test-only value the gated circuit reads in its fallible section.
 export ledger gate: Counter;
+// The key version of every request this caller files, set by initialise.
+export ledger mpcKeyVersion: Uint<8>;
 
 witness deployerSecretKey(): Bytes<32>;
 
@@ -37,18 +39,15 @@ constructor(initialDeployerCommitment: Bytes<32>, signetContract: SignetSigner) 
   signetSigner = disclose(signetContract);
 }
 
-export circuit initialise(responseKey: Secp256k1Point): [] {
+export circuit initialise(responseKey: Secp256k1Point, responseKeyVersion: Uint<8>): [] {
   assert(initialised == 0, "Already initialised");
   assert(deployerCommitment(deployerSecretKey()) == deployer, "Not the deployer");
   initialised.increment(1);
   mpcResponseKey = disclose(responseKey);
+  mpcKeyVersion = disclose(responseKeyVersion);
 }
 
-circuit fileIsEvenRequest(
-  call: IsEvenCall,
-  keyVersion: Uint<8>,
-  outputSchema: Bytes<64>
-): RequestId {
+circuit fileIsEvenRequest(call: IsEvenCall, outputSchema: Bytes<64>): RequestId {
   const calldata = EvmCalldata<1> {
     selector: Bytes [0x2a, 0x2e, 0x13, 0x20],
     noWords: 1 as Uint<16>,
@@ -67,7 +66,7 @@ circuit fileIsEvenRequest(
     accessList: []
   };
   const request = SignBidirectionalEventV1<EvmType2TxParams<1, 0, 0>, 64, 0> {
-    keyVersion: keyVersion,
+    keyVersion: mpcKeyVersion,
     sender: kernel.self(),
     path: pad(32, "caller-path"),
     algo: MPCSignatureAlgorithm.ecdsa,
@@ -109,27 +108,25 @@ circuit addBallast(): [] {
 
 export circuit submitIsEvenRequest(
   evmNonce: Uint<64>,
-  keyVersion: Uint<8>,
   to: Bytes<20>,
   argWord: Bytes<32>,
   outputSchema: Bytes<64>
 ): RequestId {
   return notifySigner(fileIsEvenRequest(
     IsEvenCall { evmNonce: evmNonce, to: to, argWord: argWord },
-    keyVersion,
     outputSchema
   ));
 }
 
 // Test-only transcript placements. Each circuit files and notifies Boolean-schema
-// requests at key version 1. Without `kernel.checkpoint()`, which this compiler's ZKIR v3
-// backend does not implement, a call is either wholly guaranteed or wholly fallible.
+// requests. Without `kernel.checkpoint()`, which this compiler's ZKIR v3 backend does
+// not implement, a call is either wholly guaranteed or wholly fallible.
 
 export circuit submitPlacedRequest(call: IsEvenCall, schema: Bytes<64>, fallible: Boolean): RequestId {
   if (disclose(fallible)) {
     addBallast();
   }
-  return notifySigner(fileIsEvenRequest(call, 1, schema));
+  return notifySigner(fileIsEvenRequest(call, schema));
 }
 
 // Both singleton calls take this call's phase and notify in call order.
@@ -142,8 +139,8 @@ export circuit submitPlacedRequestPair(
   if (disclose(fallible)) {
     addBallast();
   }
-  const firstId = notifySigner(fileIsEvenRequest(first, 1, schema));
-  const secondId = notifySigner(fileIsEvenRequest(second, 1, schema));
+  const firstId = notifySigner(fileIsEvenRequest(first, schema));
+  const secondId = notifySigner(fileIsEvenRequest(second, schema));
   return [firstId, secondId];
 }
 
@@ -152,7 +149,7 @@ export circuit submitPlacedRequestPair(
 export circuit submitGatedRequest(call: IsEvenCall, schema: Bytes<64>, expectedGate: Uint<64>): RequestId {
   addBallast();
   assert(gate == disclose(expectedGate), "Gate moved");
-  return notifySigner(fileIsEvenRequest(call, 1, schema));
+  return notifySigner(fileIsEvenRequest(call, schema));
 }
 
 export circuit bumpGate(): [] {
@@ -238,7 +235,7 @@ export circuit reviewShape(
   expectedGate: Uint<64>
 ): RequestId {
   if (disclose(mode) == 0) {
-    return fileIsEvenRequest(call, 1, schema);
+    return fileIsEvenRequest(call, schema);
   } else {
     addBallast();
     if (disclose(mode) == 1) {
@@ -246,7 +243,7 @@ export circuit reviewShape(
       return notifySigner(disclose(requestId));
     } else {
       requests.remove(disclose(requestId));
-      return notifySigner(fileIsEvenRequest(call, 1, schema));
+      return notifySigner(fileIsEvenRequest(call, schema));
     }
   }
 }

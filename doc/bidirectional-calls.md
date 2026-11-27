@@ -1148,25 +1148,24 @@ or forged bytes fail verification.
 ## 8. Implementation status
 
 Target chains are Ethereum and Tron (`Chain::supports_bidirectional_signing`).
-Source chains are Midnight, Solana, Hydration and Canton.
+Source chains are Midnight, Solana and Canton.
 
 Refusing key version 0 at admission applies at once, not from a source
-height (Section 6): a key version 0 bidirectional request on Solana,
-Hydration or Canton still waiting for its response gets none. A deployment
+height (Section 6): a key version 0 bidirectional request on Solana
+or Canton still waiting for its response gets none. A deployment
 confirms none is pending before it upgrades to a node that refuses them.
 
 Still to change:
 
 * `local` keeps the latest signature and the latest attestation per request.
-* Unviable from another request's response, on Solana, Hydration and Canton.
+* Unviable from another request's response, on Solana and Canton.
 * Refusing non-canonical request fields.
 * Signing at key version 2 (account-derivation.md), once the SDKs support
   it: the key derivation and the MPC's choice of purpose are in place.
 * A root key of its own for each key version after 2.
-* Catch-up for Hydration.
-* Hydration and Canton: source block time, so §4.3's expiry bound
-  anchors for them too.
+* Canton: source block time, so §4.3's expiry bound anchors for it
+  too.
 * Tron: Unviable at expiry for packable spans past the 24 h walk cap
   (the admission bound anchors at the source block, which sits after
   the TaPoS reference — such windows are admitted but never verdicted).
-* Solana, Hydration and Canton: structures of Section 7, and Unviable.
+* Solana and Canton: structures of Section 7, and Unviable.

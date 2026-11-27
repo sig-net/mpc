@@ -147,15 +147,15 @@ pub fn make_test_stream_context(
     let (cp_tx, cp_rx) = watch::channel(None);
     let node_client = NodeClient::new();
     let (rpc, rpc_rx) = test_rpc_channel(8);
-    let mut ctx = StreamContext::new(
-        backlog,
-        sign_tx,
-        rpc,
-        contract_watcher,
-        mesh_rx,
-        node_client,
-        cp_rx,
-    );
+    let mut ctx = StreamContext::builder()
+        .backlog(backlog)
+        .sign_tx(sign_tx)
+        .rpc(rpc)
+        .contract_watcher(contract_watcher)
+        .mesh_state(mesh_rx)
+        .node_client(node_client)
+        .checkpoints_rx(cp_rx)
+        .build();
     set_caught_up(&mut ctx, caught_up);
     (ctx, cp_tx, mesh_tx, rpc_rx)
 }
@@ -173,15 +173,15 @@ pub fn make_test_stream_context_with_rpc(
     let (_cp_tx, cp_rx) = watch::channel(None);
     let node_client = NodeClient::new();
     let (rpc, rpc_rx) = test_rpc_channel(8);
-    let mut ctx = StreamContext::new(
-        backlog,
-        sign_tx,
-        rpc,
-        contract_watcher,
-        mesh_rx,
-        node_client,
-        cp_rx,
-    );
+    let mut ctx = StreamContext::builder()
+        .backlog(backlog)
+        .sign_tx(sign_tx)
+        .rpc(rpc)
+        .contract_watcher(contract_watcher)
+        .mesh_state(mesh_rx)
+        .node_client(node_client)
+        .checkpoints_rx(cp_rx)
+        .build();
     set_caught_up(&mut ctx, caught_up);
     (ctx, rpc_rx)
 }
@@ -249,15 +249,15 @@ pub async fn run_stream_with_two_node_mesh<I: ChainIndexer>(
 
     run_supervised(
         indexer,
-        StreamContext::new(
-            backlog,
-            sign_tx,
-            rpc,
-            contract_watcher,
-            mesh_state_rx,
-            node_client,
-            cp_rx,
-        ),
+        StreamContext::builder()
+            .backlog(backlog)
+            .sign_tx(sign_tx)
+            .rpc(rpc)
+            .contract_watcher(contract_watcher)
+            .mesh_state(mesh_state_rx)
+            .node_client(node_client)
+            .checkpoints_rx(cp_rx)
+            .build(),
         NoopChainTelemetry,
     )
     .await

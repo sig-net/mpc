@@ -12,8 +12,9 @@ use minocrab_publisher::{Attestation, EcdsaSignature};
 use mpc_chain_integration_core::utils::retry::RpcFailure;
 use mpc_chain_integration_core::{ChainPublisher, PublishAction, PublisherTelemetry};
 use mpc_primitives::{Chain, SignKind, Signature};
-use mpc_utils::task::AbortOnDrop;
 use mpc_utils::time::current_unix_timestamp;
+use secrecy::ExposeSecret as _;
+use tokio_util::task::AbortOnDropHandle;
 
 use crate::attestation::validate_attestation_response;
 use crate::config::{MidnightConfig, PublisherConfig};
@@ -22,7 +23,7 @@ use crate::funding::{dust_secret_key, parse_seed, DustCheckpointStore, FundingWa
 use crate::intent::{IntentRequest, RespondCircuit, Submitted};
 use crate::native::{NativeIntentClient, Provers};
 use crate::output_storage::{OutputStore, RecoveringOutputStore};
-use crate::rpc::{MidnightPublisherRpc, PinnedReads};
+use crate::rpc::publisher::{MidnightPublisherRpc, PinnedReads};
 use crate::submit_error::{refusal_code, SubmitError};
 use crate::types::{BlockHash, MidnightAddress};
 
@@ -102,7 +103,7 @@ impl MidnightPublisher {
             &config.publisher.contract_artifacts_dir,
             &config.publisher.zk_params_dir,
         )?);
-        let key = dust_secret_key(&parse_seed(&config.publisher.funding_seed)?)?;
+        let key = dust_secret_key(&parse_seed(config.publisher.funding_seed.expose_secret())?)?;
         let wallet = FundingWallet::start(
             key,
             Arc::new(IndexerDustEvents::new(
@@ -308,7 +309,7 @@ impl ChainPublisher for MidnightPublisher {
 /// each publish fails retryably instead of the chain going unpublished until a restart.
 pub struct RecoveringMidnightPublisher {
     ready: Arc<OnceLock<MidnightPublisher>>,
-    _connector: AbortOnDrop,
+    _connector: AbortOnDropHandle<()>,
 }
 
 impl RecoveringMidnightPublisher {
@@ -363,7 +364,7 @@ impl RecoveringMidnightPublisher {
         });
         Self {
             ready,
-            _connector: AbortOnDrop(connector),
+            _connector: AbortOnDropHandle::new(connector),
         }
     }
 }
@@ -1808,7 +1809,7 @@ mod tests {
             responder_address: MidnightAddress::from_hex(RESPONDER)
                 .expect("RESPONDER is a 32-byte hex address"),
             publisher: PublisherConfig {
-                funding_seed: "ab".repeat(32),
+                funding_seed: "ab".repeat(32).into(),
                 indexer_ws_url: "ws://127.0.0.1:1/api/v3/graphql/ws".parse().unwrap(),
                 ..Default::default()
             },

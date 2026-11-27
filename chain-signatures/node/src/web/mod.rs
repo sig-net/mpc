@@ -68,7 +68,7 @@ struct AxumState {
     backlog: Backlog,
 }
 
-#[allow(clippy::too_many_arguments)]
+#[bon::builder]
 pub async fn run(
     port: u16,
     msg_channel: MessageChannel,

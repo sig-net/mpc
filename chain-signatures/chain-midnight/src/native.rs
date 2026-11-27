@@ -25,15 +25,16 @@ use midnight_onchain_state::state::ContractState;
 use midnight_storage::DefaultDB;
 use minocrab_publisher::intent::{build_intent, preimage_tx, PreimageIntent};
 use minocrab_publisher::{Deployment, InProcessProver, ManagedDir, SignerResolver};
-use mpc_utils::task::AbortOnDrop;
 use rand::rngs::StdRng;
 use rand::{Rng as _, SeedableRng as _};
 use tokio::time::Instant;
+use tokio_util::task::AbortOnDropHandle;
 
 use crate::funding::{dust_deficit, FeePayer, SealedTx, UnprovenTx};
 use crate::intent::{IntentRequest, RespondCircuit, Submitted};
 use crate::publisher::IntentClient;
-use crate::rpc::{Landing, PinnedReads, SubmitRefusal};
+use crate::rpc::publisher::PinnedReads;
+use crate::rpc::submit::{Landing, SubmitRefusal};
 use crate::submit_error::SubmitError;
 use crate::types::{BlockHash, LedgerTxHash, NetworkId};
 
@@ -410,7 +411,7 @@ impl<W: FeePayer, C: SubmitChain + 'static> NativeIntentClient<W, C> {
         let submitted = started.elapsed();
         // Ends with the wait, so a resend held up by the node never delays the scan.
         let _resending = unanswered.then(|| {
-            AbortOnDrop(tokio::spawn(resend(
+            AbortOnDropHandle::new(tokio::spawn(resend(
                 self.chain.clone(),
                 bytes.to_vec(),
                 tx_hash,
@@ -2270,10 +2271,11 @@ mod live {
     use crate::config::{MidnightConfig, PublisherConfig};
     use crate::dust_feed::IndexerDustEvents;
     use crate::funding::{dust_secret_key, parse_seed, FundingWallet};
-    use crate::rpc::MidnightPublisherRpc;
+    use crate::rpc::publisher::MidnightPublisherRpc;
     use crate::types::MidnightAddress;
     use minocrab_publisher::{Attestation, EcdsaSignature};
     use mpc_chain_integration_core::NoopPublisherTelemetry;
+    use secrecy::ExposeSecret as _;
 
     fn env(name: &str) -> String {
         std::env::var(name).unwrap_or_else(|_| panic!("{name} must be set"))
@@ -2289,7 +2291,7 @@ mod live {
             central_address: MidnightAddress::from_bytes([0; 32]),
             responder_address: MidnightAddress::from_hex(&env("MIDNIGHT_LIVE_RESPONDER")).unwrap(),
             publisher: PublisherConfig {
-                funding_seed: env("MIDNIGHT_LIVE_SEED"),
+                funding_seed: env("MIDNIGHT_LIVE_SEED").into(),
                 indexer_ws_url: env("MIDNIGHT_LIVE_INDEXER_WS_URL").parse().unwrap(),
                 contract_artifacts_dir: env("MIDNIGHT_LIVE_ARTIFACTS").into(),
                 zk_params_dir: env("MIDNIGHT_LIVE_ZK_PARAMS").into(),
@@ -2300,7 +2302,9 @@ mod live {
         };
         config.validate().unwrap();
         let rpc = Arc::new(MidnightPublisherRpc::connect(&config).await.unwrap());
-        let key = dust_secret_key(&parse_seed(&config.publisher.funding_seed).unwrap()).unwrap();
+        let key =
+            dust_secret_key(&parse_seed(config.publisher.funding_seed.expose_secret()).unwrap())
+                .unwrap();
         let wallet = FundingWallet::start(
             key,
             Arc::new(IndexerDustEvents::new(

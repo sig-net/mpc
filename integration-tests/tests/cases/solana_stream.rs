@@ -149,15 +149,15 @@ async fn spawn_supervised_stream(
     let run_handle = tokio::spawn(async move {
         run_supervised(
             indexer,
-            StreamContext::new(
-                backlog,
-                sign_tx,
-                rpc,
-                contract_watcher,
-                mesh_rx,
-                node_client,
-                checkpoints_rx,
-            ),
+            StreamContext::builder()
+                .backlog(backlog)
+                .sign_tx(sign_tx)
+                .rpc(rpc)
+                .contract_watcher(contract_watcher)
+                .mesh_state(mesh_rx)
+                .node_client(node_client)
+                .checkpoints_rx(checkpoints_rx)
+                .build(),
             NoopChainTelemetry,
         )
         .await
@@ -582,15 +582,15 @@ async fn test_solana_stream_republishes_pending_publish_after_checkpoint_recover
     let run_handle = tokio::spawn(async move {
         run_supervised(
             indexer,
-            StreamContext::new(
-                recovered_backlog.clone(),
-                sign_tx.clone(),
-                rpc.clone(),
-                contract_watcher.clone(),
-                mesh_rx.clone(),
-                node_client.clone(),
-                checkpoints_rx.clone(),
-            ),
+            StreamContext::builder()
+                .backlog(recovered_backlog.clone())
+                .sign_tx(sign_tx.clone())
+                .rpc(rpc.clone())
+                .contract_watcher(contract_watcher.clone())
+                .mesh_state(mesh_rx.clone())
+                .node_client(node_client.clone())
+                .checkpoints_rx(checkpoints_rx.clone())
+                .build(),
             NoopChainTelemetry,
         )
         .await

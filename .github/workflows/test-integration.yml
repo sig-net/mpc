@@ -49,10 +49,10 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Install Rust (1.95.0)
-        uses: dtolnay/rust-toolchain@035fceb3c12fb0c6a9461b52775e16473133e591 # 1.95.0
+      - name: Install Rust (1.100.0)
+        uses: dtolnay/rust-toolchain@d5e4d57b030548f435d0befec15ff413a2c60eff # 1.100.0
         with:
-          toolchain: 1.95.0
+          toolchain: 1.100.0
           targets: wasm32-unknown-unknown
 
       # Install system OpenSSL explicitly here so the build uses system OpenSSL instead of building OpenSSL from source
@@ -127,10 +127,10 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Install Rust (1.95.0)
-        uses: dtolnay/rust-toolchain@035fceb3c12fb0c6a9461b52775e16473133e591 # 1.95.0
+      - name: Install Rust (1.100.0)
+        uses: dtolnay/rust-toolchain@d5e4d57b030548f435d0befec15ff413a2c60eff # 1.100.0
         with:
-          toolchain: 1.95.0
+          toolchain: 1.100.0
           targets: wasm32-unknown-unknown
 
       # Install system OpenSSL explicitly here so the build uses system OpenSSL instead of building OpenSSL from source
@@ -138,13 +138,6 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y libssl-dev pkg-config
       - name: Set OpenSSL to system
         run: echo "OPENSSL_NO_VENDOR=1" >> $GITHUB_ENV
-
-      - name: Install Node.js
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
-        with:
-          node-version: '22'
-          cache: 'npm'
-          cache-dependency-path: chain-signatures/contract-eth/package-lock.json
 
       - name: Setup Solana and Anchor
         uses: metadaoproject/setup-anchor@b29b81b9a4568aafb3faaf42eccc73cefdbfbc9f # v3.1
@@ -183,9 +176,6 @@ jobs:
       - name: Install cargo-near
         run: scripts/install-cargo-near.sh
 
-      - name: Build eth contract
-        run: just build eth
-
       # Build the tests before actually running them to see how long the tests take to run by itself
       # instead of including the build time in the test time report on Github.
       # Artifacts build inside the test recipe via its setup dependency.
@@ -214,10 +204,10 @@ jobs:
         with:
           tool: just@1.54.0
 
-      - name: Install Rust (1.95.0)
-        uses: dtolnay/rust-toolchain@035fceb3c12fb0c6a9461b52775e16473133e591 # 1.95.0
+      - name: Install Rust (1.100.0)
+        uses: dtolnay/rust-toolchain@d5e4d57b030548f435d0befec15ff413a2c60eff # 1.100.0
         with:
-          toolchain: 1.95.0
+          toolchain: 1.100.0
           components: clippy
 
       # Cache policy: doc/ci-caching.md
@@ -239,14 +229,10 @@ jobs:
           # Only save the cache if there are dependency changes or it's not a merge group
           save-if: ${{ github.event_name != 'merge_group' && (github.event_name != 'pull_request' || steps.depchange.outputs.changed == 'true') }}
 
-      - name: Install Node.js
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
-        with:
-          node-version: '22'
-          cache: 'npm'
-          cache-dependency-path: chain-signatures/contract-eth/package-lock.json
       - name: Install Foundry (anvil)
         uses: foundry-rs/foundry-toolchain@908c540300062bd5a7e473851cdb4282204cee09 # v1
+        with:
+          version: v1.10.0
 
       - name: Clippy (integration-gated code)
         run: just lint-eth
@@ -267,8 +253,8 @@ jobs:
         with:
           tool: just@1.54.0
 
-      - name: Install Rust (1.95.0)
-        uses: dtolnay/rust-toolchain@035fceb3c12fb0c6a9461b52775e16473133e591 # 1.95.0
+      - name: Install Rust (1.100.0)
+        uses: dtolnay/rust-toolchain@d5e4d57b030548f435d0befec15ff413a2c60eff # 1.100.0
 
       # Cache policy: doc/ci-caching.md — restore only; unit/anvil jobs
       # maintain the shared workspace-dev key.

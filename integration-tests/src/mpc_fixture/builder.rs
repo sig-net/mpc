@@ -550,16 +550,16 @@ impl MpcFixtureNodeBuilder {
         let flat_mock_streams = self.mock_streams.values().cloned().collect::<Vec<_>>();
         let (checkpoint_tx, checkpoints_rx) = watch::channel(None);
         fixture_tasks::start_mock_stream_tasks(&flat_mock_streams, || {
-            StreamContext::new(
-                backlog.clone(),
-                sign_tx.clone(),
-                rpc_channel.clone(),
-                context.contract_state.clone(),
-                mesh_rx.clone(),
-                NodeClient::new(),
-                checkpoints_rx.clone(),
-            )
-            .with_observe_lag(context.observe_lag)
+            StreamContext::builder()
+                .backlog(backlog.clone())
+                .sign_tx(sign_tx.clone())
+                .rpc(rpc_channel.clone())
+                .contract_watcher(context.contract_state.clone())
+                .mesh_state(mesh_rx.clone())
+                .node_client(NodeClient::new())
+                .checkpoints_rx(checkpoints_rx.clone())
+                .maybe_observe_lag(context.observe_lag)
+                .build()
         });
 
         // handle outbox messages manually, we want them before they are
@@ -577,15 +577,15 @@ impl MpcFixtureNodeBuilder {
 
         // --- SyncTask setup ---
         let node_client = NodeClient::new();
-        let sync_task = SyncTask::new(
-            &node_client,
-            triple_storage.clone(),
-            presignature_storage.clone(),
-            mesh_rx.clone(),
-            context.contract_state.clone(),
-            mpc_node::protocol::sync::SyncTask::sync_report_channel().0,
-            self.network.clone(),
-        );
+        let sync_task = SyncTask::builder()
+            .client(&node_client)
+            .triples(triple_storage.clone())
+            .presignatures(presignature_storage.clone())
+            .mesh_state(mesh_rx.clone())
+            .contract(context.contract_state.clone())
+            .sync_report_tx(mpc_node::protocol::sync::SyncTask::sync_report_channel().0)
+            .network(self.network.clone())
+            .build();
         tokio::spawn(sync_task.run());
 
         let mut node = MpcFixtureNode {
