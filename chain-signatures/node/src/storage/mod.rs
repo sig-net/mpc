@@ -1,3 +1,4 @@
+pub(crate) mod cbor;
 pub mod checkpoint_storage;
 pub mod keystore;
 pub mod midnight_dust_storage;
