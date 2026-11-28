@@ -8,6 +8,7 @@ use mpc_chain_integration_core::utils::retry::{retry_rpc, RetryConfig};
 use mpc_chain_integration_core::{ChainPublisher, PublishAction, PublisherTelemetry};
 use mpc_primitives::{SignId, Signature};
 
+use anyhow::Context as _;
 use near_account_id::AccountId;
 use near_crypto::InMemorySigner;
 use near_fetch::result::ExecutionFinalResult;
@@ -75,13 +76,16 @@ impl ChainPublisher for NearClient {
         let timestamp = action.timestamp;
         let signature = &action.signature;
         let outcome = retry_rpc!(
-            Duration::MAX, // the RPC's own timeout bounds a send
+            // TODO: `JsonRpcClient::new_client()` (near-jsonrpc-client 0.22.0) sets no reqwest
+            // timeout and the node passes no custom client, so this bound does not hold; pass
+            // a client with a timeout via `near_fetch::Client::from_client`, or bound an attempt.
+            Duration::MAX,
             NEAR_RESPOND_RETRY,
             self.gates.provider,
             "near_respond",
             { self.call_respond(&action.request.id, signature).await }
         )
-        .map_err(|e| anyhow::anyhow!("near rpc error: {e}"))
+        .context("near rpc error")
         .inspect_err(|err| {
             tracing::error!(
                 sign_id = ?action.request.id,

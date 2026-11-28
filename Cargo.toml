@@ -33,6 +33,7 @@ alloy = { version = "1.0.38", features = ["contract", "json"] }
 anyhow = { version = "1.0.95", features = ["backtrace"] }
 async-trait = "0.1"
 backon = "0.4"
+base64 = "0.22"
 bip32 = { version = "0.5.3", default-features = false }
 borsh = { version = "1.6.1", features = ["derive"] }
 bon = "3.10.3"
@@ -103,6 +104,7 @@ near-primitives = "0.37"
 near-jsonrpc-client = { version = "0.22", default-features = false, features = [
     "rustls-tls",
 ] }
+near-jsonrpc-primitives = "0.37"
 near-sdk = { version = "5.29.0", features = ["unstable", "non-contract-usage"] }
 near-workspaces = "0.23.0"
 
