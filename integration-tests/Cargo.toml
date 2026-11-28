@@ -21,6 +21,7 @@ clap.workspace = true
 deadpool-redis.workspace = true
 futures = "0.3"
 hex.workspace = true
+libc = "0.2"
 rand.workspace = true
 reqwest.workspace = true
 secrecy.workspace = true
@@ -92,6 +93,10 @@ path = "src/main.rs"
 [[bin]]
 name = "redis-bench"
 path = "src/bin/redis_bench.rs"
+
+[[bin]]
+name = "memory-bench"
+path = "src/bin/memory_bench.rs"
 
 [[bench]]
 name = "sign"
