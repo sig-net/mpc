@@ -1,6 +1,6 @@
 use crate::protocol::Governance;
 use mpc_chain_integration_core::utils::retry::{retry_rpc, RetryConfig, RpcFailure, SharedBackoff};
-use mpc_chain_near::NearRpcGates;
+use mpc_chain_near::{view_json, NearRpcGates};
 use mpc_contract::errors::CheckpointError;
 pub use mpc_contract::primitives::{Read, View};
 use mpc_keys::hpke;
@@ -83,13 +83,12 @@ impl NearGovernanceClient {
             self.gates.provider,
             "governance_read",
             {
-                let views: Vec<View> = self
-                    .client
-                    .view(&self.contract_id, "read")
-                    .args_json(json!({ "reads": reads.clone() }))
-                    .await?
-                    .json()?;
-                Ok(views)
+                view_json(
+                    self.client
+                        .view(&self.contract_id, "read")
+                        .args_json(json!({ "reads": reads })),
+                )
+                .await
             }
         )
     }
@@ -197,6 +196,9 @@ impl Governance for NearGovernanceClient {
         Output = anyhow::Result<Option<mpc_contract::primitives::CandidateEntry>>,
     > + Send {
         let account_id = account_id.clone();
+        // TODO: a standing terminal refusal (401 here) now returns after one attempt to
+        // `NodeState::run`'s 1 s tick, multiplying the error lines for the outage; a backoff
+        // on that Err path restores the former cadence.
         async move {
             retry_rpc!(
                 NEAR_GOVERNANCE_TIMEOUT,
@@ -204,13 +206,12 @@ impl Governance for NearGovernanceClient {
                 self.gates.provider,
                 "governance_candidate_info",
                 {
-                    let candidacy = self
-                        .client
-                        .view(&self.contract_id, "candidate_info")
-                        .args_json(json!({ "account_id": account_id }))
-                        .await?
-                        .json()?;
-                    Ok(candidacy)
+                    view_json(
+                        self.client
+                            .view(&self.contract_id, "candidate_info")
+                            .args_json(json!({ "account_id": account_id })),
+                    )
+                    .await
                 }
             )
         }
