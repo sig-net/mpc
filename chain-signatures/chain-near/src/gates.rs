@@ -1,11 +1,13 @@
-use std::time::Duration;
-
-use mpc_chain_integration_core::utils::retry::SharedBackoff;
+use crate::classify::{read_failure, send_failure};
+use mpc_chain_integration_core::utils::retry::{RpcFailure, SharedBackoff};
 use near_fetch::ops::FunctionCallTransaction;
+use near_fetch::query::{Query, ViewFunction};
 use near_fetch::result::ExecutionFinalResult;
 use near_jsonrpc_client::errors::{JsonRpcError, JsonRpcServerError};
 use near_jsonrpc_client::methods::send_tx::RpcTransactionError;
 use near_primitives::errors::InvalidTxError;
+use serde::de::DeserializeOwned;
+use std::time::Duration;
 
 /// First pause after a signer error; doubles on each repeat.
 const SIGNER_PAUSE_BASE: Duration = Duration::from_secs(30);
@@ -36,10 +38,12 @@ impl NearRpcGates {
     fn check_signer(&self) -> anyhow::Result<()> {
         let remaining = self.signer.remaining();
         if remaining.is_zero() {
-            Ok(())
-        } else {
-            anyhow::bail!("NEAR transactions paused for {remaining:?} after a signer error")
+            return Ok(());
         }
+        // A carrier, not `bail!`: the remainder's digits must not read as a status.
+        Err(anyhow::Error::new(RpcFailure::retryable(format!(
+            "NEAR transactions paused for {remaining:?} after a signer error"
+        ))))
     }
 
     /// Submits `call` once, honoring the signer pause. Retries belong to the
@@ -51,7 +55,7 @@ impl NearRpcGates {
         self.check_signer()?;
         let result = call.transact().await;
         self.observe_transaction(&result);
-        Ok(result?)
+        result.map_err(send_failure)
     }
 
     /// Records a transaction attempt's result on the signer pause.
@@ -67,28 +71,47 @@ impl NearRpcGates {
     }
 }
 
-/// Whether a transaction was rejected for a reason only fixing the signer
+/// Decoded view call; both exits carry one read verdict, so serde text never
+/// reads as a status.
+pub async fn view_json<T: DeserializeOwned>(query: Query<'_, ViewFunction>) -> anyhow::Result<T> {
+    query
+        .await
+        .and_then(|view| view.json())
+        .map_err(read_failure)
+}
+
+/// Whether a transaction failed for a reason only fixing the signer
 /// account resolves: insufficient balance, or a missing account or access key.
 pub fn is_signer_error(err: &near_fetch::Error) -> bool {
-    let near_fetch::Error::RpcTransactionError(err) = err else {
-        return false;
-    };
-    matches!(
-        &**err,
-        JsonRpcError::ServerError(JsonRpcServerError::HandlerError(
-            RpcTransactionError::InvalidTransaction {
-                context: InvalidTxError::NotEnoughBalance { .. }
-                    | InvalidTxError::LackBalanceForState { .. }
-                    | InvalidTxError::InvalidAccessKeyError(_)
-                    | InvalidTxError::SignerDoesNotExist { .. },
-            }
-        ))
-    )
+    invalid_tx_error(err).is_some_and(|context| {
+        matches!(
+            context,
+            InvalidTxError::NotEnoughBalance { .. }
+                | InvalidTxError::LackBalanceForState { .. }
+                | InvalidTxError::InvalidAccessKeyError(_)
+                | InvalidTxError::SignerDoesNotExist { .. }
+        )
+    })
+}
+
+/// The `InvalidTxError` a refused transaction carries: the JSON-RPC handler
+/// error.
+fn invalid_tx_error(err: &near_fetch::Error) -> Option<&InvalidTxError> {
+    match err {
+        near_fetch::Error::RpcTransactionError(err) => match &**err {
+            JsonRpcError::ServerError(JsonRpcServerError::HandlerError(
+                RpcTransactionError::InvalidTransaction { context, .. },
+            )) => Some(context),
+            _ => None,
+        },
+        _ => None,
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mpc_chain_integration_core::utils::retry::{is_provider_throttled, is_retryable};
     use near_primitives::types::Balance;
 
     fn invalid_transaction(context: InvalidTxError) -> near_fetch::Error {
@@ -143,5 +166,15 @@ mod tests {
             ak_nonce: 2,
         })));
         assert!(gates.check_signer().is_ok());
+    }
+
+    #[test]
+    fn a_signer_pause_refusal_is_retryable_and_never_throttles() {
+        let gates = NearRpcGates::new(SharedBackoff::new());
+        gates.observe_transaction::<()>(&Err(not_enough_balance()));
+        let err = gates.check_signer().unwrap_err();
+        assert!(err.to_string().contains("paused"), "{err}");
+        assert!(is_retryable(&err));
+        assert!(!is_provider_throttled(&err));
     }
 }

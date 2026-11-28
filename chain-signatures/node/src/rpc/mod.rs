@@ -789,9 +789,11 @@ pub async fn execute_publish(
     }
 }
 
-/// Runs one admitted checkpoint vote until the contract answers it, it is
-/// cancelled, or consensus reaches its height. Only an answer keeps the digest
-/// admitted; any other ending releases it.
+/// Runs one admitted checkpoint vote until the contract answers it, it ends
+/// in an error, it is cancelled, or consensus reaches its height. Only an
+/// answer keeps the digest admitted; any other ending — a terminal transport
+/// refusal after one attempt included — releases it, and a later boundary's
+/// checkpoint admits a fresh vote.
 async fn run_checkpoint_vote<Fut>(
     votes: CheckpointVotes,
     checkpoint: CheckpointDigest,
@@ -906,10 +908,13 @@ mod tests {
     };
     use crate::protocol::contract::primitives::{ParticipantInfo, Participants};
     use crate::protocol::contract::{ResharingContractState, RunningContractState};
+    use crate::protocol::Governance as _;
     use crate::protocol::ProtocolState;
     use mpc_chain_integration_core::utils::retry::RpcFailure;
+    use mpc_chain_integration_core::utils::retry::{is_provider_throttled, is_retryable};
     use mpc_chain_integration_core::utils::test::make_publish_action;
     use mpc_chain_integration_core::GatedPublisher;
+    use mpc_chain_near::test_utils::{malformed_view_envelope, method_mock, warm_client};
     use mpc_primitives::{SignId, SignKind};
     use std::sync::{
         atomic::{AtomicUsize, Ordering},
@@ -963,42 +968,32 @@ mod tests {
         }
     }
 
-    fn test_governance_client(url: &str) -> NearGovernanceClient {
-        let account_id: AccountId = "node.testnet".parse().unwrap();
-        let sign_sk = near_crypto::SecretKey::from_seed(
-            near_crypto::KeyType::ED25519,
-            "rpc-cancellation-test",
-        );
-        let signer =
-            match near_crypto::InMemorySigner::from_secret_key(account_id.clone(), sign_sk.clone())
-            {
-                near_crypto::Signer::InMemory(s) => s,
-                _ => unreachable!(),
-            };
+    fn test_governance_client(
+        client: near_fetch::Client,
+        gate: SharedBackoff,
+    ) -> NearGovernanceClient {
+        let signer = mpc_chain_near::test_utils::signer();
+        let sign_sk = signer.secret_key.clone();
         let cipher_sk = mpc_keys::hpke::SecretKey::from_bytes(&[0; 32]);
         let my_addr = "http://127.0.0.1:3000".parse().unwrap();
-        let contract_id: AccountId = "contract.testnet".parse().unwrap();
         NearGovernanceClient::builder()
-            .client(near_fetch::Client::new(url))
+            .client(client)
             .my_addr(&my_addr)
             .sign_sk(&sign_sk)
             .cipher_sk(&cipher_sk)
-            .contract_id(&contract_id)
+            .contract_id(&mpc_chain_near::test_utils::contract_id())
             .signer(signer)
-            .gates(mpc_chain_near::NearRpcGates::new(SharedBackoff::new()))
+            .gates(mpc_chain_near::NearRpcGates::new(gate))
             .build()
     }
 
     #[tokio::test]
     async fn vote_surfaces_provider_errors_and_engages_the_shared_gate() {
         let mut server = mockito::Server::new_async().await;
-        let mock = server
-            .mock("POST", "/")
-            .with_status(402)
-            .expect(2)
-            .create_async()
-            .await;
-        let near = test_governance_client(&server.url());
+        let client = warm_client(&mut server).await;
+        let block = method_mock(&mut server, "block", 402, "", 2).await;
+        let send = method_mock(&mut server, "send_tx", 200, "", 0).await;
+        let near = test_governance_client(client, SharedBackoff::new());
         let checkpoint = checkpoint_digest(Chain::Ethereum, 10, 1);
 
         // One send, and its real error, not a timeout hiding it.
@@ -1027,6 +1022,87 @@ mod tests {
 
         assert!(result.is_err());
         assert!(!near.provider_gate().remaining().is_zero());
+        block.assert_async().await;
+        send.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn read_refusals_terminate_the_retry_after_one_attempt() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/")
+            .with_status(401)
+            .expect(1)
+            .create_async()
+            .await;
+        let near =
+            test_governance_client(near_fetch::Client::new(&server.url()), SharedBackoff::new());
+
+        let err = near.read(vec![Read::State]).await.unwrap_err();
+        assert!(!is_retryable(&err), "401 on a read is terminal");
+        assert!(!is_provider_throttled(&err));
+        mock.assert_async().await;
+    }
+
+    // Aborted inside the retry loop's first backoff sleep, so the single
+    // mocked hit pins that the first attempt already engaged the gate.
+    #[tokio::test]
+    async fn a_throttled_read_engages_the_shared_gate() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/")
+            .with_status(429)
+            .expect(1)
+            .create_async()
+            .await;
+        let gate = SharedBackoff::with_cooldowns(Duration::from_secs(5), Duration::from_secs(60));
+        let near = test_governance_client(near_fetch::Client::new(&server.url()), gate);
+
+        let aborted =
+            tokio::time::timeout(Duration::from_millis(300), near.read(vec![Read::State])).await;
+        assert!(aborted.is_err(), "the read keeps retrying while throttled");
+        assert!(!near.provider_gate().remaining().is_zero());
+        mock.assert_async().await;
+    }
+
+    // Aborted inside the first backoff, like the throttle test above.
+    #[tokio::test]
+    async fn a_malformed_view_keeps_the_read_retrying() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(malformed_view_envelope())
+            .expect(1)
+            .create_async()
+            .await;
+        let near =
+            test_governance_client(near_fetch::Client::new(&server.url()), SharedBackoff::new());
+
+        let aborted =
+            tokio::time::timeout(Duration::from_millis(300), near.read(vec![Read::State])).await;
+        assert!(aborted.is_err(), "the read keeps retrying");
+        assert!(near.provider_gate().remaining().is_zero(), "not a throttle");
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn candidate_info_refusals_terminate_the_retry_after_one_attempt() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/")
+            .with_status(401)
+            .expect(1)
+            .create_async()
+            .await;
+        let near =
+            test_governance_client(near_fetch::Client::new(&server.url()), SharedBackoff::new());
+        let account_id: AccountId = "candidate.testnet".parse().unwrap();
+
+        let err = near.candidate_info(&account_id).await.unwrap_err();
+        assert!(!is_retryable(&err), "401 on a read is terminal");
+        assert!(!is_provider_throttled(&err));
         mock.assert_async().await;
     }
 
@@ -1166,6 +1242,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn vote_task_releases_its_digest_when_the_vote_fails() {
+        let votes = CheckpointVotes::default();
+        let checkpoint = checkpoint_digest(Chain::Ethereum, 10, 1);
+        let ticket = votes.admit(checkpoint, None).unwrap();
+
+        run_checkpoint_vote(
+            votes.clone(),
+            checkpoint,
+            ticket,
+            CancellationToken::new(),
+            watch::channel(None).1,
+            async { anyhow::bail!("the endpoint refused the vote") },
+        )
+        .await;
+
+        assert_eq!(votes.ticket(&checkpoint), None);
+        assert_eq!(
+            votes.admit(checkpoint, None),
+            Some(1),
+            "a later boundary admits a fresh vote for the digest"
+        );
+    }
+
+    #[tokio::test]
     async fn dispatcher_skips_votes_consensus_already_settled() {
         let mut server = mockito::Server::new_async().await;
         let mock = server
@@ -1181,7 +1281,8 @@ mod tests {
         consensus[Chain::Ethereum] = consensus_rx;
 
         let (tx, mut rx) = mpsc::channel(16);
-        let near = test_governance_client(&server.url());
+        let near =
+            test_governance_client(near_fetch::Client::new(&server.url()), SharedBackoff::new());
         for height in [10, 20] {
             tx.send(RpcAction::VoteCheckpoint {
                 checkpoint: checkpoint_digest(Chain::Ethereum, height, 1),
@@ -1681,7 +1782,8 @@ mod tests {
             .create_async()
             .await;
 
-        let near = test_governance_client(&server.url());
+        let near =
+            test_governance_client(near_fetch::Client::new(&server.url()), SharedBackoff::new());
 
         let (tx, mut rx) = mpsc::channel(16);
         let publishers = HashMap::new();

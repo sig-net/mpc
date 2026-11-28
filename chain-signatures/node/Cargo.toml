@@ -15,7 +15,7 @@ axum-extra = "0.9.6"
 tower-http = { version = "0.6", features = ["timeout"] }
 backon.workspace = true
 chrono = "0.4.24"
-base64 = "0.22"
+base64.workspace = true
 dashmap = "6.1"
 google-cloud-auth = { workspace = true, features = ["default-rustls-provider"] }
 http.workspace = true
@@ -91,6 +91,7 @@ secrecy.workspace = true
 
 [dev-dependencies]
 mockito.workspace = true
+mpc-chain-near = { workspace = true, features = ["test-support"] }
 tempfile.workspace = true
 test-log.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
