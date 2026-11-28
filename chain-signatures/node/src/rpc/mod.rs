@@ -789,9 +789,11 @@ pub async fn execute_publish(
     }
 }
 
-/// Runs one admitted checkpoint vote until the contract answers it, it is
-/// cancelled, or consensus reaches its height. Only an answer keeps the digest
-/// admitted; any other ending releases it.
+/// Runs one admitted checkpoint vote until the contract answers it, it ends
+/// in an error, it is cancelled, or consensus reaches its height. Only an
+/// answer keeps the digest admitted; any other ending — a terminal transport
+/// refusal after one attempt included — releases it, and a later boundary's
+/// checkpoint admits a fresh vote.
 async fn run_checkpoint_vote<Fut>(
     votes: CheckpointVotes,
     checkpoint: CheckpointDigest,
@@ -912,9 +914,7 @@ mod tests {
     use mpc_chain_integration_core::utils::retry::{is_provider_throttled, is_retryable};
     use mpc_chain_integration_core::utils::test::make_publish_action;
     use mpc_chain_integration_core::GatedPublisher;
-    use mpc_chain_near::test_utils::{
-        malformed_view_envelope, method_mock, warm_client,
-    };
+    use mpc_chain_near::test_utils::{malformed_view_envelope, method_mock, warm_client};
     use mpc_primitives::{SignId, SignKind};
     use std::sync::{
         atomic::{AtomicUsize, Ordering},
@@ -1239,6 +1239,30 @@ mod tests {
                 "an answered vote is not resubmitted"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn vote_task_releases_its_digest_when_the_vote_fails() {
+        let votes = CheckpointVotes::default();
+        let checkpoint = checkpoint_digest(Chain::Ethereum, 10, 1);
+        let ticket = votes.admit(checkpoint, None).unwrap();
+
+        run_checkpoint_vote(
+            votes.clone(),
+            checkpoint,
+            ticket,
+            CancellationToken::new(),
+            watch::channel(None).1,
+            async { anyhow::bail!("the endpoint refused the vote") },
+        )
+        .await;
+
+        assert_eq!(votes.ticket(&checkpoint), None);
+        assert_eq!(
+            votes.admit(checkpoint, None),
+            Some(1),
+            "a later boundary admits a fresh vote for the digest"
+        );
     }
 
     #[tokio::test]

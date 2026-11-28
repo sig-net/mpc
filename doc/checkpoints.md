@@ -161,7 +161,7 @@ Described for one node, one source chain; `backlog` is the node's backlog.
   This holds for everything acting covers, between blocks too.
 
 `persist` writes `base` and `pending` durably in one step and is retried until it succeeds.
-`vote(c)` calls `vote_checkpoint` with c's chain, height and digest, and is retried until the contract has recorded the vote or has settled that height or a later one.
+`vote(c)` calls `vote_checkpoint` with c's chain, height and digest, and is retried until the contract has recorded the vote, has settled that height or a later one, or the vote has failed terminally; a failed vote is released, and the next boundary's checkpoint carries a fresh vote.
 
 ### Per-chain node state
 
